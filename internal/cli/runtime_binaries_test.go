@@ -48,6 +48,9 @@ var runtimeEgressBinaries = map[string]map[string][]string{
 		"fullsend-openai":            {"**/node", "**/codex"},
 		"fullsend-inference-gateway": {"**/codex"},
 	},
+	"opencode": {
+		"fullsend-vertex-ai": {"**/opencode", "**/opencode.exe"},
+	},
 }
 
 func scaffoldProfileBinaries(t *testing.T, id string) []string {
