@@ -320,6 +320,22 @@ func TestGivenDisabledCustomHarness_EmptyIdentity(t *testing.T) {
 	assert.Contains(t, err.Error(), "no repo configured")
 }
 
+func TestGivenDisabledAgent_EmptyIdentity(t *testing.T) {
+	t.Parallel()
+	w := &world.World{SCM: &fakeDispatchSCM{}}
+	err := givenDisabledAgent(w, "triage")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no repo configured")
+}
+
+func TestGivenDisabledAgent_EmptyName(t *testing.T) {
+	t.Parallel()
+	w := &world.World{Org: "test-org", RepoName: "test-repo", SCM: &fakeDispatchSCM{}}
+	err := givenDisabledAgent(w, "   ")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent name is required")
+}
+
 func TestCommitLocalHarnessResources_EmptyIdentity(t *testing.T) {
 	t.Parallel()
 	w := &world.World{SCM: &fakeDispatchSCM{}}
@@ -557,6 +573,81 @@ func TestGivenDisabledCustomHarness_CommitsAgentFile(t *testing.T) {
 	agentData := scm.files["test-org/test-repo/.fullsend/agents/triage.md"]
 	require.NotNil(t, agentData, "agent resource should be committed for disabled harness")
 	assert.Equal(t, minimalAgentContent, string(agentData))
+}
+
+func TestGivenDisabledAgent_Success(t *testing.T) {
+	scm := &fakeURLSCM{files: map[string][]byte{
+		"test-org/test-repo/.fullsend/config.yaml": []byte("version: \"1\"\nagents: []\n"),
+	}}
+	w := &world.World{
+		Org:      "test-org",
+		RepoName: "test-repo",
+		SCM:      scm,
+	}
+	err := givenDisabledAgent(w, "triage")
+	require.NoError(t, err)
+
+	cfgData := scm.files["test-org/test-repo/.fullsend/config.yaml"]
+	require.NotNil(t, cfgData)
+	assert.Contains(t, string(cfgData), "name: triage")
+	assert.Contains(t, string(cfgData), "enabled: false")
+	assert.True(t, w.AgentsOverridden, "should mark agents overridden for cleanup")
+}
+
+func TestGivenDisabledAgent_OverwritesExisting(t *testing.T) {
+	scm := &fakeURLSCM{files: map[string][]byte{
+		"test-org/test-repo/.fullsend/config.yaml": []byte("version: \"1\"\nagents:\n  - name: triage\n    runtime: claude\n"),
+	}}
+	w := &world.World{
+		Org:      "test-org",
+		RepoName: "test-repo",
+		SCM:      scm,
+	}
+	err := givenDisabledAgent(w, "triage")
+	require.NoError(t, err)
+
+	cfgData := scm.files["test-org/test-repo/.fullsend/config.yaml"]
+	require.NotNil(t, cfgData)
+	assert.Contains(t, string(cfgData), "enabled: false")
+}
+
+func TestGivenDisabledAgent_GetFileError(t *testing.T) {
+	scm := &fakeDispatchSCM{getFileErr: fmt.Errorf("read error")}
+	w := &world.World{
+		Org:      "test-org",
+		RepoName: "test-repo",
+		SCM:      scm,
+	}
+	err := givenDisabledAgent(w, "triage")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading config")
+}
+
+func TestGivenDisabledAgent_ParseError(t *testing.T) {
+	scm := &fakeDispatchSCM{fileContent: []byte("invalid: [yaml")}
+	w := &world.World{
+		Org:      "test-org",
+		RepoName: "test-repo",
+		SCM:      scm,
+	}
+	err := givenDisabledAgent(w, "triage")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parsing config")
+}
+
+func TestGivenDisabledAgent_CommitError(t *testing.T) {
+	scm := &fakeDispatchSCM{
+		fileContent: []byte("version: \"1\"\nagents: []\n"),
+		commitErr:   fmt.Errorf("commit failed"),
+	}
+	w := &world.World{
+		Org:      "test-org",
+		RepoName: "test-repo",
+		SCM:      scm,
+	}
+	err := givenDisabledAgent(w, "triage")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "updating config")
 }
 
 func TestCommitLocalHarnessResources_CommitsAgentFile(t *testing.T) {

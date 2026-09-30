@@ -1015,6 +1015,22 @@ func TestCleanupScenario_RestoreAgents_Error(t *testing.T) {
 	assert.Contains(t, logged[0], "restore agents")
 }
 
+func TestCleanupScenario_ResetsStatusCommentNotifications(t *testing.T) {
+	t.Parallel()
+
+	scmDriver := &fakeCleanupSCM{
+		fileContent: []byte("version: \"1\"\nstatus_notifications:\n  comment:\n    start: disabled\n    completion: disabled\n"),
+	}
+	w := &world.World{
+		Org:       "org",
+		RepoOwner: "org",
+		RepoName:  "repo",
+		SCM:       scmDriver,
+	}
+	CleanupScenario(w)
+	assert.True(t, scmDriver.commitFileCalled, "should commit config to reset comment notifications")
+}
+
 func TestCleanupScenario_BranchScenarioSweep(t *testing.T) {
 	t.Parallel()
 

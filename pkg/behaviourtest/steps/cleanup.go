@@ -377,6 +377,15 @@ func CleanupScenario(w *world.World) {
 		}
 	}
 
+	// --- Status comment notification cleanup ---
+	// Reset status comment notifications so the next scenario on this slot
+	// is not affected by sticky config state.
+	if commentsDisabledInConfig(w) {
+		if err := ResetStatusCommentNotifications(w); err != nil {
+			worldLogf(w, "behaviour cleanup: reset status comment notifications: %v", err)
+		}
+	}
+
 	// --- Dummy script cleanup ---
 	if len(w.DummyOps) > 0 {
 		if w.Org == "" || w.RepoName == "" {
