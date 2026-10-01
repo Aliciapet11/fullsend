@@ -794,6 +794,7 @@ func TestRunAgent_BareBuiltinProviderResolvesEmbeddedDefinitionAndProfile(t *tes
 	logPath := recordingProvidersStub(t)
 
 	dir := t.TempDir()
+	writePolicyFixture(t, dir)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
 
@@ -807,7 +808,7 @@ func TestRunAgent_BareBuiltinProviderResolvesEmbeddedDefinitionAndProfile(t *tes
 	// binary's embedded scaffold.
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\nproviders:\n  - vertex-ai\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\nproviders:\n  - vertex-ai\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -846,8 +847,9 @@ func runAgentWithProviderFiles(t *testing.T, harnessYAML string, files map[strin
 	logPath := recordingProvidersStub(t)
 	dir = t.TempDir()
 	files["agents/code.md"] = "You are a coding agent."
-	files["harness/code.yaml"] = harnessYAML
+	files["harness/code.yaml"] = harnessYAML + "policy: policies/base.yaml\n"
 	files["config.yaml"] = "agents:\n  - harness/code.yaml\n"
+	files["policies/base.yaml"] = "version: 1\n"
 	for rel, content := range files {
 		path := filepath.Join(dir, rel)
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))

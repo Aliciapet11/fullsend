@@ -1231,9 +1231,10 @@ func newVertexChildDir(t *testing.T, marker, runtimeName, model, extra, subagent
 	require.NoError(t, os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: probe\ndescription: probe\n---\nProbe.\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(skill, "sub-agents", "writer.md"), []byte("---\nname: writer\nmodel: sonnet\n---\nWrite.\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "code.yaml"), []byte(
-		"agent: agents/code.md\nrole: test\nmodel: "+model+"\npre_script: "+writePreScript(t, "touch "+marker+"\n")+"\n"+extra), 0o644))
+		"agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\nmodel: "+model+"\npre_script: "+writePreScript(t, "touch "+marker+"\n")+"\n"+extra), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(
 		"version: \"1\"\nruntime: "+runtimeName+"\nagents:\n  - name: code\n    source: harness/code.yaml\n"+subagents), 0o644))
+	writePolicyFixture(t, dir)
 	return dir
 }
 

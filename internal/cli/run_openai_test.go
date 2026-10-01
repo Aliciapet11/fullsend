@@ -586,7 +586,7 @@ func TestRunAgent_OpenAISubagentWithoutOpenAIProviderFailsBeforeSandbox(t *testi
 	dir := writeOpenAIFullsendDirFor(t, false, "pi", "anthropic-vertex/claude-opus-4-6")
 	// The same harness with the openai provider removed.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\nmodel: anthropic-vertex/claude-opus-4-6\n"), 0o644))
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\nmodel: anthropic-vertex/claude-opus-4-6\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(""+
 		"version: \"1\"\nruntime: pi\nagents:\n"+
 		"  - name: code\n    source: harness/code.yaml\n    subagents:\n      default: openai/gpt-5.6-luna\n"), 0o644))
@@ -630,7 +630,7 @@ func TestRunAgent_OpenAIFrontmatterChildWithoutCredential(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(skill, "sub-agents", "checker.md"),
 				[]byte("---\nname: checker\nmodel: openai/gpt-5.6-luna\n---\nCheck.\n"), 0o644))
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "code.yaml"), []byte(
-				"agent: agents/code.md\nrole: test\nmodel: anthropic-vertex/claude-opus-4-6\nskills:\n  - skills/probe\nproviders:\n  - openai\n"), 0o644))
+				"agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\nmodel: anthropic-vertex/claude-opus-4-6\nskills:\n  - skills/probe\nproviders:\n  - openai\n"), 0o644))
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(
 				"version: \"1\"\nruntime: pi\nagents:\n  - name: code\n    source: harness/code.yaml\n"+tc.subagents), 0o644))
 
