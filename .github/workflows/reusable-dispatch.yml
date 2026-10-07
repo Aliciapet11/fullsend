@@ -101,6 +101,13 @@ on:
       JIRA_USER_EMAIL:
         description: "Jira account email for Basic auth"
         required: false
+      FULLSEND_RUNNER_SECRETS:
+        description: >-
+          JSON object of name to value for host-side scripts (pre_script,
+          post_script, validation_loop). fullsend run resolves the names the
+          harness references in env.runner; the values reach host-side
+          scripts, never the sandbox (ADR 0136).
+        required: false
 
 jobs:
   route:
@@ -801,6 +808,7 @@ jobs:
           agent: triage
           gcp_wif_provider: ${{ secrets.FULLSEND_GCP_WIF_PROVIDER }}
           gcp_project_id: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}
+          runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}
           fullsend-dir: .fullsend
           version: ${{ inputs.fullsend_version || job.workflow_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -939,6 +947,7 @@ jobs:
           agent: code
           gcp_wif_provider: ${{ secrets.FULLSEND_GCP_WIF_PROVIDER }}
           gcp_project_id: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}
+          runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}
           fullsend-dir: .fullsend
           version: ${{ inputs.fullsend_version || job.workflow_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1068,6 +1077,7 @@ jobs:
           agent: review
           gcp_wif_provider: ${{ secrets.FULLSEND_GCP_WIF_PROVIDER }}
           gcp_project_id: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}
+          runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}
           fullsend-dir: .fullsend
           version: ${{ inputs.fullsend_version || job.workflow_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1331,6 +1341,7 @@ jobs:
           agent: fix
           gcp_wif_provider: ${{ secrets.FULLSEND_GCP_WIF_PROVIDER }}
           gcp_project_id: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}
+          runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}
           fullsend-dir: .fullsend
           version: ${{ inputs.fullsend_version || job.workflow_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1440,6 +1451,7 @@ jobs:
           agent: retro
           gcp_wif_provider: ${{ secrets.FULLSEND_GCP_WIF_PROVIDER }}
           gcp_project_id: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}
+          runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}
           fullsend-dir: .fullsend
           version: ${{ inputs.fullsend_version || job.workflow_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1535,6 +1547,7 @@ jobs:
           agent: prioritize
           gcp_wif_provider: ${{ secrets.FULLSEND_GCP_WIF_PROVIDER }}
           gcp_project_id: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}
+          runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}
           fullsend-dir: .fullsend
           version: ${{ inputs.fullsend_version || job.workflow_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1895,6 +1908,7 @@ jobs:
           agent: ${{ matrix.agent }}
           gcp_wif_provider: ${{ secrets.FULLSEND_GCP_WIF_PROVIDER }}
           gcp_project_id: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}
+          runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}
           version: ${{ inputs.fullsend_version || job.workflow_sha }}
           fullsend-dir: .fullsend
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
