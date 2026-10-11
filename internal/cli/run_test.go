@@ -4691,6 +4691,88 @@ func TestRunTerminalError(t *testing.T) {
 	}
 }
 
+// TestPostScriptGate pins #8305: without a loop a failed agent still gets its
+// post-script when it left a result file that parses, and the run error stays.
+// With a loop the gate is unchanged (ADR 0022).
+func TestPostScriptGate(t *testing.T) {
+	t.Parallel()
+	writeResult := func(t *testing.T, name, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+		return dir
+	}
+	noLoop := &harness.Harness{}
+	withLoop := &harness.Harness{ValidationLoop: &harness.ValidationLoop{Script: "validate.sh"}}
+	agentFailed := runTerminalError(false, false, false, 1, "", 1, time.Minute, time.Hour)
+
+	t.Run("no loop, failed agent, valid result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", `{"status":"error"}`))
+		assert.True(t, got.run)
+		assert.Equal(t, 1, got.agentExitCode)
+		assert.Contains(t, got.message, "the run still fails")
+		require.EqualError(t, agentFailed, "agent failed with exit code 1")
+	})
+	t.Run("no loop, transcript error recorded as exit 1, valid result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, true, agentFailed, writeResult(t, "agent-result.json", `{}`))
+		assert.True(t, got.run)
+	})
+	t.Run("no loop, failed agent, FULLSEND_OUTPUT_FILE names the result", func(t *testing.T) {
+		t.Parallel()
+		h := &harness.Harness{RunnerEnv: map[string]string{"FULLSEND_OUTPUT_FILE": "code-result.json"}}
+		got := postScriptGate(h, false, false, agentFailed, writeResult(t, "code-result.json", `{"ok":true}`))
+		assert.True(t, got.run)
+	})
+	t.Run("no loop, failed agent, no result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, agentFailed, t.TempDir())
+		assert.False(t, got.run)
+		assert.Contains(t, got.message, "left no result file that parses")
+	})
+	t.Run("no loop, failed agent, result does not parse", func(t *testing.T) {
+		t.Parallel()
+		for _, content := range []string{"not json", "[1,2]", "null"} {
+			got := postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", content))
+			assert.False(t, got.run, content)
+		}
+	})
+	t.Run("no loop, FULLSEND_OUTPUT_FILE with a path is refused", func(t *testing.T) {
+		t.Parallel()
+		dir := writeResult(t, "agent-result.json", `{}`)
+		h := &harness.Harness{RunnerEnv: map[string]string{"FULLSEND_OUTPUT_FILE": "../" + filepath.Base(dir) + "/agent-result.json"}}
+		assert.False(t, postScriptGate(h, false, false, agentFailed, dir).run)
+	})
+	t.Run("no loop, successful agent", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, nil, t.TempDir())
+		assert.True(t, got.run)
+		assert.Zero(t, got.agentExitCode)
+	})
+	t.Run("no loop, other run error", func(t *testing.T) {
+		t.Parallel()
+		timedOut := runTerminalError(false, false, true, -1, "", 1, time.Hour, time.Hour)
+		got := postScriptGate(noLoop, false, false, timedOut, writeResult(t, "agent-result.json", `{}`))
+		assert.False(t, got.run)
+	})
+	t.Run("loop, validation passed", func(t *testing.T) {
+		t.Parallel()
+		assert.True(t, postScriptGate(withLoop, true, false, nil, t.TempDir()).run)
+	})
+	t.Run("loop, validation failed with a result present", func(t *testing.T) {
+		t.Parallel()
+		runErr := runTerminalError(true, false, false, 1, "", 2, time.Minute, time.Hour)
+		got := postScriptGate(withLoop, false, false, runErr, writeResult(t, "agent-result.json", `{}`))
+		assert.False(t, got.run)
+		assert.Equal(t, "Skipping post-script: validation did not pass", got.message)
+	})
+	t.Run("loop, validation passed but transcript error", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, postScriptGate(withLoop, true, true, nil, t.TempDir()).run)
+	})
+}
+
 func TestShouldStartFetchService_AllowRuntimeFetch(t *testing.T) {
 	h := &harness.Harness{
 		Agent:                  "agents/test.md",

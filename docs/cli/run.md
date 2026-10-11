@@ -325,8 +325,7 @@ variables is deployed.
 
 ## How a run ends
 
-After the last iteration, `fullsend run` returns an error, and so exits non-zero, in these cases. A
-failed run skips the post-script.
+After the last iteration, `fullsend run` returns an error, and so exits non-zero, in these cases.
 
 | Harness | Run fails when | Error |
 |---|---|---|
@@ -336,7 +335,11 @@ failed run skips the post-script.
 | Without `validation_loop` | The agent exited non-zero, or exited 0 with an error reported in its transcript | `agent failed with exit code <code>` |
 
 - With a `validation_loop`, validation is the success gate: an iteration that exits non-zero but
-  writes output that validates still succeeds.
+  writes output that validates still succeeds. A failed run skips the post-script.
+- Without a loop, a failed agent still gets its post-script when it left a result file that parses
+  as a JSON object: `FULLSEND_OUTPUT_FILE` from the harness's runner env, or `agent-result.json`.
+  The post-script runs with `FULLSEND_AGENT_EXIT_CODE` set, and the run still fails. With no such
+  file, the post-script is skipped.
 - Without a loop, a behavioral limit (`error_max_turns`, `error_max_budget_usd`) does not fail the
   run, even though the agent exits non-zero. The post-script runs with
   `FULLSEND_AGENT_EXIT_REASON` set so it can report the interruption.
