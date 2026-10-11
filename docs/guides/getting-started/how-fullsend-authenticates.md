@@ -73,6 +73,22 @@ sandbox.
     tokens on the gateway route are deferred
     ([ADR 0137](../../ADRs/0137-inference-gateway-credential-route.md#deferred)).
 
+## Who does what
+
+Setting up inference usually needs more than one person. The reader of a setup guide is usually
+the repo admin or a repo writer, and the other two roles sit outside the repository. Each step
+below links to the page with the detail.
+
+| Role | Holds | Steps they own |
+|---|---|---|
+| **Repo admin** | GitHub admin on the repository | Runs [`fullsend github setup`](configuring-github.md) with the values the other roles hand over. Records the OpenAI identifiers ([step 4](../infrastructure/openai-workload-identity.md#4-tell-fullsend-the-three-identifiers)). Writes the gateway block ([Write the block](inference-gateway.md#write-the-block)). Stores an API key as a repository secret where a route uses one ([OpenAI route C](../infrastructure/openai-workload-identity.md#c-static-key-as-a-repository-secret), [gateway `auth: api-key`](inference-gateway.md#choosing-auth)). |
+| **Repo writer** | Write access, enough to add a workflow | Adds the OpenAI claim-check workflow ([step 1](../infrastructure/openai-workload-identity.md#1-see-what-your-repository-actually-claims-both-routes)). Adds a workflow with `id-token: write` to run the live check of [`fullsend inference openai status`](../../cli/inference.md#inference-openai-status) or [`fullsend inference gateway status`](../../cli/inference.md#inference-gateway-status). |
+| **Provider admin** | The OpenAI organization admin, or the inference gateway operator | OpenAI organization admin: adds the identity provider and the repository's mapping ([A2](../infrastructure/openai-workload-identity.md#a2-add-or-reuse-the-identity-provider-route-a), [A3](../infrastructure/openai-workload-identity.md#a3-map-the-repository-to-a-service-account-route-a)), then hands over the audience, the identity provider ID and the service account ID. Gateway operator: runs the gateway ([operator guide](../infrastructure/inference-gateway-operator.md)), allows or [removes](../infrastructure/inference-gateway-operator.md#remove-a-repository) the repository, and hands over the gateway URL and the audience. |
+| **GCP project admin** | IAM admin on the GCP project used for Vertex | Enables the APIs and runs [`fullsend inference provision`](getting-inference.md#configure-inference-in-your-gcp-project), then hands over the GCP project ID and the WIF provider. |
+
+If you have no OpenAI platform access at all, see
+[If you don't have OpenAI platform access](../infrastructure/openai-workload-identity.md#if-you-dont-have-openai-platform-access).
+
 ## Not supported yet: gateway token exchange
 
 The inference gateway does not do WIF. A gateway credential mode based on token exchange, for

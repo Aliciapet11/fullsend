@@ -6,6 +6,18 @@ sidebar_position: 2
 
 > Background: [How fullsend authenticates](how-fullsend-authenticates.md).
 
+> **Before you start: who you need.** The Vertex setup on this page takes two roles
+> ([Who does what](how-fullsend-authenticates.md#who-does-what)):
+>
+> - **GCP project admin**, with IAM admin on the GCP project: enables the APIs and runs
+>   `fullsend inference provision`, which needs `roles/iam.workloadIdentityPoolAdmin` and
+>   `roles/resourcemanager.projectIamAdmin`. They hand over the **GCP project ID** and the
+>   **WIF provider**.
+> - **Repo admin**: passes those two values to `fullsend github setup`
+>   ([Configuring GitHub](configuring-github.md)).
+>
+> If you are not the GCP project admin, send them this page and ask for those two values.
+
 Fullsend agents can get model inference in three ways:
 
 - **Vertex AI with Workload Identity Federation (WIF):** GCP grants short-lived tokens to your
@@ -41,9 +53,9 @@ URL resembling:
 projects/<number>/locations/global/workloadIdentityPools/<pool-name>/providers/<provider-name>
 ```
 
-Where `<number>` is the number of the GCP project. This URL may be provided to you if there is
-someone handling GCP projects in your organization. Otherwise you may need to create a GCP
-project and configure it yourself.
+Where `<number>` is the number of the GCP project. If someone else is the GCP project admin, they
+hand this URL over with the project ID. Otherwise you create and configure the GCP project
+yourself.
 
 ## Prerequisites
 
