@@ -409,6 +409,7 @@ func carveOutGlobEntry(platforms []*PlatformConfig, name string, skipGlobs map[s
 			}
 			explicit := entry
 			explicit.Name = name
+			explicit.Config = entry.Config.Clone()
 			if entry.Vendor != nil {
 				v := *entry.Vendor
 				explicit.Vendor = &v

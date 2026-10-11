@@ -550,3 +550,39 @@ func TestManagedConfig_WithCreateIssuesReposAndRoles(t *testing.T) {
 	assert.Equal(t, []string{"triage"}, fromZero.Writer().ConfigRoles())
 	assert.Nil(t, fromZero.Writer().IssueCreationConfig())
 }
+
+func TestManagedConfig_ExplicitAllowedRemoteResources(t *testing.T) {
+	var unset ManagedConfig
+	_, declared := unset.ExplicitAllowedRemoteResources()
+	assert.False(t, declared, "an unset config declares nothing")
+
+	var omitted ManagedConfig
+	require.NoError(t, yaml.Unmarshal([]byte("runtime: pi\n"), &omitted))
+	_, declared = omitted.ExplicitAllowedRemoteResources()
+	assert.False(t, declared, "an omitted key is not declared and does not surface code defaults")
+
+	var empty ManagedConfig
+	require.NoError(t, yaml.Unmarshal([]byte("allowed_remote_resources: []\n"), &empty))
+	list, declared := empty.ExplicitAllowedRemoteResources()
+	assert.True(t, declared)
+	assert.Empty(t, list)
+
+	var set ManagedConfig
+	require.NoError(t, yaml.Unmarshal([]byte("allowed_remote_resources: [\"https://a.example.com/\"]\n"), &set))
+	list, declared = set.ExplicitAllowedRemoteResources()
+	assert.True(t, declared)
+	assert.Equal(t, []string{"https://a.example.com/"}, list, "local list only, no union with code defaults")
+}
+
+func TestManagedConfig_CloneIsDeep(t *testing.T) {
+	assert.False(t, ManagedConfig{}.Clone().IsSet(), "an unset config stays unset")
+
+	var orig ManagedConfig
+	require.NoError(t, yaml.Unmarshal([]byte("allowed_remote_resources: [\"https://a.example.com/\"]\n"), &orig))
+	cp := orig.Clone()
+	require.True(t, cp.IsSet())
+	cp.Writer().SetAllowedRemoteResources([]string{"https://b.example.com/"})
+
+	list, _ := orig.ExplicitAllowedRemoteResources()
+	assert.Equal(t, []string{"https://a.example.com/"}, list)
+}

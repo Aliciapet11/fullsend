@@ -178,6 +178,13 @@ func validateManifestManaged(m *Manifest) error {
 			if err := validateManagedBlock(field, entry.Config); err != nil {
 				return err
 			}
+			if err := rejectAllowlistBelowReset([]allowlistLayer{
+				{"defaults.config", m.Defaults.Config},
+				{p.name + ".config", p.cfg.Config},
+				{field, entry.Config},
+			}); err != nil {
+				return err
+			}
 			merged := m.mergeManagedConfig(p.cfg, entry)
 			if err := config.ValidateMergedManaged(merged); err != nil {
 				return fmt.Errorf("%s: merged managed configuration: %w", field, err)
@@ -185,6 +192,39 @@ func validateManifestManaged(m *Manifest) error {
 			if err := validateManagedMintAndWIF(merged); err != nil {
 				return fmt.Errorf("%s: merged managed configuration: %w", field, err)
 			}
+		}
+	}
+	return nil
+}
+
+// allowlistLayer names one managed-configuration layer for
+// rejectAllowlistBelowReset.
+type allowlistLayer struct {
+	field string
+	cfg   config.ManagedConfig
+}
+
+// rejectAllowlistBelowReset refuses a non-empty allowed_remote_resources list
+// declared in a more specific layer than an explicit empty list. An empty
+// list resets the inherited allowlist (code defaults and any config_base
+// preset prefixes included), but the sparse managed file flattens the
+// layers and cannot record that reset: [] followed by [X] would flatten to
+// [X], and the runtime would union the preset and code-default prefixes
+// back in, admitting prefixes the declared layer chain excluded. layers are
+// ordered least to most specific.
+func rejectAllowlistBelowReset(layers []allowlistLayer) error {
+	reset := ""
+	for _, l := range layers {
+		list, declared := l.cfg.ExplicitAllowedRemoteResources()
+		if !declared {
+			continue
+		}
+		if len(list) == 0 {
+			reset = l.field
+			continue
+		}
+		if reset != "" {
+			return fmt.Errorf("%s.allowed_remote_resources: a non-empty list cannot be declared below the explicit empty list in %s.allowed_remote_resources: the empty list resets inherited prefixes and the managed file cannot record that reset; declare the full list in one layer instead", l.field, reset)
 		}
 	}
 	return nil

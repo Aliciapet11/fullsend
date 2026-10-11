@@ -297,6 +297,12 @@ func TestUpdateInferenceAuth_ConcreteFilterCarvesOutGlob(t *testing.T) {
 	assert.Equal(t, InferenceAuthOpenAIAPIKey, explicit.Inference.Auth)
 	assert.Equal(t, "v2.0.0", explicit.FullsendRef, "carved-out entry keeps the glob's other overrides")
 	assert.Equal(t, glob.Config.Writer().AllowedResources(), explicit.Config.Writer().AllowedResources())
+	// The carved entry owns its config: mutating it must not reach the glob.
+	explicit.Config.Writer().SetAllowedRemoteResources([]string{"https://changed.example.com/"})
+	globList, declared := glob.Config.ExplicitAllowedRemoteResources()
+	require.True(t, declared)
+	assert.Equal(t, []string{"https://a.example.com/"}, globList,
+		"mutating the carved allowlist must not change the glob's")
 	require.NotNil(t, explicit.Vendor)
 	assert.True(t, *explicit.Vendor)
 	require.NoError(t, m.Validate())

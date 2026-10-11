@@ -128,9 +128,9 @@ github:
 ```
 
 The `none` sentinel works for string fields (`fullsend_ref`,
-`mint_url`, `mint_mode`, `config_base.source`, `config_base.sha256`). List fields like
-`allowed_remote_resources` are managed at the `defaults` level and
-cannot be cleared per-repo. For `app_set`, `none` resets the effective
+`mint_url`, `mint_mode`, `config_base.source`, `config_base.sha256`). Fields
+inside `config`, such as `allowed_remote_resources`, follow their own merge
+rules instead; see [Managed configuration](#managed-configuration). For `app_set`, `none` resets the effective
 value to the built-in default `fullsend-ai` rather than disabling the
 field (an app set is always required to resolve App slugs).
 
@@ -336,7 +336,10 @@ then the repository's forge section `config` (`github.config` or
 included). More specific values win using each field's normal layered
 merge rule: scalars are replaced, nested maps merge key by key, a
 non-empty `allowed_remote_resources` list is unioned with the inherited
-prefixes, and an explicit empty list replaces the inherited value. A
+prefixes, and an explicit empty list replaces the inherited value. The
+managed file is sparse and cannot record that reset, so validation rejects a
+non-empty `allowed_remote_resources` list declared in a more specific layer
+than an explicit empty one; declare the full list in a single layer. A
 forge section's `config` never affects repositories of the other forge.
 The managed configuration contains only explicitly supplied values —
 code defaults and `config.base.yaml` are not baked into the file.

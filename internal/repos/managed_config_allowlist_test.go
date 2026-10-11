@@ -145,3 +145,48 @@ func TestEnsureManagedConfigDefaults_CredentialOnlyRepoIsPristine(t *testing.T) 
 	assert.Equal(t, []string{"acme/api"}, names)
 	assert.True(t, m.GitHub.Repos[0].Config.IsSet())
 }
+
+// An explicit empty allowlist resets inherited prefixes, but the sparse
+// managed file flattens layers and cannot record the reset. A non-empty list
+// below an empty one is rejected rather than silently re-admitting the
+// preset and code-default prefixes.
+func TestValidate_RejectsAllowlistBelowExplicitEmptyList(t *testing.T) {
+	const empty = "allowed_remote_resources: []\n"
+	const list = "allowed_remote_resources: [\"https://specific.example.com/\"]\n"
+	cases := map[string]struct {
+		defaults, platform, entry string
+		wantErr                   string
+	}{
+		"defaults empty, platform non-empty":   {empty, list, "", "github.config.allowed_remote_resources"},
+		"defaults empty, repository non-empty": {empty, "", list, "github.repos[acme/api].config.allowed_remote_resources"},
+		"platform empty, repository non-empty": {"", empty, list, "github.repos[acme/api].config.allowed_remote_resources"},
+		"defaults empty, platform unset, repository non-empty": {empty, "allowed_remote_resources: null\n", list,
+			"github.repos[acme/api].config.allowed_remote_resources"},
+		"empty at every layer":                  {empty, empty, empty, ""},
+		"non-empty then empty":                  {list, "", empty, ""},
+		"non-empty then non-empty":              {list, list, list, ""},
+		"empty only at the most specific layer": {"", "", empty, ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := newConvergeManifest("acme/api")
+			if tc.defaults != "" {
+				m.Defaults.Config = mustManagedConfig(t, tc.defaults)
+			}
+			if tc.platform != "" {
+				m.GitHub.Config = mustManagedConfig(t, tc.platform)
+			}
+			if tc.entry != "" {
+				m.GitHub.Repos[0].Config = mustManagedConfig(t, tc.entry)
+			}
+			err := m.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Contains(t, err.Error(), "cannot record that reset")
+		})
+	}
+}

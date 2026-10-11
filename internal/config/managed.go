@@ -112,6 +112,16 @@ func (o ManagedConfig) clone() *perRepoConfig {
 	return clonePerRepo(o.cfg)
 }
 
+// Clone returns a deep copy of o that shares no mutable state with it: the
+// Writer of the copy can be mutated without affecting the receiver. An
+// unset configuration stays unset.
+func (o ManagedConfig) Clone() ManagedConfig {
+	if o.cfg == nil {
+		return ManagedConfig{}
+	}
+	return ManagedConfig{cfg: clonePerRepo(o.cfg)}
+}
+
 // WithCreateIssuesRepos returns a copy of o whose create_issues allowlist
 // permits exactly the given repositories. It is how repos install records
 // the upstream-only cross-repo permission on a manifest entry (#8218).
@@ -141,6 +151,18 @@ func (o ManagedConfig) ExplicitRoles() ([]string, bool) {
 		return nil, false
 	}
 	return cloneStringSlice(o.cfg.Roles), true
+}
+
+// ExplicitAllowedRemoteResources returns the allowed_remote_resources list
+// declared by this layer and whether the layer declares the key at all. An
+// explicit empty list reports (empty, true). Unlike the layered
+// AllowedResources accessor it does not union with or fall back to code
+// defaults.
+func (o ManagedConfig) ExplicitAllowedRemoteResources() ([]string, bool) {
+	if o.cfg == nil || o.cfg.AllowedRemoteResources == nil {
+		return nil, false
+	}
+	return cloneStringSlice(o.cfg.AllowedRemoteResources), true
 }
 
 // ExplicitRuntime returns the runtime declared by this layer, or "" when
