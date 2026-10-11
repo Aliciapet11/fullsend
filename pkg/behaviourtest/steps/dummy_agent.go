@@ -66,6 +66,17 @@ func parseDummyAgentTable(w *world.World, table *godog.Table) error {
 			Op:          strings.TrimSpace(row.Cells[col["op"]].Value),
 			Args:        strings.TrimSpace(row.Cells[col["args"]].Value),
 		}
+		// Optional "expect" column: "fail" marks a step the scenario
+		// expects to fail, so its failure does not fail the run.
+		if i, ok := col["expect"]; ok {
+			switch v := strings.TrimSpace(row.Cells[i].Value); v {
+			case "":
+			case "fail":
+				op.ExpectFail = true
+			default:
+				return fmt.Errorf("dummy agent row %q: expect must be empty or \"fail\", got %q", op.Description, v)
+			}
+		}
 		// <issue> expansion is scoped to checkout_branch: it is the only
 		// op whose args embed the scenario issue number, and keeping the
 		// substitution off the generic ops avoids surprising rewrites of

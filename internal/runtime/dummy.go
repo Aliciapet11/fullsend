@@ -47,6 +47,10 @@ type BehaviourOperation struct {
 	Op          string `yaml:"op" json:"op"`
 	Args        string `yaml:"args" json:"args"`
 	Content     string `yaml:"content,omitempty" json:"content,omitempty"`
+	// ExpectFail marks a step the scenario expects to fail, such as a fetch
+	// the sandbox must block. Its failure is still recorded but does not
+	// make the run exit non-zero.
+	ExpectFail bool `yaml:"expect_fail,omitempty" json:"expect_fail,omitempty"`
 	// http_probe fields (#8280). Fixed fields only — the op is not a
 	// general HTTP client. When they are empty, http_probe parses Args as
 	// "METHOD URL HEADER_ENV [BODY]" (see ParseHTTPProbeArgs).
@@ -160,16 +164,19 @@ func (r DummyRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 		printer.StepWarn("Dummy runtime: " + scriptErr.Error())
 	}
 
-	// Non-zero exitCode mirrors ClaudeRuntime: run.go warns on non-zero exit but
-	// only aborts on a non-nil Go error (infrastructure failures).
-	exitCode := 0
-	for _, res := range results.Operations {
-		if !res.Success {
-			exitCode = 1
-			break
+	return behaviourExitCode(script, results), nil
+}
+
+// behaviourExitCode is 1 when a step failed that was not marked expect_fail.
+// Like ClaudeRuntime, a non-zero exit code reports an agent failure; only a
+// non-nil Go error means the infrastructure failed.
+func behaviourExitCode(script *BehaviourScript, results BehaviourResults) int {
+	for i, res := range results.Operations {
+		if !res.Success && !(i < len(script.Ops) && script.Ops[i].ExpectFail) {
+			return 1
 		}
 	}
-	return exitCode, nil
+	return 0
 }
 
 // ClearIterationArtifacts sweeps stray processes (the dummy runtime's ops run

@@ -84,10 +84,10 @@ Feature: inference gateway route under the dummy runtime
   @requires:capability:inference-gateway
   Scenario: egress is scoped to the gateway's inference path
     Given a dummy agent that would:
-      | description               | op            | args                                                      |
-      | List models on gateway    | http_probe    | GET <gateway>/v1/models INFERENCE_GATEWAY_API_KEY          |
-      | Reach another host        | http_probe    | GET https://example.com/ INFERENCE_GATEWAY_API_KEY         |
-      | Emit triage JSON          | write_fixture | output/agent-result.json, fixtures/triage/sufficient.json |
+      | description               | op            | args                                                      | expect |
+      | List models on gateway    | http_probe    | GET <gateway>/v1/models INFERENCE_GATEWAY_API_KEY          | fail   |
+      | Reach another host        | http_probe    | GET https://example.com/ INFERENCE_GATEWAY_API_KEY         | fail   |
+      | Emit triage JSON          | write_fixture | output/agent-result.json, fixtures/triage/sufficient.json |        |
     And an issue
     When the issue is labeled "ready-for-gateway-probe"
     Then the harness "gateway-probe" workflow completes successfully
@@ -98,10 +98,10 @@ Feature: inference gateway route under the dummy runtime
   @requires:capability:inference-gateway
   Scenario: a model authorised only for another repository is refused
     Given a dummy agent that would:
-      | description        | op            | args                                                                                                                              |
-      | Call allowed model | http_probe    | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo","messages":[{"role":"user","content":"ping"}]}        |
-      | Call denied model  | http_probe    | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo-denied","messages":[{"role":"user","content":"ping"}]} |
-      | Emit triage JSON   | write_fixture | output/agent-result.json, fixtures/triage/sufficient.json                                                                         |
+      | description        | op            | args                                                                                                                              | expect |
+      | Call allowed model | http_probe    | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo","messages":[{"role":"user","content":"ping"}]}        |        |
+      | Call denied model  | http_probe    | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo-denied","messages":[{"role":"user","content":"ping"}]} | fail   |
+      | Emit triage JSON   | write_fixture | output/agent-result.json, fixtures/triage/sufficient.json                                                                         |        |
     And an issue
     When the issue is labeled "ready-for-gateway-probe"
     Then the harness "gateway-probe" workflow completes successfully
