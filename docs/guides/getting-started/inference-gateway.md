@@ -49,8 +49,9 @@ inference:
         api: openai-completions
 ```
 
-- **`url`** is the gateway's origin: `https`, no path, port 443. The runner adds the `/v1/...`
-  paths itself.
+- **`url`** is the gateway's origin: `https`, port 443. If the gateway serves its API under a path
+  prefix (for example behind a shared ingress), add the prefix without the trailing `/v1`:
+  `https://gateway.example.com/team-a`. The runner adds the `/v1/...` paths itself.
 - **`audience`** is the string the operator configured on the gateway, such as
   `fullsend-inference`. It is an agreed value, not necessarily the URL, and must match the
   gateway's character for character.
@@ -223,7 +224,8 @@ In the `oidc` mode, outside GitHub Actions, it checks the block and stops:
 
 Run the same command in a GitHub Actions job in the repository, with `id-token: write`, and it
 also fetches one OIDC token for the audience and lists the models the gateway allows the
-repository (`GET /v1/models`). It never prints the token.
+repository (`GET <url>/v1/models`, under the URL's path prefix if it has one). It never prints the
+token.
 
 > **Not executed here:** this walkthrough had no gateway to check against, so the output for a
 > healthy gateway is not shown. A maintainer should add it from a run in GitHub Actions.

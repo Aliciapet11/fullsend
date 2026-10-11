@@ -71,7 +71,7 @@ prefix only selects the route, so `gateway/claude-haiku-5-5` calls `claude-haiku
 `env.sandbox` and host-file env files it sources), the launch clears the variables listed
 [below](#environment-the-launch-clears) and exports:
 
-- `ANTHROPIC_BASE_URL`: the block's `url` origin;
+- `ANTHROPIC_BASE_URL`: the block's `url` origin, with its path prefix if it has one;
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, without which Claude Code also dials
   `api.anthropic.com`;
 - the credential, per mode (below).

@@ -137,6 +137,62 @@ func TestRenderGatewayProfile_Claude(t *testing.T) {
 	assert.Error(t, err, "the renderer validates the host")
 }
 
+func TestRenderGatewayProfile_PathPrefix(t *testing.T) {
+	data, id, err := renderGatewayProfileFor(gatewayProfile{host: "gateway.example.com", prefix: "/team-a"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "__INFERENCE_GATEWAY_", "every placeholder is filled in")
+	var p renderedGatewayProfile
+	require.NoError(t, yaml.Unmarshal(data, &p))
+	assert.Equal(t, id, p.ID)
+	require.Len(t, p.Endpoints, 1)
+	ep := p.Endpoints[0]
+	assert.Equal(t, "gateway.example.com", ep.Host)
+	assert.Equal(t, 443, ep.Port)
+	assert.Equal(t, "/team-a/v1/**", ep.Path, "the credential stays bound to <prefix>/v1/** only")
+	var rules []string
+	for _, r := range ep.Rules {
+		rules = append(rules, r.Allow.Method+" "+r.Allow.Path)
+	}
+	assert.Equal(t, []string{"POST /team-a/v1/responses", "POST /team-a/v1/messages", "POST /team-a/v1/chat/completions"}, rules)
+
+	// A prefix gets its own profile id, distinct from the bare origin's and
+	// from another prefix's on the same host.
+	_, bareID, err := renderGatewayProfile("gateway.example.com")
+	require.NoError(t, err)
+	assert.NotEqual(t, bareID, id)
+	_, otherID, err := renderGatewayProfileFor(gatewayProfile{host: "gateway.example.com", prefix: "/team-b"})
+	require.NoError(t, err)
+	assert.NotEqual(t, otherID, id)
+	assert.Regexp(t, `^fullsend-inference-gateway-[0-9a-f]{12}$`, id)
+
+	// A bare origin renders exactly as before the prefix existed.
+	bare, _, err := renderGatewayProfileFor(gatewayProfile{host: "gateway.example.com", prefix: ""})
+	require.NoError(t, err)
+	assert.Contains(t, string(bare), "    path: /v1/**\n")
+	assert.Equal(t, bareID, gatewayProfileID("gateway.example.com"))
+
+	// Claude Code's rendering carries the prefix too.
+	cdata, cid, err := renderGatewayProfileFor(gatewayProfile{host: "gateway.example.com", prefix: "/org/team-a", claude: true})
+	require.NoError(t, err)
+	var cp renderedClaudeGatewayProfile
+	require.NoError(t, yaml.Unmarshal(cdata, &cp))
+	assert.Equal(t, cid, cp.ID)
+	require.Len(t, cp.Endpoints, 1)
+	assert.Equal(t, "/org/team-a/v1/**", cp.Endpoints[0].Path)
+	var crules []string
+	for _, r := range cp.Endpoints[0].Rules {
+		crules = append(crules, r.Allow.Method+" "+r.Allow.Path)
+	}
+	assert.Equal(t, []string{"POST /org/team-a/v1/messages", "POST /org/team-a/v1/messages/count_tokens"}, crules)
+	assert.Regexp(t, `^fullsend-inference-gateway-claude-[0-9a-f]{12}$`, cid)
+
+	// The renderer refuses a prefix that is not in its clean form.
+	for _, bad := range []string{"team-a", "/team-a/", "/a/../b", "/a//b", "/a/*", "/a: b", "/v1", "/a\n  - x"} {
+		_, _, err := renderGatewayProfileFor(gatewayProfile{host: "gateway.example.com", prefix: bad})
+		assert.Error(t, err, "%q must be refused", bad)
+	}
+}
+
 func TestEnsureGatewayProfile_Claude(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	p := gatewayProfile{host: "gateway.example.com", claude: true}

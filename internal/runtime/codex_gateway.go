@@ -41,9 +41,10 @@ const (
 	// codexGatewayModelProvider is the model prefix that selects the
 	// gateway route, matched case-insensitively.
 	codexGatewayModelProvider = "gateway"
-	// codexGatewayAPIPath is appended to the block's origin to form the
-	// provider's base_url: codex posts to <base_url>/responses.
-	codexGatewayAPIPath = "/v1"
+	// codexGatewayAPIPath is appended to the block's URL (origin plus any
+	// path prefix) to form the provider's base_url: codex posts to
+	// <base_url>/responses.
+	codexGatewayAPIPath = config.GatewayAPIBasePath
 )
 
 //go:embed codex_hook/gateway-token.sh
@@ -68,21 +69,24 @@ func codexGatewayRunFor(sandboxName string) string {
 	return v.(string)
 }
 
-// codexGatewayBaseURL turns the gateway origin the runner hands over into
-// the provider's base_url. The origin is validated again here, as the
-// block was, because it is rendered into config.toml and a `-c` flag.
-func codexGatewayBaseURL(origin string) (string, error) {
-	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
-	if origin == "" {
+// codexGatewayBaseURL turns the gateway base URL the runner hands over
+// (the origin plus any path prefix) into the provider's base_url. It is
+// validated again here, as the block was, because it is rendered into
+// config.toml and a `-c` flag.
+func codexGatewayBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return "", fmt.Errorf("inference.gateway applies but no gateway base URL was resolved; refusing to start a %s/ run on codex", codexGatewayModelProvider)
 	}
-	if err := config.ValidateGatewayURL(origin); err != nil {
+	gu, err := config.ParseGatewayURL(raw)
+	if err != nil {
 		return "", err
 	}
-	if strings.ContainsAny(origin, "\"\\'` \t\r\n") {
-		return "", fmt.Errorf("inference gateway base URL %q holds a character codex's config cannot carry", origin)
+	base := gu.BaseURL()
+	if strings.ContainsAny(base, "\"\\'` \t\r\n") {
+		return "", fmt.Errorf("inference gateway base URL %q holds a character codex's config cannot carry", base)
 	}
-	return origin + codexGatewayAPIPath, nil
+	return base + codexGatewayAPIPath, nil
 }
 
 // PrepareGatewayRun implements GatewayRouteRuntime: it registers the

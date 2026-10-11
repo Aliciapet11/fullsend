@@ -52,7 +52,12 @@ func registerGatewaySteps(sc *godog.ScenarioContext) {
 		return ctx, givenTestInferenceGateway(world.FromContext(ctx))
 	})
 	sc.Step(`^the test inference gateway is configured for the repository with an API key$`, func(ctx context.Context) (context.Context, error) {
-		return ctx, givenTestInferenceGatewayAPIKey(world.FromContext(ctx))
+		return ctx, givenTestInferenceGatewayAPIKey(world.FromContext(ctx), "")
+	})
+	// The test gateway also answers under a path prefix (#8303), through a
+	// route that strips it (hack/setup-e2e-inference-gateway.sh PATH_PREFIX).
+	sc.Step(`^the test inference gateway is configured for the repository with an API key under the path prefix "(/[A-Za-z0-9._~/-]+)"$`, func(ctx context.Context, prefix string) (context.Context, error) {
+		return ctx, givenTestInferenceGatewayAPIKey(world.FromContext(ctx), prefix)
 	})
 	sc.Step(`^the agent's probe "([^"]+)" returned HTTP (\d{3})$`, func(ctx context.Context, description, status string) (context.Context, error) {
 		return ctx, assertProbeStatus(world.FromContext(ctx), description, status)
@@ -166,10 +171,11 @@ func givenTestInferenceGatewayAvailable(withKey bool) error {
 }
 
 // givenTestInferenceGatewayAPIKey commits an api-key inference.gateway
-// block (url and auth: api-key, no audience) the same way. It skips the
-// scenario when the URL or the test key is unset, and registers the key
-// for redaction so it never reaches the suite's logs.
-func givenTestInferenceGatewayAPIKey(w *world.World) error {
+// block (url and auth: api-key, no audience) the same way, with pathPrefix
+// (empty for the bare origin) appended to the url. It skips the scenario
+// when the URL or the test key is unset, and registers the key for
+// redaction so it never reaches the suite's logs.
+func givenTestInferenceGatewayAPIKey(w *world.World, pathPrefix string) error {
 	gatewayURL, _, ok := testGatewayFromEnv()
 	key := strings.TrimSpace(os.Getenv(envInferenceGatewayTestKey))
 	if !ok || key == "" {
@@ -188,7 +194,7 @@ func givenTestInferenceGatewayAPIKey(w *world.World) error {
 	if err := ghDriver.Client.CreateRepoSecret(context.Background(), w.Org, w.RepoName, forge.SecretInferenceGatewayAPIKey, key); err != nil {
 		return fmt.Errorf("setting repository secret %s: %w", forge.SecretInferenceGatewayAPIKey, err)
 	}
-	return commitInferenceGateway(w, map[string]any{"url": gatewayURL, "auth": config.GatewayAuthAPIKey, "models": testGatewayModels()})
+	return commitInferenceGateway(w, map[string]any{"url": gatewayURL + pathPrefix, "auth": config.GatewayAuthAPIKey, "models": testGatewayModels()})
 }
 
 // deleteGatewayAPIKeySecret deletes the repository secret that

@@ -1,9 +1,11 @@
 ---
 # Template, not imported as-is: the runner renders it per configured gateway
 # host for the claude runtime (renderGatewayProfileFor in
-# internal/cli/run_gateway_egress.go), replacing the host placeholder below
-# and suffixing the id with a hash of the host, so two gateways on one shared
-# OpenShell gateway never share a profile id.
+# internal/cli/run_gateway_egress.go), replacing the host placeholder below,
+# filling in the path prefix of inference.gateway.url ("" for a bare origin)
+# wherever a path is set, and suffixing the id with a hash of the host and
+# prefix, so two gateways on one shared OpenShell gateway never share a
+# profile id.
 id: fullsend-inference-gateway-claude
 display_name: Fullsend inference gateway (Claude Code)
 description: Inference gateway for the claude runtime (runner-seeded, run-scoped credential)
@@ -28,7 +30,7 @@ credentials:
 endpoints:
   - host: __INFERENCE_GATEWAY_HOST__
     port: 443
-    path: /v1/**
+    path: __INFERENCE_GATEWAY_PATH_PREFIX__/v1/**
     protocol: rest
     enforcement: enforce
     # OpenShell 0.0.110+ resets any inspected request body that contains the
@@ -40,10 +42,10 @@ endpoints:
     rules:
       - allow:
           method: POST
-          path: /v1/messages
+          path: __INFERENCE_GATEWAY_PATH_PREFIX__/v1/messages
       - allow:
           method: POST
-          path: /v1/messages/count_tokens
+          path: __INFERENCE_GATEWAY_PATH_PREFIX__/v1/messages/count_tokens
 # The sandbox image's Claude Code binary is .../claude-code/bin/claude.exe, so
 # **/claude alone does not match it. It is a native binary, exec'd directly,
 # so no node wrapper needs listing. OpenShell matches the connecting process

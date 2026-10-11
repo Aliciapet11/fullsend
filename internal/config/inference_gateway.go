@@ -182,36 +182,113 @@ func (c InferenceGatewayConfig) Validate() error {
 	return nil
 }
 
-// ValidateGatewayURL checks that raw is the gateway origin: an absolute
-// https URL with a host, no path beyond "/", no port other than 443, and
-// no embedded credentials, query or fragment. The runner appends the
-// /v1/... model API paths itself, and the OpenShell egress profile binds
-// the host on port 443 only. Plain http, and any port, is accepted only
-// for a loopback host (test servers), as actionsoidc.RequireSecureURL does.
+// GatewayAPIBasePath is the model API base path the runner adds under the
+// gateway URL: the runtimes call <url>/v1/..., and the egress profile binds
+// the credential to <prefix>/v1/** only.
+const GatewayAPIBasePath = "/v1"
+
+// GatewayURL is a validated inference.gateway.url split into the parts
+// the runner builds on (ParseGatewayURL).
+type GatewayURL struct {
+	// Origin is scheme://host[:port], with no trailing slash.
+	Origin string
+	// Hostname is the host without a port, as written.
+	Hostname string
+	// Prefix is the optional path prefix the gateway serves its API
+	// under: "" for a bare origin, otherwise a clean absolute path with no
+	// trailing slash, for example "/team-a".
+	Prefix string
+}
+
+// BaseURL returns Origin followed by Prefix: the URL the runtimes add
+// GatewayAPIBasePath and the model API paths to.
+func (g GatewayURL) BaseURL() string {
+	return g.Origin + g.Prefix
+}
+
+// gatewayPrefixSegmentRe is one segment of a gateway URL path prefix:
+// RFC 3986 unreserved characters only, so a prefix needs no escaping in
+// the URL, in the rendered egress profile (where "*" would be a glob) or
+// in a runtime's config.
+var gatewayPrefixSegmentRe = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+
+// ValidateGatewayURL checks that raw is a usable gateway URL
+// (ParseGatewayURL).
 func ValidateGatewayURL(raw string) error {
+	_, err := ParseGatewayURL(raw)
+	return err
+}
+
+// ParseGatewayURL checks that raw is the gateway's URL and splits it: an
+// absolute https URL with a host, an optional path prefix
+// (GatewayPathPrefix), no port other than 443, and no embedded
+// credentials, query or fragment. The runner appends the /v1/... model API
+// paths itself, and the OpenShell egress profile binds the host on port
+// 443 only. Plain http, and any port, is accepted only for a loopback host
+// (test servers), as actionsoidc.RequireSecureURL does.
+func ParseGatewayURL(raw string) (GatewayURL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("inference.gateway.url: %w", err)
+		return GatewayURL{}, fmt.Errorf("inference.gateway.url: %w", err)
 	}
 	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
-		return fmt.Errorf("inference.gateway.url must use https (got scheme %q; plain http is allowed only for a loopback host)", u.Scheme)
+		return GatewayURL{}, fmt.Errorf("inference.gateway.url must use https (got scheme %q; plain http is allowed only for a loopback host)", u.Scheme)
 	}
 	if u.Hostname() == "" {
-		return fmt.Errorf("inference.gateway.url %q has no host", raw)
+		return GatewayURL{}, fmt.Errorf("inference.gateway.url %q has no host", raw)
 	}
 	if u.User != nil {
-		return fmt.Errorf("inference.gateway.url must not carry credentials")
+		return GatewayURL{}, fmt.Errorf("inference.gateway.url must not carry credentials")
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("inference.gateway.url must not carry a query or fragment")
-	}
-	if (u.Path != "" && u.Path != "/") || (u.RawPath != "" && u.RawPath != "/") {
-		return fmt.Errorf("inference.gateway.url %q must be the gateway origin (for example https://gateway.example.com): the runner adds the /v1/... paths itself", raw)
+		return GatewayURL{}, fmt.Errorf("inference.gateway.url must not carry a query or fragment")
 	}
 	if port := u.Port(); port != "" && port != "443" && !isLoopbackHost(u.Hostname()) {
-		return fmt.Errorf("inference.gateway.url %q must be the gateway origin (for example https://gateway.example.com): the egress profile allows port 443 only", raw)
+		return GatewayURL{}, fmt.Errorf("inference.gateway.url %q must use port 443: the egress profile allows port 443 only", raw)
 	}
-	return nil
+	prefix, err := GatewayPathPrefix(u.EscapedPath())
+	if err != nil {
+		return GatewayURL{}, err
+	}
+	return GatewayURL{
+		Origin:   u.Scheme + "://" + u.Host,
+		Hostname: u.Hostname(),
+		Prefix:   prefix,
+	}, nil
+}
+
+// GatewayPathPrefix checks the escaped path of a gateway URL and returns
+// its prefix: "" for an empty path or "/", otherwise the path without a
+// trailing slash. The prefix must be a clean absolute path: no empty
+// (doubled-slash), "." or ".." segment, no percent-encoding (so no encoded
+// "/"), only RFC 3986 unreserved characters in each segment, and no
+// trailing /v1, which the runner adds itself.
+func GatewayPathPrefix(p string) (string, error) {
+	if p == "" || p == "/" {
+		return "", nil
+	}
+	const example = "for example https://gateway.example.com or https://gateway.example.com/team-a"
+	if !strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("inference.gateway.url path %q must be absolute (%s)", p, example)
+	}
+	if strings.Contains(p, "%") {
+		return "", fmt.Errorf("inference.gateway.url path %q must not be percent-encoded (%s)", p, example)
+	}
+	segments := strings.Split(strings.TrimSuffix(p, "/")[1:], "/")
+	for _, seg := range segments {
+		switch {
+		case seg == "":
+			return "", fmt.Errorf("inference.gateway.url path %q has an empty segment (%s)", p, example)
+		case seg == "." || seg == "..":
+			return "", fmt.Errorf("inference.gateway.url path %q must be clean, with no %q segment (%s)", p, seg, example)
+		case !gatewayPrefixSegmentRe.MatchString(seg):
+			return "", fmt.Errorf("inference.gateway.url path %q may only use letters, digits, '-', '.', '_' and '~' in each segment (%s)", p, example)
+		}
+	}
+	if strings.EqualFold(segments[len(segments)-1], strings.TrimPrefix(GatewayAPIBasePath, "/")) {
+		return "", fmt.Errorf("inference.gateway.url path %q must not end in %s: the runner adds the %s/... paths itself (%s)", p, GatewayAPIBasePath, GatewayAPIBasePath, example)
+	}
+	return "/" + strings.Join(segments, "/"), nil
 }
 
 func isLoopbackHost(host string) bool {

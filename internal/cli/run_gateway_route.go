@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -114,12 +113,12 @@ func planGatewayRoute(rc runConfig, backend runtime.Backend, sandboxName string,
 	if !needsGateway && !isDummyRuntime(name) {
 		return nil, nil
 	}
-	u, err := url.Parse(block.URL)
+	gu, err := config.ParseGatewayURL(block.URL)
 	if err != nil {
-		return nil, fmt.Errorf("inference.gateway.url: %w", err)
+		return nil, err
 	}
-	plan := &gatewayRoutePlan{block: block, host: u.Hostname()}
-	plan.profile = gatewayProfile{host: plan.host, claude: name == "claude"}
+	plan := &gatewayRoutePlan{block: block, host: gu.Hostname}
+	plan.profile = gatewayProfile{host: plan.host, prefix: gu.Prefix, claude: name == "claude"}
 	gr, ok := backend.Runtime.(runtime.GatewayRouteRuntime)
 	if !ok {
 		return plan, nil
@@ -136,7 +135,7 @@ func planGatewayRoute(rc runConfig, backend runtime.Backend, sandboxName string,
 	if err := gr.PrepareGatewayRun(sandboxName, runtime.GatewayRun{
 		Block:      block,
 		ModelsFile: modelsFile,
-		BaseURL:    u.Scheme + "://" + u.Host,
+		BaseURL:    gu.BaseURL(),
 	}); err != nil {
 		return nil, err
 	}
