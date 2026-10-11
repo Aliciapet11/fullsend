@@ -26,6 +26,16 @@ func (c *selectiveSecretClient) CreateRepoSecret(ctx context.Context, owner, rep
 	return c.Client.CreateRepoSecret(ctx, owner, repo, name, value)
 }
 
+// The embedded interface hides the optional project lease capability, so it is
+// forwarded explicitly.
+func (c *selectiveSecretClient) AcquireProjectLease(ctx context.Context, owner, repo, name, holder string) (bool, error) {
+	return c.Client.(forge.ProjectLeaser).AcquireProjectLease(ctx, owner, repo, name, holder)
+}
+
+func (c *selectiveSecretClient) ReleaseProjectLease(ctx context.Context, owner, repo, name, holder string) error {
+	return c.Client.(forge.ProjectLeaser).ReleaseProjectLease(ctx, owner, repo, name, holder)
+}
+
 func seededRoleClient(t *testing.T, roles ...gitlabroles.Role) *forge.FakeClient {
 	t.Helper()
 	fc := provisionClient(t)
@@ -741,7 +751,7 @@ func TestRotateGitLabRoleCredentials_InvalidStateAndEmptyCreate(t *testing.T) {
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 	fc := seededRoleClient(t, gitlabroles.RolePoller)
 	require.NoError(t, fc.UpdateCIVariable(context.Background(), "group", "project", forge.VarGitLabRoleRotation,
-		`{"roles":{"poller":{"unknown":true}}}`, true))
+		`{"roles":{"poller":{"lock_until":"not-a-time"}}}`, true))
 	tokens := &fakeTokens{emptyValue: map[string]bool{gitlabroles.PollerTokenName: true}}
 	tokens.seed(ProjectAccessToken{Name: gitlabroles.PollerTokenName, Active: true, ExpiresAt: "2026-10-01"})
 

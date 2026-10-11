@@ -355,6 +355,75 @@ If you would rather keep them out of the repository, set them as **repository va
 workflows pass them to every agent run, and when any of them is set they replace the
 `config.yaml` block entirely (the two are never mixed — set all three in one place).
 
+### Manifest-managed repositories (`repos install`)
+
+For repositories managed with a `repos.yaml` manifest, select the method as `inference.auth:
+openai-wif`, under `defaults`, in the `github` section, or on a repo or glob entry, or pass
+`--inference-auth openai-wif` to `fullsend repos install`:
+
+```bash
+fullsend repos install acme/api --forge github --inference-auth openai-wif
+```
+
+- No `FULLSEND_GCP_PROJECT_ID`, `FULLSEND_GCP_WIF_PROVIDER` or `FULLSEND_OPENAI_API_KEY` is required.
+  Pass the Vertex flags (`--vertex-project`, `--vertex-region`) as well to provision the GCP pair for
+  Vertex sub-agents. Existing GCP secrets are never removed from an `openai-wif` repository.
+- The identifiers come from the same places and in the same order as at run time: the
+  `FULLSEND_OPENAI_*` Actions variables (repository variables, falling back per name to organization
+  variables available to the repository) when any is set, otherwise `inference.openai` from
+  `.fullsend/config.yaml` over `config.base.yaml`. `repos install` also counts the managed
+  configuration and configuration preset it is delivering. A repository with no identifiers or a
+  partial set fails before anything is written, and the error names only the missing identifiers.
+- Migrating from `fullsend github setup --openai-*` needs no new OpenAI values: the existing
+  `inference.openai` block or repository variables are still read as they are. The existing
+  `.fullsend/config.yaml` has no ownership marker, though, so `repos install` stops before any
+  write until it is adopted: move the settings you want to keep, including `inference.openai`,
+  into the repository's `repos.yaml` entry, then remove or replace the file (see
+  [Repo Management — Managed configuration](../getting-started/repo-management.md#managed-configuration)).
+  An existing `.fullsend/config.base.yaml` likewise blocks install unless a `config_base` preset
+  is declared for the repository.
+- Switching from `openai-api-key` keeps `FULLSEND_OPENAI_API_KEY` until a complete identifier set is
+  on the default branch. If the identifiers arrive in an unmerged initialization pull request, merge
+  it and re-run `repos install` to remove the key.
+- `fullsend repos status` reports drift on `identifiers` when the set on the default branch is
+  missing or partial.
+- `openai-wif` is rejected for GitLab repositories before any write. Use `openai-api-key` there.
+
+#### Live validation
+
+Ordinary unit CI includes `TestOpenAIWIFInstallStatusRuntimeIntegration`, which installs
+without GCP or API-key secrets against a fake forge using the shipped workflow sources,
+checks healthy status, and exchanges the installed identifier configuration through the
+runtime's WIF resolver with a simulated token endpoint. It also verifies that an
+incompatible installed workflow produces status drift. Existing Vertex installation and
+runtime tests retain regression coverage.
+
+`TestOpenAIWIFLiveInstallAndRun` automates the live install → readiness → successful agent
+check. It is opt-in because it writes to a dedicated repository and incurs inference cost.
+Prepare that repository with mint enrollment, the three `FULLSEND_OPENAI_*` variables,
+and a working OpenAI-model triage agent triggered by new issues. Unmanaged configuration is no
+longer preserved: a markerless `.fullsend/config.yaml`, or a `.fullsend/config.base.yaml` with no
+declared preset, makes `repos install` fail before any write. Start from a repository with neither
+file, or adopt them into `repos.yaml` first. The repository must have none of
+`FULLSEND_GCP_PROJECT_ID`, `FULLSEND_GCP_WIF_PROVIDER`, or `FULLSEND_OPENAI_API_KEY`.
+The configured GitHub identity needs permission to install workflows, inspect secret
+names, create/close issues, and read Actions runs/logs. Allow no concurrent issue-triggered
+runs during this check. Set `GH_TOKEN`, `FULLSEND_OPENAI_WIF_LIVE_REPO` (`owner/repo`),
+`FULLSEND_OPENAI_WIF_LIVE_MINT_URL`, and `FULLSEND_OPENAI_WIF_LIVE_REF` to the candidate
+revision containing the compatible reusable workflows, then run from this checkout:
+
+```bash
+go test ./internal/cli -run '^TestOpenAIWIFLiveInstallAndRun$' -count=1 -v -timeout=25m
+```
+
+The test confirms the default-branch workflow contract, creates a smoke issue, waits for a
+successful run, requires the OpenAI credential setup in its logs, and closes its issue.
+It leaves the installed configuration in place and prints the workflow URL as evidence.
+A skipped test is not live validation. No live success is asserted by the ordinary unit
+suite. The capability-gated `features/runtime/pi-openai.feature` and
+`features/runtime/codex-openai.feature` additionally exercise tools and metrics on OpenAI;
+`features/runtime/pi.feature` exercises Vertex.
+
 ## 5. Pick a GPT model for an agent
 
 In `.fullsend/config.yaml`, put the agent on a runtime that serves OpenAI models — `pi` or

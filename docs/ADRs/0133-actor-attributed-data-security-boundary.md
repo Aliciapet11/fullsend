@@ -78,54 +78,27 @@ current revision, the record is redacted. The actor's applicable permission or
 recognized role MUST be co-fetched in the
 same authoritative API response, delivered in the same verified event payload,
 or lazily resolved from the authoritative source when first needed. A lazy
-result MAY be cached for the lifetime of the event or entity structure that
-requested it, but MUST NOT be reused for an unrelated record or structure.
-This is a logical lifetime, not an object-identity lifetime: re-reading or
-re-fetching the data, constructing a new structure for a retry or requeue, or
-terminating and re-invoking the agent ends the current lifetime and requires a
-new authorization result. The new result MUST be resolved again even if the
-implementation mutates or reuses the same in-memory structure. Within one
-such lifetime, this ADR does not require a separate wall-clock expiry or
-revalidation.
+result MAY be cached only for the logical lifetime of the containing event or
+entity structure and agent invocation. The cache lifetime and the required
+fresh checks between admission and model exposure are defined by the
+[Authorization Contract v1](../normative/authorization/v1/README.md).
 The actor MUST meet the applicable observation or mutation threshold for the
 selected harness. For a human actor, this means the applicable current forge
 permission threshold. For a bot actor, whose `actor.role` remains `none`, a
 fresh provider-backed exact `actor.bot_role` recognition under ADR 0107
-satisfies this gate only when the selected harness policy admits that bot role
-for the record's operation; the ordinary `actor.role` threshold does not apply.
-An unrecognized, unresolved, or disallowed bot role fails closed and the
-record is redacted. A label grant authorizes only its verified label
-transition; it does not authorize unrelated content from that actor or other
-actors.
+satisfies this gate; the ordinary `actor.role` threshold does not apply. CEL or
+harness routing may further restrict a recognized bot role, but cannot
+authorize an unrecognized bot. An unrecognized or unresolved bot role fails
+closed and the record is redacted. A label grant authorizes only its verified
+label transition; it does not authorize unrelated content from that actor or
+other actors.
 
 Event-carried permission or role evidence may support initial event admission
 and routing, but it MUST NOT satisfy later model-bound authorization checks.
-For event-triggered runs, Fullsend MUST freshly resolve each record actor's
-current authorization after event admission and before model admission. It
-MUST freshly resolve that authorization again immediately before sandbox
-initialization and immediately before the first model exposure when the record
-will be exposed to a model in that sandbox; if those operations are contiguous,
-the same fresh check may serve both gates. Revocation after first exposure
-cannot retract content already in the model context, but every later retrieval
-result has its own release check.
-Non-event retrieval paths perform the equivalent fresh resolution after
-retrieval admission and before model admission, followed by the
-sandbox-initialization and first-exposure checks. Preloaded records use the
-sandbox gates; a Fullsend-controlled capability invoked after sandbox
-initialization MUST freshly resolve authorization immediately before releasing
-each retrieved result to the model. That release check is the equivalent
-checkpoint for mid-run retrieval and MUST apply the same filtering, cache, and
-failure semantics. A cache entry MUST NOT cross any checkpoint; the actor MUST
-still meet the applicable threshold at each check. Failure, unavailability, or
-loss of authorization at a check redacts the record and, if no authorized
-records remain, denies the run.
-
-Only a source-system record whose actor attribution can be reliably
-established, and for which the applicable source-system or trusted-provider
-authorization can be resolved, is eligible for this boundary. A self-asserted
-Git author, committer, or account association does not establish actor identity
-for admission; if the required attribution or authorization cannot be
-established, the record is redacted.
+Fullsend MUST apply the fresh authorization checks defined by the Authorization
+Contract before model admission and at later model-exposure checkpoints.
+Failure, unavailability, or loss of authorization at a check redacts the
+record and, if no authorized records remain, denies the run.
 
 This is bounded trust: content with authorized provenance may inform analysis
 and, where the harness permits, provide task instructions. It cannot grant
@@ -177,17 +150,21 @@ authorization, filtering, and redaction contract.
 
 Fullsend-controlled retrieval capabilities are part of this target boundary
 and MUST return source-system records with the same attribution,
-authorization, filtering, and redaction guarantees. Agent-authored arbitrary
-API tools are outside the platform guarantee; a harness that requires this
-boundary MUST use controlled capabilities rather than expose raw
-source-system reads to the model.
+authorization, filtering, and redaction guarantees. This ADR does not govern
+model-initiated or agent-authored direct source-system calls; those calls may
+still occur outside this boundary. Future ADRs may define mechanisms that
+encourage models to prefer platform-originated data that passes this boundary
+or apply additional filtering to model-originated retrievals.
 
 ## Consequences
 
 - Authorized contributors and recognized bots can provide useful context and task guidance, regardless of how the data is retrieved, without gaining platform authority.
+- The strict per-record threshold means that external contributors whose current source authorization is below the selected harness threshold may have their descriptions or comments redacted even when a maintainer's event authorizes observation; preserving community review of that content is a likely follow-up ADR.
 - Every forge adapter, poller, snapshot builder, proactive data source, and Fullsend-controlled model retrieval capability needs provenance binding, per-record authorization, bounded retrieval, and the common filtering pipeline before its content is model-visible.
+- Fresh authorization at admission and later model-exposure checkpoints adds source-system API load and latency. Implementations may coalesce contiguous checks and cache per actor only within the logical lifetime defined by the Authorization Contract.
 - Hidden-character and prompt-injection findings may omit legitimate-looking content, so the model and operators need bounded diagnostics rather than an assumption that all source text will be preserved.
 - Filtering reduces, but cannot prove the absence of prompt injection; immutable instructions, least privilege, output validation, and deterministic host-side mutations remain required defenses.
 - Quoted, forwarded, or copied text is intentionally not detected or assigned a separate trust level inside an authorized record. A trusted actor or bot can therefore relay hostile text as part of a trusted record; this residual risk is accepted in exchange for a whole-record admission model, and is mitigated by trusted-actor caution, filtering, explicit delimitation, least privilege, output validation, deterministic host-side mutations, and the fresh authorization checkpoints.
 - Any harness that admits an authorized record as task guidance MUST keep that guidance within its configured scope and enforce least privilege, output validation, and deterministic host-side mutation rules; the whole-record rule does not authorize a new stage, capability, provider, or separate source-system record.
+- Direct model-initiated source-system calls remain outside this ADR's guarantee. A future ADR may define ways to encourage use of platform-originated, checked data or add filtering for model-originated retrievals.
 - The data-filter contract becomes a versioned security boundary whose changes require compatibility review and regression testing across all model-bound data consumers.

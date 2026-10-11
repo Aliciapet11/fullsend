@@ -285,6 +285,18 @@ func UpdateInferenceAuth(ctx context.Context, cfg ManifestEditConfig, filters []
 	if len(updated) == 0 {
 		return nil, nil
 	}
+	// Refuse to persist a selection the entry's forge cannot satisfy
+	// (openai-wif on GitLab) before the manifest is written.
+	if m.GitLab != nil {
+		for _, e := range m.GitLab.Repos {
+			if !slices.ContainsFunc(updated, func(u string) bool { return strings.EqualFold(u, e.Name) }) {
+				continue
+			}
+			if err := ValidateInferenceAuthForForge(ForgeGitLab, e.Inference.Auth); err != nil {
+				return nil, fmt.Errorf("%s: %w", e.Name, err)
+			}
+		}
+	}
 	if cfg.ManifestPath != "" && !cfg.DryRun {
 		if err := writeManifest(cfg.ManifestPath, m); err != nil {
 			return nil, err
@@ -401,6 +413,10 @@ func carveOutGlobEntry(platforms []*PlatformConfig, name string, skipGlobs map[s
 			if entry.Vendor != nil {
 				v := *entry.Vendor
 				explicit.Vendor = &v
+			}
+			if entry.Signoff != nil {
+				s := *entry.Signoff
+				explicit.Signoff = &s
 			}
 			platform.Repos = append(platform.Repos, explicit)
 			return &platform.Repos[len(platform.Repos)-1], nil
@@ -766,7 +782,17 @@ func validateRepoName(forgeName, name string) error {
 	return nil
 }
 
+// WriteManifest persists m to path in one write. `repos install` plans every
+// manifest edit in memory and calls it once the layered safety comparison has
+// passed, so a rejected install leaves the file untouched.
+func WriteManifest(path string, m *Manifest) error {
+	return writeManifest(path, m)
+}
+
 func writeManifest(path string, m *Manifest) error {
+	if ManifestReadOnly(m, path) {
+		return fmt.Errorf("manifest %s is read-only; apply the equivalent edit to its source, then re-run", path)
+	}
 	data, err := MarshalWithHeader(m)
 	if err != nil {
 		return fmt.Errorf("marshalling manifest: %w", err)
@@ -981,7 +1007,7 @@ func validateDefaultValue(key, value string) error {
 			return err
 		}
 	case "defaults.inference.auth", "github.inference.auth", "gitlab.inference.auth":
-		if err := ValidateInferenceAuth(key, value); err != nil {
+		if err := validateManifestInferenceAuth(key, value); err != nil {
 			return err
 		}
 	case "defaults.config_base.source":

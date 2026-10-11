@@ -117,7 +117,7 @@ overlays:
     profiles: [profiles/myorg-github.yaml]  # Concatenated with top-level
   host_files:                         # Overlay-specific host files
     - src: env/github.env
-      dest: /run/secrets/forge.env
+      dest: /sandbox/workspace/.env.d/forge.env
   env:
     runner:
       GH_TOKEN: "${GH_TOKEN}"
@@ -155,7 +155,23 @@ Most fields are self-explanatory from the inline comments above. This section ex
 
 **`validation_loop.preflight_check`** — A host-dependency probe run before sandbox creation as a literal `sh -c` command ([ADR 0128](../ADRs/0128-preflight-check-literal-command.md)). It uses the host process's working directory and is not resolved through the resource-fetch pipeline. Prefer a self-contained probe such as `python3 -c "import jsonschema"`; a relative script command works only if its file is present in that host working directory.
 
+**`env.runner`** — Variables passed to host-side scripts (`pre_script`, `post_script`,
+`validation_loop.script` and `validation_loop.preflight_check`), layered over the `fullsend run`
+process environment. A few named workflow secrets are **not** inherited from that environment:
+`JIRA_TOKEN`, `JIRA_USER_EMAIL`, and the OTLP collector headers `OTEL_EXPORTER_OTLP_HEADERS` /
+`OTEL_EXPORTER_OTLP_*_HEADERS` (for example `OTEL_EXPORTER_OTLP_TRACES_HEADERS`). A script
+receives one only when the harness declares it, e.g. `JIRA_TOKEN: "${JIRA_TOKEN}"` under
+`env.runner`. `fullsend run` itself still reads them for its own Jira client and trace export.
+Earlier releases passed them to every script unconditionally; a harness whose scripts read
+`JIRA_TOKEN` or `JIRA_USER_EMAIL` without declaring them must add them to `env.runner`. Scripts
+always run with `PYTHONDONTWRITEBYTECODE=1`, overriding any `env.runner` value, so bytecode never
+breaks the hash-verified fetch cache.
+
 **`agent_input`** — A local directory, not a file. When a URL `base:` harness declares it, the inherited value is cleared rather than fetched; supply the directory in the child harness if needed. See [Harness field semantic types](../contributing/harness-fields.md#semantic-types-adr-0127).
+
+**`host_files[].dest`** — An absolute path under `/sandbox/` or `/tmp/`. Paths the runner writes or puts on `PATH` ahead of the image are refused when the harness loads: `/sandbox/workspace/.env`, the runner and runtime binaries in `/sandbox/workspace/bin` (`claude`, `codex`, `pi`, `opencode`, `fullsend`, `fullsend-check-output`), and anything under `/sandbox/claude-config`, `/sandbox/codex-config`, `/sandbox/pi-config`, `/sandbox/workspace/.fullsend`, `/sandbox/workspace/.security`, `/sandbox/.venv` or `/sandbox/go/bin`. A `dest` containing a `..` path component is refused as well. The same rule applies to `host_files` under `overlays:`, `forge:` and inherited from `base:`. On Claude and pi runs `/sandbox/workspace/bin` is last on the agent's `PATH`, so a file there adds a command but does not replace one the image provides. Codex runs restore the `PATH` from before `.env`, so `/sandbox/workspace/bin` and `.env.d` additions are not on the codex agent's `PATH`. See [Adding executables](../guides/user/customizing-agents.md#adding-executables).
+
+**`.env.d` host files** — A `host_files` entry with a `dest` in `/sandbox/workspace/.env.d/` ending in `.env` is sourced as shell in the agent launch shell, before the runtime starts. Treat these files like `pre_script`: they run whatever they contain. `host_files` can also place configuration that tools load, such as git config or shell rc files; that is trusted like `pre_script` too. After the `.env.d` files run, on Claude and pi runs the runner puts its own `PATH` back in front. Claude runs then unset `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `NODE_OPTIONS`, `NODE_PATH` and `BUN_OPTIONS`; codex runs unset the same names except `BUN_OPTIONS`. Setting those there has no effect on the agent of those runtimes.
 
 **`timeout_minutes`** — Wall-clock budget for one agent iteration, default 30. The runner ends the iteration and sweeps the processes the agent left running in the sandbox (best effort) when it is spent, and a killed iteration ends the run with `agent timed out after <elapsed> without completing (timeout: <budget>)` unless its output validates anyway. Before every iteration the runner writes the budget as `FULLSEND_TIMEOUT_MINUTES`, the kill time as `FULLSEND_ITERATION_DEADLINE` (Unix seconds), and the current agent span as `TRACEPARENT` into the agent's environment — see [`fullsend run` § Budget and deadline](../cli/run.md#budget-and-deadline). Those names are reserved: an `env.sandbox` entry with any of them is dropped.
 

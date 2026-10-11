@@ -542,7 +542,7 @@ func runPerRepoInstall(ctx context.Context, c perRepoInstallConfig) error {
 			printer.StepInfo(fmt.Sprintf("  Mint URL: %s", mintDisplay))
 			printer.StepInfo(fmt.Sprintf("  Mint project: %s, region: %s", mintProject, mintRegion))
 			if mintFound {
-				printer.StepInfo(fmt.Sprintf("  Would register %s in ALLOWED_ORGS", owner))
+				printer.StepInfo(fmt.Sprintf("  Would register %s/%s in PER_REPO_WIF_REPOS", owner, repo))
 				printer.StepInfo(fmt.Sprintf("  Would use shared ROLE_APP_IDS for roles: %s", strings.Join(roles, ",")))
 			}
 		}
@@ -957,6 +957,35 @@ type scaffoldOptions struct {
 	signOffTrailer string // e.g. "Signed-off-by: Name <email>"; appended to the commit message when non-empty
 	runtime        string // runtime written to .fullsend/config.yaml ("" = default claude); described in the PR body
 	installed      bool   // true when the repo already has fullsend installed (upgrade path)
+}
+
+// resolveSignOffTrailer resolves the authenticated user's identity through
+// the forge client and formats it as a Signed-off-by trailer. It fails
+// rather than returning a partial or misleading trailer when the identity
+// is unavailable or incomplete. setting names the option that requested the
+// trailer (e.g. "--signoff") and forgeLabel the forge (e.g. "GitHub"); both
+// appear in error messages.
+func resolveSignOffTrailer(ctx context.Context, client forge.Client, setting, forgeLabel string) (string, error) {
+	id, err := client.GetAuthenticatedUserIdentity(ctx)
+	if err != nil {
+		hint := ""
+		if forgeLabel == "GitHub" {
+			hint = " — this is not available for GitHub App tokens"
+		}
+		return "", fmt.Errorf("%s requires a %s user identity (name and email)%s: %w", setting, forgeLabel, hint, err)
+	}
+	if id == nil || id.Name == "" || id.Email == "" {
+		var name, email string
+		if id != nil {
+			name, email = id.Name, id.Email
+		}
+		return "", fmt.Errorf("%s requires a %s user identity with both name and email set (got name=%q, email=%q)", setting, forgeLabel, name, email)
+	}
+	trailer, err := id.SignOffTrailer()
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", setting, err)
+	}
+	return trailer, nil
 }
 
 // applyPerRepoScaffold commits scaffold files to the repo's default branch

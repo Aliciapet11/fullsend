@@ -151,7 +151,8 @@ supported, for example `group/subgroup/project`), and `<gcp-project>` is
 the GCP project from [Getting Inference](getting-inference.md).
 
 `--inference-auth` selects the inference authentication method
-(`vertex-wif` or `openai-api-key`) and is persisted as `inference.auth` on
+(`vertex-wif` or `openai-api-key`; `openai-wif` is GitHub only and is
+rejected for GitLab projects) and is persisted as `inference.auth` on
 the project's manifest entry. There is no default: when the manifest does
 not already provide a selection, `repos install` fails before changing the
 project. See
@@ -231,7 +232,9 @@ then converges the project:
   token to the Maintainer who creates it, the fast path stays disabled
   when the only available creator is a Maintainer or Owner; the polling
   schedules keep working, and the poller, dispatcher, and agent
-  credentials stay Developer-level.
+  credentials stay Developer-level. A Poller-owned trigger lifecycle is
+  rolling out but stays deferred; see
+  [Project service accounts (rolling out)](#project-service-accounts-rolling-out).
 * Writes inference CI/CD variables when `--vertex-project` is set.
 
 By default the scaffold lands as a merge request. Pass `--direct` to push
@@ -294,6 +297,8 @@ roles. These are genuinely different GitLab identities, so GitLab can audit
 which responsibility acted and the Analyst can approve a merge request
 created by the Coder. The credential variables are described in
 the [role-credential contract](../../contributing/gitlab-role-credentials.md).
+Per-role project service accounts are rolling out as the primary path; see
+[Project service accounts (rolling out)](#project-service-accounts-rolling-out).
 
 This automatic per-role provisioning is **not available on GitLab.com Free**
 because that tier cannot create project access tokens. You can still enroll
@@ -402,11 +407,141 @@ rotated by the administrator, not by `repos install`.
 `repos status` reports per-role readiness and treats missing, expired, or
 revoked credentials as `gitlab-role:<name>` drift. Re-running
 `repos install` repairs missing role secrets. `repos uninstall` deletes
-the registry, rotation document, role secrets, and matching role project
-access tokens. It does not delete a leftover `FULLSEND_FORGE_TOKEN`
+the registry, role secrets, and matching role project access tokens, and
+removes the rotation document last. If the rotation document records
+administrator-supplied account exclusions, an exclusions-only document is
+retained, and uninstall fails closed, deleting nothing, when the rotation
+state is unreadable or malformed. It does not delete a leftover `FULLSEND_FORGE_TOKEN`
 secret or revoke a matching `fullsend-bot` project access token — a
 repository installed before the role-only rollout requires manual
 cleanup of those. See [Operations § Uninstalling](operations.md#uninstalling).
+
+#### Project service accounts (rolling out)
+
+> **Status: rolling out, not active yet.**
+> [#7772](https://github.com/fullsend-ai/fullsend/issues/7772) delivers the
+> behavior below as a series of small changes. Until the CLI activation change
+> ([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)) merges,
+> install keeps creating role project access tokens as described above. The
+> webhook fast path stays deferred and the polling schedules stay the dispatch
+> path until the live fresh-identity Poller handoff
+> ([#8243](https://github.com/fullsend-ai/fullsend/issues/8243)) merges and is
+> validated.
+
+> **Poller elevation safety:** Re-elevating a Poller identity that ever held a
+> distributed runtime credential requires a verified server-side guarantee
+> that requests accepted before credential revocation, including asynchronous
+> credential and job creation, have finished. The current GitLab adapter
+> cannot establish that guarantee, so it defers temporary Maintainer elevation
+> and new trigger creation. Polling continues with Developer credentials;
+> compliant existing triggers can still be reused. Revocation and empty
+> resource inventories alone do not prove that requests have drained.
+
+Once activated, fresh installs create a separate project service account for
+the Poller, Analyst, and Coder roles where the instance supports project
+service accounts, and issue each a Developer-level personal access token.
+Where project service accounts are unavailable, installs fall back to separate
+Developer-level project access tokens if the instance supports them. Either
+way these are genuinely different GitLab identities.
+
+Re-running `repos install` also replaces positively identified Fullsend-managed
+legacy role credentials with service-account credentials. There is no separate
+migration command. Supplied credentials are retained; old managed tokens stay
+valid for the ordinary 24-hour in-flight-job grace period before cleanup on a
+later install. Before publishing a replacement Poller credential, install grants
+and verifies its protected-default-branch pipeline access. A failed grant
+revokes the unpublished replacement and preserves the installed legacy
+credential. Interrupted replacement resumes through ordinary rotation state.
+
+Service-account provisioning is the primary path; the project-access-token
+fallback is what GitLab.com Free restricts, because that tier cannot create
+project access tokens. Whether the service-account path works on GitLab.com
+Free has not been verified against a live instance, so do not rely on it there.
+Where neither automatic path is available, or you prefer to own the identities,
+enroll role credentials manually with personal access tokens as shown in
+[Role identities and GitLab Free](#role-identities-and-gitlab-free).
+
+On instances with project service accounts, `fullsend-poller`,
+`fullsend-analyst`, and `fullsend-coder` (plus any `fullsend-role-*` accounts)
+appear under Project information → Members; their personal access tokens do
+not appear under Settings → Access Tokens. Installs that fall back to project
+access tokens show the tokens under Settings → Access Tokens instead.
+
+Status also shows service-account IDs, ownership and effective access; a
+managed account outside Developer is drift. Uninstall deletes durably
+identified managed service accounts only after credentials and owned resources
+are retired. It preserves supplied or unverified accounts and contributions.
+Remaining SSH credentials, unfinished jobs, schedules or triggers prevent
+account deletion; address the reported resource and retry uninstall.
+
+GitLab ties a trigger token to the user who creates it, and creating one needs
+Maintainer. The target design therefore creates it as a fresh replacement
+Poller service account that has never held a distributed credential, instead
+of the installing Maintainer or the current Poller. Re-elevating an identity
+whose runtime credential was distributed is unsafe, because GitLab has no
+drain barrier for requests accepted before revocation. This stays deferred
+until the live handoff
+([#8243](https://github.com/fullsend-ai/fullsend/issues/8243)) is wired to an
+adapter. When enabled, install:
+
+1. Creates the replacement Poller service account at Developer and records
+   its ID in `FULLSEND_GITLAB_POLLER_GENERATIONS` before acting.
+2. Creates an installer-only bootstrap personal access token for the
+   replacement account. The bootstrap token is never stored in a CI/CD
+   variable, log, or agent environment.
+3. Grants the replacement account Maintainer temporarily and creates the
+   trigger authenticated with the bootstrap credential. The trigger-create
+   request is attempted once and never retried.
+4. Revokes the bootstrap token, restores Developer, and verifies the
+   replacement account's effective access and the revocation.
+5. Confirms the trigger is owned by the replacement account, re-checks the
+   project-wide trigger-safety invariants (pipeline-variable override policy,
+   no other protected branches or tags, the standard CI configuration path,
+   and trigger pipelines that run only the dispatcher), and starts a pipeline
+   on the protected default branch at Developer access. The same invariants
+   are checked before the account is raised, so an unsafe or unverifiable
+   project defers the handoff before any trigger exists. A trigger owned by a
+   different user than the replacement account is quarantined with an
+   instruction to delete that exact trigger and confirm it is gone.
+6. Publishes the replacement runtime credential and cuts over; the previous
+   Poller is then retired.
+
+The current Poller is never elevated or modified, and keeps polling
+throughout, so polling and in-flight jobs that authenticate as the current
+Poller are not interrupted. The webhook is enabled or updated only after the
+replacement is verified. If any step after the trigger-create request fails,
+install publishes nothing and quarantines the generation with an
+operator-facing reason. A quarantined generation or a lost account ID blocks
+any new generation until an administrator reviews
+`FULLSEND_GITLAB_POLLER_GENERATIONS`, deletes any pipeline trigger the
+replacement account owns, removes the replacement account, and then removes
+only the `pending` generation, keeping `version`, `current_user_id` and
+`retiring_user_id` so the running Poller is still recorded and retired at the
+next cutover. Removing `pending` forgets the account and its trigger, so do it
+only after both are gone.
+
+An unresolved retiring Poller is a separate condition: it blocks any new
+generation and cutover, and removing `pending` does not clear it. Retirement
+completes only after the recorded retiring account's schedules, credentials,
+triggers and account are removed and its `retiring_user_id` is then cleared
+through the retirement step (`finishPollerRetirement`). Polling continues with
+the current Poller in the meantime.
+
+Install refuses to raise the Poller, and defers the fast path, when the Poller
+service account holds an active personal access token that fullsend does not
+manage, or owns a pipeline trigger token that fullsend does not manage, or
+when its credentials cannot be listed. Revoke the extra token or trigger
+before re-running install; fullsend never revokes credentials it does not
+manage, and an administrator-supplied Poller credential is left untouched.
+
+When the Poller is a project access token bot, its role cannot be raised, so
+the fast path stays deferred. Rotating the Poller migrates it to a service
+account. In every deferral the polling schedules keep working, and the poller,
+dispatcher, and agent credentials stay Developer-level. See the
+[CLI reference](../../cli/repos.md#gitlab-project-service-account-lifecycle)
+and the
+[role-credential contract](../../contributing/gitlab-role-credentials.md#project-service-accounts)
+for details.
 
 ### Off-system polling
 
@@ -899,12 +1034,13 @@ Confirm:
   above). Role-aware installs also provision
   `FULLSEND_GITLAB_POLLER_TOKEN`, `FULLSEND_GITLAB_ANALYST_TOKEN`, and
   `FULLSEND_GITLAB_CODER_TOKEN`; custom role enrollments may add
-  `FULLSEND_GITLAB_ROLE_*_TOKEN`. Secrets are requested as masked, but GitLab
-  silently falls back to unmasked if it rejects a value (for example, one
-  that doesn't meet its masking character-set rules). If any credential
-  secret is unmasked, rotate it or restrict job-log visibility before running
-  agents against untrusted content; revoke old personal PATs on their
-  issuing accounts.
+  `FULLSEND_GITLAB_ROLE_*_TOKEN`. Secrets are requested as masked. For
+  the role tokens above, storing one fails if GitLab rejects masking (for
+  example, a value that doesn't meet its masking character-set rules); it is
+  never stored unmasked. For other secrets, GitLab silently falls back to
+  unmasked if it rejects a value. If any credential secret is unmasked, rotate
+  it or restrict job-log visibility before running agents against untrusted
+  content; revoke old personal PATs on their issuing accounts.
 
 ## Testing Fullsend
 
@@ -1027,3 +1163,15 @@ configure WIF. If agent jobs fail token exchange, confirm the
   GitLab CI status-notification variables.
 * Read the [Agents](../../agents/README.md) section to learn about the
   default agents Fullsend ships with.
+
+### Inherited variables and authentication changes
+
+Fullsend agent jobs have no deployment environment, so only wildcard (`*`) CI/CD variables
+participate in installation checks. Fullsend already creates its variables at this scope;
+Fullsend installations require no migration.
+
+On self-managed instances, a project Maintainer token cannot normally read instance CI/CD
+variables. Installation can proceed with unverified inherited scopes, but switching to
+`openai-api-key` retains obsolete inference credentials until those scopes can be checked.
+Confirm that no inherited `FULLSEND_OPENAI_*` identifiers override the key, then manually remove
+credentials that are no longer needed. See [repository status](../../cli/repos.md#repos-status).

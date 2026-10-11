@@ -552,6 +552,9 @@ func (h *Harness) Validate() error {
 		if hf.Dest == "" {
 			return fmt.Errorf("host_files[%d]: dest is required", i)
 		}
+		if err := ValidateHostFileDest(hf.Dest); err != nil {
+			return fmt.Errorf("host_files[%d]: %w", i, err)
+		}
 	}
 	if h.ValidationLoop != nil && h.ValidationLoop.Script == "" {
 		return fmt.Errorf("validation_loop.script is required when validation_loop is set")
@@ -924,7 +927,7 @@ func (h *Harness) Scripts() []string {
 
 // ValidateAllowedRemoteResources checks that each entry in AllowedRemoteResources
 // is a valid HTTPS URL ending with "/" and is covered by at least one entry in the
-// org-level allowlist. Org allowlist entries are also validated: each must be a
+// config-level allowlist. Allowlist entries are also validated: each must be a
 // valid HTTPS URL ending with "/" and must not contain double-encoded sequences.
 func (h *Harness) ValidateAllowedRemoteResources(orgAllowlist []string) error {
 	for i, orgEntry := range orgAllowlist {

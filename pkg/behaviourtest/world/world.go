@@ -33,6 +33,19 @@ type World struct {
 
 	ScenarioStart time.Time
 
+	// ScenarioName is the godog scenario name, set by the Before hook.
+	// ScenarioBegin is the time the Before hook ran; unlike
+	// ScenarioStart, which trigger steps move forward, it never changes
+	// during the scenario. Failure log collection uses both to label its
+	// summary and to scope the repository's runs to this scenario.
+	ScenarioName  string
+	ScenarioBegin time.Time
+
+	// SavedLogRunIDs records the workflow runs whose logs have already
+	// been written under BEHAVIOUR_ARTIFACT_DIR during the scenario, so
+	// failure log collection in the After hook does not fetch them again.
+	SavedLogRunIDs map[int]bool
+
 	DummyOps           []runtime.BehaviourOperation
 	ArtifactDir        string
 	TriageTriggerEvent string // GitHub event for triage dispatch (issues for label path)
@@ -126,6 +139,19 @@ type World struct {
 	// does not inherit custom agent entries from the previous lessee.
 	AgentsOverridden bool
 	AgentsOriginal   []config.AgentEntry
+
+	// GatewayConfigOverridden records that this scenario committed an
+	// inference.gateway block into .fullsend/config.yaml;
+	// GatewayConfigOriginal holds the pre-scenario file bytes.
+	// CleanupScenario commits them back, before the leased repo is
+	// deallocated, so the slot's next scenario does not inherit the block.
+	GatewayConfigOverridden bool
+	GatewayConfigOriginal   []byte
+
+	// GatewayAPIKeySecretSet records that this scenario set the enrolled
+	// repo's FULLSEND_INFERENCE_GATEWAY_API_KEY secret to the test key.
+	// CleanupScenario deletes it before the leased repo is deallocated.
+	GatewayAPIKeySecretSet bool
 
 	// OwnersAuthActivated records whether this scenario committed an
 	// OWNERS file and/or added owners_file to the authorization providers in config.yaml.
