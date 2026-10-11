@@ -86,6 +86,10 @@ region there remains an alternative.
 
 `repos install` provisions and rotates the registered role credentials directly. There is no migration gate and no shared-token runtime path. Neither install nor uninstall removes a leftover `FULLSEND_FORGE_TOKEN` from a repository installed before the role-only rollout — clean that up manually.
 
+### Per-repo configuration in `repos.yaml`
+
+For repositories managed through `repos.yaml` (every GitLab install, and GitHub fleets), `.fullsend/config.yaml` is managed: change per-repo config values — including `runtime` and `allowed_remote_resources` — in `defaults.config`, `github.config`, `gitlab.config`, or the repository entry's `config`, then run `fullsend repos install`. `repos install` has no `--runtime` or `--allowed-remote-resources` flag, and `repos set-default` does not write config fields. The former sibling keys (`defaults.runtime`, `defaults.allowed_remote_resources`, and their repository-entry equivalents) are rejected with the replacement path. See [Repo Management — Managed configuration](repo-management.md#managed-configuration).
+
 ## Syncing workflow templates
 
 After upgrading the fullsend CLI, re-run `github setup` to update the workflow file for a single repo:

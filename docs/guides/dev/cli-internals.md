@@ -69,7 +69,6 @@ fullsend
 │   │   ├── --fullsend-ref <ref>             #   Per-repo fullsend workflow ref override
 │   │   ├── --mint-url <url>                 #   Per-repo mint URL override
 │   │   ├── --app-set <prefix>               #   GitHub App set prefix override ($FULLSEND_APP_SET); GitHub-only
-│   │   ├── --allowed-remote-resources <list> #  Per-repo allowed remote resources override
 │   │   ├── --inference-auth <method>        #   vertex-wif, openai-api-key or openai-wif (GitHub only); persisted as inference.auth on each selected manifest entry (a repo covered only by a glob gets its own copied entry); never changes defaults or forge sections
 │   │   ├── --vendor                         #   Vendor binary and content into each repo for offline CI
 │   │   ├── --signoff                        #   Signed-off-by trailer on scaffold commits; overrides manifest signoff for this run

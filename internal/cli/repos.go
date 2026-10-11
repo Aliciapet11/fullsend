@@ -51,7 +51,11 @@ func newReposSetDefaultCmd() *cobra.Command {
 An empty value removes the key. Creates the manifest with version: 1 if it does not exist.
 
 Valid keys:
-  %s`, strings.Join(repos.ValidDefaultKeys, "\n  ")),
+  %s
+
+Per-repo config fields, including runtime and allowed_remote_resources, are
+not set here: edit defaults.config, github.config, gitlab.config, or a
+repository entry's config in repos.yaml instead.`, strings.Join(repos.ValidDefaultKeys, "\n  ")),
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return repos.SetDefault(manifest, args[0], args[1])
@@ -303,12 +307,10 @@ type reposInstallConfig struct {
 	rotateGitLabTriggerToken bool
 
 	// Per-repo overrides
-	fullsendRef            string
-	mintURL                string
-	appSet                 string
-	allowedRemoteResources []string
-	runtime                string
-	inferenceAuth          string
+	fullsendRef   string
+	mintURL       string
+	appSet        string
+	inferenceAuth string
 
 	// Vendor flags
 	vendor         bool
@@ -413,8 +415,6 @@ GCP infrastructure (WIF, mint) must be provisioned separately via
 	cmd.Flags().StringVar(&opts.fullsendRef, "fullsend-ref", "", "per-repo fullsend workflow ref override")
 	cmd.Flags().StringVar(&opts.mintURL, "mint-url", "", "per-repo mint URL override")
 	cmd.Flags().StringVar(&opts.appSet, "app-set", "", "GitHub App set prefix (apps named {app-set}-{role}) persisted as FULLSEND_APP_SET for selected repos; GitHub-only")
-	cmd.Flags().StringSliceVar(&opts.allowedRemoteResources, "allowed-remote-resources", nil, "per-repo allowed remote resources override")
-	cmd.Flags().StringVar(&opts.runtime, "runtime", "", "agent runtime written to the per-repo config for repos added by this command (claude, pi, codex); repos already in the manifest keep their entry/defaults.runtime")
 	cmd.Flags().StringVar(&opts.inferenceAuth, "inference-auth", "", "inference authentication method (vertex-wif, openai-api-key, or openai-wif) persisted as inference.auth on each selected manifest entry, overriding forge-section and defaults values for those repos")
 	cmd.Flags().StringVar(&opts.gitlabURL, "gitlab-url", "", "GitLab instance URL (e.g. https://gitlab.example.com); sets gitlab.url in the manifest and implies --forge=gitlab when no forge is specified")
 	cmd.Flags().StringVar(&opts.gitlabRoleRegistry, "gitlab-role-registry", "", "path to administrator GitLab role registry JSON (custom roles; never secret values)")
@@ -591,8 +591,7 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			}
 		}
 		hasEntryOverrides := opts.fullsendRef != "" || opts.mintURL != "" ||
-			len(opts.allowedRemoteResources) > 0 || opts.runtime != "" || opts.vendorChanged ||
-			opts.appSet != ""
+			opts.vendorChanged || opts.appSet != ""
 		// A textual glob match does not guarantee that convergence discovers
 		// the repository: ListOrgRepos omits forks and archived repos, so a
 		// glob-covered target can be absent from the expansion and would then
@@ -618,16 +617,6 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			}
 		}
 		if len(carveTargets) > 0 {
-			if opts.runtime != "" {
-				if err := validateRuntimeName(opts.runtime); err != nil {
-					return fmt.Errorf("--runtime: %w", err)
-				}
-			}
-			if len(opts.allowedRemoteResources) > 0 {
-				if err := repos.ValidateAllowedRemoteResourcesFormat("--allowed-remote-resources", opts.allowedRemoteResources); err != nil {
-					return err
-				}
-			}
 			// Copy the matching glob into an explicit entry for each selected
 			// repo and record the requested overrides on it, so the repo keeps
 			// the glob's other settings and its siblings are unchanged. A value
@@ -673,12 +662,6 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 				}
 				if forgeName == repos.ForgeGitHub && opts.mintURL != "" && (entry.MintURL != "" || opts.mintURL != platform.MintURL) {
 					entry.MintURL = opts.mintURL
-				}
-				if len(opts.allowedRemoteResources) > 0 {
-					entry.AllowedRemoteResources = opts.allowedRemoteResources
-				}
-				if opts.runtime != "" && (entry.Runtime != "" || opts.runtime != manifest.Defaults.Runtime) {
-					entry.Runtime = opts.runtime
 				}
 				if opts.vendorChanged {
 					defaultVendor := manifest.Defaults.Vendor != nil && *manifest.Defaults.Vendor
@@ -752,17 +735,6 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			if forgeName != repos.ForgeGitHub && opts.vendorChanged && opts.vendor {
 				printer.StepWarn("--vendor only fully supported for GitHub repos; GitLab CI templates do not yet reference the vendored binary")
 			}
-			if opts.runtime != "" {
-				if err := validateRuntimeName(opts.runtime); err != nil {
-					return fmt.Errorf("--runtime: %w", err)
-				}
-			}
-			if len(opts.allowedRemoteResources) > 0 {
-				if err := repos.ValidateAllowedRemoteResourcesFormat("--allowed-remote-resources", opts.allowedRemoteResources); err != nil {
-					return err
-				}
-			}
-
 			// New entries must resolve an inference authentication method
 			// before anything is written: either the flag (persisted on the
 			// entry) or an inherited forge-section/defaults value.
@@ -809,12 +781,6 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 					if opts.appSet != "" && (manifest.GitHub == nil || opts.appSet != manifest.GitHub.AppSet) {
 						entry.AppSet = opts.appSet
 					}
-				}
-				if len(opts.allowedRemoteResources) > 0 {
-					entry.AllowedRemoteResources = opts.allowedRemoteResources
-				}
-				if opts.runtime != "" && opts.runtime != manifest.Defaults.Runtime {
-					entry.Runtime = opts.runtime
 				}
 				if opts.vendorChanged {
 					defaultVendor := manifest.Defaults.Vendor != nil && *manifest.Defaults.Vendor

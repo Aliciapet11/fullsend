@@ -153,8 +153,14 @@ type PlatformConfig struct {
 	// Signoff, when non-nil, enables or disables a Signed-off-by trailer
 	// on scaffold commits for every repository in this forge section,
 	// overriding defaults.signoff and overridden by repository entries.
-	Signoff *bool       `yaml:"signoff,omitempty"`
-	Repos   []RepoEntry `yaml:"repos"`
+	Signoff *bool `yaml:"signoff,omitempty"`
+	// Config is a sparse managed .fullsend/config.yaml layer for every
+	// repository in this forge section (ADR 0122). It overrides
+	// defaults.config and is overridden by each repository entry's config,
+	// using the per-field merge rules of per-repo config. It never affects
+	// repositories of the other forge.
+	Config config.ManagedConfig `yaml:"config,omitempty"`
+	Repos  []RepoEntry          `yaml:"repos"`
 }
 
 // ConfigBase is the nested config_base object in repos.yaml. Source is
@@ -189,19 +195,14 @@ func (c ConfigBase) configSource() string {
 // Override fields use plain strings (config_base is a nested object);
 // the sentinel value "none" stops the inheritance chain.
 type RepoEntry struct {
-	Name                   string   `yaml:"name"`
-	FullsendRef            string   `yaml:"fullsend_ref,omitempty"`
-	MintURL                string   `yaml:"mint_url,omitempty"`
-	MintMode               string   `yaml:"mint_mode,omitempty"`
-	AllowedRemoteResources []string `yaml:"allowed_remote_resources,omitempty"`
+	Name        string `yaml:"name"`
+	FullsendRef string `yaml:"fullsend_ref,omitempty"`
+	MintURL     string `yaml:"mint_url,omitempty"`
+	MintMode    string `yaml:"mint_mode,omitempty"`
 	// AppSet overrides the GitHub App set prefix for this repository,
 	// persisted as the FULLSEND_APP_SET repo variable. GitHub-only; the
 	// sentinel "none" resets back to the built-in default.
 	AppSet string `yaml:"app_set,omitempty"`
-	// Runtime is the agent runtime written as the repo's `runtime:` at
-	// install time (claude, pi, codex); empty inherits defaults.runtime,
-	// and an empty resolved value keeps the code default (claude).
-	Runtime string `yaml:"runtime,omitempty"`
 	// Inference overrides the inference authentication selection for this
 	// repository (or every repository matched by this glob entry).
 	Inference InferenceSettings `yaml:"inference,omitempty"`
@@ -218,18 +219,15 @@ type RepoEntry struct {
 	// is an optional digest verified against the fetched preset.
 	ConfigBase ConfigBase `yaml:"config_base,omitempty"`
 	// Config is a sparse managed .fullsend/config.yaml for this
-	// repository (ADR 0122). Presence opts this repository into managed
-	// configuration even when the mapping is empty. runtime and
-	// allowed_remote_resources are rejected here; use the sibling fields.
+	// repository (ADR 0122). It accepts every per-repo config field,
+	// including runtime and allowed_remote_resources, and overrides the
+	// forge section's config and defaults.config.
 	Config config.ManagedConfig `yaml:"config,omitempty"`
 }
 
 // DefaultsConfig holds default field values applied to every repo
 // across all platforms.
 type DefaultsConfig struct {
-	AllowedRemoteResources []string `yaml:"allowed_remote_resources,omitempty"`
-	// Runtime is the default agent runtime for every repo (claude, pi, codex).
-	Runtime string `yaml:"runtime,omitempty"`
 	// Inference is the operator-provided default inference authentication
 	// selection for every repository. It is not a built-in fallback: when
 	// no level sets inference.auth, install/convergence/status report a
@@ -247,49 +245,17 @@ type DefaultsConfig struct {
 	// source "none" disables inheritance for entries that reference it.
 	// SHA256 is an optional digest verified against the fetched preset.
 	ConfigBase ConfigBase `yaml:"config_base,omitempty"`
-	// Config is a fleet-wide sparse managed .fullsend/config.yaml
-	// (ADR 0122). Presence opts every repository into managed configuration.
+	// Config is a fleet-wide sparse managed .fullsend/config.yaml layer
+	// (ADR 0122). It accepts every per-repo config field, including
+	// runtime and allowed_remote_resources, and is overridden by the forge
+	// section's config and each repository entry's config.
 	Config config.ManagedConfig `yaml:"config,omitempty"`
 }
 
-// allowedRemoteResourcesKey is the manifest key whose nil-versus-empty
-// distinction is semantic: nil inherits, an explicit empty list denies
-// every remote resource.
-const allowedRemoteResourcesKey = "allowed_remote_resources"
-
-// marshalKeepingEmptyAllowlist encodes plain (a method-free alias of the
-// owning struct) and, when allowed is an explicit empty list, appends
-// `allowed_remote_resources: []` that the omitempty tag would drop. Without
-// it a manifest rewrite turns a deny-all declaration into an inherited
-// default (#8218).
-func marshalKeepingEmptyAllowlist(plain any, allowed []string) (any, error) {
-	node := &yaml.Node{}
-	if err := node.Encode(plain); err != nil {
-		return nil, err
-	}
-	if allowed != nil && len(allowed) == 0 && node.Kind == yaml.MappingNode {
-		node.Content = append(node.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: allowedRemoteResourcesKey},
-			&yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle})
-	}
-	return node, nil
-}
-
-// MarshalYAML preserves an explicit empty allowed_remote_resources list.
-func (e RepoEntry) MarshalYAML() (interface{}, error) {
-	type plain RepoEntry
-	return marshalKeepingEmptyAllowlist(plain(e), e.AllowedRemoteResources)
-}
-
-// MarshalYAML preserves an explicit empty allowed_remote_resources list.
-func (d DefaultsConfig) MarshalYAML() (interface{}, error) {
-	type plain DefaultsConfig
-	return marshalKeepingEmptyAllowlist(plain(d), d.AllowedRemoteResources)
-}
-
-// IsZero reports whether no default is declared. An explicit empty
-// allowed_remote_resources list counts as declared, so omitempty on the
-// parent keeps `defaults: {allowed_remote_resources: []}`.
+// IsZero reports whether no default is declared. A declared config
+// mapping (even an empty one, or one holding only
+// `allowed_remote_resources: []`) counts as declared, so omitempty on the
+// parent keeps it.
 func (d DefaultsConfig) IsZero() bool {
 	return reflect.DeepEqual(d, DefaultsConfig{})
 }
@@ -311,14 +277,13 @@ type ResolvedRepo struct {
 // The ForgeConfig field carries per-forge patterns and (when populated
 // by ForgeClientFactory.ConfigFor) a live API client.
 type ResolvedConfig struct {
-	Owner                  string
-	Repo                   string
-	Forge                  string
-	ForgeConfig            ForgeConfig
-	MintURL                string
-	MintMode               string
-	FullsendRef            string
-	AllowedRemoteResources []string
+	Owner       string
+	Repo        string
+	Forge       string
+	ForgeConfig ForgeConfig
+	MintURL     string
+	MintMode    string
+	FullsendRef string
 	// AppSet is the resolved GitHub App set prefix persisted as the
 	// FULLSEND_APP_SET repo variable. GitHub-only; empty for GitLab.
 	AppSet string
@@ -327,8 +292,9 @@ type ResolvedConfig struct {
 	// sentinel). When false, convergence preserves any existing
 	// FULLSEND_APP_SET value on the repo rather than forcing the default.
 	AppSetExplicit bool
-	// Runtime is the resolved agent runtime (entry, then defaults); empty
-	// means the code default.
+	// Runtime is the runtime explicitly declared by the managed
+	// configuration layers (repository config, then forge section config,
+	// then defaults.config); empty means the preset or code default.
 	Runtime string
 	// InferenceAuth is the resolved inference authentication method
 	// (entry, then forge section, then defaults). Empty means no level
@@ -366,14 +332,17 @@ type ResolvedConfig struct {
 	// .fullsend/config.yaml is managed (ADR 0122). It is true for every
 	// repository; no config key is required to opt in (#8218).
 	ConfigManaged bool
-	// Managed is the sparse managed configuration: defaults.config merged with
-	// the repository config, plus authoritative runtime and
-	// allowed_remote_resources shorthands. Nil when ConfigManaged is
-	// false. It does not bake in code defaults or config.base.yaml.
+	// Managed is the sparse managed configuration: defaults.config, the
+	// forge section's config, and the repository config merged in that
+	// order. Nil when ConfigManaged is false. It does not bake in code
+	// defaults or config.base.yaml.
 	Managed config.PerRepoConfigWriter
 }
 
 func parseManifestBytes(data []byte, m *Manifest) error {
+	if err := rejectRemovedConfigSiblings(data); err != nil {
+		return err
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(m); err != nil && !errors.Is(err, io.EOF) {
@@ -381,6 +350,74 @@ func parseManifestBytes(data []byte, m *Manifest) error {
 	}
 	migrateDeprecatedRunnerTags(m)
 	return nil
+}
+
+// removedConfigSiblingKeys are per-repo config fields that older manifests
+// declared as sibling keys under defaults and repository entries. They now
+// live only inside the matching config block (#8330).
+var removedConfigSiblingKeys = []string{"runtime", "allowed_remote_resources"}
+
+// rejectRemovedConfigSiblings fails when a manifest still declares runtime
+// or allowed_remote_resources as a sibling key under defaults or a
+// repository entry, naming the config path that replaces each one. The old
+// spellings are neither migrated nor accepted as aliases. Malformed YAML is
+// left to the strict decoder, which reports it with full context.
+func rejectRemovedConfigSiblings(data []byte) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	var errs []error
+	check := func(n *yaml.Node, path string) {
+		if n == nil || n.Kind != yaml.MappingNode {
+			return
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key := n.Content[i]
+			if !slices.Contains(removedConfigSiblingKeys, key.Value) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("line %d: %s.%s is no longer supported; move it to %s.config.%s",
+				key.Line, path, key.Value, path, key.Value))
+		}
+	}
+	root := doc.Content[0]
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key, val := root.Content[i].Value, root.Content[i+1]
+		switch key {
+		case "defaults":
+			check(val, "defaults")
+		case ForgeGitHub, ForgeGitLab:
+			if val.Kind != yaml.MappingNode {
+				continue
+			}
+			for j := 0; j+1 < len(val.Content); j += 2 {
+				if val.Content[j].Value != "repos" || val.Content[j+1].Kind != yaml.SequenceNode {
+					continue
+				}
+				for idx, entry := range val.Content[j+1].Content {
+					check(entry, fmt.Sprintf("%s.repos[%s]", key, repoEntryLabel(entry, idx)))
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// repoEntryLabel returns the name of a repository entry node for error
+// paths, or its index when the entry has no scalar name.
+func repoEntryLabel(entry *yaml.Node, idx int) string {
+	if entry.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(entry.Content); i += 2 {
+			if entry.Content[i].Value == "name" && entry.Content[i+1].Kind == yaml.ScalarNode && entry.Content[i+1].Value != "" {
+				return entry.Content[i+1].Value
+			}
+		}
+	}
+	return fmt.Sprint(idx)
 }
 
 // migrateDeprecatedRunnerTags copies gitlab.runner_tags onto
@@ -648,13 +685,7 @@ func (m *Manifest) validate(checkInferenceAuth func(key, value string) error) er
 		return fmt.Errorf("unsupported manifest version %d (expected 1)", m.Version)
 	}
 
-	if err := validateRuntimeValue("defaults.runtime", m.Defaults.Runtime); err != nil {
-		return err
-	}
 	if err := checkInferenceAuth("defaults.inference.auth", m.Defaults.Inference.Auth); err != nil {
-		return err
-	}
-	if err := ValidateAllowedRemoteResourcesFormat("defaults.allowed_remote_resources", m.Defaults.AllowedRemoteResources); err != nil {
 		return err
 	}
 	var err error
@@ -684,13 +715,7 @@ func (m *Manifest) validate(checkInferenceAuth func(key, value string) error) er
 		}
 		for i := range p.cfg.Repos {
 			e := &p.cfg.Repos[i]
-			if err := validateRuntimeValue(fmt.Sprintf("%s.repos[%s].runtime", p.name, e.Name), e.Runtime); err != nil {
-				return err
-			}
 			if err := checkInferenceAuth(fmt.Sprintf("%s.repos[%s].inference.auth", p.name, e.Name), e.Inference.Auth); err != nil {
-				return err
-			}
-			if err := ValidateAllowedRemoteResourcesFormat(fmt.Sprintf("%s.repos[%s].allowed_remote_resources", p.name, e.Name), e.AllowedRemoteResources); err != nil {
 				return err
 			}
 			if e.ConfigBase.resolvedSource, err = m.validateConfigSource(fmt.Sprintf("%s.repos[%d].config_base.source", p.name, i), e.ConfigBase.Source); err != nil {
@@ -1160,15 +1185,9 @@ func (m *Manifest) resolveWithEntry(owner, repo, forgeName string, platform *Pla
 		Forge: forgeName,
 	}
 
-	// AllowedRemoteResources: per-repo overrides defaults when non-nil.
-	if entry.AllowedRemoteResources != nil {
-		cfg.AllowedRemoteResources = entry.AllowedRemoteResources
-	} else {
-		cfg.AllowedRemoteResources = m.Defaults.AllowedRemoteResources
-	}
-	// Runtime: per-repo overrides the global default; "none" stops the
-	// chain like the other string fields.
-	cfg.Runtime = resolveField(entry.Runtime, m.Defaults.Runtime, "")
+	// Runtime: the most specific managed configuration layer that declares
+	// one (repository, then forge section, then defaults).
+	cfg.Runtime = firstNonEmpty(entry.Config.ExplicitRuntime(), platform.Config.ExplicitRuntime(), m.Defaults.Config.ExplicitRuntime())
 	// InferenceAuth: entry, then forge section, then defaults. There is
 	// deliberately no built-in fallback (see RequireInferenceAuth).
 	cfg.InferenceAuth = firstNonEmpty(entry.Inference.Auth, platform.Inference.Auth, m.Defaults.Inference.Auth)
@@ -1197,7 +1216,7 @@ func (m *Manifest) resolveWithEntry(owner, repo, forgeName string, platform *Pla
 	// Every manifest repository's .fullsend/config.yaml is managed; no
 	// config key is required to opt in (#8218).
 	cfg.ConfigManaged = true
-	cfg.Managed = m.mergeManagedConfig(entry)
+	cfg.Managed = m.mergeManagedConfig(platform, entry)
 
 	// Source infrastructure config from the platform-level section,
 	// with per-repo overrides via the string fallback chain.
@@ -1753,19 +1772,4 @@ func validateConfigHash(field, hash string) error {
 		return fmt.Errorf("%s is not valid hex: %w", field, err)
 	}
 	return nil
-}
-
-// validateRuntimeValue accepts an empty value (inherit), the "none" sentinel
-// (stop the chain; code default) or a runtime the per-repo config would
-// accept, so a manifest cannot install a runtime config.yaml would reject.
-func validateRuntimeValue(key, value string) error {
-	if value == "" || value == NoneSentinel {
-		return nil
-	}
-	for _, v := range config.ValidRuntimes() {
-		if value == v {
-			return nil
-		}
-	}
-	return fmt.Errorf("%s %q is not a valid runtime; valid runtimes: %s", key, value, strings.Join(config.ValidRuntimes(), ", "))
 }

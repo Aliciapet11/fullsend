@@ -12,14 +12,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Managed-configuration fields that already have authoritative repos.yaml
-// shorthands. They are valid on .fullsend/config.yaml but must not appear
-// inside a manifest config block (ADR 0122).
-const (
-	managedForbiddenRuntime = "runtime"
-	managedForbiddenARR     = "allowed_remote_resources"
-)
-
 var (
 	managedKeysOnce sync.Once
 	managedKeys     map[string]bool
@@ -85,8 +77,10 @@ func yamlKeysOf(v any) map[string]bool {
 }
 
 // ManagedConfig is a sparse per-repo managed configuration as declared in
-// repos.yaml defaults.config and per-repository config blocks (ADR 0122).
-// The zero value means the key was omitted.
+// repos.yaml defaults.config, github.config, gitlab.config, and
+// per-repository config blocks (ADR 0122). Every per-repo
+// .fullsend/config.yaml field is accepted. The zero value means the key
+// was omitted.
 type ManagedConfig struct {
 	cfg *perRepoConfig
 }
@@ -149,9 +143,18 @@ func (o ManagedConfig) ExplicitRoles() ([]string, bool) {
 	return cloneStringSlice(o.cfg.Roles), true
 }
 
+// ExplicitRuntime returns the runtime declared by this layer, or "" when
+// the layer is unset or omits runtime. Unlike the layered ConfigRuntime
+// accessor it does not fall back to code defaults.
+func (o ManagedConfig) ExplicitRuntime() string {
+	if o.cfg == nil {
+		return ""
+	}
+	return o.cfg.Runtime
+}
+
 // UnmarshalYAML strictly decodes a mapping into a sparse per-repo managed
-// configuration. Unknown fields and the runtime / allowed_remote_resources
-// shorthands are rejected with field-specific errors.
+// configuration. Unknown fields are rejected with field-specific errors.
 func (o *ManagedConfig) UnmarshalYAML(value *yaml.Node) error {
 	cfg, err := decodeManagedConfig(value)
 	if err != nil {
@@ -184,18 +187,9 @@ func decodeManagedConfig(n *yaml.Node) (*perRepoConfig, error) {
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		keyNode := node.Content[i]
 		key := keyNode.Value
-		switch key {
-		case managedForbiddenRuntime:
+		if !known[key] {
 			fieldErrs = append(fieldErrs, managedFieldError(keyNode,
-				"runtime is not allowed inside config; use the runtime field"))
-		case managedForbiddenARR:
-			fieldErrs = append(fieldErrs, managedFieldError(keyNode,
-				"allowed_remote_resources is not allowed inside config; use the allowed_remote_resources field"))
-		default:
-			if !known[key] {
-				fieldErrs = append(fieldErrs, managedFieldError(keyNode,
-					fmt.Sprintf("unknown field %q", key)))
-			}
+				fmt.Sprintf("unknown field %q", key)))
 		}
 		// AgentEntry has a custom UnmarshalYAML (string-or-mapping), so
 		// decodeKnownFields' dec.KnownFields(true) below never sees these
@@ -266,24 +260,6 @@ func MergeManaged(parent, child PerRepoConfigWriter) PerRepoConfigWriter {
 	out := clonePerRepo(p)
 	applyManagedLayer(out, c)
 	return out
-}
-
-// ApplyManagedShorthands writes the authoritative repos.yaml runtime and
-// allowed_remote_resources values onto a managed configuration. Empty
-// runtime and a nil allowlist are left unset so code defaults /
-// config.base.yaml still apply at read time. An explicit empty allowlist
-// is deny-all.
-func ApplyManagedShorthands(managed PerRepoConfigWriter, runtime string, allowedRemoteResources []string) {
-	cfg := asPerRepo(managed)
-	if cfg == nil {
-		return
-	}
-	if runtime != "" {
-		cfg.Runtime = runtime
-	}
-	if allowedRemoteResources != nil {
-		cfg.AllowedRemoteResources = cloneStringSlice(allowedRemoteResources)
-	}
 }
 
 // LayerOnBase returns a writer whose local fields are overlay's and whose

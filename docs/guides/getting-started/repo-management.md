@@ -286,26 +286,37 @@ config.
 ### Managed configuration
 
 `repos.yaml` can also declare a sparse managed `.fullsend/config.yaml`
-([ADR 0122](../../ADRs/0122-declarative-repo-configuration.md)). The
-block uses the same schema as per-repo `config.yaml` except `runtime`
-and `allowed_remote_resources`, which stay on their existing manifest
-shorthands.
+([ADR 0122](../../ADRs/0122-declarative-repo-configuration.md)) in
+`defaults.config`, `github.config`, `gitlab.config`, and each repository
+entry's `config`. Every section uses the same schema as per-repo
+`config.yaml`, including `runtime` and `allowed_remote_resources`, and
+each is sparse: declare only the values you want to set.
 
 ```yaml
 version: 1
 defaults:
-  runtime: pi
   config:
+    runtime: pi
     kill_switch: false
     inference:
       region: us-east1
 github:
+  config:
+    allowed_remote_resources:     # GitHub repositories only
+      - https://example.com/agents/
   repos:
-    - name: acme/api              # inherits defaults.config
+    - name: acme/api              # inherits defaults.config, then github.config
     - name: acme/special
       config:
         kill_switch: true         # repository values win
+        allowed_remote_resources: []   # explicit empty list: deny all
     - name: acme/plain            # no config key: still managed (sparse, marker only)
+gitlab:
+  url: https://gitlab.example.com
+  config:
+    runtime: claude               # GitLab repositories only
+  repos:
+    - name: group/project
 ```
 
 Every repository selected from the manifest has a managed
@@ -320,24 +331,31 @@ repository's manifest entry, and an explicit `--roles` value in
 `config.roles`, before rendering the overlay. If the manifest is an
 HTTPS URL or read-only, install fails with the exact edit to make.
 Resolution is code defaults, then `config_base`, then `defaults.config`,
-then the repository `config`; more specific values win and unspecified
-keys inherit. The managed configuration contains only explicitly supplied
-values (plus the `runtime` / `allowed_remote_resources` shorthands) —
+then the repository's forge section `config` (`github.config` or
+`gitlab.config`), then the repository entry's `config` (glob entries
+included). More specific values win using each field's normal layered
+merge rule: scalars are replaced, nested maps merge key by key, a
+non-empty `allowed_remote_resources` list is unioned with the inherited
+prefixes, and an explicit empty list replaces the inherited value. A
+forge section's `config` never affects repositories of the other forge.
+The managed configuration contains only explicitly supplied values —
 code defaults and `config.base.yaml` are not baked into the file.
-Unknown fields and the forbidden shorthand keys fail manifest validation
-with field-specific errors. `config` is the managed overlay (written to
+Unknown fields and invalid values fail manifest validation with errors
+that name the section. `config` is the managed overlay (written to
 `.fullsend/config.yaml`); `config_base` is a separate preset copied to
 `.fullsend/config.base.yaml`.
 
-Do not put `runtime` or `allowed_remote_resources` inside `config` — those
-paths stay on the sibling manifest fields:
+`runtime` and `allowed_remote_resources` are no longer accepted as sibling
+keys under `defaults` or a repository entry. A manifest that still uses
+them fails to load with the replacement path, and there is no automatic
+migration:
 
 ```yaml
-# Invalid — rejected at manifest load
+# Invalid — rejected at manifest load:
+#   defaults.runtime is no longer supported; move it to defaults.config.runtime
 defaults:
-  config:
-    runtime: pi
-    allowed_remote_resources: []
+  runtime: pi
+  allowed_remote_resources: []
 ```
 
 Every managed `.fullsend/config.yaml` begins with a stable ownership
@@ -405,7 +423,7 @@ When the manifest is read-only (an HTTPS URL, or a local file without write
 permission), install fails before attempting any manifest write and prints
 the exact entry to add to its source. That includes a glob-covered
 repository that needs an explicit entry because other per-entry flags
-(for example `--fullsend-ref`, `--mint-url`, `--runtime`) were passed; the
+(for example `--fullsend-ref`, `--mint-url`, `--app-set`) were passed; the
 printed entry carries those values and the install-time `config` defaults.
 `--dry-run`, live install and `repos status` agree.
 
@@ -648,8 +666,10 @@ fullsend repos install acme/new-api --forge github --roles triage,coder,review
 ```
 
 Per-repo overrides can be specified with `--fullsend-ref`, `--mint-url`,
-`--app-set`, `--allowed-remote-resources`, `--inference-auth`, and
-`--vendor`. The
+`--app-set`, `--inference-auth`, and `--vendor`. Per-repo config fields
+such as `runtime` and `allowed_remote_resources` have no install flag:
+declare them in the entry's `config` (see
+[Managed configuration](#managed-configuration)). The
 `--vertex-region` flag is install-time only and is not stored in the
 manifest.
 
