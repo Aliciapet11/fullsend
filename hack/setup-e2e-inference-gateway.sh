@@ -363,6 +363,11 @@ api_key_policy() {
 # The echo listener is a header-echo upstream inside the same container (Cloud
 # Run only routes to port 8080). Its answer reports whether the gateway's own
 # stub key, rather than the caller's credential, reached the upstream.
+#
+# The config block turns off agentgateway's admin, stats and readiness
+# listeners, which otherwise bind 15000, 15020 and 15021. Nothing uses them:
+# Cloud Run's startup probe is its default TCP check on 8080. "off" is quoted
+# so that YAML 1.1 parsers do not read it as a boolean.
 render_config() {
   local pool m
   pool=$(pool_cel)
@@ -371,6 +376,10 @@ render_config() {
   cat <<EOF
 # fullsend-e2e-gateway (fullsend#8285): agentgateway ${AGW_VERSION}, llm mode, GitHub Actions OIDC
 # $(( ${#POOL_ORGS[@]} * ${#POOL_REPOS[@]} )) allowed repositories (${#POOL_ORGS[@]} orgs x ${#POOL_REPOS[@]} repos)
+config:
+  adminAddr: "off"
+  statsAddr: "off"
+  readinessAddr: "off"
 binds:
 - port: ${ECHO_PORT}
   listeners:
