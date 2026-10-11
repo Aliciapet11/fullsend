@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fullsend-ai/fullsend/internal/config"
 )
 
 func piGatewayTestRun() *PiGatewayRun {
@@ -283,4 +285,22 @@ func TestPiAgentProbe_Gateway(t *testing.T) {
 	assert.Equal(t, []string{piVertexExtensionPath, piInferenceGatewayExtensionPath}, exts)
 	assert.Equal(t, []string{piVertexExtensionPath}, piAgentProviderExtensions(exts, false), "no block: children do not load it")
 	assert.Equal(t, exts, piAgentProviderExtensions(exts, true))
+}
+
+// A gateway url with a path prefix reaches pi as INFERENCE_GATEWAY_BASE_URL
+// with the prefix; the extension adds /v1 under it.
+func TestPiPrepareGatewayRun_PathPrefix(t *testing.T) {
+	t.Setenv("FULLSEND_PI_MODEL", "")
+	t.Setenv("FULLSEND_PI_PROVIDER", "")
+	params := piTestParams()
+	params.SandboxName = "sb-gw-prefix"
+	params.Model = "gateway/m1"
+	block := config.InferenceGatewayConfig{
+		URL:      "https://gw.example.com/team-a",
+		Audience: "aud",
+		Models:   map[string]config.InferenceGatewayModel{"m1": {API: config.GatewayAPIOpenAIResponses}},
+	}
+	require.NoError(t, PiRuntime{}.PrepareGatewayRun(params.SandboxName, GatewayRun{Block: block, BaseURL: "https://gw.example.com/team-a"}))
+	t.Cleanup(func() { PiRuntime{}.ClearGatewayRun(params.SandboxName) })
+	assert.Contains(t, buildPiRunCommand(params, &piManifest{}, nil, ""), "export INFERENCE_GATEWAY_BASE_URL='https://gw.example.com/team-a'")
 }

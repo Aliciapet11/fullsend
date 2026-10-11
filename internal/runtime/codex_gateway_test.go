@@ -32,6 +32,9 @@ func TestCodexGatewayBaseURL(t *testing.T) {
 		"https://gateway.example.com/":  testCodexGatewayBaseURL,
 		" https://gateway.example.com ": testCodexGatewayBaseURL,
 		"http://127.0.0.1:8080":         "http://127.0.0.1:8080/v1",
+		// A path prefix carries into base_url, ahead of /v1.
+		"https://gateway.example.com/team-a":  "https://gateway.example.com/team-a/v1",
+		"https://gateway.example.com/team-a/": "https://gateway.example.com/team-a/v1",
 	} {
 		got, err := codexGatewayBaseURL(in)
 		require.NoError(t, err, in)
@@ -41,6 +44,8 @@ func TestCodexGatewayBaseURL(t *testing.T) {
 		"",
 		"http://gateway.example.com",
 		"https://gateway.example.com/v1",
+		"https://gateway.example.com/team-a/v1",
+		"https://gateway.example.com/team-a/../x",
 		"https://gateway.example.com:8443",
 		"https://user@gateway.example.com",
 		"https://gate'way.example.com",

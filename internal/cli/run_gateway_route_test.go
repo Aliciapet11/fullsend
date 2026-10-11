@@ -163,6 +163,49 @@ func TestPlanGatewayRoute(t *testing.T) {
 	})
 }
 
+// recordingPiGatewayRuntime is pi with PrepareGatewayRun recording the run
+// the planner hands over.
+type recordingPiGatewayRuntime struct {
+	runtime.PiRuntime
+	got *runtime.GatewayRun
+}
+
+func (r recordingPiGatewayRuntime) PrepareGatewayRun(_ string, run runtime.GatewayRun) error {
+	*r.got = run
+	return nil
+}
+
+func TestPlanGatewayRoute_PathPrefix(t *testing.T) {
+	stubGatewayOIDC(t, "https://x.actions.githubusercontent.com/t", "req")
+	cfg := strings.Replace(gatewayTestBlock, "url: https://gw.example.com", "url: https://gw.example.com/team-a/", 1)
+	rc := gatewayTestRunConfig(t, cfg, nil)
+
+	var got runtime.GatewayRun
+	pi := runtime.Backend{Runtime: recordingPiGatewayRuntime{got: &got}}
+	plan, err := planGatewayRoute(rc, pi, "fs-plan-prefix", []string{"gateway/m1"}, true)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	assert.Equal(t, "gw.example.com", plan.host)
+	assert.Equal(t, gatewayProfile{host: "gw.example.com", prefix: "/team-a"}, plan.profileSpec())
+	assert.Equal(t, "https://gw.example.com/team-a", got.BaseURL, "pi's base URL carries the prefix")
+
+	// Claude Code and codex get the same base URL and prefixed profile.
+	const csb = "fs-plan-prefix-claude"
+	claude := runtime.Backend{Runtime: runtime.ClaudeRuntime{}}
+	cplan, err := planGatewayRoute(rc, claude, csb, []string{"gateway/m1"}, true)
+	require.NoError(t, err)
+	require.NotNil(t, cplan)
+	t.Cleanup(func() { cplan.prepared.ClearGatewayRun(csb) })
+	assert.Equal(t, gatewayProfile{host: "gw.example.com", prefix: "/team-a", claude: true}, cplan.profileSpec())
+
+	// A bare origin keeps an empty prefix and the origin as the base URL.
+	got = runtime.GatewayRun{}
+	bare, err := planGatewayRoute(gatewayTestRunConfig(t, gatewayTestBlock, nil), pi, "fs-plan-prefix-bare", []string{"gateway/m1"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, gatewayProfile{host: "gw.example.com"}, bare.profileSpec())
+	assert.Equal(t, "https://gw.example.com", got.BaseURL)
+}
+
 func TestPlanGatewayRoute_ModelsFile(t *testing.T) {
 	stubGatewayOIDC(t, "https://x.actions.githubusercontent.com/t", "req")
 	pi := runtime.Backend{Runtime: runtime.PiRuntime{}}

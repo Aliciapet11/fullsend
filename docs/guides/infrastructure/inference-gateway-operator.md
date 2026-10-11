@@ -22,7 +22,7 @@ You hand these three values to the people who enrol repositories. None of them i
 
 | Value | Example in this guide | What it is |
 |---|---|---|
-| **Gateway URL** | `https://gateway.example.com` | The Cloud Run service URL, or your own domain in front of it. |
+| **Gateway URL** | `https://gateway.example.com` | The Cloud Run service URL, or your own domain in front of it. Behind a shared ingress it can carry a path prefix ([Serve the gateway under a path prefix](#serve-the-gateway-under-a-path-prefix)). |
 | **Audience** | `fullsend-inference` | The string every job asks GitHub to put in its token's `aud` claim. The gateway refuses any other value. You choose it; it has no required format. |
 | **Allowed repositories** | `example-org/example-repo` | The `owner/name` of each repository the gateway serves, matched exactly against the token's `repository` claim. |
 
@@ -564,6 +564,35 @@ HTTP 200 {"model":"echo",...,"choices":[{"message":{"content":"{\"authorization\
 
 Remove the two `echo` models and the `binds` block once the check passes, then roll the change
 out as described in [Change the config](#change-the-config).
+
+## Serve the gateway under a path prefix
+
+> **Not executed in this walkthrough:** the steps above give the gateway its own origin. This
+> section describes what fullsend expects when it shares one; the ingress configuration depends on
+> your load balancer and is not shown.
+
+A gateway behind a shared ingress often gets a path prefix rather than its own host name, for
+example `https://ingress.example.com/team-a/v1/...`. Fullsend supports this: hand out the gateway
+URL **with** the prefix and **without** the trailing `/v1`:
+
+| Gateway serves | Gateway URL to hand out |
+|---|---|
+| `https://gateway.example.com/v1/...` | `https://gateway.example.com` |
+| `https://ingress.example.com/team-a/v1/...` | `https://ingress.example.com/team-a` |
+| `https://ingress.example.com/api/v1/...` | `https://ingress.example.com/api` |
+
+The runner then calls `<url>/v1/responses`, `<url>/v1/messages` and `<url>/v1/chat/completions`,
+and the run's egress profile binds the credential to `<prefix>/v1/**` on the ingress host only, not
+to the whole host, so the job's token never reaches another service behind the same ingress.
+
+- The ingress must forward `<prefix>/v1/...` to the gateway's `/v1/...` (strip the prefix) unless
+  the gateway itself serves the prefixed paths. Check with the step 8 workflow, setting
+  `GATEWAY_URL` to the URL with the prefix: `GET /v1/models` then calls `<prefix>/v1/models`.
+- The prefix must be a clean path: no `..`, `.` or empty segments, no percent-encoding, and only
+  letters, digits, `-`, `.`, `_` and `~` in each segment. The host must still serve `https` on
+  port 443.
+- One gateway per repository still applies ([ADR 0137](../../ADRs/0137-inference-gateway-credential-route.md)):
+  a repository's `inference.gateway.url` names one host and prefix.
 
 ## Change the config
 

@@ -203,6 +203,17 @@ func TestInferenceGatewayStatus_ModelsAuthorised(t *testing.T) {
 	assert.Contains(t, out, "claude-sonnet")
 }
 
+func TestInferenceGatewayStatus_PathPrefix(t *testing.T) {
+	g := newGatewayTestServer(t, http.StatusOK, `{"object":"list","data":[{"id":"gpt-5"}]}`)
+	dir := writeGatewayStatusConfig(t, "inference:\n  gateway:\n    url: "+g.srv.URL+"/team-a/\n    audience: gw-aud\n", "")
+	f := newGatewayStatusFixture(actionsEnv("acme/widget"), g.client())
+	out, err := runGatewayStatusForTest(t, dir, f)
+	require.NoError(t, err)
+	assert.Equal(t, "GET /team-a/v1/models", g.gotRequest, "the probe calls the model list under the url's path prefix")
+	assert.Contains(t, out, "Sending one authenticated request to "+g.srv.URL+"/team-a/v1/models")
+	assert.Contains(t, out, "ANTHROPIC_BASE_URL="+g.srv.URL+"/team-a as <model>", "the Claude Code route carries the prefix")
+}
+
 func TestInferenceGatewayStatus_ModelIDsSanitised(t *testing.T) {
 	// A gateway that echoes the bearer value, another JWT or a terminal
 	// escape as a model id must not get any of them into the output.

@@ -532,3 +532,16 @@ func TestBuildRunCommand_GatewayInlineSettingsArgv(t *testing.T) {
 	want := strings.ReplaceAll(string(merged), sandbox.SandboxClaudeConfig, filepath.Join(tmp, "claude-config"))
 	assert.Equal(t, want, string(got), "the argument is the recorded document, unchanged")
 }
+
+// A gateway url with a path prefix reaches Claude Code as
+// ANTHROPIC_BASE_URL with the prefix, so its /v1/messages calls land under
+// it.
+func TestClaudeGatewaySettings_PathPrefix(t *testing.T) {
+	const sb = "fs-claude-gw-prefix"
+	block := config.InferenceGatewayConfig{URL: "https://gw.example.com/team-a", Audience: "aud"}
+	require.NoError(t, ClaudeRuntime{}.PrepareGatewayRun(sb, GatewayRun{Block: block, BaseURL: "https://gw.example.com/team-a"}))
+	t.Cleanup(func() { ClaudeRuntime{}.ClearGatewayRun(sb) })
+	env, ok := ClaudeRuntime{}.claudeGatewaySettings(sb)["env"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "https://gw.example.com/team-a", env["ANTHROPIC_BASE_URL"])
+}
