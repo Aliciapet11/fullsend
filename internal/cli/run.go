@@ -1928,26 +1928,22 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 
 	// Post-script runs after sandbox cleanup (defers are LIFO).
 	// When a validation_loop is configured, the post-script only runs if
-	// validation passed (ADR 0022). When no validation_loop exists (e.g.,
-	// the code agent), the post-script runs unconditionally after a
-	// successful agent run — the post-script itself is responsible for
-	// any output checks it needs.
+	// validation passed (ADR 0022). Without one it runs after a successful
+	// agent run, and after a failed agent only when the agent left a result
+	// file that parses (#8305): the result is still reported, and the run
+	// still fails. The post-script itself is responsible for any further
+	// output checks it needs.
 	if h.PostScript != "" {
 		defer func() {
 			if noPostScript {
 				printer.StepWarn(fmt.Sprintf("Skipping post-script %s: --no-post-script", h.PostScript))
 				return
 			}
-			if h.ValidationLoop != nil && !validationPassed {
-				printer.StepWarn("Skipping post-script: validation did not pass")
-				return
+			gate := postScriptGate(h, validationPassed, transcriptErrorOverride, runErr, filepath.Join(runDir, fmt.Sprintf("iteration-%d", runCount), "output"))
+			if gate.message != "" {
+				printer.StepWarn(gate.message)
 			}
-			if runErr != nil {
-				printer.StepWarn("Skipping post-script: agent run failed")
-				return
-			}
-			if transcriptErrorOverride {
-				printer.StepWarn("Skipping post-script: agent reported error via transcript")
+			if !gate.run {
 				return
 			}
 			postStart := time.Now()
@@ -2044,6 +2040,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			// mid-work." See #6877.
 			if agentExitReason != "" {
 				postCmd.Env = append(postCmd.Env, fmt.Sprintf("FULLSEND_AGENT_EXIT_REASON=%s", agentExitReason))
+			}
+			// Set only when the post-script runs after a failed agent (#8305).
+			if gate.agentExitCode != 0 {
+				postCmd.Env = append(postCmd.Env, fmt.Sprintf("FULLSEND_AGENT_EXIT_CODE=%d", gate.agentExitCode))
 			}
 			postCmd.Stdout = os.Stdout
 			postCmd.Stderr = os.Stderr
@@ -2621,7 +2621,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// Check the tee'd output.jsonl for is_error:true result events.
 		// The transcript is checked regardless of exit code to catch both:
 		// 1. API/infra failures where Claude exits 0 but reports errors
-		//    (is_error:true) — these skip the post-script entirely (#2786).
+		//    (is_error:true) — these count as exit 1 (#2786), which skips
+		//    the post-script unless postScriptGate lets a result through.
 		// 2. Behavioral limits (error_max_turns, error_max_budget_usd) where
 		//    Claude exits non-zero mid-work — these pass the reason to
 		//    the post-script so it can report accurately (#6877).
@@ -2656,7 +2657,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		finalizeAgentSpan(agentSpan, nil, iteration, exitCode, genAISystem, rt.Name(), &metrics, transcriptErrMsg, toolSpans)
 
 		printer.Blank()
-		// Non-zero exit is a warning, not a failure — the validation loop is the success gate.
+		// Non-zero exit is a warning here, not a failure — with a loop, validation is
+		// the success gate; without one, runTerminalError fails the run (#8305).
 		if lastExitCode == 0 {
 			printer.StepDone(fmt.Sprintf("Agent exited with code %d (%.1fs)", exitCode, time.Since(agentStart).Seconds()))
 		} else {
@@ -2918,7 +2920,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	}
 	printer.Blank()
 
-	return runTerminalError(h.ValidationLoop != nil, validationPassed, lastIterTimedOut, runCount, lastIterElapsed, timeout)
+	return runTerminalError(h.ValidationLoop != nil, validationPassed, lastIterTimedOut, lastExitCode, agentExitReason, runCount, lastIterElapsed, timeout)
 }
 
 func bootstrapCommon(sandboxName, fullsendBinary string, h *harness.Harness) error {
@@ -3520,9 +3522,12 @@ func timeoutNoRetryMessage(elapsed, timeout time.Duration) string {
 
 // runTerminalError decides how the run ends after the post-loop steps. A
 // valid result wins; the timeout error replaces "validation failed" only when
-// nothing validated (#7042). Without a loop the timeout alone fails the run
-// (#5075).
-func runTerminalError(hasLoop, validationPassed, timedOut bool, runCount int, elapsed, timeout time.Duration) error {
+// nothing validated (#7042). Without a loop the timeout fails the run (#5075),
+// and so does a failed agent (#8305): exitCode is the runner's lastExitCode,
+// already 1 for an exit 0 with a transcript-reported error (#2786). A
+// behavioral limit exit (exitReason, #6877) does not fail a run without a
+// loop, so the post-script still runs and can report the interruption.
+func runTerminalError(hasLoop, validationPassed, timedOut bool, exitCode int, exitReason string, runCount int, elapsed, timeout time.Duration) error {
 	timeoutErr := fmt.Errorf("agent timed out after %s without completing (timeout: %s)", elapsed.Round(time.Second), timeout)
 	switch {
 	case hasLoop && !validationPassed && timedOut:
@@ -3531,8 +3536,90 @@ func runTerminalError(hasLoop, validationPassed, timedOut bool, runCount int, el
 		return fmt.Errorf("validation failed after %d iteration(s)", runCount)
 	case !hasLoop && timedOut:
 		return timeoutErr
+	case !hasLoop && exitCode != 0 && !(exitCode > 0 && isBehavioralExitSubtype(exitReason)):
+		return &agentFailedError{exitCode: exitCode}
 	}
 	return nil
+}
+
+// agentFailedError ends a run without a validation_loop whose agent failed
+// (#8305). The post-script gate tells it apart from other run errors.
+type agentFailedError struct {
+	exitCode int
+}
+
+func (e *agentFailedError) Error() string {
+	return fmt.Sprintf("agent failed with exit code %d", e.exitCode)
+}
+
+// postScriptDecision says whether the post-script runs, with the warning to
+// print. agentExitCode is set when it runs after a failed agent.
+type postScriptDecision struct {
+	run           bool
+	message       string
+	agentExitCode int
+}
+
+// postScriptGate decides whether the post-script runs once the agent is done.
+// With a validation_loop it needs a validated result (ADR 0022). Without one
+// it runs after a successful agent, and after a failed agent only when the
+// agent left a result file that parses (#8305), so the result is still
+// reported while the run fails. --no-post-script is checked by the caller.
+func postScriptGate(h *harness.Harness, validationPassed, transcriptErrorOverride bool, runErr error, outputDir string) postScriptDecision {
+	if h.ValidationLoop != nil && !validationPassed {
+		return postScriptDecision{message: "Skipping post-script: validation did not pass"}
+	}
+	var agentErr *agentFailedError
+	if errors.As(runErr, &agentErr) {
+		resultFile, ok := agentResultFile(h, outputDir)
+		if !ok {
+			return postScriptDecision{message: fmt.Sprintf("Skipping post-script: agent failed with exit code %d and left no result file that parses", agentErr.exitCode)}
+		}
+		return postScriptDecision{
+			run:           true,
+			message:       fmt.Sprintf("Agent failed with exit code %d but left %s: running the post-script; the run still fails", agentErr.exitCode, filepath.Base(resultFile)),
+			agentExitCode: agentErr.exitCode,
+		}
+	}
+	if runErr != nil {
+		return postScriptDecision{message: "Skipping post-script: agent run failed"}
+	}
+	if transcriptErrorOverride {
+		return postScriptDecision{message: "Skipping post-script: agent reported error via transcript"}
+	}
+	return postScriptDecision{run: true}
+}
+
+// agentResultMaxBytes caps how much of the sandbox-written result file the
+// runner reads; a larger file counts as no result.
+const agentResultMaxBytes = 4 << 20
+
+// agentResultFile returns the agent's result file in outputDir when it exists
+// and holds a JSON object. The name is the harness's FULLSEND_OUTPUT_FILE,
+// defaulting to agent-result.json as fullsend-check-output does.
+func agentResultFile(h *harness.Harness, outputDir string) (string, bool) {
+	name := h.RunnerEnv["FULLSEND_OUTPUT_FILE"]
+	if name == "" {
+		name = "agent-result.json"
+	}
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		return "", false
+	}
+	path := filepath.Join(outputDir, name)
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, agentResultMaxBytes+1))
+	if err != nil || len(data) > agentResultMaxBytes {
+		return "", false
+	}
+	var obj map[string]any
+	if json.Unmarshal(data, &obj) != nil || obj == nil {
+		return "", false
+	}
+	return path, true
 }
 
 func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, runtimeEnvExports []string, fetchEnv ...fetchServiceEnv) error {
@@ -4314,7 +4401,7 @@ type transcriptCheckOutcome struct {
 //  1. Behavioral limits (error_max_turns, error_max_budget_usd): pass the reason
 //     to the post-script so it can report accurately. See #6877.
 //  2. API/infra failures with exit code 0: override the exit code to 1 so
-//     the post-script is skipped. See #2786.
+//     the run counts as failed. See #2786.
 //  3. Non-behavioral errors with non-zero exit code: the exit code already
 //     signals failure; the transcript error enriches span telemetry.
 func classifyTranscriptError(errMsg, subtype string, exitCode int) transcriptCheckOutcome {

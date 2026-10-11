@@ -386,6 +386,52 @@ func TestDummyRuntime_RunOpFailureReturnsNilGoError(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDummyRuntime_RunExpectedFailureExitsZero(t *testing.T) {
+	fullsendDir := t.TempDir()
+	scriptDir := filepath.Join(fullsendDir, "behaviour")
+	require.NoError(t, os.MkdirAll(scriptDir, 0o755))
+	script := `ops:
+- description: blocked fetch
+  op: url_get
+  args: https://example.com/blocked
+  expect_fail: true
+`
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "current-scenario.yaml"), []byte(script), 0o644))
+
+	var got BehaviourResults
+	rt := DummyRuntime{WriteResultsFn: func(_ string, r BehaviourResults) error { got = r; return nil }}
+	exit, err := rt.Run(context.Background(), RunParams{
+		SandboxName: "nonexistent-sandbox",
+		RepoDir:     t.TempDir(),
+		FullsendDir: fullsendDir,
+	}, ui.New(io.Discard), time.Now(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, exit)
+	require.Len(t, got.Operations, 1)
+	assert.False(t, got.Operations[0].Success, "the failure is still recorded")
+}
+
+func TestBehaviourExitCode(t *testing.T) {
+	t.Parallel()
+	script := &BehaviourScript{Ops: []BehaviourOperation{{Op: "url_get", ExpectFail: true}, {Op: "assert_env"}}}
+	tests := []struct {
+		name    string
+		results []BehaviourOpResult
+		want    int
+	}{
+		{"all pass", []BehaviourOpResult{{Success: true}, {Success: true}}, 0},
+		{"expected failure only", []BehaviourOpResult{{Success: false}, {Success: true}}, 0},
+		{"unexpected failure", []BehaviourOpResult{{Success: true}, {Success: false}}, 1},
+		{"both fail", []BehaviourOpResult{{Success: false}, {Success: false}}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, behaviourExitCode(script, BehaviourResults{Operations: tt.results}))
+		})
+	}
+}
+
 func TestExecuteBehaviourOp_URLGetNonZeroExit(t *testing.T) {
 	t.Parallel()
 

@@ -541,7 +541,7 @@ Critical findings block the run in `fail_mode: closed`.
 
 ## Dummy runtime operations
 
-The `dummy` runtime executes a YAML script of operations inside the real sandbox (behaviour tests only). Besides `write_fixture` and `fail`, dispatch behaviour tests use:
+The `dummy` runtime executes a YAML script of operations inside the real sandbox (behaviour tests only). Besides `write_fixture` and `fail`, behaviour tests can use:
 
 | Op | Args | Purpose |
 |----|------|---------|

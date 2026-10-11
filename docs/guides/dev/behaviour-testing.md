@@ -59,6 +59,7 @@ Given a dummy agent that would:
 | `description` | Human label matched by assertion steps |
 | `op` | `read_file`, `url_get`, `write_fixture`, `assert_env`, `assert_not_jwt`, `assert_file`, `assert_json`, `checkout_branch`, `http_probe`, `wait` |
 | `args` | Op-specific; see below |
+| `expect` | Optional. `fail` marks a step the scenario expects to fail, such as a fetch the sandbox blocks. The failure is still recorded for `the agent will fail to ...`, but it does not make the agent exit non-zero, so the run still succeeds. |
 
 **`assert_not_jwt`:** `VAR` — succeeds when the sandbox variable `VAR` is set and does not hold a JWT (three base64url segments, the first starting `eyJ`). When its value is an absolute path to a readable file, as `INFERENCE_GATEWAY_TOKEN_FILE` is, the file must not hold one either. Use it to check that a credential reached the sandbox only as a placeholder.
 

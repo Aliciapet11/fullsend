@@ -484,8 +484,12 @@ if [[ -n "${FULLSEND_AGENT_EXIT_REASON:-}" ]]; then
 fi
 ```
 
-Unlike API or infrastructure errors (which skip the post-script entirely),
-behavioral exits still run the post-script so it can report accurately.
+Without a `validation_loop`, a behavioral exit runs the post-script and the run
+succeeds. Any other agent failure fails the run, but the post-script still runs
+when the agent left its result file (`FULLSEND_OUTPUT_FILE`, default
+`agent-result.json`) and it parses as a JSON object; `FULLSEND_AGENT_EXIT_CODE`
+is then set. With a loop, validation decides. See
+[How a run ends](../../cli/run.md#how-a-run-ends).
 
 ### Post-script security considerations
 

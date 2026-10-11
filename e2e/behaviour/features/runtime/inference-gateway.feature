@@ -61,14 +61,14 @@ Feature: inference gateway route under the dummy runtime
   @requires:capability:inference-gateway
   Scenario: the gateway route keeps the credential out of the sandbox and scoped to its model path
     Given a dummy agent that would:
-      | description            | op             | args                                                                                                                              |
-      | See the placeholder    | assert_env     | INFERENCE_GATEWAY_API_KEY                                                                                                         |
-      | Placeholder is no JWT  | assert_not_jwt | INFERENCE_GATEWAY_API_KEY                                                                                                         |
-      | Call the gateway       | http_probe     | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo","messages":[{"role":"user","content":"ping"}]}        |
-      | Call denied model      | http_probe     | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo-denied","messages":[{"role":"user","content":"ping"}]} |
-      | List models on gateway | http_probe     | GET <gateway>/v1/models INFERENCE_GATEWAY_API_KEY                                                                                 |
-      | Reach another host     | http_probe     | GET https://example.com/ INFERENCE_GATEWAY_API_KEY                                                                                |
-      | Emit triage JSON       | write_fixture  | output/agent-result.json, fixtures/triage/sufficient.json                                                                         |
+      | description            | op             | args                                                                                                                              | expect |
+      | See the placeholder    | assert_env     | INFERENCE_GATEWAY_API_KEY                                                                                                         |        |
+      | Placeholder is no JWT  | assert_not_jwt | INFERENCE_GATEWAY_API_KEY                                                                                                         |        |
+      | Call the gateway       | http_probe     | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo","messages":[{"role":"user","content":"ping"}]}        |        |
+      | Call denied model      | http_probe     | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo-denied","messages":[{"role":"user","content":"ping"}]} | fail   |
+      | List models on gateway | http_probe     | GET <gateway>/v1/models INFERENCE_GATEWAY_API_KEY                                                                                 | fail   |
+      | Reach another host     | http_probe     | GET https://example.com/ INFERENCE_GATEWAY_API_KEY                                                                                | fail   |
+      | Emit triage JSON       | write_fixture  | output/agent-result.json, fixtures/triage/sufficient.json                                                                         |        |
     And an issue
     When the issue is labeled "ready-for-gateway-probe"
     Then the harness "gateway-probe" workflow completes successfully
