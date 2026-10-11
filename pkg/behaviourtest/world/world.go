@@ -112,6 +112,13 @@ type World struct {
 	WriteSCM   scm.Driver
 	WriteLogin string
 
+	// TriageSCM is an SCM driver authenticated as a GitHub User with
+	// triage-level access to the pool-org repos. Used by scenarios that
+	// act as the triage actor. Nil when TEST_ACTOR_TRIAGE_PAT is not
+	// set. Shared across scenarios, never reset.
+	TriageSCM   scm.Driver
+	TriageLogin string
+
 	// KillSwitchActivated records whether this scenario activated the
 	// repo-level kill switch. CleanupScenario uses this to deactivate
 	// the switch so the next scenario on this slot is not affected.
