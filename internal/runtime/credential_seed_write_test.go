@@ -55,6 +55,20 @@ func orderedSeedCases() []orderedSeedCase {
 				return strings.ReplaceAll(CodexRuntime{}.OpenAIAuthSeed(), sandbox.SandboxCodexConfig, dir)
 			},
 		},
+		{
+			name: "codex gateway",
+			env:  codexGatewayCredentialEnv,
+			file: codexGatewayTokenFile,
+			seed: codexGatewaySeedIn,
+		},
+		{
+			name: "claude gateway",
+			env:  piGatewayCredentialEnv,
+			file: piInferenceGatewayTokenFile,
+			seed: func(dir string) string {
+				return strings.ReplaceAll(ClaudeRuntime{}.GatewayCredentialSeed().Seed, sandbox.SandboxClaudeConfig, dir)
+			},
+		},
 	}
 }
 

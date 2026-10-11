@@ -90,6 +90,7 @@ func codexGatewaySeedIn(dir string) string {
 // The seed writes a gateway placeholder to the token file as-is; anything
 // else fails closed and leaves no file.
 func TestCodexGatewayAuthSeed_Shell(t *testing.T) {
+	requireSeedLock(t)
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
@@ -123,6 +124,7 @@ func TestCodexGatewayAuthSeed_Shell(t *testing.T) {
 // The iteration-start seed and a refresher's re-seed can overlap: each
 // writes its own temp file, so neither fails and none is left behind.
 func TestCodexGatewayAuthSeed_Concurrent(t *testing.T) {
+	requireSeedLock(t)
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
@@ -142,10 +144,9 @@ func TestCodexGatewayAuthSeed_Concurrent(t *testing.T) {
 	for i := 0; i < 16; i++ {
 		require.NoError(t, <-errs)
 	}
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
-	require.Len(t, entries, 1, "only the token file: no temp file is left behind")
-	assert.Equal(t, codexGatewayTokenFile, entries[0].Name())
+	// Only the token file and the seed's lock and history: no temp file
+	// is left behind.
+	assertOnlySeedFiles(t, dir, codexGatewayTokenFile)
 }
 
 // The gateway auth.command prints the seeded placeholder and nothing else;
