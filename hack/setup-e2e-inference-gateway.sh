@@ -150,6 +150,10 @@ BUSY_STATUSES=(queued in_progress waiting requested pending)
 # The endpoints the post-deploy check calls on every served model, and the
 # bearer it sends as a wrong API key.
 CHECK_ENDPOINTS=(/v1/chat/completions /v1/messages /v1/responses)
+# PATH_PREFIX serves the same gateway under a path prefix too (#8303): the
+# path-prefix route strips it and hands the request back to this listener,
+# so the prefixed URL gets exactly the same checks as the bare origin.
+PATH_PREFIX=/e2e-prefix
 WRONG_KEY="wrong-key-for-the-post-deploy-check"
 
 # --- Arguments --------------------------------------------------------------
@@ -386,6 +390,15 @@ binds:
             "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})
 gateways:
   default: { port: ${GATEWAY_PORT}, bindAddress: 0.0.0.0 }
+routes:
+- name: path-prefix
+  gateways: [default]
+  matches:
+  - path: { pathPrefix: ${PATH_PREFIX}/ }
+  policies:
+    urlRewrite: { path: { prefix: / } }
+  backends:
+  - host: 127.0.0.1:${GATEWAY_PORT}
 llm:
   gateways: [default]
   discovery: disabled
@@ -1234,7 +1247,7 @@ post_failed=0
 # request_body prints a minimal request for an endpoint and model.
 request_body() {
   case "$1" in
-    /v1/responses) jq -nc --arg m "$2" '{model: $m, max_output_tokens: 16, input: "ping"}' ;;
+    */v1/responses) jq -nc --arg m "$2" '{model: $m, max_output_tokens: 16, input: "ping"}' ;;
     *) jq -nc --arg m "$2" '{model: $m, max_tokens: 1, messages: [{role: "user", content: "ping"}]}' ;;
   esac
 }
@@ -1290,6 +1303,10 @@ elif (( ${#CHANGES[@]} > service_changes_before )) && [[ "${DRY_RUN}" != "true" 
     done
   done
   check_call "wrong key" 401 /v1/chat/completions echo -H "authorization: Bearer ${WRONG_KEY}"
+  for endpoint in "${CHECK_ENDPOINTS[@]}"; do
+    check_call "no credential, path prefix" "${anon_status}" "${PATH_PREFIX}${endpoint}" echo
+  done
+  check_call "wrong key, path prefix" 401 "${PATH_PREFIX}/v1/chat/completions" echo -H "authorization: Bearer ${WRONG_KEY}"
   echo
 fi
 
@@ -1310,6 +1327,9 @@ if [[ -n "${URL}" ]]; then
   echo
   echo "    E2E_INFERENCE_GATEWAY_URL=${URL}"
   echo "    E2E_INFERENCE_GATEWAY_AUDIENCE=${AUDIENCE}"
+  echo
+  echo "    The same gateway also answers under ${URL}${PATH_PREFIX}"
+  echo "    (the path-prefix behaviour test appends ${PATH_PREFIX} itself)."
   echo
   echo "    A positive check needs a GitHub Actions OIDC token for a pool"
   echo "    repository; the inference-gateway behaviour test covers it."
