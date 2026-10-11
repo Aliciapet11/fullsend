@@ -260,21 +260,25 @@ durable [agentgateway](https://github.com/agentgateway/agentgateway) v1.6.0
 instance on Cloud Run in the E2E GCP project. The gateway accepts GitHub
 Actions OIDC tokens from the pool repositories only.
 `hack/setup-e2e-inference-gateway.sh` creates it, or adopts an existing one
-with the same names, and keeps it in sync. The scenarios stay behind
-`@requires:capability:inference-gateway` until the gateway exists and the
-capability is declared.
+with the same names, and keeps it in sync. The scenarios are gated on
+`@requires:capability:` tags.
+[Wiring it into the behaviour tests](#wiring-it-into-the-behaviour-tests)
+lists the capabilities CI declares and how to run the rest.
 
 ### Who runs it, and when
 
 An E2E project admin runs the script from a workstation with `gcloud`
-(authenticated), `skopeo`, `jq` and `curl`. Run it again after any of these
+(authenticated), `skopeo`, `jq`, `curl` and `gh` (authenticated, to read
+this repository's workflow runs for the
+[busy check](#change-control)). Run it again after any of these
 changes:
 
 - **Pool change:** a new pool org, or a different `DefaultPoolSize`
   (`pkg/behaviourtest/drivers/install/driver.go`). Edit `POOL_ORGS` or
   `POOL_REPOS` at the top of the script.
 - **agentgateway bump:** change `AGW_VERSION`.
-- **Model change:** edit `VERTEX_MODELS`.
+- **Model change:** edit `VERTEX_MODELS`, plus `vertex_params` for a
+  model-as-a-service model.
 
 The operator needs these roles on the project:
 
@@ -311,6 +315,9 @@ defaults to `us-east5`. The durable gateway serves the Vertex models, so pass
    ==> Checking required APIs...
        OK: required APIs are enabled
 
+   ==> Change control...
+       OK: config matches version 27, which the serving revision started with
+
    ==> Artifact Registry repository fullsend-e2e-gateway...
        OK: repository fullsend-e2e-gateway exists
 
@@ -344,8 +351,8 @@ defaults to `us-east5`. The durable gateway serves the Vertex models, so pass
 
    ==> No changes: everything was already in place.
 
-   ==> Behaviour test settings (set the URL as a variable in the dev and stage
-       environments; it embeds the project number, so never commit it):
+   ==> Behaviour test settings (set the URL as a repository secret; it embeds
+       the project number, so never commit it):
 
        E2E_INFERENCE_GATEWAY_URL=https://fullsend-e2e-gateway-abc123-ul.a.run.app
        E2E_INFERENCE_GATEWAY_AUDIENCE=fullsend-e2e-gateway
@@ -384,9 +391,11 @@ repository.
 The api-key behaviour test ([ADR 0138](../../ADRs/0138-inference-gateway-api-key-credential-mode.md))
 needs a gateway key for the `echo` model only. Pass its hash, never the key,
 as `ECHO_KEY_HASH=sha256:<64 hex>` on every run; a run without it removes
-the key. `REAL_KEY_HASH` does the same for a time-boxed `claude-haiku-5-5`
-key used in one local run, and is left unset afterwards. With a key, this
-test gateway serves both modes, so its OIDC check is permissive: a request
+the key. `REAL_KEY_HASH` does the same for a time-boxed key used in one local
+run, and is left unset afterwards. That key may call one real model:
+`claude-haiku-5-5` by default, or `gpt-oss-120b` with
+`REAL_KEY_MODEL=gpt-oss-120b`. With a key, this test gateway serves both
+modes, so its OIDC check is permissive: a request
 with no credential passes authentication and each model then refuses it
 with a 403. That is a test-gateway arrangement, not a recommendation. An
 OIDC-only gateway keeps strict `jwtAuth`, and a gateway that does mix the
@@ -394,6 +403,90 @@ modes must have authorization rules that deny anonymous requests. The probe
 therefore expects a 401 (`api key authentication failure: ...`) for a
 bearer that is neither a valid token nor a configured key, instead of the
 three probes above.
+
+### Change control
+
+The `behaviour` job of `e2e.yml` calls this gateway on every run, and the
+merge queue requires that job. A bad deploy, or a deploy in the middle of a
+run, fails the queue. `release.yml` does not call the gateway, but the
+script also waits for release runs, so nothing changes while a release is
+cut. So a run that changes the gateway goes through three checks. A run that
+changes nothing skips them and is still a no-op.
+
+1. **Frozen-path diff.** Before it changes anything, the script renders the
+   new config and compares it with the live config: the config secret
+   version that the revision getting the traffic started with. A revision
+   pinned to a version number serves that version. The service mounts the
+   secret's latest version, so otherwise that is the newest version
+   created before the revision was, and the post-deploy check of the run
+   that rolled the revision verified it. A version added later is a pending
+   rollout: an instance that restarts may load it, so the script warns
+   about it, but it is not the baseline. If the traffic is split across
+   revisions, the script stops before it changes anything. The comparison
+   masks only the changes that are allowed:
+   - extra allowlist repositories after the pool list, such as temporary
+     repositories added to the live config by hand;
+   - the time-boxed `REAL_KEY_HASH` entry, when it may call exactly one
+     real model, and its allow rule on that model;
+   - the tokens-per-minute cap, only with `--allow-tpm-change`.
+
+   Any other difference refuses the deploy with exit 4 and prints the masked
+   diff. That covers the `echo` and `echo-denied` models, the pool list, the
+   `jwtAuth` and `apiKey` modes, the echo key hash, the requests-per-minute
+   cap, the Vertex models, and the real key's rule on `echo` or
+   `echo-denied`. To make such a change, pass
+   `--allow-frozen-change`. Use it only outside a release window, and tell
+   the maintainers first. `--dry-run` runs this check too.
+2. **Busy check.** Before its first change of any kind, including a pending
+   rollout, an image or IAM change and `--delete`, the script refuses with
+   exit 6 while a `merge_group` run of `e2e.yml` or a `release.yml` run is
+   not completed. It asks `fullsend-ai/fullsend` with `gh` for each
+   unfinished status, so a run behind a page of completed runs still
+   counts. A failed lookup also stops the run, because an unknown state is
+   not an idle gateway. `--force-busy` skips the check. Use it only for an
+   outage fix. `--dry-run` skips it, because it changes nothing.
+3. **Post-deploy check.** After any new revision serves traffic, the script
+   calls `claude-haiku-5-5`, `gemini-3.8-flash`, `gpt-oss-120b` and `echo`,
+   each on `/v1/chat/completions`, `/v1/messages` and `/v1/responses`, with
+   no credential. All 12 calls must return 403. Then one call with a wrong
+   API key must return 401. On a gateway without `--with-vertex`, only `echo`
+   is called. On a gateway without a key hash, the anonymous calls must
+   return 401, because strict `jwtAuth` refuses them before any model does.
+   If a call gets any other status, or the new revision has no URL to
+   call, the script prints the config secret version that was serving
+   before the run and the command that restores it, then exits 5. If the
+   run removed the Vertex grant, the command grants it again first. If that version is disabled, the script stops before
+   it changes anything: enable it, or roll a revision onto an enabled
+   version, to choose a rollback baseline first.
+
+Exit codes:
+
+| Exit | Meaning |
+|------|---------|
+| 0 | Done, or nothing to do |
+| 1 | An error, or a verification probe failed |
+| 2 | `REAL_KEY_MODEL` names a model the real key may not call |
+| 3 | `--dry-run` found pending changes |
+| 4 | The config change touches a frozen part of the config |
+| 5 | The post-deploy check failed. Roll back. |
+| 6 | A merge queue or release run is using the gateway |
+
+**Rolling back.** The post-deploy failure prints one command line, with the
+values filled in. It copies the previous version into a new latest version,
+then rolls a revision onto it:
+
+```bash
+gcloud secrets versions access <previous> --secret=fullsend-e2e-gateway-config --project="$E2E_GCP_PROJECT_ID" > fullsend-e2e-gateway-config-v<previous>.yaml \
+  && gcloud secrets versions add fullsend-e2e-gateway-config --project="$E2E_GCP_PROJECT_ID" --data-file=fullsend-e2e-gateway-config-v<previous>.yaml \
+  && gcloud run services update fullsend-e2e-gateway --project="$E2E_GCP_PROJECT_ID" --region=us-east5 \
+       --update-secrets=/etc/agw-config/config.yaml=fullsend-e2e-gateway-config:latest,/etc/agw-upstream/key=fullsend-e2e-gateway-stub-upstream-key:latest
+```
+
+The restored config is the latest version again, so the service still
+mounts `:latest` and the script sees no drift in the service settings. Fix
+the change in the script before you re-run it. The next run compares the
+fixed config with the restored version and goes through the three checks
+again.
 
 ### What it manages
 
@@ -416,37 +509,116 @@ not on the project.
 
 The generated config (print it with `--print-config`):
 
-- validates tokens with `jwtAuth` in `strict` mode. The issuer is
+- validates tokens with `jwtAuth`. The issuer is
   `https://token.actions.githubusercontent.com`, its JWKS is fetched from
   GitHub, and the only accepted audience is `fullsend-e2e-gateway`. The
   caller's token is never forwarded upstream; that is agentgateway's default.
+  The mode depends on whether a key hash is set:
+  - **No key hash:** `jwtAuth` runs in `strict` mode, and a request without
+    a valid token gets a 401.
+  - **`ECHO_KEY_HASH` or `REAL_KEY_HASH` set:** `jwtAuth` runs in `permissive` mode, followed by an
+    `apiKey` policy in `optional` mode. A valid JWT is checked and
+    stripped first, so it never reaches the key check. A bearer that is not
+    a JWT goes on to the key check, and a wrong key gets a 401. Each key
+    carries its own `allowedModels`: `[echo]` for the echo key, and the one
+    model `REAL_KEY_MODEL` names for the real key. A request with no credential
+    passes both checks, and each model's authorisation rules then deny it
+    with a 403. The durable gateway has `ECHO_KEY_HASH` only, and no real
+    key.
+
+  This mixed setup exists so that one test gateway can serve both the
+  `oidc` and `api-key` auth modes. Do not copy it to production. A
+  production OIDC gateway should keep the strict `jwtAuth` recommended by
+  [ADR 0137](../../ADRs/0137-inference-gateway-credential-route.md).
 - authorises each model with an exact-match list of `jwt.repository` values.
   The list covers `test-repo-01` to `test-repo-12` in `halfsend-01` to
   `halfsend-12` and in the STAGE org `halfsend`: 156 repositories. It
   matches names, so keep the pool orgs registered: whoever owns a pool org
-  name can call the gateway.
+  name can call the gateway. A model that a configured key may call also
+  admits that key's `apiKey.purpose`.
 - strips `x-api-key` from every request it sends upstream.
+- caps each real model at 60 requests and 200,000 tokens per minute for
+  each kind of caller: the pool shares one budget per model, each configured
+  key has its own, and every other caller shares one separate budget. So no
+  caller can use up the behaviour tests' budget, not even with requests the
+  model refuses. `echo` and `echo-denied` allow pool and key callers 60
+  requests a second; every other caller stays in its one shared bucket.
+  Tokens are counted after each response, including cached input, so the
+  token budget is a throttle rather than a hard ceiling: requests already in
+  flight when it runs out still finish, and only later ones are refused. The
+  budgets are held in the single instance and start again with each new
+  revision. On the durable gateway, a refused request gets a 429 whose body
+  is `rate limit exceeded`; the limit appears only in its
+  `x-ratelimit-limit` and `retry-after` headers. During a flood of
+  unauthenticated requests, a request with no credential can receive that
+  429 instead of a 403. The script's tests check the rendered rules but do
+  not evaluate them; the separation between callers was checked by sending
+  requests to a running gateway as the pool, as a key, and without
+  credentials.
 - serves these models:
 
   | Model | Allowed for | Upstream |
   |-------|-------------|----------|
-  | `claude-haiku-5-5`, `gemini-3.8-flash` (`--with-vertex` only) | The pool | Vertex AI, location `global`, as the runtime service account |
-  | `echo` | The pool | A header-echo listener in the same container. The gateway sends it the stub key. Its answer reports whether that key, and not the caller's credential, arrived, so the custody check can assert it. |
+  | `claude-haiku-5-5`, `gemini-3.8-flash` (`--with-vertex` only) | The pool, plus the real key for `claude-haiku-5-5` when `REAL_KEY_HASH` is set and `REAL_KEY_MODEL` is left at its default | Vertex AI, location `global`, as the runtime service account |
+  | `gpt-oss-120b` (`--with-vertex` only) | The pool, plus the real key when `REAL_KEY_HASH` is set and `REAL_KEY_MODEL=gpt-oss-120b` | The Vertex AI model-as-a-service model `openai/gpt-oss-120b-maas`, location `global`, as the runtime service account. It serves Responses clients such as Codex on `/v1/responses`, which the gateway translates to Chat Completions. Gemini 3 tool loops through Responses translation aren't supported on the test gateway, and the Claude models take no Responses requests. The gateway drops assistant messages that have neither content nor tool calls from requests to this model, because its chat template rejects them: a test-gateway requirement, not something fullsend needs from every gateway. |
+  | `echo` | The pool, plus the echo key when `ECHO_KEY_HASH` is set | A header-echo listener in the same container. The gateway sends it the stub key. Its answer reports whether that key, and not the caller's credential, arrived, so the custody check can assert it. |
   | `echo-denied` | Only `fullsend-e2e-gateway-outside/not-a-pool-repo`, which is outside the pool | The same echo listener. A behaviour test calls it from a pool repository and expects 403. |
 
 ### Wiring it into the behaviour tests
 
-The gateway URL embeds the E2E project number, so it is never committed. A
-maintainer wires it in by hand; this script changes no workflow files:
+The gateway URL embeds the E2E project number, so it is never committed. This
+script changes no workflow files; the wiring is:
 
-1. Set the printed URL as the variable `E2E_INFERENCE_GATEWAY_URL` in the
-   `dev` and `stage` GitHub environments. `E2E_INFERENCE_GATEWAY_AUDIENCE`
-   defaults to `fullsend-e2e-gateway` and needs setting only if it changes.
-2. Pass the variable to the `behaviour` job in `e2e.yml`.
-3. Once a behaviour test run passes with
-   `BEHAVIOUR_CAPABILITIES=runtime-pi,inference-gateway`, declare
-   `inference-gateway` in `BEHAVIOUR_CAPABILITIES` (`Makefile`) and in the
-   `behaviour` job.
+1. Set two repository-level **secrets**, like the `E2E_GCP_*` secrets:
+   - `E2E_INFERENCE_GATEWAY_URL`: the URL the script prints.
+   - `E2E_INFERENCE_GATEWAY_TEST_KEY`: the plaintext of the echo-only key
+     whose hash is passed as `ECHO_KEY_HASH`. The gateway authorises it for
+     the `echo` model only, so it reaches no real model. The suite
+     registers it for redaction. The `api-key` scenario sets it as the
+     enrolled pool repository's `FULLSEND_INFERENCE_GATEWAY_API_KEY`
+     secret for the scenario and deletes it afterwards, so the pool needs
+     no standing key.
+
+   `E2E_INFERENCE_GATEWAY_AUDIENCE` defaults to `fullsend-e2e-gateway` and
+   needs setting only if it changes.
+2. `e2e.yml` passes both secrets in the env of the `behaviour` job's "Run
+   behaviour tests" step, next to the `E2E_GCP_*` secrets, and to the
+   artifact redaction step. The gateway scenarios skip when these variables
+   are unset. Pull requests that the
+   `gate` job does not authorize never run the `behaviour` job, so they
+   receive neither secret. Authorized pull requests, including forks, do
+   receive them, and the `behaviour` job runs the pull request's head code
+   with those secrets in its environment. Authorizing a pull request
+   therefore lets its head code read both values, as it can already read
+   the `E2E_GCP_*` secrets. The echo-only key scope limits what the key can
+   call, not whether it can be read. To keep fork pull requests away from
+   these secrets, add an explicit condition in the base workflow.
+
+CI declares only the gateway capabilities that reach no real model. They
+are part of the `BEHAVIOUR_CAPABILITIES` default in the `Makefile`, which
+`make behaviour-test` and the `behaviour` job use:
+
+| Capability | Scenarios | Declared in CI |
+|------------|-----------|----------------|
+| `inference-gateway` | `features/runtime/inference-gateway.feature`: one dummy-runtime scenario covering the placeholder, credential custody on `echo`, egress scope and the `echo-denied` refusal | Yes |
+| `inference-gateway-api-key` | `features/runtime/inference-gateway-api-key.feature` (dummy runtime, echo-only key) | Yes |
+| `runtime-pi-gateway` | `features/runtime/pi-gateway.feature` (pi through the gateway to a real model, `claude-haiku-5-5`) | No: costs a real model run |
+| `runtime-codex-gateway` | `features/runtime/codex-gateway.feature` (codex through the gateway to a real model, `gpt-oss-120b`, on Responses) | No: costs a real model run |
+| `runtime-claude-gateway` | `features/runtime/claude-gateway.feature` (Claude Code through the gateway to a real model, `claude-haiku-5-5`, in the `oidc` mode) | No: costs a real model run |
+| `inference-gateway-reseed` | The token-rotation scenario in `features/runtime/inference-gateway.feature`, which also needs `inference-gateway` | No: holds the sandbox for a 330 s wait |
+
+To run the undeclared scenarios on demand, set `E2E_INFERENCE_GATEWAY_URL`
+and pass the full capability list. This replaces the `Makefile` default
+rather than adding to it:
+
+```bash
+BEHAVIOUR_CAPABILITIES=runtime-pi,inference-gateway,inference-gateway-api-key,runtime-pi-gateway,runtime-codex-gateway,runtime-claude-gateway,inference-gateway-reseed \
+  make behaviour-test
+```
+
+To run them in CI, add them to the `BEHAVIOUR_CAPABILITIES` default in the
+`Makefile` on a pull request. The behaviour job reads the `Makefile` from
+the pull request.
 
 ### Removing it
 

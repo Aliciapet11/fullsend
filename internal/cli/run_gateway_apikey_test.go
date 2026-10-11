@@ -82,8 +82,8 @@ func TestStartGatewayRoute_APIKey(t *testing.T) {
 	var gotExpiry time.Time
 	orig := ensureGatewayAPIKeyProviderFn
 	t.Cleanup(func() { ensureGatewayAPIKeyProviderFn = orig })
-	ensureGatewayAPIKeyProviderFn = func(_ context.Context, host, _ string, key string, expiresAt time.Time, _ *ui.Printer) (string, string, error) {
-		gotHost, gotKey, gotExpiry = host, key, expiresAt
+	ensureGatewayAPIKeyProviderFn = func(_ context.Context, profile gatewayProfile, _ string, key string, expiresAt time.Time, _ *ui.Printer) (string, string, error) {
+		gotHost, gotKey, gotExpiry = profile.host, key, expiresAt
 		return "inference-gateway-k", "fullsend-inference-gateway-abc", nil
 	}
 	plan := &gatewayRoutePlan{
@@ -105,12 +105,12 @@ func TestStartGatewayRoute_APIKey(t *testing.T) {
 	assert.NotContains(t, out.String(), gatewayTestAPIKey, "the key is never printed")
 
 	// A plan sized for a longer run bounds the instance by it.
-	plan.apiKeyLifetime = 30 * time.Hour
+	plan.runLifetime = 30 * time.Hour
 	before = time.Now()
 	_, err = startGatewayRoute(context.Background(), plan, "fs-key", ui.New(io.Discard))
 	require.NoError(t, err)
 	assert.False(t, gotExpiry.Before(before.Add(30*time.Hour)), "the run's own bound is used")
-	plan.apiKeyLifetime = 0
+	plan.runLifetime = 0
 
 	// The refresher does nothing in this mode: it returns at once.
 	done := make(chan struct{})
@@ -131,7 +131,7 @@ func TestStartGatewayRoute_APIKey(t *testing.T) {
 
 	// A provider failure fails the run too.
 	stubGatewayAPIKey(t, gatewayTestAPIKey)
-	ensureGatewayAPIKeyProviderFn = func(context.Context, string, string, string, time.Time, *ui.Printer) (string, string, error) {
+	ensureGatewayAPIKeyProviderFn = func(context.Context, gatewayProfile, string, string, time.Time, *ui.Printer) (string, string, error) {
 		return "", "", errors.New("gateway down")
 	}
 	_, err = startGatewayRoute(context.Background(), plan, "fs-key", ui.New(io.Discard))
@@ -156,7 +156,7 @@ func TestEnsureGatewayAPIKeyProvider(t *testing.T) {
 	id := gatewayProfileID("gateway.example.com")
 	argsLog := profileListingStub(t, "Available Provider Profiles:\n    "+id+"  Fullsend inference gateway  endpoints: 1")
 	expires := time.Now().Add(gatewayAPIKeyLifetime).UTC()
-	name, gotID, err := ensureGatewayAPIKeyProvider(context.Background(), "gateway.example.com", "fs-tri-0123456789abcdef", gatewayTestAPIKey, expires, ui.New(io.Discard))
+	name, gotID, err := ensureGatewayAPIKeyProvider(context.Background(), gatewayProfile{host: "gateway.example.com"}, "fs-tri-0123456789abcdef", gatewayTestAPIKey, expires, ui.New(io.Discard))
 	require.NoError(t, err)
 	assert.Equal(t, "inference-gateway-0123456789ab", name)
 	assert.Equal(t, id, gotID)
@@ -178,7 +178,7 @@ func TestEnsureGatewayAPIKeyProvider_MaskIsPercentEncoded(t *testing.T) {
 	key := gatewayTestAPIKey + "%25x%0Ay"
 	var err error
 	stderr := captureStderr(t, func() {
-		_, _, err = ensureGatewayAPIKeyProvider(context.Background(), "gateway.example.com", "fs-tri-0123456789abcdef", key, time.Now().Add(time.Hour), ui.New(io.Discard))
+		_, _, err = ensureGatewayAPIKeyProvider(context.Background(), gatewayProfile{host: "gateway.example.com"}, "fs-tri-0123456789abcdef", key, time.Now().Add(time.Hour), ui.New(io.Discard))
 	})
 	require.NoError(t, err)
 	assert.Contains(t, stderr, "::add-mask::"+gatewayTestAPIKey+"%2525x%250Ay\n")
@@ -191,7 +191,7 @@ func TestEnsureGatewayAPIKeyProvider_RejectsControlCharacters(t *testing.T) {
 	for _, key := range []string{"", "   ", gatewayTestAPIKey + "\n::error::pwned"} {
 		var err error
 		stderr := captureStderr(t, func() {
-			_, _, err = ensureGatewayAPIKeyProvider(context.Background(), "gateway.example.com", "fs-x-1", key, time.Now().Add(time.Hour), ui.New(io.Discard))
+			_, _, err = ensureGatewayAPIKeyProvider(context.Background(), gatewayProfile{host: "gateway.example.com"}, "fs-x-1", key, time.Now().Add(time.Hour), ui.New(io.Discard))
 		})
 		require.Error(t, err, "%q", key)
 		assert.NotContains(t, err.Error(), "pwned")

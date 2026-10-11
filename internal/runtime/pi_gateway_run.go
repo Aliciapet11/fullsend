@@ -240,10 +240,25 @@ const (
 // write goes through orderedSeedWrite, so an iteration-start seed that
 // stalls cannot replace a newer placeholder a re-seed already wrote.
 func PiGatewayTokenSeed(configDir string) string {
-	final := configDir + "/" + piInferenceGatewayTokenFile
+	return gatewayTokenSeed(configDir)
+}
+
+// gatewayPlaceholderCheck is the POSIX sh fragment that fails the run
+// (piSeedExit) unless the sandbox environment carries a gateway
+// placeholder for INFERENCE_GATEWAY_API_KEY made only of placeholder
+// characters. Every runtime on the gateway route runs it before the
+// agent-writable .env is sourced.
+func gatewayPlaceholderCheck() string {
 	return `case "${` + piGatewayCredentialEnv + `:-}" in ` + piPlaceholderPrefix + `*` + piGatewayCredentialEnv + `) ;; *) echo 'fullsend: ` + piGatewayCredentialEnv + ` in the sandbox is not a gateway placeholder (inference gateway provider not attached, or a real token reached the sandbox); refusing to run the gateway provider' >&2; ` + piSeedExit + ` ;; esac` +
-		` && case "$` + piGatewayCredentialEnv + `" in *[!A-Za-z0-9_:]*) echo 'fullsend: ` + piGatewayCredentialEnv + ` placeholder has unexpected characters; refusing to run the gateway provider' >&2; ` + piSeedExit + ` ;; esac` +
-		` && ` + orderedSeedWrite(piGatewayCredentialEnv, configDir, final,
+		` && case "$` + piGatewayCredentialEnv + `" in *[!A-Za-z0-9_:]*) echo 'fullsend: ` + piGatewayCredentialEnv + ` placeholder has unexpected characters; refusing to run the gateway provider' >&2; ` + piSeedExit + ` ;; esac`
+}
+
+// gatewayTokenSeed is the runtime-neutral body of PiGatewayTokenSeed: the
+// placeholder check, then the ordered write of the placeholder into
+// configDir/inference-gateway.token.
+func gatewayTokenSeed(configDir string) string {
+	return gatewayPlaceholderCheck() +
+		` && ` + orderedSeedWrite(piGatewayCredentialEnv, configDir, configDir+"/"+piInferenceGatewayTokenFile,
 		`printf '%s' "$`+piGatewayCredentialEnv+`"`,
 		`fullsend: writing the inference gateway token file failed`, piSeedExit)
 }
