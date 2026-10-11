@@ -222,7 +222,7 @@ github:
         runtime: claude
 ```
 
-A repository-level `allowed_remote_resources` value now follows the per-repo config merge rule: a non-empty list is unioned with the prefixes inherited from `github.config` / `gitlab.config` and `defaults.config` (previously it replaced the defaults list). Use an explicit empty list to deny every remote resource.
+A repository-level `allowed_remote_resources` value now follows the per-repo config merge rule: a non-empty list is unioned with the prefixes inherited from `github.config` / `gitlab.config` and `defaults.config` (previously it replaced the defaults list). Because a repository can only add to inherited prefixes, it can no longer narrow them to a subset; only an explicit empty list (`allowed_remote_resources: []`) denies every remote resource.
 
 #### Vertex flags renamed (breaking)
 
