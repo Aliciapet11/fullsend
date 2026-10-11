@@ -2,7 +2,7 @@
 .PHONY: help bootstrap ensure-hooks lint lint-all check fmt \
        mindmap go-build go-test go-fmt go-vet go-tidy \
        lint-md-links script-test test \
-       behaviour-test playback-test lint-eval-cases functional-tests \
+       behaviour-test playback-test \
        wasm-build wasm-stage mint-cf-worker-test
 
 # Let Go automatically download the toolchain version required by go.mod.
@@ -26,11 +26,9 @@ help:
 	@echo "  go-tidy              - Run go mod tidy"
 	@echo "  lint-md-links        - Check markdown files for broken in-repo links and anchors"
 	@echo "  script-test          - Run shell script tests (topissues, analyze-transcript, user-forum-whats-new, gitlint-rules, gateway doc configs, artifact redaction, kill_stray_processes)"
-	@echo "  test                 - Run all checks: lint-all, go-test, script-test, lint-eval-cases"
+	@echo "  test                 - Run all checks: lint-all, go-test, script-test"
 	@echo "  behaviour-test       - Run Gherkin behaviour tests (installs fullsend per-repo; CI: OIDC mint)"
 	@echo "  playback-test        - Run @playback behaviour scenarios on the dummy-playback runtime (CI: OIDC mint)"
-	@echo "  lint-eval-cases      - Lint eval case definitions (annotations.yaml completeness)"
-	@echo "  functional-tests     - Run functional agent tests (requires EVAL_ORG, FULLSEND_DIR, GH_TOKEN, GCP creds)"
 	@echo "  wasm-build           - Build mintcore WASM binary and report gzip size vs Workers limits"
 	@echo "  wasm-stage           - Build and stage WASM + wasm_exec.js into CF Worker source tree"
 	@echo "  mint-cf-worker-test  - Build WASM, install deps, and run CF Worker bridge smoke tests"
@@ -182,7 +180,6 @@ endef
 
 script-test:
 	$(call run-timed,bash scripts/check-live-test-relevance-test.sh)
-	$(call run-timed,bash eval/scripts/capture-fixture-test.sh)
 	$(call run-timed,bash scripts/check-e2e-authorization-test.sh)
 	$(call run-timed,bash scripts/redact-behaviour-artifacts-test.sh)
 	$(call run-timed,bash .github/scripts/check-fix-eligibility-test.sh)
@@ -211,7 +208,7 @@ script-test:
 	$(call run-timed,python3 -m pytest internal/security/hooks/ -q)
 	$(call run-timed,node --test internal/runtime/pi_extension/*.test.mjs)
 
-test: lint-all go-test script-test lint-eval-cases
+test: lint-all go-test script-test
 
 # Capabilities the runner declares for @requires:capability:<name> scenarios.
 # Declared here rather than in the e2e workflow so a PR that adds a gated
@@ -254,19 +251,3 @@ behaviour-test:
 # the same timeout-minutes (see docs/guides/dev/behaviour-testing.md).
 playback-test:
 	go test -tags playback -race -v -count=1 -timeout 45m ./e2e/behaviour/
-
-# Functional agent evals — run agents against ephemeral GitHub repos and judge results.
-# Required env: EVAL_ORG (GitHub org for ephemeral repos), plus GCP creds for Vertex AI.
-# GH_TOKEN defaults to `gh auth token` if not set.
-FULLSEND_DIR ?= $(CURDIR)/internal/scaffold/fullsend-repo
-EVAL_AGENTS  ?= triage
-
-lint-eval-cases:
-	@for agent in $(EVAL_AGENTS); do \
-		./eval/lint-cases.sh "$$agent"; \
-	done
-
-functional-tests: lint-eval-cases
-	@for agent in $(EVAL_AGENTS); do \
-		FULLSEND_DIR="$(FULLSEND_DIR)" ./eval/run-functional.sh "$$agent"; \
-	done
