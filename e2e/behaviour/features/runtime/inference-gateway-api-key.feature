@@ -38,11 +38,11 @@ Feature: inference gateway route in the api-key mode under the dummy runtime
         && event.transition.label.name == "ready-for-gateway-key-probe"
       """
     And a dummy agent that would:
-      | description          | op             | args                                                                                                                                  |
-      | See the placeholder  | assert_env     | INFERENCE_GATEWAY_API_KEY                                                                                                             |
-      | Call the echo model  | http_probe     | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo","messages":[{"role":"user","content":"ping"}]}            |
-      | Call a real model    | http_probe     | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"claude-haiku-5-5","messages":[{"role":"user","content":"ping"}]} |
-      | Emit triage JSON     | write_fixture  | output/agent-result.json, fixtures/triage/sufficient.json                                                                             |
+      | description          | op             | args                                                                                                                                  | expect |
+      | See the placeholder  | assert_env     | INFERENCE_GATEWAY_API_KEY                                                                                                             |        |
+      | Call the echo model  | http_probe     | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"echo","messages":[{"role":"user","content":"ping"}]}            |        |
+      | Call a real model    | http_probe     | POST <gateway>/v1/chat/completions INFERENCE_GATEWAY_API_KEY {"model":"claude-haiku-5-5","messages":[{"role":"user","content":"ping"}]} | fail   |
+      | Emit triage JSON     | write_fixture  | output/agent-result.json, fixtures/triage/sufficient.json                                                                             |        |
     And an issue
     When the issue is labeled "ready-for-gateway-key-probe"
     Then the harness "gateway-key-probe" workflow completes successfully
