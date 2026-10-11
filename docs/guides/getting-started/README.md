@@ -8,9 +8,7 @@ description: Step-by-step setup for fullsend — connect a model provider, choos
 This section contains easy and to the point guides to help you
 set up Fullsend. These are intended to be read in a certain order:
 
-1. [How fullsend authenticates](how-fullsend-authenticates.md)
-2. [Getting Inference](getting-inference.md), or
-   [Using an inference gateway](inference-gateway.md) if your organisation runs one
-3. [Choose an agent runtime](choosing-a-runtime.md)
-4. [Configuring GitHub](configuring-github.md) or [Configuring GitLab](configuring-gitlab.md)
-5. [Repo Management](repo-management.md)
+1. [Getting Inference](getting-inference.md)
+2. [Choose an agent runtime](choosing-a-runtime.md)
+3. [Configuring GitHub](configuring-github.md) or [Configuring GitLab](configuring-gitlab.md)
+4. [Repo Management](repo-management.md)

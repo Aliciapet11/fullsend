@@ -243,15 +243,7 @@ export default defineConfig({
           collapsed: true,
           link: "/guides/getting-started/",
           items: [
-            {
-              text: "How fullsend authenticates",
-              link: "/guides/getting-started/how-fullsend-authenticates",
-            },
             { text: "Getting Inference", link: "/guides/getting-started/getting-inference" },
-            {
-              text: "Using an inference gateway",
-              link: "/guides/getting-started/inference-gateway",
-            },
             { text: "Choose a Runtime", link: "/guides/getting-started/choosing-a-runtime" },
             { text: "Configuring GitHub", link: "/guides/getting-started/configuring-github" },
             { text: "Configuring GitLab", link: "/guides/getting-started/configuring-gitlab" },
@@ -288,6 +280,11 @@ export default defineConfig({
           link: "/guides/",
           items: [
             { text: "Adopting Fullsend Incrementally", link: "/guides/user/adoption" },
+            {
+              text: "How fullsend authenticates",
+              link: "/guides/user/how-fullsend-authenticates",
+            },
+            { text: "Using an inference gateway", link: "/guides/user/inference-gateway" },
             { text: "Bugfix Workflow", link: "/guides/user/bugfix-workflow" },
             { text: "Issue Commands", link: "/guides/user/issues-commands" },
             {

@@ -162,7 +162,7 @@ See [Default, derived, and custom agents](guides/user/default-vs-custom.md).
 ### Direct OIDC Trust
 
 The inference gateway's `auth: oidc` mode: the gateway validates the job's forge OIDC token itself, with no token exchange. It is not [WIF](#wif-workload-identity-federation).
-See [How fullsend authenticates](guides/getting-started/how-fullsend-authenticates.md).
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
 
 ## E
 
@@ -226,7 +226,7 @@ See [architecture.md](architecture.md) and [agent-architecture.md](problems/agen
 ### Installation Token
 
 A short-lived GitHub App token that the token mint issues in exchange for the job's OIDC token. Agents use it for forge writes such as comments and pull requests.
-See [How fullsend authenticates](guides/getting-started/how-fullsend-authenticates.md).
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
 
 ## L
 
@@ -280,7 +280,7 @@ See [Distributed Tracing](guides/infrastructure/distributed-tracing.md) and [ADR
 ### Placeholder
 
 A stand-in value the sandbox holds instead of a real credential. The OpenShell proxy swaps in the real credential on the way out, so the credential never enters the sandbox.
-See [How fullsend authenticates](guides/getting-started/how-fullsend-authenticates.md).
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
 
 ### Policy Store
 
@@ -383,7 +383,7 @@ See [security-threat-model.md](problems/security-threat-model.md) and [agent-arc
 ### WIF (Workload Identity Federation)
 
 A token exchange in which a provider trusts the job's OIDC token and returns its own short-lived access token. Fullsend uses GCP WIF for Vertex AI and OpenAI Workload Identity for OpenAI models; the inference gateway's [direct OIDC trust](#direct-oidc-trust) is not WIF.
-See [How fullsend authenticates](guides/getting-started/how-fullsend-authenticates.md).
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
 
 ### Work Coordinator
 

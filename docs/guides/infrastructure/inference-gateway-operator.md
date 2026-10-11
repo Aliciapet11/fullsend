@@ -21,7 +21,7 @@ service on Cloud Run that:
   (pi) and `/v1/responses` (pi, codex).
 
 The runner side (how a fullsend run fetches the token and points the agent's runtime at the gateway) is in the
-[user guide for the hosted gateway route](../getting-started/inference-gateway.md).
+[user guide for the hosted gateway route](../user/inference-gateway.md).
 This page covers only the gateway.
 
 ## What you end up with
