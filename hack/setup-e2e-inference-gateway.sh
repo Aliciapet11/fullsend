@@ -151,8 +151,10 @@ BUSY_STATUSES=(queued in_progress waiting requested pending)
 # bearer it sends as a wrong API key.
 CHECK_ENDPOINTS=(/v1/chat/completions /v1/messages /v1/responses)
 # PATH_PREFIX serves the same gateway under a path prefix too (#8303): the
-# path-prefix route strips it and hands the request back to this listener,
-# so the prefixed URL gets exactly the same checks as the bare origin.
+# path-prefix route turns ${PATH_PREFIX}/v1/ into /v1/ and hands the request
+# back to this listener, so the prefixed URL gets exactly the same checks as
+# the bare origin. Matching through /v1/ keeps it to one hop: a repeated
+# prefix does not match again.
 PATH_PREFIX=/e2e-prefix
 WRONG_KEY="wrong-key-for-the-post-deploy-check"
 
@@ -394,9 +396,9 @@ routes:
 - name: path-prefix
   gateways: [default]
   matches:
-  - path: { pathPrefix: ${PATH_PREFIX}/ }
+  - path: { pathPrefix: ${PATH_PREFIX}/v1/ }
   policies:
-    urlRewrite: { path: { prefix: / } }
+    urlRewrite: { path: { prefix: /v1/ } }
   backends:
   - host: 127.0.0.1:${GATEWAY_PORT}
 llm:
@@ -1307,6 +1309,7 @@ elif (( ${#CHANGES[@]} > service_changes_before )) && [[ "${DRY_RUN}" != "true" 
     check_call "no credential, path prefix" "${anon_status}" "${PATH_PREFIX}${endpoint}" echo
   done
   check_call "wrong key, path prefix" 401 "${PATH_PREFIX}/v1/chat/completions" echo -H "authorization: Bearer ${WRONG_KEY}"
+  check_call "no credential, repeated prefix" "${anon_status}" "${PATH_PREFIX}${PATH_PREFIX}/v1/chat/completions" echo
   echo
 fi
 
