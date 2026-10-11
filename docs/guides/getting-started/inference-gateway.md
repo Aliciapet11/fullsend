@@ -4,6 +4,8 @@ sidebar_label: Using an inference gateway
 
 # Using an inference gateway
 
+> Background: [How fullsend authenticates](how-fullsend-authenticates.md).
+
 Agents on the [pi](../../runtimes/pi.md), [Claude Code](../../runtimes/claude.md) and
 [Codex](../../runtimes/codex.md) runtimes can reach their models through an
 OpenAI/Anthropic-compatible inference gateway that trusts the job's GitHub Actions OIDC token
@@ -72,9 +74,10 @@ The block's `auth` field names the credential the runner presents. There is no f
 the modes: if the credential for the chosen mode is missing, or the gateway refuses it, the run
 fails.
 
-- **`auth: oidc`** is the default and the recommended mode. The job's GitHub OIDC token, minted
-  for `audience`, is the credential, and no reusable key is stored anywhere. The runner refreshes
-  the token before it expires, so long runs keep working.
+- **`auth: oidc`** is the default and the recommended mode. It is direct OIDC trust (no token
+  exchange): the job's GitHub OIDC token, minted for `audience`, is itself the credential the
+  gateway validates, and no reusable key is stored anywhere. The runner refreshes the token
+  before it expires, so long runs keep working.
 - **`auth: api-key`: use with caution.** It is for a gateway that cannot trust forge OIDC. The
   runner reads the gateway key from `FULLSEND_INFERENCE_GATEWAY_API_KEY`: a repository secret in
   CI, or the environment on a local run. The block needs no `audience` in this mode. It is a

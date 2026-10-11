@@ -1,5 +1,7 @@
 # OpenAI Workload Identity
 
+> Background: [How fullsend authenticates](../getting-started/how-fullsend-authenticates.md).
+
 Run GPT models on the [pi](../../runtimes/pi.md) or [codex](../../runtimes/codex.md) runtime
 without storing an OpenAI API key
 anywhere. Your GitHub Actions job proves who it is with its OIDC token, OpenAI hands back a

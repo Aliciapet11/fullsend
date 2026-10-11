@@ -243,6 +243,10 @@ export default defineConfig({
           collapsed: true,
           link: "/guides/getting-started/",
           items: [
+            {
+              text: "How fullsend authenticates",
+              link: "/guides/getting-started/how-fullsend-authenticates",
+            },
             { text: "Getting Inference", link: "/guides/getting-started/getting-inference" },
             {
               text: "Using an inference gateway",
