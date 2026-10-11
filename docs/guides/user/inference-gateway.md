@@ -39,7 +39,7 @@ For the repo admin:
 
 - The gateway URL and the audience from the operator, and confirmation that your repository is
   on the allowed list.
-- A repository [set up with fullsend](configuring-github.md) on the pi, codex or Claude Code runtime.
+- A repository [set up with fullsend](../getting-started/configuring-github.md) on the pi, codex or Claude Code runtime.
   pi needs the model list below; codex and Claude Code do not need one. See
   [Claude Code § Inference gateway route](../../runtimes/claude.md#inference-gateway-route) and
   [Codex › Models through an inference gateway](../../runtimes/codex.md#models-through-an-inference-gateway-experimental).
@@ -99,7 +99,7 @@ fails.
 The `api-key` mode also applies to local runs: a local `fullsend run` with
 `FULLSEND_INFERENCE_GATEWAY_API_KEY` in its environment takes the same route as CI. The `oidc`
 mode applies only to runs that have a GitHub OIDC endpoint, so a local run without one leaves the
-route to the [harness-plugin setup](../user/running-agents-locally.md#using-an-inference-gateway-experimental).
+route to the [harness-plugin setup](running-agents-locally.md#using-an-inference-gateway-experimental).
 
 For `api-key`, store the key the operator gave you as a repository secret:
 
@@ -299,7 +299,7 @@ If you call fullsend from a workflow of your own, add `id-token: write` to that 
 
 A block with `auth: api-key` also applies to local runs; see [Choosing `auth`](#choosing-auth).
 For pi, the harness-plugin path for local runs is in
-[Running agents locally § Using an inference gateway](../user/running-agents-locally.md#using-an-inference-gateway-experimental).
+[Running agents locally § Using an inference gateway](running-agents-locally.md#using-an-inference-gateway-experimental).
 
 ## Troubleshooting the gateway route
 

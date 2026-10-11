@@ -1,9 +1,9 @@
 # OpenAI Workload Identity
 
-> Background: [How fullsend authenticates](../getting-started/how-fullsend-authenticates.md).
+> Background: [How fullsend authenticates](../user/how-fullsend-authenticates.md).
 
 > **Before you start: who you need.** This page takes up to three roles
-> ([Who does what](../getting-started/how-fullsend-authenticates.md#who-does-what)):
+> ([Who does what](../user/how-fullsend-authenticates.md#who-does-what)):
 >
 > - **OpenAI organization admin**, the provider admin: owns the Workload Identity Provider in
 >   Organization Settings, adds your repository's mapping, and hands over the **audience**, the

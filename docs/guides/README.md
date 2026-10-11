@@ -6,10 +6,8 @@ Practical how-to documentation for fullsend, organized by audience. For design d
 
 Guides for onboarding organizations and configuring GitHub or GitLab — the first thing most users need.
 
-- [How fullsend authenticates](getting-started/how-fullsend-authenticates.md) — Which credential path fullsend uses in each case: the mint, GCP and OpenAI Workload Identity, and the gateway's direct OIDC trust
 - [Mint enrollment](getting-started/README.md) — Enroll your repo in a token mint before configuring anything else
 - [Getting Inference](getting-started/getting-inference.md) — Provision GCP inference access for your org or repo
-- [Using an inference gateway](getting-started/inference-gateway.md) — Reach models through an OpenAI/Anthropic-compatible gateway with direct OIDC trust (no token exchange) or a gateway key
 - [Configuring GitHub](getting-started/configuring-github.md) — Install GitHub Apps and run the setup CLI
 - [Configuring GitLab](getting-started/configuring-gitlab.md) — Install via `repos install --forge gitlab`, runners, polling, and role-credential lifecycle
 
@@ -39,6 +37,8 @@ Advanced guides for platform operators who deploy and manage the GCP-side infras
 Guides for developers working in repositories where fullsend is active.
 
 - [Adopting fullsend incrementally](user/adoption.md) — Crawl, walk, run, fly: incremental adoption path from first agents to auto-merge
+- [How fullsend authenticates](user/how-fullsend-authenticates.md) — Which credential path fullsend uses in each case: the mint, GCP and OpenAI Workload Identity, and the gateway's direct OIDC trust
+- [Using an inference gateway](user/inference-gateway.md) — Reach models through an OpenAI/Anthropic-compatible gateway with direct OIDC trust (no token exchange) or a gateway key
 - [Bugfix workflow](user/bugfix-workflow.md) — End-to-end guide to how fullsend handles a bug report from issue to merge
 - [Issue commands](user/issues-commands.md) — Slash commands and label triggers for interacting with agents
 - [OWNERS file authorization](user/owners-file-authorization.md) — Authorize agent dispatch via Prow-style OWNERS files

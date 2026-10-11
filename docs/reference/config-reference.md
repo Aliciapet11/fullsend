@@ -413,7 +413,7 @@ independently through the layered config system (an overlay can override
   --inference-gateway-*` writes it and changes only the keys you pass, so
   a repository can add its models under a `url` and `audience` inherited
   from `config.base.yaml`. For a walkthrough, see
-  [Using an inference gateway](../guides/getting-started/inference-gateway.md).
+  [Using an inference gateway](../guides/user/inference-gateway.md).
 
 For setup instructions, see
 [Getting Inference](../guides/getting-started/getting-inference.md).

@@ -4,7 +4,7 @@ sidebar_position: 3
 
 # Configuring GitHub For Fullsend
 
-> Background: [How fullsend authenticates](how-fullsend-authenticates.md).
+> Background: [How fullsend authenticates](../user/how-fullsend-authenticates.md).
 
 The goal of this document is that you configure Fullsend for your GitHub repository.
 GitLab repositories use a different command (`fullsend repos install --forge gitlab`).
