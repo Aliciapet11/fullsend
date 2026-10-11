@@ -4,6 +4,7 @@
 #
 # Usage: hack/setup-e2e-inference-gateway.sh [--project <id>] [--region us-east5]
 #            [--with-vertex | --without-vertex] [--dry-run | --print-config]
+#            [--force-busy] [--allow-tpm-change] [--allow-frozen-change]
 #        hack/setup-e2e-inference-gateway.sh [--project <id>] [--region us-east5]
 #            --delete [--yes] [--include-unlabelled]
 #   --project         GCP project (default: $E2E_GCP_PROJECT_ID; no other default)
@@ -22,6 +23,44 @@
 #                     lack the purpose=fullsend-e2e-gateway marker (for example
 #                     a gateway deployed by hand and adopted). Without it, any
 #                     unmarked resource stops the delete before anything goes.
+#
+# Change control: the merge queue and releases call this gateway, so a run
+# that changes its config is guarded (see "Change control" in
+# docs/guides/dev/e2e-testing.md):
+#   - busy check: before the first change of any kind (--delete too),
+#     refuses (exit 6) while a merge_group run of e2e.yml or a release.yml
+#     run is not completed
+#   - frozen-path diff: refuses (exit 4) any config difference except extra
+#     allowlist repositories after the pool list, the REAL_KEY_HASH entry and
+#     its allow rule on a real model, and (with --allow-tpm-change) the
+#     tokens-per-minute cap. The base is the config version that the
+#     revision getting the traffic started with.
+#   - post-deploy check: after any new revision, anonymous calls to every
+#     model and endpoint must be refused and a wrong key must get a 401;
+#     otherwise it prints the served config version and the command that
+#     restores it (exit 5)
+#   --force-busy      skip the busy check (an outage fix only)
+#   --allow-tpm-change
+#                     allow a change of the tokens-per-minute cap
+#   --allow-frozen-change
+#                     allow any config change; only outside a release window,
+#                     with the maintainers told first
+#
+# Optional gateway API keys (the api-key mode, ADR 0138), each given only as
+# its hash, sha256:<64 hex>, never in plaintext:
+#   ECHO_KEY_HASH     a key for the echo model only (E2E_INFERENCE_GATEWAY_TEST_KEY)
+#   REAL_KEY_HASH     a time-boxed key for one real model only, for one local
+#                     run; leave it unset once that run is done
+#   REAL_KEY_MODEL    the model REAL_KEY_HASH may call: claude-haiku-5-5
+#                     (default) or gpt-oss-120b
+# With a key, this TEST gateway runs both modes on one gateway: its OIDC
+# check becomes permissive (a non-JWT bearer goes on to the key check),
+# each model also admits its key's purpose, and the post-deploy probe
+# expects a 401 for a wrong key instead of for no token. That is not a
+# recommended setup: a gateway that only serves the oidc mode keeps strict
+# jwtAuth. Permissive is safe here only because every model's
+# authorization rules admit nothing but a pool repository's token or a
+# configured key, so an anonymous request is refused per model.
 #
 # Idempotent: checks each resource and creates or updates only what is
 # missing or different, then prints what it did. Re-running after a pool
@@ -43,7 +82,8 @@
 # carry the marker purpose=fullsend-e2e-gateway (a label, or the description
 # of the service account); --delete removes unmarked ones only on request.
 #
-# Requires: gcloud (authenticated), skopeo, jq, curl.
+# Requires: gcloud (authenticated), skopeo, jq, curl, and gh (authenticated)
+# for the busy check.
 # See docs/guides/dev/e2e-testing.md#inference-gateway-test-gateway for the
 # IAM roles the operator needs.
 
@@ -61,8 +101,29 @@ POOL_REPOS=(test-repo-01 test-repo-02 test-repo-03 test-repo-04 test-repo-05 tes
 DENIED_REPO="fullsend-e2e-gateway-outside/not-a-pool-repo"
 
 # Real models on Vertex, reached with the runtime service account.
-VERTEX_MODELS=(claude-haiku-5-5 gemini-3.8-flash)
+# gpt-oss-120b is a Vertex MaaS model that serves Responses clients such as
+# Codex through the gateway's Responses-to-Chat-Completions translation.
+# Gemini 3 tool loops through that translation aren't supported on the test
+# gateway, and Claude models take no Responses requests here.
+VERTEX_MODELS=(claude-haiku-5-5 gemini-3.8-flash gpt-oss-120b)
 VERTEX_REGION="global"
+
+# gpt-oss streams an empty first content delta, which the Responses
+# translation keeps as an empty assistant message. Codex replays it, and the
+# model's chat template rejects an assistant message with neither content nor
+# tool calls, so the converted Chat request drops such messages.
+GPTOSS_FINAL="    finalTransformation:
+      messages: 'llmRequest.messages.filter(m, !(m.role == \"assistant\" && (!has(m.content) || type(m.content) == null_type || (type(m.content) == string && m.content == \"\")) && (!has(m.tool_calls) || type(m.tool_calls) == null_type || (type(m.tool_calls) == list && size(m.tool_calls) == 0))))'
+"
+
+# vertex_params prints a Vertex model's params. A MaaS model names its
+# publisher model upstream.
+vertex_params() {
+  case "$1" in
+    gpt-oss-120b) echo "{ vertexProject: ${PROJECT}, vertexRegion: ${VERTEX_REGION}, model: openai/gpt-oss-120b-maas }" ;;
+    *) echo "{ vertexProject: ${PROJECT}, vertexRegion: ${VERTEX_REGION} }" ;;
+  esac
+}
 
 # --- Fixed names and versions ---------------------------------------------
 NAME="fullsend-e2e-gateway"
@@ -79,6 +140,18 @@ ECHO_PORT=9000
 GITHUB_ISSUER="https://token.actions.githubusercontent.com"
 LABEL="purpose=${NAME}"
 
+# Change control: the repository whose runs use the gateway, and the
+# workflows whose merge_group runs call it.
+BUSY_REPO="fullsend-ai/fullsend"
+BUSY_MERGE_GROUP_WORKFLOWS=(e2e.yml)
+BUSY_RELEASE_WORKFLOW="release.yml"
+# The run statuses that mean a run is not completed.
+BUSY_STATUSES=(queued in_progress waiting requested pending)
+# The endpoints the post-deploy check calls on every served model, and the
+# bearer it sends as a wrong API key.
+CHECK_ENDPOINTS=(/v1/chat/completions /v1/messages /v1/responses)
+WRONG_KEY="wrong-key-for-the-post-deploy-check"
+
 # --- Arguments --------------------------------------------------------------
 usage() {
   sed -n '2,/^$/{s/^# \{0,1\}//;p;}' "$0"
@@ -92,6 +165,9 @@ YES=false
 INCLUDE_UNLABELLED=false
 DRY_RUN=false
 PRINT_CONFIG=false
+FORCE_BUSY=false
+ALLOW_TPM_CHANGE=false
+ALLOW_FROZEN_CHANGE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project|--region)
@@ -110,6 +186,9 @@ while [[ $# -gt 0 ]]; do
     --delete) DELETE=true; shift ;;
     --yes) YES=true; shift ;;
     --include-unlabelled) INCLUDE_UNLABELLED=true; shift ;;
+    --force-busy) FORCE_BUSY=true; shift ;;
+    --allow-tpm-change) ALLOW_TPM_CHANGE=true; shift ;;
+    --allow-frozen-change) ALLOW_FROZEN_CHANGE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -127,7 +206,8 @@ if ! [[ "${REGION}" =~ ^[a-z]+-[a-z]+[0-9]+$ ]]; then
   echo "Error: '${REGION}' is not a valid GCP region." >&2
   exit 1
 fi
-if [[ "${DELETE}" == "true" && ( -n "${VERTEX}" || "${DRY_RUN}" == "true" || "${PRINT_CONFIG}" == "true" ) ]]; then
+if [[ "${DELETE}" == "true" && ( -n "${VERTEX}" || "${DRY_RUN}" == "true" || "${PRINT_CONFIG}" == "true" \
+    || "${ALLOW_TPM_CHANGE}" == "true" || "${ALLOW_FROZEN_CHANGE}" == "true" ) ]]; then
   echo "Error: --delete cannot be combined with other modes." >&2
   exit 1
 fi
@@ -159,17 +239,116 @@ pool_cel() {
   printf ']'
 }
 
-# model prints one llm model. Arguments: name, provider, params, CEL rule.
+# Cost cap: per real model, RATE_RPM requests and RATE_TPM tokens per minute.
+# agentgateway v1.6.0 has no per-model limit, so these are llm-wide rules whose
+# CEL key picks the bucket. The request rule runs before the LLM request is
+# parsed and before model authorization, so its key reads the model from the
+# body. Each bucket is a (real model, caller class) pair. The caller class is
+# "pool" for a pool repository's token, "key/<purpose>" for a configured key,
+# and "other" for everyone else, who share a single bucket. So no caller can
+# use up the pool's budget, not even with requests the model then refuses.
+# Unknown model names share one bucket per class, and echo and echo-denied get
+# one bucket per class per second (60 requests a second), so no caller can
+# create enough buckets to evict the others (agentgateway keeps 65,536 per
+# rule) and reset the cap. The token rule is charged after each response (input including
+# cached tokens, plus output). Buckets live in the one instance
+# (max-instances 1) and reset when a new revision starts. A 429 names the limit
+# only in its x-ratelimit-limit and retry-after headers.
+RATE_RPM=60
+RATE_TPM=200000
+ECHO_MODELS='["echo", "echo-denied"]'
+
+# pool_list prints the pool as a CEL list.
+pool_list() {
+  local cel
+  cel=$(pool_cel)
+  printf '%s' "${cel#jwt.repository in }"
+}
+
+# real_list prints the real models as a CEL list.
+real_list() {
+  local m sep=""
+  printf '['
+  for m in "${VERTEX_MODELS[@]}"; do
+    printf '%s"%s"' "${sep}" "${m}"
+    sep=", "
+  done
+  printf ']'
+}
+
+# rate_key prints the bucket key for a CEL expression that yields the model.
+rate_key() {
+  printf '(default(jwt.repository, "") in %s ? "pool" : (default(apiKey.purpose, "") != "" ? "key/" + string(apiKey.purpose) : "other")).with(c, c == "other" ? "other" : (%s in %s ? "echo/" + c + "/" + string(request.startTime).substring(0, 19) : (%s in %s ? string(%s) + "/" + c : "unknown/" + c)))' \
+    "$(pool_list)" "$1" "${ECHO_MODELS}" "$1" "$(real_list)" "$1"
+}
+
+# rate_limit_policy prints the llm localRateLimit policy.
+rate_limit_policy() {
+  printf '    localRateLimit:\n'
+  printf '    - type: requests\n      maxTokens: %s\n      tokensPerFill: %s\n      fillInterval: 60s\n' "${RATE_RPM}" "${RATE_RPM}"
+  printf "      key: 'coalesce(json(request.body).model, \"no-model\").with(m, %s)'\n" "$(rate_key m)"
+  printf '    - type: tokens\n      maxTokens: %s\n      tokensPerFill: %s\n      fillInterval: 60s\n' "${RATE_TPM}" "${RATE_TPM}"
+  printf "      key: '%s'\n" "$(rate_key llm.requestModel)"
+}
+
+# model prints one llm model. Arguments: name, provider, params, CEL rule,
+# an optional second CEL rule (an API key's purpose), and optional extra
+# lines placed before the authorization rules.
 model() {
   cat <<EOF
   - name: $1
     provider: $2
     params: $3
     requestHeaders: { remove: [x-api-key] }
+EOF
+  if [[ -n "${6:-}" ]]; then
+    printf '%s' "$6"
+  fi
+  cat <<EOF
     authorization:
       rules:
       - allow: '$4'
 EOF
+  if [[ -n "${5:-}" ]]; then
+    printf "      - allow: '%s'\n" "$5"
+  fi
+}
+
+ECHO_KEY_HASH="${ECHO_KEY_HASH:-}"
+REAL_KEY_HASH="${REAL_KEY_HASH:-}"
+REAL_KEY_MODEL="${REAL_KEY_MODEL:-claude-haiku-5-5}"
+case "${REAL_KEY_MODEL}" in
+  claude-haiku-5-5|gpt-oss-120b) ;;
+  *) echo "Error: REAL_KEY_MODEL must be claude-haiku-5-5 or gpt-oss-120b." >&2; exit 2 ;;
+esac
+for key_hash in "${ECHO_KEY_HASH}" "${REAL_KEY_HASH}"; do
+  if [[ -n "${key_hash}" && ! "${key_hash}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Error: ECHO_KEY_HASH and REAL_KEY_HASH must be sha256:<64 lowercase hex>, never a plaintext key." >&2
+    exit 1
+  fi
+done
+ECHO_KEY_CEL='apiKey.purpose == "e2e-echo-test"'
+REAL_KEY_CEL='apiKey.purpose == "e2e-real-run"'
+HAS_KEYS=false
+JWT_MODE=strict
+if [[ -n "${ECHO_KEY_HASH}" || -n "${REAL_KEY_HASH}" ]]; then
+  HAS_KEYS=true
+  JWT_MODE=permissive
+fi
+
+# api_key_policy prints the llm apiKey policy for the configured key hashes.
+# jwtAuth runs first and strips a valid JWT, so a key never reaches JWT
+# validation and a JWT never reaches the key check. agentgateway v1.6.0
+# rejects a key budget without config.database, so keys carry none.
+api_key_policy() {
+  [[ "${HAS_KEYS}" == "true" ]] || return 0
+  printf '    apiKey:\n      mode: optional\n      keys:\n'
+  if [[ -n "${ECHO_KEY_HASH}" ]]; then
+    printf '      - keyHash: "%s"\n        metadata: { name: e2e-echo-test, purpose: e2e-echo-test }\n        allowedModels: [echo]\n' "${ECHO_KEY_HASH}"
+  fi
+  if [[ -n "${REAL_KEY_HASH}" ]]; then
+    printf '      - keyHash: "%s"\n        metadata: { name: e2e-real-run, purpose: e2e-real-run }\n        allowedModels: [%s]\n' "${REAL_KEY_HASH}" "${REAL_KEY_MODEL}"
+  fi
 }
 
 # render_config prints the agentgateway config. It must not contain "$":
@@ -212,19 +391,33 @@ llm:
   discovery: disabled
   policies:
     jwtAuth:
-      mode: strict
+      mode: ${JWT_MODE}
       providers:
       - issuer: ${GITHUB_ISSUER}
         audiences: [${AUDIENCE}]
         jwks: { url: ${GITHUB_ISSUER}/.well-known/jwks }
-  models:
 EOF
+  api_key_policy
+  rate_limit_policy
+  echo "  models:"
   if [[ "${VERTEX}" == "with" ]]; then
     for m in "${VERTEX_MODELS[@]}"; do
-      model "${m}" vertex "{ vertexProject: ${PROJECT}, vertexRegion: ${VERTEX_REGION} }" "${pool}"
+      local extra=""
+      if [[ "${m}" == "${REAL_KEY_MODEL}" && -n "${REAL_KEY_HASH}" ]]; then
+        extra="${REAL_KEY_CEL}"
+      fi
+      local final=""
+      if [[ "${m}" == "gpt-oss-120b" ]]; then
+        final="${GPTOSS_FINAL}"
+      fi
+      model "${m}" vertex "$(vertex_params "${m}")" "${pool}" "${extra}" "${final}"
     done
   fi
-  model echo "${echo_provider}" "${echo_params}" "${pool}"
+  local echo_extra=""
+  if [[ -n "${ECHO_KEY_HASH}" ]]; then
+    echo_extra="${ECHO_KEY_CEL}"
+  fi
+  model echo "${echo_provider}" "${echo_params}" "${pool}" "${echo_extra}"
   model echo-denied "${echo_provider}" "${echo_params}" "jwt.repository == \"${DENIED_REPO}\""
 }
 
@@ -245,8 +438,45 @@ die() {
   exit 1
 }
 
+# check_busy exits 6 while a merge_group run of the e2e workflows or a release
+# run is not completed. It asks for each unfinished status, so no run hides
+# behind a page of completed ones. A failed lookup stops the script: an
+# unknown state is not an idle gateway.
+check_busy() {
+  local wf st runs found busy=()
+  command -v gh &>/dev/null \
+    || die "gh is required for the busy check. Pass --force-busy only for an outage fix."
+  for wf in "${BUSY_MERGE_GROUP_WORKFLOWS[@]}" "${BUSY_RELEASE_WORKFLOW}"; do
+    local event_args=()
+    if [[ "${wf}" != "${BUSY_RELEASE_WORKFLOW}" ]]; then
+      event_args=(--event merge_group)
+    fi
+    for st in "${BUSY_STATUSES[@]}"; do
+      runs=$(gh run list --repo "${BUSY_REPO}" --workflow "${wf}" ${event_args[@]+"${event_args[@]}"} \
+          --status "${st}" --limit 20 --json databaseId,status,url 2>"${TMP}/gh.err") \
+        || die "could not list ${st} ${wf} runs in ${BUSY_REPO}: $(cat "${TMP}/gh.err")"
+      jq -e 'type == "array"' <<<"${runs}" >/dev/null 2>&1 \
+        || die "the ${st} ${wf} run list from gh is not a JSON array, so the gateway may be in use."
+      found=$(jq -r --arg wf "${wf}" '.[] | "\($wf) run \(.databaseId) is \(.status): \(.url)"' <<<"${runs}") \
+        || die "could not read the ${wf} run list."
+      if [[ -n "${found}" ]]; then
+        busy+=("${found}")
+      fi
+    done
+  done
+  if (( ${#busy[@]} > 0 )); then
+    printf '%s\n' "${busy[@]}" | sed 's/^/    busy: /' >&2
+    echo "    ERROR: the gateway is in use; nothing changed. Re-run when these runs finish, or pass --force-busy for an outage fix only." >&2
+    exit 6
+  fi
+  ok "no merge_group e2e run or release run is using the gateway"
+}
+
 # change records a change and runs its command, or only prints it with
-# --dry-run. Arguments: description, command...
+# --dry-run. Before the first real change the busy check runs, so nothing
+# changes while the merge queue or a release uses the gateway. Arguments:
+# description, command...
+BUSY_CHECKED=false
 change() {
   local what="$1"
   shift
@@ -254,6 +484,14 @@ change() {
   if [[ "${DRY_RUN}" == "true" ]]; then
     say "WOULD: ${what}"
     return 0
+  fi
+  if [[ "${BUSY_CHECKED}" != "true" ]]; then
+    BUSY_CHECKED=true
+    if [[ "${FORCE_BUSY}" == "true" ]]; then
+      say "WARNING: busy check skipped (--force-busy)"
+    else
+      check_busy
+    fi
   fi
   "$@" >/dev/null
   say "CHANGED: ${what}"
@@ -488,6 +726,165 @@ if [[ -z "${VERTEX}" ]]; then
   VERTEX=without
 fi
 
+# --- Change control -------------------------------------------------------------
+# The merge queue and releases call this gateway on every run, so a run that
+# changes its config is checked before anything changes: the config must
+# differ from the live one only where a change is allowed, and nothing may be
+# using the gateway.
+
+# mask_config prints a config with the allowed changes masked out: extra
+# allowlist repositories after the pool list (temporary repositories added to
+# the live config), the time-boxed real key's entry when it may call exactly
+# one real model, its allow rule inside a real model's block, and, with
+# --allow-tpm-change, the tokens-per-minute cap. The real key's rule on echo
+# or echo-denied, or a real key that may call another model, stays visible.
+# The header line that counts the pool stays unmasked, so a smaller pool
+# cannot pass as removed extra repositories.
+mask_config() {
+  local pool
+  pool=$(pool_list)
+  jq -Rrs --arg pool "${pool%]}" --argjson tpm "${ALLOW_TPM_CHANGE}" \
+    --argjson real "$(printf '%s\n' "${VERTEX_MODELS[@]}" | jq -R . | jq -sc .)" \
+    --arg allow "      - allow: '${REAL_KEY_CEL}'" '
+    (split($pool) | [.[0]] + (.[1:] | map(sub("^(, \"[^\"]*\")*\\]"; "]"))) | join($pool))
+    | split("\n") | . as $l
+    | def real_model($m): $m != null and ($real | index([$m])) != null;
+      reduce range(0; length) as $i ({out: [], skip: 0, type: "", model: null};
+        . as $st
+        | if .skip > 0 then .skip -= 1
+        elif ($l[$i] | test("^      - keyHash: "))
+            and (($l[$i + 1] // "") | test("purpose: e2e-real-run }$"))
+            and real_model(((($l[$i + 2] // "") | capture("^        allowedModels: \\[(?<m>[^],]+)\\]$")) // {}).m)
+          then .skip = 2
+        elif $l[$i] == $allow and real_model($st.model) then .
+        else
+          (if ($l[$i] | test("^  - name: ")) then .model = ($l[$i] | ltrimstr("  - name: ")) else . end)
+          | (if ($l[$i] | test("^    - type: ")) then .type = ($l[$i] | ltrimstr("    - type: ")) else . end)
+          | .out += [if $tpm and .type == "tokens" and ($l[$i] | test("^      (maxTokens|tokensPerFill): [0-9]+$"))
+              then ($l[$i] | sub("[0-9]+$"; "<tokens-per-minute>")) else $l[$i] end]
+        end)
+    | .out | join("\n")' "$1"
+}
+
+echo "==> Change control..."
+render_config > "${TMP}/config.yaml"
+if grep -q '\$' "${TMP}/config.yaml"; then
+  die "rendered config contains '\$', which agentgateway would expand."
+fi
+# created_after reports whether RFC 3339 timestamp $1 is later than $2, to the
+# nanosecond. It exits on a timestamp it cannot parse.
+created_after() {
+  local result
+  result=$(jq -rn --arg a "$1" --arg b "$2" '
+    def norm: (capture("^(?<s>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.(?<f>[0-9]+))?Z$")
+        // error("unparseable timestamp"))
+      | .s + "." + (((.f // "") + "000000000")[0:9]);
+    ($a | norm) > ($b | norm)') || die "could not compare timestamps '$1' and '$2'."
+  [[ "${result}" == "true" ]]
+}
+
+# LIVE_VERSION is the config secret version the serving revision started
+# with: the base for the frozen-path diff and the one to restore if the
+# post-deploy check fails. The serving revision is the one that gets the
+# service's traffic. It mounts the secret's latest version, so it started
+# with the newest version created before it was, and the post-deploy check
+# of the run that rolled it verified that version. A version added after the
+# revision is a pending rollout. An instance that restarts may already load
+# it, so the script warns about it, but it was never verified, so it is not
+# the rollback baseline.
+LIVE_VERSION=""
+config_will_change=true
+if describe run services describe "${NAME}" --region="${REGION}"; then
+  svc_status="${DESCRIBED}"
+  serving_revisions=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0) | .revisionName // empty]
+      | unique | join(" ")' <<<"${svc_status}")
+  if [[ "${serving_revisions}" == *" "* ]]; then
+    die "the traffic of ${NAME} is split across revisions ${serving_revisions}, so the live config is ambiguous; nothing changed. Send all traffic to one revision first."
+  fi
+  serving="${serving_revisions:-$(jq -r '.status.latestReadyRevisionName // empty' <<<"${svc_status}")}"
+  if [[ -z "${serving}" ]]; then
+    say "service ${NAME} has no ready revision, so there is no served config to compare"
+  elif describe secrets describe "${CONFIG_SECRET}"; then
+    describe run revisions describe "${serving}" --region="${REGION}" \
+      || die "revision ${serving} of ${NAME} not found."
+    rev_time=$(jq -r '.metadata.creationTimestamp // empty' <<<"${DESCRIBED}")
+    [[ -n "${rev_time}" ]] || die "revision ${serving} has no creation time."
+    # The config secret version the revision mounts as CONFIG_DIR/config.yaml:
+    # "latest", or a number when the revision is pinned to one version. A
+    # mount the script cannot read stops the run: the served config is unknown.
+    mounted_version=$(jq -r --arg dir "${CONFIG_DIR}" --arg sec "${CONFIG_SECRET}" '
+        [.spec.containers[0].volumeMounts[]? | select(.mountPath == $dir) | .name] as $names
+        | [.spec.volumes[]? | select((.name as $n | $names | index($n)) and .secret.secretName == $sec)
+            | .secret.items[]? | select(.path == "config.yaml") | .key] | first // empty' <<<"${DESCRIBED}")
+    if [[ "${mounted_version}" != "latest" && ! "${mounted_version}" =~ ^[0-9]+$ ]]; then
+      die "revision ${serving} mounts no readable version of secret ${CONFIG_SECRET} as ${CONFIG_DIR}/config.yaml (found '${mounted_version}'), so the served config is unknown; nothing changed."
+    fi
+    gc secrets versions list "${CONFIG_SECRET}" --format=json >"${TMP}/versions.json" 2>"${TMP}/versions.err" \
+      || die "could not list the versions of secret ${CONFIG_SECRET}: $(cat "${TMP}/versions.err")"
+    versions=$(jq -r '.[] | [(.name | split("/") | last), .createTime, .state] | @tsv' "${TMP}/versions.json") \
+      || die "could not read the versions of secret ${CONFIG_SECRET}."
+    live_state=""
+    pending=()
+    while IFS=$'\t' read -r v v_time v_state; do
+      [[ "${v}" =~ ^[0-9]+$ ]] || continue
+      if [[ "${mounted_version}" =~ ^[0-9]+$ ]]; then
+        # A pinned revision serves exactly the version it names.
+        if [[ "${v}" == "${mounted_version}" ]]; then
+          LIVE_VERSION="${v}"
+          live_state="${v_state}"
+        fi
+      elif created_after "${v_time}" "${rev_time}"; then
+        if [[ "${v_state}" == "ENABLED" ]]; then
+          pending+=("${v}")
+        fi
+      elif [[ -z "${LIVE_VERSION}" || "${v}" -gt "${LIVE_VERSION}" ]]; then
+        LIVE_VERSION="${v}"
+        live_state="${v_state}"
+      fi
+    done <<<"${versions}"
+    if (( ${#pending[@]} > 0 )); then
+      say "WARNING: version(s) ${pending[*]} of secret ${CONFIG_SECRET} came after revision ${serving}; a restarted instance may already serve the newest. The diff and the restore use version ${LIVE_VERSION:-none}, which the revision started with."
+    fi
+    [[ -n "${LIVE_VERSION}" ]] \
+      || die "no version of secret ${CONFIG_SECRET} predates revision ${serving}, so the served config is unknown."
+    if [[ "${live_state}" != "ENABLED" ]]; then
+      die "revision ${serving} loaded version ${LIVE_VERSION} of secret ${CONFIG_SECRET}, which is ${live_state}, so it can be neither compared nor restored. Choose a rollback baseline first: enable that version, or roll a revision onto an enabled one."
+    fi
+    gc secrets versions access "${LIVE_VERSION}" --secret="${CONFIG_SECRET}" \
+        >"${TMP}/live.yaml" 2>"${TMP}/access.err" \
+      || die "could not read version ${LIVE_VERSION} of secret ${CONFIG_SECRET}: $(cat "${TMP}/access.err")"
+    if cmp -s "${TMP}/live.yaml" "${TMP}/config.yaml"; then
+      config_will_change=false
+    fi
+  fi
+fi
+if [[ "${config_will_change}" != "true" ]]; then
+  ok "config matches version ${LIVE_VERSION}, which the serving revision started with"
+elif [[ -z "${LIVE_VERSION}" ]]; then
+  say "no live config to compare: no serving revision has loaded a config yet"
+else
+  mask_config "${TMP}/live.yaml" > "${TMP}/live.masked"
+  mask_config "${TMP}/config.yaml" > "${TMP}/config.masked"
+  if cmp -s "${TMP}/live.masked" "${TMP}/config.masked"; then
+    ok "config differs from version ${LIVE_VERSION} only where a change is allowed"
+  else
+    {
+      echo "--- live config (version ${LIVE_VERSION})"
+      echo "+++ new config"
+      diff -u "${TMP}/live.masked" "${TMP}/config.masked" | tail -n +3 | head -n 80 || true
+    } | sed 's/^/    | /' >&2
+    if [[ "${ALLOW_FROZEN_CHANGE}" == "true" ]]; then
+      say "WARNING: changing a frozen part of the config (--allow-frozen-change)"
+    else
+      echo "    ERROR: the config change above touches a frozen part of the gateway config; nothing changed." >&2
+      echo "    Pass --allow-tpm-change for a tokens-per-minute change. Any other change needs" >&2
+      echo "    --allow-frozen-change, outside a release window and with the maintainers told first." >&2
+      exit 4
+    fi
+  fi
+fi
+echo
+
 # --- 2. Artifact Registry repository ---------------------------------------
 echo "==> Artifact Registry repository ${NAME}..."
 if describe artifacts repositories describe "${NAME}" --location="${REGION}"; then
@@ -563,6 +960,7 @@ else
       --display-name="fullsend e2e inference gateway runtime" --description="${LABEL}"
 fi
 
+VERTEX_GRANT_REMOVED=false
 if [[ "${VERTEX}" == "with" ]]; then
   if [[ "${has_vertex_grant}" == "true" ]]; then
     ok "service account has roles/aiplatform.user"
@@ -575,6 +973,7 @@ elif [[ "${has_vertex_grant}" == "true" ]]; then
   change "removed roles/aiplatform.user from ${SA_EMAIL}" \
     gc projects remove-iam-policy-binding "${PROJECT}" \
       --member="${SA_MEMBER}" --role=roles/aiplatform.user --condition=None
+  VERTEX_GRANT_REMOVED=true
 else
   ok "service account has no Vertex grant (--without-vertex)"
 fi
@@ -625,10 +1024,6 @@ ensure_secret() {
 }
 
 echo "==> Secrets..."
-render_config > "${TMP}/config.yaml"
-if grep -q '\$' "${TMP}/config.yaml"; then
-  die "rendered config contains '\$', which agentgateway would expand."
-fi
 say "rendered config sha256 $(sha256 < "${TMP}/config.yaml")"
 ensure_secret "${CONFIG_SECRET}" "${TMP}/config.yaml"
 CONFIG_CHANGED="${SECRET_CHANGED}"
@@ -642,6 +1037,7 @@ echo
 
 # --- 6. Cloud Run service -----------------------------------------------------
 echo "==> Cloud Run service ${NAME}..."
+service_changes_before=${#CHANGES[@]}
 deploy_args=(
   run deploy "${NAME}"
   --region="${REGION}"
@@ -691,18 +1087,6 @@ spec_drift() {
 
 ready_of() {
   jq -r '[.status.conditions[]? | select(.type == "Ready") | .status][0] // "Unknown"'
-}
-
-# created_after reports whether RFC 3339 timestamp $1 is later than $2, to the
-# nanosecond. It exits on a timestamp it cannot parse.
-created_after() {
-  local result
-  result=$(jq -rn --arg a "$1" --arg b "$2" '
-    def norm: (capture("^(?<s>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.(?<f>[0-9]+))?Z$")
-        // error("unparseable timestamp"))
-      | .s + "." + (((.f // "") + "000000000")[0:9]);
-    ($a | norm) > ($b | norm)') || die "could not compare timestamps '$1' and '$2'."
-  [[ "${result}" == "true" ]]
 }
 
 # secrets_newer_than_revision reports whether either secret's latest version
@@ -801,10 +1185,11 @@ else
 fi
 
 # probe sends one request and expects a 401 from the gateway itself (not an
-# HTML page from Cloud Run's front end). It prints the real status and body.
+# HTML page from Cloud Run's front end) whose text/plain body starts with
+# the given prefix. It prints the real status and body.
 probe() {
-  local label="$1"
-  shift
+  local label="$1" prefix="$2"
+  shift 2
   local status ctype body
   : > "${TMP}/probe.body"
   status=$(curl -sS -m 30 -o "${TMP}/probe.body" -w '%{http_code} %{content_type}' "$@" "${URL}/v1/models") \
@@ -820,17 +1205,93 @@ probe() {
   elif [[ "${ctype}" == text/html* ]] || grep -qi '<html' "${TMP}/probe.body"; then
     echo "    FAIL: 401 is an HTML page; the invoker IAM check is still on." >&2
     verify_failed=1
-  elif [[ "${ctype}" != text/plain* ]] || ! grep -q '^authentication failure: ' "${TMP}/probe.body"; then
+  elif [[ "${ctype}" != text/plain* ]] || ! grep -q "^${prefix}" "${TMP}/probe.body"; then
     echo "    FAIL: 401 is not agentgateway's text/plain authentication failure." >&2
     verify_failed=1
   fi
 }
-if [[ -n "${URL}" ]]; then
-  probe "no token"
-  probe "x-api-key only" -H "x-api-key: ${STUB_UPSTREAM_KEY}"
-  probe "non-JWT bearer" -H "authorization: Bearer not-a-jwt"
+if [[ -n "${URL}" && "${HAS_KEYS}" == "true" ]]; then
+  # With keys, no credential passes authentication (and is refused per
+  # model), so the probe that must fail is a bearer that is neither a
+  # valid JWT nor a configured key.
+  probe "wrong key" 'api key authentication failure: ' -H "authorization: Bearer not-a-configured-key"
+elif [[ -n "${URL}" ]]; then
+  probe "no token" 'authentication failure: '
+  probe "x-api-key only" 'authentication failure: ' -H "x-api-key: ${STUB_UPSTREAM_KEY}"
+  probe "non-JWT bearer" 'authentication failure: ' -H "authorization: Bearer not-a-jwt"
 fi
 echo
+
+# --- 8. Post-deploy check -----------------------------------------------------
+# After this run rolled or created a revision, every served model is called
+# on each endpoint with
+# no credential, and must refuse it: a 403 from its authorization rules when
+# keys make jwtAuth permissive (the durable gateway), a 401 from strict
+# jwtAuth otherwise. Then a wrong API key must get a 401. A failure points at
+# the config version to restore.
+post_failed=0
+
+# request_body prints a minimal request for an endpoint and model.
+request_body() {
+  case "$1" in
+    /v1/responses) jq -nc --arg m "$2" '{model: $m, max_output_tokens: 16, input: "ping"}' ;;
+    *) jq -nc --arg m "$2" '{model: $m, max_tokens: 1, messages: [{role: "user", content: "ping"}]}' ;;
+  esac
+}
+
+# check_call LABEL WANT ENDPOINT MODEL [CURL_ARGS...] posts one request and
+# expects HTTP status WANT.
+check_call() {
+  local label="$1" want="$2" endpoint="$3" model="$4" status
+  shift 4
+  status=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST \
+      -H "content-type: application/json" "$@" \
+      --data "$(request_body "${endpoint}" "${model}")" "${URL}${endpoint}") \
+    || status="curl-failed"
+  if [[ "${status}" == "${want}" ]]; then
+    ok "${label}: POST ${endpoint} model ${model} -> HTTP ${status}"
+  else
+    echo "    FAIL: ${label}: POST ${endpoint} model ${model} -> HTTP ${status}, expected ${want}." >&2
+    post_failed=1
+  fi
+}
+
+# restore_command prints the one command that makes the previous config
+# version the latest again and rolls a revision onto it. If this run removed
+# the Vertex grant, the command grants it again first, because the restored
+# config serves the Vertex models.
+restore_command() {
+  local file="${CONFIG_SECRET}-v${LIVE_VERSION}.yaml"
+  if [[ "${VERTEX_GRANT_REMOVED}" == "true" ]]; then
+    printf '%s' "gcloud projects add-iam-policy-binding ${PROJECT} --member=${SA_MEMBER} --role=roles/aiplatform.user --condition=None && "
+  fi
+  printf '%s' "gcloud secrets versions access ${LIVE_VERSION} --secret=${CONFIG_SECRET} --project=${PROJECT} > ${file}" \
+    " && gcloud secrets versions add ${CONFIG_SECRET} --project=${PROJECT} --data-file=${file}" \
+    " && gcloud run services update ${NAME} --project=${PROJECT} --region=${REGION}" \
+    " --update-secrets=${CONFIG_DIR}/config.yaml=${CONFIG_SECRET}:latest,${KEY_DIR}/key=${KEY_SECRET}:latest"
+}
+
+if (( ${#CHANGES[@]} > service_changes_before )) && [[ "${DRY_RUN}" != "true" && -z "${URL}" ]]; then
+  echo "    FAIL: the service has a new revision but no URL, so the post-deploy check cannot run." >&2
+  post_failed=1
+elif (( ${#CHANGES[@]} > service_changes_before )) && [[ "${DRY_RUN}" != "true" ]]; then
+  echo "==> Post-deploy check..."
+  anon_status=401
+  if [[ "${HAS_KEYS}" == "true" ]]; then
+    anon_status=403
+  fi
+  check_models=(echo)
+  if [[ "${VERTEX}" == "with" ]]; then
+    check_models=("${VERTEX_MODELS[@]}" echo)
+  fi
+  for m in "${check_models[@]}"; do
+    for endpoint in "${CHECK_ENDPOINTS[@]}"; do
+      check_call "no credential" "${anon_status}" "${endpoint}" "${m}"
+    done
+  done
+  check_call "wrong key" 401 /v1/chat/completions echo -H "authorization: Bearer ${WRONG_KEY}"
+  echo
+fi
 
 # --- Summary ------------------------------------------------------------------
 if (( ${#CHANGES[@]} == 0 )); then
@@ -844,8 +1305,8 @@ else
 fi
 echo
 if [[ -n "${URL}" ]]; then
-  echo "==> Behaviour test settings (set the URL as a variable in the dev and stage"
-  echo "    environments; it embeds the project number, so never commit it):"
+  echo "==> Behaviour test settings (set the URL as a repository secret; it embeds"
+  echo "    the project number, so never commit it):"
   echo
   echo "    E2E_INFERENCE_GATEWAY_URL=${URL}"
   echo "    E2E_INFERENCE_GATEWAY_AUDIENCE=${AUDIENCE}"
@@ -858,6 +1319,18 @@ fi
 # they would fix.
 if [[ "${DRY_RUN}" == "true" && ${#CHANGES[@]} -gt 0 ]]; then
   exit 3
+fi
+if (( post_failed > 0 )); then
+  echo >&2
+  echo "==> Post-deploy check failed; see FAIL lines above." >&2
+  if [[ -n "${LIVE_VERSION}" ]]; then
+    echo "    The previous config is version ${LIVE_VERSION} of secret ${CONFIG_SECRET}. Restore it with:" >&2
+    echo >&2
+    echo "    $(restore_command)" >&2
+  else
+    echo "    There is no previous config version to restore: this run created the config." >&2
+  fi
+  exit 5
 fi
 if (( verify_failed > 0 )); then
   echo >&2

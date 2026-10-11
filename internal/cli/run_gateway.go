@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/fullsend-ai/fullsend/internal/config"
+	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/inference/actionsoidc"
 )
 
@@ -53,8 +55,10 @@ var (
 // With the defaults that is 3*10 s + 2*5 s + 90 s = 130 s of work, plus
 // gatewayRefreshSafety = 145 s, inside the 150 s lead of a 300 s token.
 // It budgets the expected path: the seed and verify execs after the settle
-// wait each have their own timeout, which it does not count, and a
-// hand-off that misses the budget is retried on its own (runGatewayRefresh).
+// wait each have their own timeout, which it does not count (one hand-off
+// is bounded by handOffTimeout). A settle wait that runs out fails
+// the route closed rather than retrying (runGatewayRefresh); a seed or
+// verify failure is retried on its own.
 func gatewayRefreshWork() time.Duration {
 	attempts := time.Duration(gatewayRefreshRetries + 1)
 	return attempts*gatewayFetchTimeout + time.Duration(gatewayRefreshRetries)*gatewayRefreshBackoff + openAIPlaceholderSettle
@@ -113,11 +117,11 @@ func anyGatewayModel(models []string) bool {
 }
 
 // gatewayRouteRuntimes are the runtimes that implement the gateway route.
-var gatewayRouteRuntimes = []string{"pi"}
+var gatewayRouteRuntimes = []string{"pi", "codex", "claude"}
 
 // validateGatewayRuntime refuses a gateway/ model on a runtime without the
-// route (Claude Code, Codex): the model would otherwise fail later with an
-// unknown provider, or worse reach a different credential.
+// route: the model would otherwise fail later with an unknown provider, or
+// worse reach a different credential.
 func validateGatewayRuntime(runtimeName string, models []string) error {
 	if !anyGatewayModel(models) {
 		return nil
@@ -130,6 +134,61 @@ func validateGatewayRuntime(runtimeName string, models []string) error {
 	return fmt.Errorf("gateway/ models need the inference gateway route, which runtime %q does not implement (supported: %s)", runtimeName, strings.Join(gatewayRouteRuntimes, ", "))
 }
 
+// validateClaudeGatewayModels checks the gateway/ models of a Claude Code
+// run: each must name a model after the prefix, and the run needs a block
+// that applies. Claude Code has no harness-side way to reach a gateway (pi
+// has the extension as a plugin), so without the runner's route a gateway/
+// model would reach Vertex, or an endpoint set by hand, as a literal id.
+func validateClaudeGatewayModels(models []string, block config.InferenceGatewayConfig, applies bool) error {
+	if !anyGatewayModel(models) {
+		return nil
+	}
+	for _, m := range models {
+		if !isGatewayModel(m) {
+			continue
+		}
+		if _, id, _ := strings.Cut(strings.TrimSpace(m), "/"); strings.TrimSpace(id) == "" {
+			return fmt.Errorf("model %q names no gateway model after the gateway/ prefix", m)
+		}
+	}
+	if applies {
+		return nil
+	}
+	switch {
+	case block.IsZero():
+		return errors.New("gateway/ models on the claude runtime need an inference.gateway block in .fullsend/config.yaml; configure one with 'fullsend github setup --inference-gateway-url ...'")
+	case !block.IsAPIKey():
+		return errors.New("gateway/ models on the claude runtime need the inference.gateway block to apply, and the oidc mode applies only on a run with a forge OIDC endpoint (a GitHub Actions job with id-token: write); use auth: api-key for a local run")
+	}
+	return errors.New("gateway/ models on the claude runtime need an inference.gateway block that applies to this run")
+}
+
+// validateClaudeGatewayFallbacks checks a Claude Code run's fallback chain
+// after models.aliases, as buildRunCommand remaps it. On the gateway route
+// every fallback goes to the gateway, so a gateway/ entry is fine there.
+// Off the route Claude Code would send a gateway/ entry to Vertex as a
+// literal id, so it is refused: the route is selected by the run's own
+// model, never by a fallback. On either side a gateway/ entry must name a
+// model, or Claude Code would get an empty fallback id.
+func validateClaudeGatewayFallbacks(parentGateway bool, fallbacks []string, aliases map[string]string) error {
+	for _, fb := range fallbacks {
+		target := fb
+		if id, ok := aliases[fb]; ok {
+			target = id
+		}
+		if !isGatewayModel(target) {
+			continue
+		}
+		if _, id, _ := strings.Cut(strings.TrimSpace(target), "/"); strings.TrimSpace(id) == "" {
+			return fmt.Errorf("fallback model %q names no gateway model after the gateway/ prefix", fb)
+		}
+		if !parentGateway {
+			return fmt.Errorf("fallback model %q selects the inference gateway, but the run's own model does not; on the claude runtime only the run's model selects the gateway route, and every fallback then goes to the gateway too", fb)
+		}
+	}
+	return nil
+}
+
 // gatewayOIDCEnvFn returns the forge OIDC endpoint the runner fetches
 // assertions from: ACTIONS_ID_TOKEN_REQUEST_URL and
 // ACTIONS_ID_TOKEN_REQUEST_TOKEN. Override in tests to stub the endpoint
@@ -139,23 +198,59 @@ var gatewayOIDCEnvFn = func() (requestURL, requestToken string) {
 }
 
 // gatewayBlockApplies reports whether the runner owns the gateway route
-// for this run: a complete inference.gateway block and a run with a forge
-// OIDC endpoint. A partial block is an error. With no block, or without an
-// OIDC endpoint (a local run), the runner adds nothing for gateway/ models,
-// so the harness-plugin setup in the local guide keeps working.
+// for this run. A partial block is an error. In the oidc mode (the
+// default) the block applies only on a run with a forge OIDC endpoint:
+// with no block, or without an endpoint (a local run), the runner adds
+// nothing for gateway/ models, so the harness-plugin setup in the local
+// guide keeps working. In the api-key mode the block applies on every
+// run, local runs included, so the runner owns the setup there too.
 func gatewayBlockApplies(g config.InferenceGatewayConfig) (bool, error) {
 	g = g.Trimmed()
 	if g.IsZero() {
 		return false, nil
 	}
 	if missing := g.Missing(); len(missing) > 0 {
-		return false, fmt.Errorf("inference.gateway is partial: missing %s (url and audience are all or none)", strings.Join(missing, " and "))
+		return false, fmt.Errorf("inference.gateway is partial: missing %s (the %s mode needs url%s)", strings.Join(missing, " and "), g.EffectiveAuth(), gatewayAudienceHint(g))
 	}
 	if err := g.Validate(); err != nil {
 		return false, err
 	}
+	if g.IsAPIKey() {
+		return true, nil
+	}
 	reqURL, _ := gatewayOIDCEnvFn()
 	return reqURL != "", nil
+}
+
+// gatewayAudienceHint names audience in a partial-block error when the
+// block's mode requires it.
+func gatewayAudienceHint(g config.InferenceGatewayConfig) string {
+	if g.IsAPIKey() {
+		return ""
+	}
+	return " and audience"
+}
+
+// gatewayAPIKeyEnv is where the api-key mode reads the gateway API key: a
+// forge secret in CI or the local environment. It is never written to
+// config.
+const gatewayAPIKeyEnv = forge.SecretInferenceGatewayAPIKey
+
+// gatewayAPIKeyEnvFn reads gatewayAPIKeyEnv. Override in tests.
+var gatewayAPIKeyEnvFn = func() string { return os.Getenv(gatewayAPIKeyEnv) }
+
+// gatewayAPIKey returns the api-key mode's credential. A missing key fails
+// the run: there is no fallback to the oidc mode, the openai provider, WIF
+// or a static OpenAI key. The error never carries the value.
+func gatewayAPIKey() (string, error) {
+	key := strings.TrimSpace(gatewayAPIKeyEnvFn())
+	if key == "" {
+		return "", fmt.Errorf("inference.gateway.auth is %q but %s is not set; set it as a forge secret (or in the local environment)", config.GatewayAuthAPIKey, gatewayAPIKeyEnv)
+	}
+	if strings.ContainsAny(key, "\r\n\x00") {
+		return "", fmt.Errorf("%s holds a control character; refusing to use it", gatewayAPIKeyEnv)
+	}
+	return key, nil
 }
 
 // fetchGatewayAssertionFn fetches the job's OIDC assertion (defaults to

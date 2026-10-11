@@ -8,6 +8,7 @@ Guides for onboarding organizations and configuring GitHub or GitLab — the fir
 
 - [Mint enrollment](getting-started/README.md) — Enroll your repo in a token mint before configuring anything else
 - [Getting Inference](getting-started/getting-inference.md) — Provision GCP inference access for your org or repo
+- [Using an inference gateway](getting-started/inference-gateway.md) — Reach models through an OpenAI/Anthropic-compatible gateway with GitHub OIDC or a gateway key
 - [Configuring GitHub](getting-started/configuring-github.md) — Install GitHub Apps and run the setup CLI
 - [Configuring GitLab](getting-started/configuring-gitlab.md) — Install via `repos install --forge gitlab`, runners, polling, and role-credential lifecycle
 
@@ -30,6 +31,7 @@ Advanced guides for platform operators who deploy and manage the GCP-side infras
 - [Gate binaries](infrastructure/gate-binaries.md) — Building statically linked binaries for custom endpoint access constraints beyond L4/L7 rules
 - [Tracing reference](infrastructure/distributed-tracing.md) — Telemetry levels, environment variables, span hierarchy, and attributes
 - [Eval measurements](infrastructure/eval-measurements.md) — Online trace scoring with `eval-measurements.jsonl` and measurement manifests
+- [Inference gateway operator guide](infrastructure/inference-gateway-operator.md) — Run an agentgateway inference gateway on Cloud Run that trusts GitHub Actions OIDC, for `gateway/` models on pi, codex and Claude Code
 
 ## User guides
 

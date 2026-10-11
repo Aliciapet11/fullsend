@@ -82,9 +82,27 @@ func TestPlanGatewayRoute(t *testing.T) {
 		assert.Nil(t, plan.prepared)
 		assert.True(t, plan.seed.IsZero())
 	})
-	t.Run("a gateway model on Claude Code is an error", func(t *testing.T) {
-		_, err := planGatewayRoute(rc, claude, "fs-plan-claude", []string{"gateway/m1"}, false)
-		assert.ErrorContains(t, err, "does not implement")
+	t.Run("Claude Code on a gateway model prepares the runtime", func(t *testing.T) {
+		const sb = "fs-plan-claude"
+		plan, err := planGatewayRoute(rc, claude, sb, []string{"gateway/claude-haiku-5-5"}, true)
+		require.NoError(t, err)
+		require.NotNil(t, plan)
+		t.Cleanup(func() { plan.prepared.ClearGatewayRun(sb) })
+		require.NotNil(t, plan.prepared)
+		assert.Equal(t, runtime.ClaudeRuntime{}.GatewayCredentialSeed(), plan.seed)
+		assert.Equal(t, gatewayProfile{host: "gw.example.com", claude: true}, plan.profileSpec())
+	})
+	t.Run("Claude Code with no gateway model keeps its route", func(t *testing.T) {
+		plan, err := planGatewayRoute(rc, claude, "fs-plan-claude-vertex", []string{"opus"}, false)
+		require.NoError(t, err)
+		assert.Nil(t, plan)
+	})
+	t.Run("a gateway model on Claude Code without a block is an error", func(t *testing.T) {
+		_, err := planGatewayRoute(runConfig{}, claude, "fs-plan-claude-nocfg", []string{"gateway/m1"}, true)
+		assert.ErrorContains(t, err, "need an inference.gateway block")
+		none := gatewayTestRunConfig(t, "version: \"1\"\n", nil)
+		_, err = planGatewayRoute(none, claude, "fs-plan-claude-noblock", []string{"gateway/m1"}, true)
+		assert.ErrorContains(t, err, "need an inference.gateway block")
 	})
 	t.Run("no config file", func(t *testing.T) {
 		plan, err := planGatewayRoute(runConfig{}, pi, "fs-plan-nocfg", []string{"gateway/m1"}, true)
@@ -107,6 +125,42 @@ func TestPlanGatewayRoute(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, plan)
 	})
+	t.Run("a local oidc run is an error on Claude Code", func(t *testing.T) {
+		stubGatewayOIDC(t, "", "")
+		_, err := planGatewayRoute(rc, claude, "fs-plan-claude-local", []string{"gateway/m1"}, true)
+		assert.ErrorContains(t, err, "auth: api-key for a local run")
+	})
+	t.Run("a local api-key run on Claude Code uses the Claude Code profile", func(t *testing.T) {
+		stubGatewayOIDC(t, "", "")
+		keyed := gatewayTestRunConfig(t, "version: \"1\"\ninference:\n  gateway:\n    url: https://gw.example.com\n    auth: api-key\n", nil)
+		const sb = "fs-plan-claude-key"
+		plan, err := planGatewayRoute(keyed, claude, sb, []string{"gateway/m1"}, true)
+		require.NoError(t, err)
+		require.NotNil(t, plan)
+		t.Cleanup(func() { plan.prepared.ClearGatewayRun(sb) })
+		assert.Equal(t, gatewayProfile{host: "gw.example.com", claude: true}, plan.profileSpec())
+	})
+	t.Run("codex on a gateway model prepares the runtime without a model list", func(t *testing.T) {
+		codex := runtime.Backend{Runtime: runtime.CodexRuntime{}}
+		bare := gatewayTestRunConfig(t, "version: \"1\"\ninference:\n  gateway:\n    url: https://gw.example.com\n    audience: aud\n", nil)
+		const sb = "fs-plan-codex"
+		plan, err := planGatewayRoute(bare, codex, sb, []string{"gateway/m1"}, true)
+		require.NoError(t, err)
+		require.NotNil(t, plan)
+		t.Cleanup(func() { plan.prepared.ClearGatewayRun(sb) })
+		assert.Equal(t, runtime.CodexRuntime{}.GatewayCredentialSeed(), plan.seed)
+	})
+	t.Run("codex on a gateway model with no applying block fails early", func(t *testing.T) {
+		codex := runtime.Backend{Runtime: runtime.CodexRuntime{}}
+		_, err := planGatewayRoute(runConfig{}, codex, "fs-plan-codex-nocfg", []string{"gateway/m1"}, true)
+		assert.ErrorContains(t, err, "need an inference.gateway block")
+		plan, err := planGatewayRoute(rc, codex, "fs-plan-codex-openai", []string{"openai/gpt-5"}, false)
+		require.NoError(t, err)
+		assert.Nil(t, plan)
+		stubGatewayOIDC(t, "", "")
+		_, err = planGatewayRoute(rc, codex, "fs-plan-codex-local", []string{"gateway/m1"}, true)
+		assert.ErrorContains(t, err, "need an inference.gateway block")
+	})
 }
 
 func TestPlanGatewayRoute_ModelsFile(t *testing.T) {
@@ -125,6 +179,15 @@ func TestPlanGatewayRoute_ModelsFile(t *testing.T) {
 	missing := gatewayTestRunConfig(t, cfg, nil)
 	_, err = planGatewayRoute(missing, pi, "fs-plan-file-missing", []string{"gateway/from-file"}, true)
 	assert.ErrorContains(t, err, "models_file")
+
+	// Claude Code does not use the model list, so a configured but missing
+	// models_file does not stop its run.
+	const csb = "fs-plan-file-claude"
+	claude := runtime.Backend{Runtime: runtime.ClaudeRuntime{}}
+	cplan, err := planGatewayRoute(missing, claude, csb, []string{"gateway/from-file"}, true)
+	require.NoError(t, err)
+	require.NotNil(t, cplan)
+	t.Cleanup(func() { cplan.prepared.ClearGatewayRun(csb) })
 }
 
 func TestReadGatewayModelsFile(t *testing.T) {
@@ -173,8 +236,8 @@ func TestStartGatewayRoute(t *testing.T) {
 	var gotHost, gotToken string
 	orig := ensureGatewayProviderFn
 	t.Cleanup(func() { ensureGatewayProviderFn = orig })
-	ensureGatewayProviderFn = func(_ context.Context, host, sandboxName, token string, _ time.Time, _ *ui.Printer) (string, string, error) {
-		gotHost, gotToken = host, token
+	ensureGatewayProviderFn = func(_ context.Context, profile gatewayProfile, sandboxName, token string, _ time.Time, _ *ui.Printer) (string, string, error) {
+		gotHost, gotToken = profile.host, token
 		return "inference-gateway-x", "fullsend-inference-gateway-abc", nil
 	}
 	plan := &gatewayRoutePlan{block: config.InferenceGatewayConfig{URL: "https://gw.example.com", Audience: "aud"}, host: "gw.example.com", seed: runtime.PiRuntime{}.GatewayCredentialSeed()}
@@ -200,7 +263,7 @@ func TestStartGatewayRoute(t *testing.T) {
 	stubGatewayAssertion(t, func(context.Context, actionsoidc.AssertionConfig) (*actionsoidc.Assertion, error) {
 		return &actionsoidc.Assertion{Value: gatewayTestJWT, IssuedAt: iat, ExpiresAt: iat.Add(5 * time.Minute)}, nil
 	})
-	ensureGatewayProviderFn = func(context.Context, string, string, string, time.Time, *ui.Printer) (string, string, error) {
+	ensureGatewayProviderFn = func(context.Context, gatewayProfile, string, string, time.Time, *ui.Printer) (string, string, error) {
 		return "", "", errors.New("gateway down")
 	}
 	_, err = startGatewayRoute(context.Background(), plan, "fs-start", ui.New(io.Discard))
@@ -382,16 +445,17 @@ func TestRouteCredentialKeysMatchRuntimeSeeds(t *testing.T) {
 // gatewayRecoveryStub puts an openshell on PATH whose placeholder read
 // answers nothing until dir/base exists, then the old generation, and the
 // new one once the provider was updated and dir/flip exists; a read after
-// the update touches dir/settling. Seed and verify execs succeed; a
-// provider update touches dir/updated.
+// the update touches dir/settling (and fails while dir/readfail exists).
+// Seed execs fail while dir/seedfail
+// exists and verify execs succeed; a provider update touches dir/updated.
 func gatewayRecoveryStub(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	q := func(name string) string { return shellQuoteForTest(filepath.Join(dir, name)) }
 	stubOpenshell(t, "case \"$*\" in\n"+
 		"  *grep*) exit 0 ;;\n"+
-		"  *inference-gateway.token*) exit 0 ;;\n"+
-		"  *INFERENCE_GATEWAY_API_KEY:-*) if test -f "+q("updated")+"; then touch "+q("settling")+"; fi; if test -f "+q("updated")+" && test -f "+q("flip")+"; then printf '"+ph("v222_INFERENCE_GATEWAY_API_KEY")+"'; elif test -f "+q("base")+"; then printf '"+ph("v111_INFERENCE_GATEWAY_API_KEY")+"'; fi; exit 0 ;;\n"+
+		"  *inference-gateway.token*) if test -f "+q("seedfail")+"; then exit 1; fi; exit 0 ;;\n"+
+		"  *INFERENCE_GATEWAY_API_KEY:-*) if test -f "+q("updated")+" && test -f "+q("readfail")+"; then exit 1; fi; if test -f "+q("updated")+"; then touch "+q("settling")+"; fi; if test -f "+q("updated")+" && test -f "+q("flip")+"; then printf '"+ph("v222_INFERENCE_GATEWAY_API_KEY")+"'; elif test -f "+q("base")+"; then printf '"+ph("v111_INFERENCE_GATEWAY_API_KEY")+"'; fi; exit 0 ;;\n"+
 		"  *'provider update'*) touch "+q("updated")+"; exit 0 ;;\n"+
 		"esac\nexit 0")
 	return dir
@@ -430,13 +494,15 @@ func countFiveMinuteAssertions(t *testing.T) *atomic.Int32 {
 	return &calls
 }
 
-// A failed hand-off is retried on its own, without fetching or rotating
-// again, and the agent gets the new placeholder once the sandbox hands it
-// out — well before the next rotation is due.
+// A hand-off whose seed fails is retried on its own, without fetching or
+// rotating again, and the agent gets the new placeholder once the seed
+// succeeds — well before the next rotation is due.
 func TestRunGatewayRefresh_RetriesTheHandOffAlone(t *testing.T) {
 	stubGatewayOIDC(t, "https://x.actions.githubusercontent.com/t", "req")
 	dir := gatewayRecoveryStub(t)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "base"), nil, 0o644))
+	for _, f := range []string{"base", "flip", "seedfail"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, f), nil, 0o644))
+	}
 	shrinkGatewayRefreshTimers(t)
 	calls := countFiveMinuteAssertions(t)
 	h := gatewayDueHandle(time.Minute)
@@ -447,7 +513,7 @@ func TestRunGatewayRefresh_RetriesTheHandOffAlone(t *testing.T) {
 	require.Eventually(t, func() bool { return strings.Contains(out.String(), "retrying the hand-off") }, 10*time.Second, 5*time.Millisecond, out.String())
 	assert.Never(t, func() bool { return calls.Load() > 1 }, 200*time.Millisecond, 5*time.Millisecond, "the hand-off is retried without another fetch")
 	assert.NotContains(t, out.String(), "still failing", "no warning per retry while the agent's token is valid")
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "flip"), nil, 0o644))
+	require.NoError(t, os.Remove(filepath.Join(dir, "seedfail")))
 	require.Eventually(t, func() bool { return strings.Contains(out.String(), "handed off") }, 10*time.Second, 5*time.Millisecond, out.String())
 	assert.Equal(t, int32(1), calls.Load())
 }
@@ -586,4 +652,212 @@ func TestRunGatewayRefresh_PendingHandOffSeedsTheNewestGeneration(t *testing.T) 
 	assert.False(t, st.handOffPending)
 	assert.Equal(t, ph("v2_INFERENCE_GATEWAY_API_KEY"), st.placeholder, "the agent holds the newest generation")
 	assert.Equal(t, st.expiresAt, st.heldExpiresAt)
+}
+
+// A new generation that never reaches the sandbox within the settle wait
+// fails the route closed: no second rotation, the provider's expiry moves
+// back to the token the agent holds, and the refresher stops.
+func TestRunGatewayRefresh_SettleTimeoutFailsClosed(t *testing.T) {
+	stubGatewayOIDC(t, "https://x.actions.githubusercontent.com/t", "req")
+	dir := gatewayRecoveryStub(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "base"), nil, 0o644)) // no flip: the old generation stays
+	shrinkGatewayRefreshTimers(t)
+	calls := countFiveMinuteAssertions(t)
+	var expiries []time.Time
+	orig := setProviderCredentialExpiryFn
+	setProviderCredentialExpiryFn = func(_ context.Context, name, key string, at time.Time) error {
+		assert.Equal(t, "inference-gateway-x", name)
+		assert.Equal(t, gatewayCredentialKey, key)
+		expiries = append(expiries, at)
+		return nil
+	}
+	t.Cleanup(func() { setProviderCredentialExpiryFn = orig })
+	h := gatewayDueHandle(time.Minute)
+	h.refreshState() // shared with the refresher's copy of h
+	held := h.expiresAt
+	var out syncBuffer
+	done := make(chan struct{})
+	go func() {
+		runGatewayRefresh(context.Background(), h, ui.New(&out))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("refresher did not stop after the settle wait ran out")
+	}
+	assert.Equal(t, int32(1), calls.Load(), "no second rotation")
+	assert.Equal(t, []time.Time{held}, expiries, "the provider fails closed at the held token's expiry")
+	assert.Contains(t, out.String(), "stopped")
+	assert.NotContains(t, out.String(), "retrying the hand-off")
+	assert.Equal(t, held, h.state.expiresAt)
+}
+
+func TestHandOffTimeout_CoversEveryAttempt(t *testing.T) {
+	want := openAIPlaceholderSettle + openAIPlaceholderPoll + time.Duration(1+2*reseedSeedAttempts)*openAIPlaceholderExecTimeout
+	assert.Equal(t, want, handOffTimeout())
+}
+
+// A placeholder read that fails after the rotation is no evidence of the
+// new generation either: the route fails closed instead of rotating again.
+func TestRunGatewayRefresh_ReadFailureAfterRotationFailsClosed(t *testing.T) {
+	stubGatewayOIDC(t, "https://x.actions.githubusercontent.com/t", "req")
+	dir := gatewayRecoveryStub(t)
+	for _, f := range []string{"base", "readfail"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, f), nil, 0o644))
+	}
+	shrinkGatewayRefreshTimers(t)
+	calls := countFiveMinuteAssertions(t)
+	var expiries []time.Time
+	orig := setProviderCredentialExpiryFn
+	setProviderCredentialExpiryFn = func(_ context.Context, _, _ string, at time.Time) error {
+		expiries = append(expiries, at)
+		return nil
+	}
+	t.Cleanup(func() { setProviderCredentialExpiryFn = orig })
+	h := gatewayDueHandle(time.Minute)
+	h.refreshState()
+	held := h.expiresAt
+	var out syncBuffer
+	done := make(chan struct{})
+	go func() {
+		runGatewayRefresh(context.Background(), h, ui.New(&out))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("refresher did not stop after the failed read")
+	}
+	assert.Equal(t, int32(1), calls.Load(), "no second rotation")
+	assert.Equal(t, []time.Time{held}, expiries)
+	assert.Contains(t, out.String(), "not observed in the sandbox")
+}
+
+// Claude Code's oidc provider gets the run deadline as its OpenShell expiry
+// at creation, not the token's exp (#8316); the refresh schedule still
+// follows the token. pi's provider keeps the token's exp.
+func TestStartGatewayRoute_ClaudeRunDeadline(t *testing.T) {
+	stubGatewayOIDC(t, "https://x.actions.githubusercontent.com/t", "req")
+	iat := time.Now().Truncate(time.Second)
+	stubGatewayAssertion(t, func(context.Context, actionsoidc.AssertionConfig) (*actionsoidc.Assertion, error) {
+		return &actionsoidc.Assertion{Value: gatewayTestJWT, IssuedAt: iat, ExpiresAt: iat.Add(5 * time.Minute)}, nil
+	})
+	var gotExpiry time.Time
+	orig := ensureGatewayProviderFn
+	t.Cleanup(func() { ensureGatewayProviderFn = orig })
+	ensureGatewayProviderFn = func(_ context.Context, _ gatewayProfile, _, _ string, at time.Time, _ *ui.Printer) (string, string, error) {
+		gotExpiry = at
+		return "inference-gateway-x", "fullsend-inference-gateway-claude-abc", nil
+	}
+	block := config.InferenceGatewayConfig{URL: "https://gw.example.com", Audience: "aud"}
+	claude := &gatewayRoutePlan{block: block, host: "gw.example.com", profile: gatewayProfile{host: "gw.example.com", claude: true}, runLifetime: 30 * time.Hour}
+
+	before := time.Now()
+	h, err := startGatewayRoute(context.Background(), claude, "fs-claude", ui.New(io.Discard))
+	require.NoError(t, err)
+	assert.False(t, gotExpiry.Before(before.Add(30*time.Hour)), "the generation expires at the run deadline")
+	assert.False(t, gotExpiry.After(time.Now().Add(30*time.Hour)))
+	assert.Equal(t, gotExpiry, h.runDeadline)
+	assert.Equal(t, iat.Add(5*time.Minute), h.expiresAt, "the refresh schedule follows the token's exp")
+	assert.Equal(t, iat.Add(5*time.Minute), h.state.heldExpiresAt)
+
+	// With no run lifetime set, the deadline uses the api-key mode's bound.
+	claude.runLifetime = 0
+	before = time.Now()
+	h, err = startGatewayRoute(context.Background(), claude, "fs-claude", ui.New(io.Discard))
+	require.NoError(t, err)
+	assert.False(t, h.runDeadline.Before(before.Add(gatewayAPIKeyLifetime)))
+	assert.False(t, h.runDeadline.After(time.Now().Add(gatewayAPIKeyLifetime)))
+
+	// pi's provider keeps the token's exp and has no run deadline.
+	pi := &gatewayRoutePlan{block: block, host: "gw.example.com", profile: gatewayProfile{host: "gw.example.com"}, runLifetime: 30 * time.Hour}
+	h, err = startGatewayRoute(context.Background(), pi, "fs-pi", ui.New(io.Discard))
+	require.NoError(t, err)
+	assert.Equal(t, iat.Add(5*time.Minute), gotExpiry)
+	assert.True(t, h.runDeadline.IsZero())
+}
+
+// Each rotation creates the new generation with the run deadline as its
+// expiry on Claude Code's provider, and with the token's exp on pi's.
+func TestRefreshGatewayProvider_GenerationExpiry(t *testing.T) {
+	stubGatewayOIDC(t, "https://x.actions.githubusercontent.com/t", "req")
+	iat := time.Now().Truncate(time.Second)
+	stubGatewayAssertion(t, func(context.Context, actionsoidc.AssertionConfig) (*actionsoidc.Assertion, error) {
+		return &actionsoidc.Assertion{Value: gatewayTestJWT, IssuedAt: iat, ExpiresAt: iat.Add(5 * time.Minute)}, nil
+	})
+	var expiries []time.Time
+	orig := updateGatewayProviderFn
+	updateGatewayProviderFn = func(_ context.Context, name string, creds map[string]string, at time.Time) error {
+		assert.Equal(t, "inference-gateway-x", name)
+		assert.Equal(t, map[string]string{gatewayCredentialKey: gatewayTestJWT}, creds)
+		expiries = append(expiries, at)
+		return nil
+	}
+	t.Cleanup(func() { updateGatewayProviderFn = orig })
+
+	deadline := iat.Add(26 * time.Hour)
+	h := gatewayProviderHandle{name: "inference-gateway-x", block: config.InferenceGatewayConfig{Audience: "aud"}, sandbox: "fs-x", runDeadline: deadline, sandboxUp: &atomic.Bool{}}
+	_, gotExp, _, err := refreshGatewayProvider(context.Background(), h, "", ui.New(io.Discard))
+	require.NoError(t, err)
+	assert.Equal(t, iat.Add(5*time.Minute), gotExp, "the next refresh is scheduled from the token's exp")
+
+	h.runDeadline = time.Time{}
+	_, _, _, err = refreshGatewayProvider(context.Background(), h, "", ui.New(io.Discard))
+	require.NoError(t, err)
+	assert.Equal(t, []time.Time{deadline, iat.Add(5 * time.Minute)}, expiries)
+}
+
+func TestGatewayRunDeadline(t *testing.T) {
+	now := time.Now()
+	assert.True(t, gatewayRunDeadline(&gatewayRoutePlan{profile: gatewayProfile{host: "gw"}}, now).IsZero(), "pi keeps the token's exp")
+	assert.Equal(t, now.Add(gatewayAPIKeyLifetime), gatewayRunDeadline(&gatewayRoutePlan{profile: gatewayProfile{host: "gw", claude: true}}, now))
+	assert.Equal(t, now.Add(40*time.Hour), gatewayRunDeadline(&gatewayRoutePlan{profile: gatewayProfile{host: "gw", claude: true}, runLifetime: 40 * time.Hour}, now))
+}
+
+// On Claude Code's provider a hand-off that is never observed stops the
+// refresher without moving the provider's expiry back: no expiry update
+// is made, and the gateway's exp check is the fail-closed layer.
+func TestRunGatewayRefresh_SettleTimeoutKeepsRunDeadline(t *testing.T) {
+	stubGatewayOIDC(t, "https://x.actions.githubusercontent.com/t", "req")
+	dir := gatewayRecoveryStub(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "base"), nil, 0o644)) // no flip: the old generation stays
+	shrinkGatewayRefreshTimers(t)
+	calls := countFiveMinuteAssertions(t)
+	var expiryUpdates atomic.Int32
+	orig := setProviderCredentialExpiryFn
+	setProviderCredentialExpiryFn = func(context.Context, string, string, time.Time) error {
+		expiryUpdates.Add(1)
+		return nil
+	}
+	t.Cleanup(func() { setProviderCredentialExpiryFn = orig })
+	var generations []time.Time
+	origUpdate := updateGatewayProviderFn
+	updateGatewayProviderFn = func(ctx context.Context, name string, creds map[string]string, at time.Time) error {
+		generations = append(generations, at)
+		return origUpdate(ctx, name, creds, at)
+	}
+	t.Cleanup(func() { updateGatewayProviderFn = origUpdate })
+	h := gatewayDueHandle(time.Minute)
+	h.runDeadline = time.Now().Add(24 * time.Hour)
+	h.refreshState()
+	held := h.expiresAt
+	var out syncBuffer
+	done := make(chan struct{})
+	go func() {
+		runGatewayRefresh(context.Background(), h, ui.New(&out))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("refresher did not stop after the settle wait ran out")
+	}
+	assert.Equal(t, int32(1), calls.Load(), "no second rotation")
+	assert.Equal(t, int32(0), expiryUpdates.Load(), "the expiry is not moved back")
+	assert.Equal(t, []time.Time{h.runDeadline}, generations, "the new generation got the run deadline at creation")
+	assert.Contains(t, out.String(), "stopped")
+	assert.Contains(t, out.String(), "gateway refuses")
+	assert.Equal(t, held, h.state.heldExpiresAt)
+	assert.True(t, h.state.expiresAt.After(held), "the provider's token is the new one")
 }

@@ -35,8 +35,8 @@ func TestPiGatewayCredentialSeed_IsItsOwnRoute(t *testing.T) {
 	assert.NotEqual(t, oa.File, gw.File, "independent handoffs per route")
 
 	var _ GatewayRouteRuntime = PiRuntime{}
-	_, ok := Runtime(ClaudeRuntime{}).(GatewayRouteRuntime)
-	assert.False(t, ok, "Claude Code has no gateway route yet")
+	var _ GatewayRouteRuntime = ClaudeRuntime{}
+	var _ GatewayRouteRuntime = CodexRuntime{}
 }
 
 // TestPiGatewayTokenSeed_Shell runs the seed under sh: a gateway
@@ -102,6 +102,66 @@ func TestPiGatewayTokenSeed_Concurrent(t *testing.T) {
 
 }
 
+// Overlapping OpenAI seeds write their own temp files, as the gateway seed
+// does: none is left behind, auth.json holds one writer's whole value, and
+// a writer that fails does so only because another writer replaced its
+// value after its move.
+func TestPiOpenAIAuthSeed_Concurrent(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := filepath.Join(t.TempDir(), "cfg")
+	errs := make(chan error, 16)
+	for i := range 16 {
+		go func(i int) {
+			cmd := exec.Command("sh", "-c", PiOpenAIAuthSeed(dir))
+			cmd.Env = append(os.Environ(), "OPENAI_API_KEY="+piPlaceholderPrefix+"v"+strconv.Itoa(i)+"_OPENAI_API_KEY")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				err = fmt.Errorf("%w: %s", err, out)
+			}
+			errs <- err
+		}(i)
+	}
+	// A writer whose value a later writer replaced still succeeds: that
+	// is a legitimate outcome (a refresher's newer generation winning),
+	// not a failed seed.
+	for range 16 {
+		require.NoError(t, <-errs)
+	}
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "only auth.json: no temp file is left behind")
+	assert.Equal(t, piOpenAIAuthFile, entries[0].Name())
+	data, err := os.ReadFile(filepath.Join(dir, piOpenAIAuthFile))
+	require.NoError(t, err)
+	assert.Regexp(t, `^\{"openai":\{"type":"api_key","key":"`+piPlaceholderPrefix+`v[0-9]+_OPENAI_API_KEY"\}\}\n$`, string(data))
+}
+
+// Both credential seeds fail with their own exit code, so the runner can
+// tell a failed seed from an agent failure, and Run attributes that code
+// to the seed only when the command carries one.
+func TestPiCredentialSeeds_DedicatedExitCode(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := filepath.Join(t.TempDir(), "cfg")
+	for name, seed := range map[string]string{
+		"openai":  PiOpenAIAuthSeed(dir),
+		"gateway": PiGatewayTokenSeed(dir),
+	} {
+		cmd := exec.Command("sh", "-c", seed)
+		cmd.Env = append(os.Environ(), "OPENAI_API_KEY=sk-real", "INFERENCE_GATEWAY_API_KEY=real-token")
+		out, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr, "%s: %s", name, out)
+		assert.Equal(t, piCredentialSeedFailedExit, exitErr.ExitCode(), name)
+	}
+	assert.True(t, piRunSeedsCredential("x && "+PiOpenAIAuthSeed(dir)+" && y", dir))
+	assert.True(t, piRunSeedsCredential("x && "+PiGatewayTokenSeed(dir)+" && y", dir))
+	assert.False(t, piRunSeedsCredential("pi --model anthropic-vertex/claude", dir))
+}
+
 func TestPiPrepareGatewayRun(t *testing.T) {
 	const sb = "sb-gw-prepare"
 	t.Cleanup(func() { SetPiGatewayRun(sb, nil) })
@@ -117,6 +177,9 @@ func TestPiPrepareGatewayRun(t *testing.T) {
 	assert.Equal(t, []string{"m1"}, gw.ModelIDs)
 	assert.Equal(t, "https://gw.example.com", gw.BaseURL)
 	assert.Equal(t, r.ConfigDir()+"/"+piInferenceGatewayTokenFile, gw.TokenFile)
+	assert.Equal(t, r.ConfigDir()+"/"+PiInferenceGatewayConfigFile, gw.ConfigFile)
+	assert.Contains(t, strings.Join(piGatewayEnvParts(gw), " "), "export INFERENCE_GATEWAY_CONFIG_FILE='"+r.ConfigDir()+"/"+PiInferenceGatewayConfigFile+"'",
+		"the parent reads exactly the guarded file, never an overlay")
 	assert.Contains(t, string(gw.Config), `"authHeader": "authorization"`)
 	require.NoError(t, validatePiGatewayRun(gw, nil), "a prepared run passes the launch check")
 
@@ -162,7 +225,15 @@ func TestNeedsGatewayRoute(t *testing.T) {
 	assert.True(t, NeedsGatewayRoute("pi", "", "gateway/m1", nil), "agent definition model")
 	assert.True(t, NeedsGatewayRoute("pi", "fast", "", map[string]string{"fast": "gateway/m1"}), "alias")
 	assert.False(t, NeedsGatewayRoute("pi", "openai/gpt-5", "", nil))
-	assert.False(t, NeedsGatewayRoute("claude", "gateway/m1", "", nil), "only pi carries the route")
+	assert.True(t, NeedsGatewayRoute("claude", "gateway/m1", "", nil), "Claude Code carries the route too (TestNeedsGatewayRoute_Claude)")
+
+	assert.True(t, NeedsGatewayRoute("codex", "gateway/vendor/org/model", "", nil), "codex, multi-segment id")
+	assert.True(t, NeedsGatewayRoute("codex", "GATEWAY/m1", "", nil), "codex, case-folded")
+	assert.True(t, NeedsGatewayRoute("codex", "", "gateway/m1", nil), "codex, agent definition model")
+	assert.False(t, NeedsGatewayRoute("codex", "openai/gpt-5.6-luna", "", nil))
+	assert.False(t, NeedsGatewayRoute("codex", "gpt-5.6-luna", "", nil))
+	assert.False(t, NeedsGatewayRoute("codex", "fast", "", map[string]string{"fast": "gateway/m1"}),
+		"codex consults no alias table")
 }
 
 // A Vertex parent with gateway children: the children alone put the run

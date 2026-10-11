@@ -13,14 +13,16 @@
 # never committed here; the scenario skips when the URL is unset. Enable
 # with BEHAVIOUR_CAPABILITIES=runtime-pi,runtime-pi-gateway.
 #
-# Gap: the repository also needs the gateway model list (inference.gateway
-# models: gateway/claude-haiku-5-5 and gateway/gemini-3.8-flash); the
-# "test inference gateway" step commits only url + audience today.
+# The "test inference gateway" step also commits the model list pi needs
+# (it runs offline): claude-haiku-5-5 on anthropic-messages. Some
+# projects' org policy refuses strict tool schemas on partner models, so
+# that entry sets compat supportsStrictTools: false.
 Feature: pi runtime runs an agent through an inference gateway without a credential in the sandbox
 
   @requires:capability:runtime-pi-gateway
   Scenario: gateway run selects pi, calls tools through the hook adapter, and reports metrics
-    Given the enrolled test repository
+    Given the test inference gateway is available
+    And the enrolled test repository
     And the test inference gateway is configured for the repository
     And the repository runtime is "pi"
     And a custom harness "pi-gateway-smoke" with:
