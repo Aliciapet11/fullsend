@@ -65,7 +65,7 @@ func formatRefAnnotation(ref, tag, forgeName string) string {
 	if forgeName == ForgeGitLab {
 		return ref + " (" + tag + ")"
 	}
-	return ref + " # " + tag
+	return ref + "  # " + tag
 }
 
 // collectGitLabUpgradeTemplates collects the GitLab CI template files
