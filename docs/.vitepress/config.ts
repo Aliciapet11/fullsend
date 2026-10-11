@@ -22,6 +22,16 @@ const repoRoot = path.resolve(__dirname, "..", "..");
 /** Git glob passed to `git tag --list` and to mvb `multiVersionBuild.match`. */
 const MVB_TAG_MATCH = "v[0-9].*";
 
+/**
+ * Number of newest minors that get a versioned docs copy under /docs/v/.
+ *
+ * Cloudflare Workers Free rejects a deploy with more than 20,000 static asset
+ * files per Worker version. Each versioned copy adds about 1,650 files, and
+ * stable/edge/dev plus the rest of the site add about 6,500 more, so 6 minors
+ * keeps the site near 16,500 files. Lower this if the per-version cost grows.
+ */
+const MVB_MAX_MINORS = 6;
+
 /** Git tags mvb will later re-test with `semver.satisfies` (one version at a time). */
 function gitVersionTags(match: string): string[] {
   return execFileSync("git", ["tag", "--list", match], {
@@ -203,7 +213,7 @@ export default defineConfig({
 
     multiVersionBuild: {
       match: MVB_TAG_MATCH,
-      satisfies: getLatestPatchMatching(gitVersionTags(MVB_TAG_MATCH), ">=0.37.0"),
+      satisfies: getLatestPatchMatching(gitVersionTags(MVB_TAG_MATCH), ">=0.37.0", MVB_MAX_MINORS),
       build: "stable",
     },
 
