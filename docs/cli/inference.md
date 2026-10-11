@@ -8,15 +8,15 @@ Manage the inference credentials agent runs use. `provision`, `deprovision` and 
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `fullsend inference provision <org\|owner/repo>` | Create WIF pool/provider and grant Agent Platform access |
-| `fullsend inference deprovision <org\|owner/repo>` | Remove org or repo from WIF |
-| `fullsend inference status <org\|owner/repo>` | Check WIF health and print config values |
-| `fullsend inference openai request <owner/repo>[,…]` | Generate WIF provider/mapping request for OpenAI admin |
-| `fullsend inference openai import [reply.json]` | Import OpenAI WIF identifiers into config |
-| `fullsend inference openai status <owner/repo>` | Check OpenAI WIF configuration and exchange status |
-| `fullsend inference gateway status <owner/repo>` | Check inference gateway configuration and authentication |
+| Command | Description | Who runs it / permission |
+|---------|-------------|--------------------------|
+| `fullsend inference provision <org\|owner/repo>` | Create WIF pool/provider and grant Agent Platform access | GCP project admin, with `roles/iam.workloadIdentityPoolAdmin` and `roles/resourcemanager.projectIamAdmin` |
+| `fullsend inference deprovision <org\|owner/repo>` | Remove org or repo from WIF | GCP project admin, with `roles/iam.workloadIdentityPoolAdmin` |
+| `fullsend inference status <org\|owner/repo>` | Check WIF health and print config values | Read access on the GCP project: `roles/iam.workloadIdentityPoolViewer` and `roles/browser` |
+| `fullsend inference openai request <owner/repo>[,…]` | Generate WIF provider/mapping request for OpenAI admin | Anyone; needs no credentials |
+| `fullsend inference openai import [reply.json]` | Import OpenAI WIF identifiers into config | Repo admin. Writes `.fullsend/config.yaml` locally, to commit afterwards; `--variables` needs a GitHub token that can set repository variables |
+| `fullsend inference openai status <owner/repo>` | Check OpenAI WIF configuration and exchange status | Config checks: anyone, from a checkout of the repository. Live exchange: only inside a GitHub Actions job in `<owner/repo>` with `id-token: write`, so a repo writer adds the workflow |
+| `fullsend inference gateway status <owner/repo>` | Check inference gateway configuration and authentication | Config checks: anyone, from a checkout of the repository. Live check, `oidc` mode only: inside a GitHub Actions job in `<owner/repo>` with `id-token: write`, so a repo writer adds the workflow |
 
 ## `inference provision`
 

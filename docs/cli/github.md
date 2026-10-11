@@ -28,6 +28,8 @@ fullsend github setup <owner/repo> \
   --inference-wif-provider "<WIF_PROVIDER>"
 ```
 
+The values passed to `--inference-gateway-*` and `--openai-*` come from the gateway operator and the OpenAI organization admin; see [Using an inference gateway](../guides/getting-started/inference-gateway.md) and [OpenAI Workload Identity](../guides/infrastructure/openai-workload-identity.md).
+
 **Re-running per-repo setup** (for example after a fullsend upgrade) refreshes the managed
 workflow files but never rewrites an existing `.fullsend/config.yaml` on its own: `agents:` entries and
 their per-agent settings, allowlists and hand-written comments stay as they are, the runtime prompt is skipped,

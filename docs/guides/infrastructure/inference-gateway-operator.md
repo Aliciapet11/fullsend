@@ -570,6 +570,33 @@ gcloud run services update "$SERVICE" --project "$PROJECT" --region "$REGION" \
 
 Then rerun the workflow from step 8.
 
+## Remove a repository
+
+> **Not executed in this walkthrough:** the service was deleted after the checks, so no
+> repository was removed from a running gateway here. The refusal the removed repository should
+> see is the one [Check that another repository is refused](#check-that-another-repository-is-refused)
+> shows for a repository that was never allowed.
+
+1. Remove every grant the repository has in the gateway config ([step 3](#3-write-the-gateway-config)):
+   - its `jwt.repository` rule on every model. Where a rule allows several repositories with `||`,
+     delete only that repository's term;
+   - if you issued it a gateway key ([`auth: api-key`](#accept-a-static-key-as-well-auth-api-key)),
+     its `apiKey.purpose` rule on every model and its entry under `apiKey.keys`. Removing only the
+     `jwt.repository` rule leaves the key working.
+2. Roll the new `config.yaml` out the same way as a config change: see
+   [Change the config](#change-the-config).
+3. Check that the removed repository is now refused. For a key, send one request with the old key
+   from your own machine, for example `GET /v1/models` with `Authorization: Bearer <old key>`: it
+   must no longer return the repository's models. `fullsend inference gateway status` cannot check
+   this, because in the `api-key` mode it stops at the config checks. Ask the repo admin to delete
+   the `FULLSEND_INFERENCE_GATEWAY_API_KEY` secret. For OIDC, from the repository's check workflow
+   ([step 8](#8-check-the-gateway-from-github-actions)), `GET /v1/models` returns an empty list
+   (`{"data":[],"object":"list"}`) or `403 model_authorization_denied`, and every model call
+   returns `403 model_authorization_denied`. In that repository,
+   [`fullsend inference gateway status`](../../cli/inference.md#inference-gateway-status) reports
+   the refusal: `Gateway authenticated the assertion, but no models are authorised for <owner/repo>`
+   for the empty list, or `Gateway refused the assertion (HTTP 403)`.
+
 ## Delete the gateway
 
 ```bash

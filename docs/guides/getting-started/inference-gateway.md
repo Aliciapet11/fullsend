@@ -6,6 +6,20 @@ sidebar_label: Using an inference gateway
 
 > Background: [How fullsend authenticates](how-fullsend-authenticates.md).
 
+> **Before you start: who you need.** This route takes up to three roles
+> ([Who does what](how-fullsend-authenticates.md#who-does-what)):
+>
+> - **Gateway operator**, the provider admin: runs the gateway
+>   ([operator guide](../infrastructure/inference-gateway-operator.md)) and hands over the
+>   **gateway URL**, the **audience**, and confirmation that your repository is on the gateway's
+>   **allowed list**. None of them is a secret. In the `api-key` mode the operator hands over a
+>   gateway key instead of the audience.
+> - **Repo admin**: writes the `inference.gateway` block with those values and lists the models
+>   the agents use ([Write the block](#write-the-block)). In the `api-key` mode, also stores the
+>   key as a repository secret.
+> - **Repo writer**: adds a workflow with `id-token: write` to run the live check in
+>   [Check the block](#check-the-block). Optional.
+
 Agents on the [pi](../../runtimes/pi.md), [Claude Code](../../runtimes/claude.md) and
 [Codex](../../runtimes/codex.md) runtimes can reach their models through an
 OpenAI/Anthropic-compatible inference gateway that trusts the job's GitHub Actions OIDC token
@@ -19,16 +33,12 @@ listed in [`fullsend github setup`](../../cli/github.md) and the
 
 The examples use `example-org/example-repo` and `https://gateway.example.com`.
 
-## Who does what
+## Prerequisites
 
-| Who | Does what |
-|---|---|
-| **Gateway operator** | Runs the gateway ([operator guide](../infrastructure/inference-gateway-operator.md)) and hands you three values: the **gateway URL**, the **audience** and the **allowed repositories**. None of them is a secret. |
-| **Repository owner** | Checks that the repository is on the allowed list, writes the `inference.gateway` block with those values, and lists the models the agents use. |
+For the repo admin:
 
-Prerequisites for the repository owner:
-
-- The three values from the operator, with your repository among the allowed repositories.
+- The gateway URL and the audience from the operator, and confirmation that your repository is
+  on the allowed list.
 - A repository [set up with fullsend](configuring-github.md) on the pi, codex or Claude Code runtime.
   pi needs the model list below; codex and Claude Code do not need one. See
   [Claude Code § Inference gateway route](../../runtimes/claude.md#inference-gateway-route) and

@@ -2,6 +2,21 @@
 
 > Background: [How fullsend authenticates](../getting-started/how-fullsend-authenticates.md).
 
+> **Before you start: who you need.** This page takes up to three roles
+> ([Who does what](../getting-started/how-fullsend-authenticates.md#who-does-what)):
+>
+> - **OpenAI organization admin**, the provider admin: owns the Workload Identity Provider in
+>   Organization Settings, adds your repository's mapping, and hands over the **audience**, the
+>   **identity provider ID** and the **service account ID**. On route A, that is you.
+> - **Repo admin**: records the three identifiers
+>   ([step 4](#4-tell-fullsend-the-three-identifiers)). On route C, stores the API key as the
+>   `FULLSEND_OPENAI_API_KEY` repository secret.
+> - **Repo writer**: adds the temporary claim-check workflow in
+>   [step 1](#1-see-what-your-repository-actually-claims-both-routes).
+>
+> For route C, someone with OpenAI platform access creates the API key. If you have no platform
+> access at all, see [If you have no OpenAI platform access](#if-you-have-no-openai-platform-access).
+
 Run GPT models on the [pi](../../runtimes/pi.md) or [codex](../../runtimes/codex.md) runtime
 without storing an OpenAI API key
 anywhere. Your GitHub Actions job proves who it is with its OIDC token, OpenAI hands back a
@@ -76,6 +91,27 @@ into the console; route B: the ticket to send), and `import` records the identif
 > (`repository_owner`, a name prefix, a derived attribute): a GitHub organization often contains
 > repositories the company does not own, and a pattern would let every one of them obtain your
 > token. Adding a repository later means adding its assertion; that is the gate, by design.
+
+### If you have no OpenAI platform access
+
+Routes B and C both assume some access to the OpenAI platform: route B a project you own or
+request, route C someone who can create a key. If you are a repo admin who cannot open the
+platform at all, the OpenAI organization admin does the platform side for you:
+
+1. Generate the request. It needs no credentials and sends nothing:
+
+   ```bash
+   fullsend inference openai request <owner>/<repo> --format md --out openai-wif-request.md
+   ```
+
+   Leave out `--project`. It defaults to empty, and the request then asks the admin to pick the
+   project the runs are billed to.
+2. Send `openai-wif-request.md` to your OpenAI organization admin. It names the provider to reuse
+   or create, the mapping to add, and what to send back.
+3. The admin sends back the provider's audience, the identity provider ID and the service account
+   ID.
+4. Record them with `fullsend inference openai import` (see
+   [B3](#b3-record-what-you-get-back-route-b)), then commit `.fullsend/config.yaml`.
 
 ## 1. See what your repository actually claims (both routes)
 
