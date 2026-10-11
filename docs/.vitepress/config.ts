@@ -14,6 +14,7 @@ import {
   pageSeoHead,
 } from "./seo";
 import { getMarkdownFiles } from "./sidebar";
+import { githubSlugify } from "./slugify";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const docsDir = path.resolve(__dirname, "..");
@@ -537,6 +538,9 @@ export default defineConfig({
   },
 
   markdown: {
+    // GitHub-compatible heading ids, so links lychee accepts also work here.
+    anchor: { slugify: githubSlugify },
+
     shikiSetup: async (shiki) => {
       await shiki.loadLanguage("toml");
     },
