@@ -16,7 +16,7 @@ Manage the inference credentials agent runs use. `provision`, `deprovision` and 
 | `fullsend inference openai request <owner/repo>[,…]` | Generate WIF provider/mapping request for OpenAI admin | Anyone; needs no credentials |
 | `fullsend inference openai import [reply.json]` | Import OpenAI WIF identifiers into config | Repo admin. Writes `.fullsend/config.yaml` locally, to commit afterwards; `--variables` needs a GitHub token that can set repository variables |
 | `fullsend inference openai status <owner/repo>` | Check OpenAI WIF configuration and exchange status | Config checks: anyone, from a checkout of the repository. Live exchange: only inside a GitHub Actions job in `<owner/repo>` with `id-token: write`, so a repo writer adds the workflow |
-| `fullsend inference gateway status <owner/repo>` | Check inference gateway configuration and authentication | Config checks: anyone, from a checkout of the repository. Live check: only inside a GitHub Actions job in `<owner/repo>` with `id-token: write`, so a repo writer adds the workflow |
+| `fullsend inference gateway status <owner/repo>` | Check inference gateway configuration and authentication | Config checks: anyone, from a checkout of the repository. Live check, `oidc` mode only: inside a GitHub Actions job in `<owner/repo>` with `id-token: write`, so a repo writer adds the workflow |
 
 ## `inference provision`
 

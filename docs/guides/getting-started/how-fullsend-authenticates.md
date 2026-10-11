@@ -87,7 +87,7 @@ below links to the page with the detail.
 | **GCP project admin** | IAM admin on the GCP project used for Vertex | Enables the APIs and runs [`fullsend inference provision`](getting-inference.md#configure-inference-in-your-gcp-project), then hands over the GCP project ID and the WIF provider. |
 
 If you have no OpenAI platform access at all, see
-[If you don't have OpenAI platform access](../infrastructure/openai-workload-identity.md#if-you-dont-have-openai-platform-access).
+[If you have no OpenAI platform access](../infrastructure/openai-workload-identity.md#if-you-have-no-openai-platform-access).
 
 ## Not supported yet: gateway token exchange
 

@@ -15,7 +15,7 @@
 >   [step 1](#1-see-what-your-repository-actually-claims-both-routes).
 >
 > For route C, someone with OpenAI platform access creates the API key. If you have no platform
-> access at all, see [If you don't have OpenAI platform access](#if-you-dont-have-openai-platform-access).
+> access at all, see [If you have no OpenAI platform access](#if-you-have-no-openai-platform-access).
 
 Run GPT models on the [pi](../../runtimes/pi.md) or [codex](../../runtimes/codex.md) runtime
 without storing an OpenAI API key
@@ -92,7 +92,7 @@ into the console; route B: the ticket to send), and `import` records the identif
 > repositories the company does not own, and a pattern would let every one of them obtain your
 > token. Adding a repository later means adding its assertion; that is the gate, by design.
 
-### If you don't have OpenAI platform access
+### If you have no OpenAI platform access
 
 Routes B and C both assume some access to the OpenAI platform: route B a project you own or
 request, route C someone who can create a key. If you are a repo admin who cannot open the
