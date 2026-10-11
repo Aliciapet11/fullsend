@@ -2621,7 +2621,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// Check the tee'd output.jsonl for is_error:true result events.
 		// The transcript is checked regardless of exit code to catch both:
 		// 1. API/infra failures where Claude exits 0 but reports errors
-		//    (is_error:true) — these skip the post-script entirely (#2786).
+		//    (is_error:true) — these count as exit 1 (#2786), which skips
+		//    the post-script unless postScriptGate lets a result through.
 		// 2. Behavioral limits (error_max_turns, error_max_budget_usd) where
 		//    Claude exits non-zero mid-work — these pass the reason to
 		//    the post-script so it can report accurately (#6877).
@@ -4400,7 +4401,7 @@ type transcriptCheckOutcome struct {
 //  1. Behavioral limits (error_max_turns, error_max_budget_usd): pass the reason
 //     to the post-script so it can report accurately. See #6877.
 //  2. API/infra failures with exit code 0: override the exit code to 1 so
-//     the post-script is skipped. See #2786.
+//     the run counts as failed. See #2786.
 //  3. Non-behavioral errors with non-zero exit code: the exit code already
 //     signals failure; the transcript error enriches span telemetry.
 func classifyTranscriptError(errMsg, subtype string, exitCode int) transcriptCheckOutcome {

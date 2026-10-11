@@ -584,6 +584,11 @@ Vendoring commit messages use title + body (upload and stale delete). `admin ins
 │  │                   │ post-script so it can report accurately  │
 │  │                   │ instead of emitting a misleading "no     │
 │  │                   │ changes needed" message. See #6877.      │
+│  │                   │                                          │
+│  │                   │ FULLSEND_AGENT_EXIT_CODE is set when a   │
+│  │                   │ run without a validation_loop runs the   │
+│  │                   │ post-script after a failed agent. See    │
+│  │                   │ #8305.                                   │
 │  └──────┬───────────┘                                           │
 │         ▼                                                       │
 │  ┌──────────────────┐                                           │
