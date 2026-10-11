@@ -122,7 +122,7 @@ func (r CodexRuntime) codexGatewayAuthScriptPath() string {
 
 // gatewayAuthSeed is the POSIX sh fragment that writes the placeholder the
 // sandbox environment carries for INFERENCE_GATEWAY_API_KEY into the
-// gateway token file, atomically via rename. It runs at iteration start,
+// gateway token file through orderedSeedWrite. It runs at iteration start,
 // before the agent-writable .env is sourced, and the runner re-runs it
 // through `sandbox exec` after every token refresh. A value that is not a
 // gateway placeholder fails the run: a real token in the sandbox
@@ -130,17 +130,14 @@ func (r CodexRuntime) codexGatewayAuthScriptPath() string {
 //
 // The iteration-start seed and a refresher's re-seed can overlap, so each
 // writer uses its own temp file, named by its shell's pid, and removes it
-// if the write fails (as PiGatewayTokenSeed does).
+// if the write fails. The write goes through orderedSeedWrite (as
+// PiGatewayTokenSeed does), so a stalled seed cannot replace a newer one.
 func (r CodexRuntime) gatewayAuthSeed() string {
-	dir := shellQuote(r.ConfigDir())
-	final := shellQuote(r.codexGatewayTokenPath())
-	tmp := shellQuote(r.codexGatewayTokenPath()+".fullsend") + `.$$`
 	return `case "${` + codexGatewayCredentialEnv + `:-}" in ` + piPlaceholderPrefix + `*` + codexGatewayCredentialEnv + `) ;; *) echo 'fullsend: ` + codexGatewayCredentialEnv + ` in the sandbox is not a gateway placeholder (inference gateway provider not attached, or a real token reached the sandbox); refusing to run codex' >&2; exit 1 ;; esac` +
 		` && case "$` + codexGatewayCredentialEnv + `" in *[!A-Za-z0-9_:]*) echo 'fullsend: ` + codexGatewayCredentialEnv + ` placeholder has unexpected characters; refusing to run codex' >&2; exit 1 ;; esac` +
-		` && { command -p mkdir -p ` + dir +
-		` && printf '%s' "$` + codexGatewayCredentialEnv + `" > ` + tmp +
-		` && command -p mv -f ` + tmp + ` ` + final +
-		` || { command -p rm -f ` + tmp + `; echo 'fullsend: writing the codex inference gateway token file failed' >&2; exit 1; }; }`
+		` && ` + orderedSeedWrite(codexGatewayCredentialEnv, r.ConfigDir(), r.codexGatewayTokenPath(),
+		`printf '%s' "$`+codexGatewayCredentialEnv+`"`,
+		`fullsend: writing the codex inference gateway token file failed`, "exit 1")
 }
 
 // isCodexGatewayModel reports whether model selects the gateway route on
