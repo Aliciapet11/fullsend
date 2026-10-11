@@ -577,8 +577,9 @@ Vendoring commit messages use title + body (upload and stale delete). `admin ins
 │  │                   │ than crashing or succeeding. Known       │
 │  │                   │ subtypes: error_max_turns (turn limit),  │
 │  │                   │ error_max_budget_usd (cost limit).       │
-│  │                   │ Unlike API/infrastructure errors (which  │
-│  │                   │ skip the post-script entirely),          │
+│  │                   │ Unlike other agent failures (which skip  │
+│  │                   │ it unless there is no validation_loop    │
+│  │                   │ and a result file parses, #8305),        │
 │  │                   │ behavioral exits still run the           │
 │  │                   │ post-script so it can report accurately  │
 │  │                   │ instead of emitting a misleading "no     │

@@ -3569,6 +3569,10 @@ func postScriptGate(h *harness.Harness, validationPassed, transcriptErrorOverrid
 	return postScriptDecision{run: true}
 }
 
+// agentResultMaxBytes caps how much of the sandbox-written result file the
+// runner reads; a larger file counts as no result.
+const agentResultMaxBytes = 4 << 20
+
 // agentResultFile returns the agent's result file in outputDir when it exists
 // and holds a JSON object. The name is the harness's FULLSEND_OUTPUT_FILE,
 // defaulting to agent-result.json as fullsend-check-output does.
@@ -3581,8 +3585,13 @@ func agentResultFile(h *harness.Harness, outputDir string) (string, bool) {
 		return "", false
 	}
 	path := filepath.Join(outputDir, name)
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, agentResultMaxBytes+1))
+	if err != nil || len(data) > agentResultMaxBytes {
 		return "", false
 	}
 	var obj map[string]any

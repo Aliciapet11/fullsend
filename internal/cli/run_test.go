@@ -4738,6 +4738,11 @@ func TestPostScriptGate(t *testing.T) {
 			assert.False(t, got.run, content)
 		}
 	})
+	t.Run("no loop, result over the size cap", func(t *testing.T) {
+		t.Parallel()
+		big := `{"pad":"` + strings.Repeat("x", agentResultMaxBytes) + `"}`
+		assert.False(t, postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", big)).run)
+	})
 	t.Run("no loop, FULLSEND_OUTPUT_FILE with a path is refused", func(t *testing.T) {
 		t.Parallel()
 		dir := writeResult(t, "agent-result.json", `{}`)
