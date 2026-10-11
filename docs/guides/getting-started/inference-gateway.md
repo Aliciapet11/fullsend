@@ -4,6 +4,8 @@ sidebar_label: Using an inference gateway
 
 # Using an inference gateway
 
+> Background: [How fullsend authenticates](how-fullsend-authenticates.md).
+
 Agents on the [pi](../../runtimes/pi.md), [Claude Code](../../runtimes/claude.md) and
 [Codex](../../runtimes/codex.md) runtimes can reach their models through an
 OpenAI/Anthropic-compatible inference gateway that trusts the job's GitHub Actions OIDC token
@@ -49,8 +51,9 @@ inference:
         api: openai-completions
 ```
 
-- **`url`** is the gateway's origin: `https`, no path, port 443. The runner adds the `/v1/...`
-  paths itself.
+- **`url`** is the gateway's origin: `https`, port 443. If the gateway serves its API under a path
+  prefix (for example behind a shared ingress), add the prefix without the trailing `/v1`:
+  `https://gateway.example.com/team-a`. The runner adds the `/v1/...` paths itself.
 - **`audience`** is the string the operator configured on the gateway, such as
   `fullsend-inference`. It is an agreed value, not necessarily the URL, and must match the
   gateway's character for character.
@@ -72,9 +75,10 @@ The block's `auth` field names the credential the runner presents. There is no f
 the modes: if the credential for the chosen mode is missing, or the gateway refuses it, the run
 fails.
 
-- **`auth: oidc`** is the default and the recommended mode. The job's GitHub OIDC token, minted
-  for `audience`, is the credential, and no reusable key is stored anywhere. The runner refreshes
-  the token before it expires, so long runs keep working.
+- **`auth: oidc`** is the default and the recommended mode. It is direct OIDC trust (no token
+  exchange): the job's GitHub OIDC token, minted for `audience`, is itself the credential the
+  gateway validates, and no reusable key is stored anywhere. The runner refreshes the token
+  before it expires, so long runs keep working.
 - **`auth: api-key`: use with caution.** It is for a gateway that cannot trust forge OIDC. The
   runner reads the gateway key from `FULLSEND_INFERENCE_GATEWAY_API_KEY`: a repository secret in
   CI, or the environment on a local run. The block needs no `audience` in this mode. It is a
@@ -223,7 +227,8 @@ In the `oidc` mode, outside GitHub Actions, it checks the block and stops:
 
 Run the same command in a GitHub Actions job in the repository, with `id-token: write`, and it
 also fetches one OIDC token for the audience and lists the models the gateway allows the
-repository (`GET /v1/models`). It never prints the token.
+repository (`GET <url>/v1/models`, under the URL's path prefix if it has one). It never prints the
+token.
 
 > **Not executed here:** this walkthrough had no gateway to check against, so the output for a
 > healthy gateway is not shown. A maintainer should add it from a run in GitHub Actions.

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/sandbox"
 	"github.com/fullsend-ai/fullsend/internal/scaffold"
 	"github.com/fullsend-ai/fullsend/internal/security"
@@ -20,14 +21,18 @@ import (
 // The inference gateway route (#8280, ADR 0137) reaches a host the run
 // configures, so its OpenShell profile cannot be a fixed embedded file the
 // way fullsend-openai is. The scaffold ships a template
-// (profiles/fullsend-inference-gateway.yaml) whose host and id the runner
-// fills in per configured host.
+// (profiles/fullsend-inference-gateway.yaml) whose host, path prefix and id
+// the runner fills in per configured gateway URL.
 const (
 	// gatewayProfileTemplateID is the id the scaffold template declares and
 	// the prefix of every rendered per-host profile id.
 	gatewayProfileTemplateID = "fullsend-inference-gateway"
 	// gatewayProfileHostPlaceholder is the template's stand-in for the host.
 	gatewayProfileHostPlaceholder = "__INFERENCE_GATEWAY_HOST__"
+	// gatewayProfilePrefixPlaceholder is the template's stand-in for the
+	// path prefix of inference.gateway.url, at the start of every path the
+	// template sets; it renders as "" for a bare origin.
+	gatewayProfilePrefixPlaceholder = "__INFERENCE_GATEWAY_PATH_PREFIX__"
 	// gatewayProviderBase is the harness-facing provider name the run-scoped
 	// instance name derives from (gatewayRunScopedProviderName).
 	gatewayProviderBase = "inference-gateway"
@@ -82,12 +87,15 @@ func validateGatewayHost(host string) (string, error) {
 // host: the template id plus a short hash of the host, so two gateways on one
 // shared OpenShell gateway never import over each other's profile.
 func gatewayProfileID(host string) string {
-	return gatewayProfileIDFor(gatewayProfileTemplateID, host)
+	return gatewayProfileIDFor(gatewayProfileTemplateID, host, "")
 }
 
-// gatewayProfileIDFor is gatewayProfileID for the template templateID.
-func gatewayProfileIDFor(templateID, host string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(host)))
+// gatewayProfileIDFor is gatewayProfileID for the template templateID and
+// the URL path prefix ("" for a bare origin). A prefix is hashed with the
+// host, so two gateways under different prefixes on one host never share a
+// profile id; a bare origin keeps the host-only id.
+func gatewayProfileIDFor(templateID, host, prefix string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(host) + prefix))
 	return templateID + "-" + hex.EncodeToString(sum[:])[:gatewayProfileIDHashLen]
 }
 
@@ -104,6 +112,10 @@ const gatewayClaudeProfileTemplateID = "fullsend-inference-gateway-claude"
 type gatewayProfile struct {
 	// host is the gateway host the profile binds.
 	host string
+	// prefix is the path prefix of inference.gateway.url
+	// (config.GatewayURL.Prefix), "" for a bare origin. The credential
+	// binding and every allow rule carry it.
+	prefix string
 	// claude selects the Claude Code template.
 	claude bool
 }
@@ -122,12 +134,18 @@ func renderGatewayProfileFor(p gatewayProfile) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	// The prefix is rendered into the profile's paths, so it must be the
+	// clean form config.ParseGatewayURL returns.
+	if clean, err := config.GatewayPathPrefix(p.prefix); err != nil {
+		return nil, "", err
+	} else if clean != p.prefix {
+		return nil, "", fmt.Errorf("inference gateway path prefix %q is not in its clean form %q", p.prefix, clean)
+	}
 	templateID := gatewayProfileTemplateID
-	id := gatewayProfileID(h)
 	if p.claude {
 		templateID = gatewayClaudeProfileTemplateID
-		id = gatewayProfileIDFor(templateID, h)
 	}
+	id := gatewayProfileIDFor(templateID, h, p.prefix)
 	tmpl, err := scaffold.FullsendRepoFile("profiles/" + templateID + ".yaml")
 	if err != nil {
 		return nil, "", fmt.Errorf("provider profile %q is not shipped by this fullsend build: %w", templateID, err)
@@ -137,8 +155,14 @@ func renderGatewayProfileFor(p gatewayProfile) ([]byte, string, error) {
 	if strings.Count(s, idLine) != 1 || strings.Count(s, gatewayProfileHostPlaceholder) != 1 {
 		return nil, "", fmt.Errorf("embedded provider profile %q is not a valid gateway template (one id line and one host placeholder expected)", templateID)
 	}
+	// Every path must start at the prefix placeholder, so no path (the
+	// credential binding above all) can escape the configured prefix.
+	if !strings.Contains(s, gatewayProfilePrefixPlaceholder) || strings.Contains(s, "path: /") {
+		return nil, "", fmt.Errorf("embedded provider profile %q is not a valid gateway template (every path must start with %s)", templateID, gatewayProfilePrefixPlaceholder)
+	}
 	s = strings.Replace(s, idLine, "\nid: "+id+"\n", 1)
 	s = strings.Replace(s, gatewayProfileHostPlaceholder, h, 1)
+	s = strings.ReplaceAll(s, gatewayProfilePrefixPlaceholder, p.prefix)
 	return []byte(s), id, nil
 }
 

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
-	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -113,12 +113,12 @@ func planGatewayRoute(rc runConfig, backend runtime.Backend, sandboxName string,
 	if !needsGateway && !isDummyRuntime(name) {
 		return nil, nil
 	}
-	u, err := url.Parse(block.URL)
+	gu, err := config.ParseGatewayURL(block.URL)
 	if err != nil {
-		return nil, fmt.Errorf("inference.gateway.url: %w", err)
+		return nil, err
 	}
-	plan := &gatewayRoutePlan{block: block, host: u.Hostname()}
-	plan.profile = gatewayProfile{host: plan.host, claude: name == "claude"}
+	plan := &gatewayRoutePlan{block: block, host: gu.Hostname}
+	plan.profile = gatewayProfile{host: plan.host, prefix: gu.Prefix, claude: name == "claude"}
 	gr, ok := backend.Runtime.(runtime.GatewayRouteRuntime)
 	if !ok {
 		return plan, nil
@@ -135,7 +135,7 @@ func planGatewayRoute(rc runConfig, backend runtime.Backend, sandboxName string,
 	if err := gr.PrepareGatewayRun(sandboxName, runtime.GatewayRun{
 		Block:      block,
 		ModelsFile: modelsFile,
-		BaseURL:    u.Scheme + "://" + u.Host,
+		BaseURL:    gu.BaseURL(),
 	}); err != nil {
 		return nil, err
 	}
@@ -377,6 +377,23 @@ type gatewayRefreshState struct {
 	// handOffPending is set when the provider holds a newer token than the
 	// agent: the refresher then retries the hand-off alone.
 	handOffPending bool
+	// superseded lists generations older than placeholder that an earlier
+	// rotation retired while a hand-off was pending: the held placeholder
+	// the pending hand-off never replaced, and any generation before it. A
+	// seed holding one may not have recorded it, so the next hand-off
+	// retires them along with the baseline it observes. It is kept apart
+	// from placeholder so a retry of the same hand-off still accepts the
+	// generation the sandbox already hands out. Emptied by a hand-off that
+	// lands.
+	superseded []string
+}
+
+// supersede records p as retired by a rotation that ran with a hand-off
+// pending, once.
+func (s *gatewayRefreshState) supersede(p string) {
+	if p != "" && !slices.Contains(s.superseded, p) {
+		s.superseded = append(s.superseded, p)
+	}
 }
 
 // refreshState returns the handle's refresh state, creating it from the
@@ -512,11 +529,17 @@ func failGatewayClosed(h gatewayProviderHandle, st *gatewayRefreshState, cause e
 
 // handOffGateway re-seeds the running agent's token file once the sandbox
 // hands out a placeholder other than previous, the one the agent holds.
-// It returns the placeholder the agent now holds.
+// It returns the placeholder the agent now holds. The re-seed also retires
+// the generations the handle's state lists as superseded, so a seed holding
+// one that never recorded itself is still refused.
 func handOffGateway(ctx context.Context, h gatewayProviderHandle, previous string, printer *ui.Printer) (string, error) {
 	settleCtx, cancel := context.WithTimeout(ctx, handOffTimeout())
 	defer cancel()
-	return reseedCredential(settleCtx, h.sandbox, "inference gateway", h.seed, previous, printer)
+	var superseded []string
+	if h.state != nil {
+		superseded = h.state.superseded
+	}
+	return reseedCredential(settleCtx, h.sandbox, "inference gateway", h.seed, previous, nil, superseded, printer)
 }
 
 // refreshGatewayProvider rotates the provider's token (rotateGatewayToken)
@@ -623,7 +646,7 @@ func runGatewayRefresh(ctx context.Context, h gatewayProviderHandle, printer *ui
 				}
 				continue
 			}
-			st.placeholder, st.heldExpiresAt, st.handOffPending = held, st.expiresAt, false
+			st.placeholder, st.heldExpiresAt, st.handOffPending, st.superseded = held, st.expiresAt, false, nil
 			printer.StepDone(fmt.Sprintf("Inference gateway token handed off for %s (next expiry in %s)", h.name, time.Until(st.expiresAt).Round(time.Second)))
 			continue
 		}
@@ -649,6 +672,10 @@ func runGatewayRefresh(ctx context.Context, h gatewayProviderHandle, printer *ui
 		// one in between.
 		previous := st.placeholder
 		if st.handOffPending {
+			// The held placeholder is being passed over without ever
+			// having been replaced in the sandbox: a seed holding it may
+			// not have recorded it, so the hand-off retires it too.
+			st.supersede(st.placeholder)
 			previous = ""
 		}
 		iat, exp, held, err := refreshGatewayProvider(ctx, h, previous, printer)
@@ -680,7 +707,7 @@ func runGatewayRefresh(ctx context.Context, h gatewayProviderHandle, printer *ui
 			printer.StepWarn(fmt.Sprintf("Inference gateway token refresh for %s gave up: %v; the running agent keeps the token it holds, which expires at %s", h.name, err, st.heldExpiresAt.UTC().Format(time.RFC3339)))
 			return
 		default:
-			st.issuedAt, st.expiresAt, st.heldExpiresAt, st.placeholder, st.handOffPending = iat, exp, exp, held, false
+			st.issuedAt, st.expiresAt, st.heldExpiresAt, st.placeholder, st.handOffPending, st.superseded = iat, exp, exp, held, false, nil
 			printer.StepDone(fmt.Sprintf("Inference gateway token refreshed for %s (next expiry in %s)", h.name, time.Until(exp).Round(time.Second)))
 		}
 	}

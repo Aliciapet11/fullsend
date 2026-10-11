@@ -4,6 +4,8 @@ sidebar_position: 2
 
 # Getting Inference For Fullsend
 
+> Background: [How fullsend authenticates](how-fullsend-authenticates.md).
+
 Fullsend agents can get model inference in three ways:
 
 - **Vertex AI with Workload Identity Federation (WIF):** GCP grants short-lived tokens to your
@@ -102,9 +104,9 @@ The important piece of information is the `WIF Provider` which you need to pass 
 An inference gateway is an OpenAI/Anthropic-compatible endpoint that holds the upstream provider
 credential, so agents on the pi, Claude Code and Codex runtimes reach their models through it.
 Choose this route when your organisation runs or buys a gateway and you want no provider key
-stored in the forge. `auth: oidc`, where the gateway trusts the job's GitHub OIDC token, is the
-recommended mode; `auth: api-key` is supported, but use it with caution because it relies on a
-long-lived secret. See [Using an inference gateway](inference-gateway.md) for the walkthrough and
+stored in the forge. `auth: oidc` is the recommended mode: direct OIDC trust (no token exchange),
+where the gateway validates the job's GitHub OIDC token itself. `auth: api-key` is supported, but
+use it with caution because it relies on a long-lived secret. See [Using an inference gateway](inference-gateway.md) for the walkthrough and
 the [operator guide](../infrastructure/inference-gateway-operator.md) for running the gateway.
 
 ## Next steps

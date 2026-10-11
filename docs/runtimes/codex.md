@@ -119,7 +119,8 @@ itself.
 **Pin the model.** fullsend renders no model catalog for codex, so the block's `models` list is not
 used on codex, and codex's own `GET /v1/models` probe is denied by the gateway profile: the id after
 `gateway/` is what codex sends. The gateway must serve
-it on `POST /v1/responses` with Bearer auth.
+it on `POST /v1/responses` with Bearer auth (`POST <prefix>/v1/responses` when the gateway `url`
+has a path prefix).
 
 **Token counts can read 0.** Codex takes usage from the gateway's final Responses event. On the E2E
 test gateway, `gpt-oss-120b`'s usage arrives after the finish chunk, and `metrics.json` records 0

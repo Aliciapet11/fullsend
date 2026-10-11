@@ -70,11 +70,24 @@ func TestInferenceGateway_ValidateErrors(t *testing.T) {
 		{"query", InferenceGatewayConfig{URL: "https://gw.example.com?x=1"}, "query or fragment"},
 		{"fragment", InferenceGatewayConfig{URL: "https://gw.example.com#x"}, "query or fragment"},
 		{"bad url", InferenceGatewayConfig{URL: "https://gw example.com/%zz"}, "inference.gateway.url"},
-		{"path", InferenceGatewayConfig{URL: "https://gw.example.com/v1"}, "must be the gateway origin"},
-		{"nested path", InferenceGatewayConfig{URL: "https://gw.example.com/proxy/"}, "must be the gateway origin"},
-		{"encoded slash path", InferenceGatewayConfig{URL: "https://gw.example.com/%2f"}, "must be the gateway origin"},
+		{"v1 path", InferenceGatewayConfig{URL: "https://gw.example.com/v1"}, "must not end in /v1"},
+		{"v1 path trailing slash", InferenceGatewayConfig{URL: "https://gw.example.com/v1/"}, "must not end in /v1"},
+		{"prefix ending in v1", InferenceGatewayConfig{URL: "https://gw.example.com/team-a/V1"}, "must not end in /v1"},
+		{"encoded slash path", InferenceGatewayConfig{URL: "https://gw.example.com/%2f"}, "percent-encoded"},
+		{"encoded slash in prefix", InferenceGatewayConfig{URL: "https://gw.example.com/team%2Fa"}, "percent-encoded"},
+		{"encoded letter in prefix", InferenceGatewayConfig{URL: "https://gw.example.com/te%61m"}, "percent-encoded"},
+		{"dot-dot segment", InferenceGatewayConfig{URL: "https://gw.example.com/team-a/../admin"}, `no ".." segment`},
+		{"dot segment", InferenceGatewayConfig{URL: "https://gw.example.com/./team-a"}, `no "." segment`},
+		{"doubled slash", InferenceGatewayConfig{URL: "https://gw.example.com/team-a//b"}, "empty segment"},
+		{"leading doubled slash", InferenceGatewayConfig{URL: "https://gw.example.com//team-a"}, "empty segment"},
+		{"glob in prefix", InferenceGatewayConfig{URL: "https://gw.example.com/team-*"}, "may only use"},
+		{"colon in prefix", InferenceGatewayConfig{URL: "https://gw.example.com/team:a"}, "may only use"},
+		{"prefix with query", InferenceGatewayConfig{URL: "https://gw.example.com/team-a?x=1"}, "query or fragment"},
+		{"prefix with fragment", InferenceGatewayConfig{URL: "https://gw.example.com/team-a#x"}, "query or fragment"},
 		{"port", InferenceGatewayConfig{URL: "https://gw.example.com:8443"}, "port 443 only"},
-		{"loopback path", InferenceGatewayConfig{URL: "http://127.0.0.1:8080/v1"}, "must be the gateway origin"},
+		{"prefix on another port", InferenceGatewayConfig{URL: "https://gw.example.com:8443/team-a"}, "port 443 only"},
+		{"prefix over http", InferenceGatewayConfig{URL: "http://gw.example.com/team-a"}, "must use https"},
+		{"loopback path", InferenceGatewayConfig{URL: "http://127.0.0.1:8080/v1"}, "must not end in /v1"},
 		{"both forms", InferenceGatewayConfig{
 			Models:     map[string]InferenceGatewayModel{"m": {API: GatewayAPIOpenAIResponses}},
 			ModelsFile: ".fullsend/inference-gateway.json",
@@ -265,6 +278,53 @@ func TestValidateGatewayURL_LoopbackHTTP(t *testing.T) {
 func TestValidateGatewayURL_Origin(t *testing.T) {
 	for _, u := range []string{"https://gw.example.com", "https://gw.example.com/", "https://gw.example.com:443", "https://gw.example.com:443/"} {
 		require.NoError(t, ValidateGatewayURL(u), u)
+	}
+}
+
+func TestParseGatewayURL(t *testing.T) {
+	cases := []struct {
+		raw      string
+		origin   string
+		hostname string
+		prefix   string
+	}{
+		// A bare origin keeps working unchanged: no prefix.
+		{"https://gw.example.com", "https://gw.example.com", "gw.example.com", ""},
+		{"https://gw.example.com/", "https://gw.example.com", "gw.example.com", ""},
+		{"https://gw.example.com:443", "https://gw.example.com:443", "gw.example.com", ""},
+		{"https://Gw.Example.com", "https://Gw.Example.com", "Gw.Example.com", ""},
+		// A path prefix, with or without a trailing slash.
+		{"https://gw.example.com/team-a", "https://gw.example.com", "gw.example.com", "/team-a"},
+		{"https://gw.example.com/team-a/", "https://gw.example.com", "gw.example.com", "/team-a"},
+		{"https://gw.example.com:443/api", "https://gw.example.com:443", "gw.example.com", "/api"},
+		{"https://gw.example.com/org/team_a.v2~x", "https://gw.example.com", "gw.example.com", "/org/team_a.v2~x"},
+		{"https://gw.example.com/v1/team-a", "https://gw.example.com", "gw.example.com", "/v1/team-a"},
+		{"https://gw.example.com/v10", "https://gw.example.com", "gw.example.com", "/v10"},
+		// Loopback test servers.
+		{"http://127.0.0.1:8080/team-a", "http://127.0.0.1:8080", "127.0.0.1", "/team-a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			g, err := ParseGatewayURL(tc.raw)
+			require.NoError(t, err)
+			assert.Equal(t, tc.origin, g.Origin)
+			assert.Equal(t, tc.hostname, g.Hostname)
+			assert.Equal(t, tc.prefix, g.Prefix)
+			assert.Equal(t, tc.origin+tc.prefix, g.BaseURL())
+			require.NoError(t, ValidateGatewayURL(tc.raw))
+		})
+	}
+}
+
+func TestGatewayPathPrefix(t *testing.T) {
+	for in, want := range map[string]string{"": "", "/": "", "/a": "/a", "/a/": "/a", "/a/b": "/a/b"} {
+		got, err := GatewayPathPrefix(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, in := range []string{"a", "/a//b", "//", "/a/..", "/a%2Fb", "/a b", `/a\b`, "/v1", "/a/v1/", "/a/*"} {
+		_, err := GatewayPathPrefix(in)
+		assert.Error(t, err, in)
 	}
 }
 
