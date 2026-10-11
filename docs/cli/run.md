@@ -382,12 +382,14 @@ token file is codex's `gateway-token`, which the runner-owned `fullsend-gateway`
 [Codex › Models through an inference gateway](../runtimes/codex.md#models-through-an-inference-gateway-experimental).
 
 **Claude Code.** A claude runtime run whose own model is `gateway/<id>` uses the same block, provider
-and refresh. The runner exports the gateway origin as `ANTHROPIC_BASE_URL`, passes `<id>` to
+and refresh. The runner exports the gateway URL (the origin plus its path prefix, if `url` has one) as
+`ANTHROPIC_BASE_URL`, passes `<id>` to
 `--model`, and skips the Vertex credential checks. The credential reaches Claude Code through an
 `apiKeyHelper` that re-reads the re-seeded token file in the `oidc` mode, or as an
 `ANTHROPIC_AUTH_TOKEN` placeholder in the `api-key` mode. Both are sent as `Authorization: Bearer`,
 as on pi. The per-host egress profile is a Claude Code rendering that admits only
-`POST /v1/messages` and `POST /v1/messages/count_tokens`. Claude Code has no plugin-carried
+`POST <prefix>/v1/messages` and `POST <prefix>/v1/messages/count_tokens` (`<prefix>` is empty for a
+bare origin). Claude Code has no plugin-carried
 setup, so a `gateway/` model without a block that applies (no block, or an `oidc` block on a run
 without an OIDC endpoint) is an error. Details:
 [Claude Code § Inference gateway route](../runtimes/claude.md#inference-gateway-route).
