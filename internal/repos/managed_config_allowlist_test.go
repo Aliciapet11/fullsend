@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/preset"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,26 +13,32 @@ import (
 
 // An explicit empty allowed_remote_resources list denies every remote
 // resource; nil inherits. A manifest rewrite must keep the distinction in
-// both locations (#8218).
+// every config layer (#8218, #8330).
 func TestManifestMarshalPreservesEmptyAllowedRemoteResources(t *testing.T) {
 	m := newConvergeManifest("acme/api", "acme/web")
-	m.Defaults.AllowedRemoteResources = []string{}
-	m.GitHub.Repos[0].AllowedRemoteResources = []string{}
+	m.Defaults.Config = mustManagedConfig(t, "allowed_remote_resources: []\n")
+	m.GitHub.Config = mustManagedConfig(t, "allowed_remote_resources: []\n")
+	m.GitHub.Repos[0].Config = mustManagedConfig(t, "allowed_remote_resources: []\n")
 
 	path := filepath.Join(t.TempDir(), "repos.yaml")
 	require.NoError(t, writeManifest(path, m))
 	reloaded, err := LoadManifest(context.Background(), path)
 	require.NoError(t, err)
 
-	require.NotNil(t, reloaded.Defaults.AllowedRemoteResources, "defaults deny-all survives a round trip")
-	assert.Empty(t, reloaded.Defaults.AllowedRemoteResources)
-	require.NotNil(t, reloaded.GitHub.Repos[0].AllowedRemoteResources, "entry deny-all survives a round trip")
-	assert.Empty(t, reloaded.GitHub.Repos[0].AllowedRemoteResources)
-	assert.Nil(t, reloaded.GitHub.Repos[1].AllowedRemoteResources, "an unset entry stays unset")
+	for name, layer := range map[string]config.ManagedConfig{
+		"defaults.config": reloaded.Defaults.Config,
+		"github.config":   reloaded.GitHub.Config,
+		"entry config":    reloaded.GitHub.Repos[0].Config,
+	} {
+		require.True(t, layer.IsSet(), name)
+		require.NotNil(t, layer.Writer().AllowedResources(), "%s deny-all survives a round trip", name)
+		assert.Empty(t, layer.Writer().AllowedResources(), name)
+	}
+	assert.False(t, reloaded.GitHub.Repos[1].Config.IsSet(), "an unset entry stays unset")
 
 	api, _ := reloaded.ResolveConfig("acme", "api")
-	assert.NotNil(t, api.AllowedRemoteResources)
-	assert.Empty(t, api.AllowedRemoteResources)
+	assert.NotNil(t, api.Managed.AllowedResources())
+	assert.Empty(t, api.Managed.AllowedResources())
 }
 
 func TestManifestMarshalOmitsUnsetAllowedRemoteResources(t *testing.T) {
@@ -45,7 +52,7 @@ func TestManifestMarshalOmitsUnsetAllowedRemoteResources(t *testing.T) {
 // not-yet-installed repository when it rewrites the manifest.
 func TestEnsureManagedConfigDefaults_KeepsDenyAllOnUnselectedRepo(t *testing.T) {
 	m := newConvergeManifest("acme/api", "acme/web")
-	m.GitHub.Repos[1].AllowedRemoteResources = []string{}
+	m.GitHub.Repos[1].Config = mustManagedConfig(t, "allowed_remote_resources: []\n")
 	path := writebackManifestFile(t, m)
 	fc := newFakeClientForBatch("acme/api", "acme/web")
 
@@ -57,8 +64,10 @@ func TestEnsureManagedConfigDefaults_KeepsDenyAllOnUnselectedRepo(t *testing.T) 
 
 	reloaded, err := LoadManifest(context.Background(), path)
 	require.NoError(t, err)
-	require.NotNil(t, reloaded.GitHub.Repos[1].AllowedRemoteResources)
-	assert.Empty(t, reloaded.GitHub.Repos[1].AllowedRemoteResources)
+	web := reloaded.GitHub.Repos[1].Config.Writer()
+	require.NotNil(t, web)
+	require.NotNil(t, web.AllowedResources())
+	assert.Empty(t, web.AllowedResources())
 }
 
 // The upstream create_issues grant is only a default for a pristine
@@ -135,4 +144,51 @@ func TestEnsureManagedConfigDefaults_CredentialOnlyRepoIsPristine(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"acme/api"}, names)
 	assert.True(t, m.GitHub.Repos[0].Config.IsSet())
+}
+
+// An explicit empty allowlist resets inherited prefixes, but the sparse
+// managed file flattens layers and cannot record the reset. A non-empty list
+// below an empty one is rejected rather than silently re-admitting the
+// preset and code-default prefixes.
+func TestValidate_RejectsAllowlistBelowExplicitEmptyList(t *testing.T) {
+	const empty = "allowed_remote_resources: []\n"
+	const list = "allowed_remote_resources: [\"https://specific.example.com/\"]\n"
+	cases := map[string]struct {
+		defaults, platform, entry string
+		wantErr                   string
+	}{
+		"defaults empty, platform non-empty":   {empty, list, "", "github.config.allowed_remote_resources"},
+		"defaults empty, repository non-empty": {empty, "", list, "github.repos[acme/api].config.allowed_remote_resources"},
+		"platform empty, repository non-empty": {"", empty, list, "github.repos[acme/api].config.allowed_remote_resources"},
+		"defaults empty, platform unset, repository non-empty": {empty, "allowed_remote_resources: null\n", list,
+			"github.repos[acme/api].config.allowed_remote_resources"},
+		"empty at every layer":                  {empty, empty, empty, ""},
+		"non-empty then empty":                  {list, "", empty, ""},
+		"non-empty then non-empty":              {list, list, list, ""},
+		"empty only at the most specific layer": {"", "", empty, ""},
+		"empty, non-empty, empty":               {empty, list, empty, ""},
+		"empty, non-empty, unset":               {empty, list, "", "github.config.allowed_remote_resources"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := newConvergeManifest("acme/api")
+			if tc.defaults != "" {
+				m.Defaults.Config = mustManagedConfig(t, tc.defaults)
+			}
+			if tc.platform != "" {
+				m.GitHub.Config = mustManagedConfig(t, tc.platform)
+			}
+			if tc.entry != "" {
+				m.GitHub.Repos[0].Config = mustManagedConfig(t, tc.entry)
+			}
+			err := m.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Contains(t, err.Error(), "cannot record that reset")
+		})
+	}
 }

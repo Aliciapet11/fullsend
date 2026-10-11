@@ -32,7 +32,6 @@ func TestRunReposInstall_ReadOnlyManifestGlobCarveFailsWithSuggestedEdit(t *test
 			opts.forge = repos.ForgeGitHub
 			opts.fullsendRef = "v2.0.0"
 			opts.mintURL = "https://mint-override.example.com"
-			opts.allowedRemoteResources = []string{"https://github.com/acme/"}
 			useOpenAIInputs(opts)
 
 			err = runReposInstall(context.Background(), opts)
@@ -40,7 +39,7 @@ func TestRunReposInstall_ReadOnlyManifestGlobCarveFailsWithSuggestedEdit(t *test
 			msg := err.Error()
 			assert.Contains(t, msg, "read-only")
 			for _, want := range []string{"github.repos", "name: acme/api", "fullsend_ref: v2.0.0", "mint_url: https://mint-override.example.com",
-				"https://github.com/acme/", "- fullsend-ai/fullsend"} {
+				"- fullsend-ai/fullsend"} {
 				assert.Contains(t, msg, want)
 			}
 			after, err := os.ReadFile(manifestPath)

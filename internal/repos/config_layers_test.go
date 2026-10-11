@@ -286,8 +286,8 @@ func TestRequireWritableManifestForCarved(t *testing.T) {
 			m := &Manifest{Version: 1, Defaults: testInferenceDefaults()}
 			platform := m.EnsurePlatform(f)
 			platform.Repos = []RepoEntry{
-				{Name: "acme/*", Runtime: "pi"},
-				{Name: "acme/api", Runtime: "pi", Vendor: boolPtr(true)},
+				{Name: "acme/*", Config: mustManagedConfig(t, "runtime: pi\n")},
+				{Name: "acme/api", Config: mustManagedConfig(t, "runtime: pi\n"), Vendor: boolPtr(true)},
 			}
 			fc := newFakeClientForBatch("acme/api")
 

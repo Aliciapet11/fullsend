@@ -486,8 +486,9 @@ func ValidateAgentEntries(agents []AgentEntry, allowlist []string) error {
 // known yet:
 //
 //   - enforceAllowlist: when false, a URL-sourced entry's prefix is not
-//     checked against allowlist (used before repos.yaml's
-//     allowed_remote_resources shorthand has been applied to the layer).
+//     checked against allowlist (used for a single repos.yaml config
+//     layer, before the layers that may supply allowed_remote_resources
+//     are merged).
 //   - requireBuiltinName: when false, an override-only entry (no source)
 //     is not required to name a compiled-in agent (it may tune a custom
 //     agent registered in config.base.yaml, unresolved until that layer
@@ -875,7 +876,7 @@ func (c *perRepoConfig) Validate() error {
 // and model aliases. It is split out of Validate so a repos.yaml config
 // managed-configuration layer (ADR 0122) can be checked without pulling in
 // the agent-allowlist / override-only-custom-agent checks below, which need
-// information (repos.yaml shorthands, config.base.yaml) that isn't
+// information (the other repos.yaml config layers, config.base.yaml) that isn't
 // resolved yet at every point a managed block is validated — see
 // ValidateManagedLayer and ValidateMergedManaged.
 func (c *perRepoConfig) validateLocalFields() error {
@@ -944,18 +945,17 @@ func (c *perRepoConfig) validateLocalFields() error {
 }
 
 // ValidateManagedLayer validates a single repos.yaml managed-configuration
-// layer (defaults.config or one repository's config block, ADR 0122) in
-// isolation: before defaults.config and the repository config are merged,
-// and before the repos.yaml runtime / allowed_remote_resources shorthands
-// are applied. It runs the same locally-set field checks as Validate,
-// plus structural checks on this layer's own agent entries (name format,
+// layer (defaults.config, github.config, gitlab.config, or one
+// repository's config block, ADR 0122) in isolation, before the layers are
+// merged. It runs the same locally-set field checks as Validate, plus
+// structural checks on this layer's own agent entries (name format,
 // duplicate names, URL scheme and integrity hash) — but it does not
-// check a URL agent against an allowlist (the allowed_remote_resources
-// shorthand isn't applied to this layer yet) and does not require an
-// override-only entry (no source) to name a compiled-in agent (it may
-// tune a custom agent registered in config.base.yaml, which this layer
-// cannot see). Those two checks run in ValidateMergedManaged once the
-// shorthand is applied.
+// check a URL agent against an allowlist (another layer may supply the
+// allowed_remote_resources prefix) and does not require an override-only
+// entry (no source) to name a compiled-in agent (it may tune a custom
+// agent registered in config.base.yaml, which this layer cannot see).
+// Those two checks run in ValidateMergedManaged once the layers are
+// merged.
 func ValidateManagedLayer(w PerRepoConfigWriter) error {
 	c := asPerRepo(w)
 	if c == nil {
@@ -968,9 +968,9 @@ func ValidateManagedLayer(w PerRepoConfigWriter) error {
 }
 
 // ValidateMergedManaged validates a repos.yaml managed configuration
-// (ADR 0122) after defaults.config and the repository config have been
-// merged and the repos.yaml runtime / allowed_remote_resources shorthands
-// applied (mergeManagedConfig). The resolved allowlist is now correct, so
+// (ADR 0122) after defaults.config, the platform config, and the
+// repository config have been merged (mergeManagedConfig). The resolved
+// allowlist is now correct, so
 // a URL-sourced agent entry is checked against it; an override-only entry
 // is still not required to name a compiled-in agent, since
 // config.base.yaml — which may register the agent it tunes — is not

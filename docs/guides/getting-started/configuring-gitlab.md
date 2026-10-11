@@ -260,15 +260,18 @@ fullsend repos install <group/project> \
 ### Choosing a runtime
 
 `repos install` records the agent runtime in `.fullsend/config.yaml`.
-Pass `--runtime` to set it (`claude` is the stable default; `pi` and
-`codex` are experimental):
+Declare it in a `repos.yaml` config section — `defaults.config`,
+`gitlab.config`, or the project entry's `config` — then run
+`fullsend repos install` (`claude` is the stable default; `pi` and
+`codex` are experimental). There is no `--runtime` install flag:
 
-```bash
-fullsend repos install <group/project> \
-  --forge gitlab \
-  --gitlab-url https://gitlab.com \
-  --vertex-project "<gcp-project>" \
-  --runtime claude
+```yaml
+gitlab:
+  url: https://gitlab.com
+  config:
+    runtime: claude
+  repos:
+    - name: <group/project>
 ```
 
 See [Choose a Runtime](choosing-a-runtime.md) for what the runtimes are
