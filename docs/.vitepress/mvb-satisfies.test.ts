@@ -93,6 +93,16 @@ describe("getLatestPatchMatching", () => {
       expect(getLatestPatchMatching(["v0.36.0", "v0.38.0-rc.1"], ">=0.37.0", 6)).toBe(">=0.37.0");
     });
 
+    it("keeps exactly one minor when maxMinors is 1", () => {
+      expect(getLatestPatchMatching(tags, ">=0.37.0", 1)).toBe("0.47.0");
+    });
+
+    it("rejects an invalid maxMinors instead of dropping the cap", () => {
+      for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => getLatestPatchMatching(tags, ">=0.37.0", bad)).toThrow(RangeError);
+      }
+    });
+
     it("matches the uncapped behaviour when maxMinors is omitted", () => {
       expect(getLatestPatchMatching(tags, ">=0.37.0")).toBe(
         "0.37.0 || 0.38.0 || 0.39.0 || 0.40.1 || 0.41.0 || 0.42.3 || 0.43.2 || 0.44.0 || 0.45.0 || 0.46.1 || 0.47.0",

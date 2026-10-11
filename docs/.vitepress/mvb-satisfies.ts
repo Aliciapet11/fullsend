@@ -9,11 +9,15 @@ import semver from "semver";
  * with `||` (a range-set of exact comparators).
  *
  * When `maxMinors` is given, keep only the newest `maxMinors` minors (by
- * semver, after the per-minor latest-patch selection).
+ * semver, after the per-minor latest-patch selection). It must be an integer
+ * >= 1; anything else throws a RangeError rather than silently dropping the cap.
  *
  * If no tag qualifies, return `range` unchanged.
  */
 export function getLatestPatchMatching(tags: string[], range: string, maxMinors?: number): string {
+  if (maxMinors !== undefined && (!Number.isInteger(maxMinors) || maxMinors < 1)) {
+    throw new RangeError(`maxMinors must be an integer >= 1, got ${maxMinors}`);
+  }
   const versions = tags
     .map((tag) => semver.clean(tag))
     .filter((version): version is string => version !== null)
