@@ -4,7 +4,7 @@ sidebar_label: fullsend inference
 
 # fullsend inference
 
-Manage the inference credentials agent runs use. `provision`, `deprovision` and `status` create, inspect, and remove the GCP Workload Identity Federation (WIF) pool, OIDC provider, and IAM bindings that let GitHub Actions workflows authenticate with GCP for Agent Platform (Vertex) access. [`openai`](#inference-openai) enrols repositories with OpenAI WIF for GPT models on the pi runtime. [`gateway status`](#inference-gateway-status) checks a repository's `inference.gateway` block and whether the gateway accepts the job's OIDC assertion.
+Manage the inference credentials agent runs use. `provision`, `deprovision` and `status` create, inspect, and remove the GCP Workload Identity Federation (WIF) pool, OIDC provider, and IAM bindings that let GitHub Actions workflows authenticate with GCP for Agent Platform (Vertex) access. [`openai`](#inference-openai) enrols repositories with OpenAI WIF for GPT models on the pi runtime. [`gateway status`](#inference-gateway-status) is not part of WIF: it checks a repository's `inference.gateway` block and whether the gateway accepts the job's OIDC assertion through direct OIDC trust (no token exchange).
 
 ## Commands
 

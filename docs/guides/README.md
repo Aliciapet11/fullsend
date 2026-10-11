@@ -6,9 +6,10 @@ Practical how-to documentation for fullsend, organized by audience. For design d
 
 Guides for onboarding organizations and configuring GitHub or GitLab — the first thing most users need.
 
+- [How fullsend authenticates](getting-started/how-fullsend-authenticates.md) — Which credential path fullsend uses in each case: the mint, GCP and OpenAI Workload Identity, and the gateway's direct OIDC trust
 - [Mint enrollment](getting-started/README.md) — Enroll your repo in a token mint before configuring anything else
 - [Getting Inference](getting-started/getting-inference.md) — Provision GCP inference access for your org or repo
-- [Using an inference gateway](getting-started/inference-gateway.md) — Reach models through an OpenAI/Anthropic-compatible gateway with GitHub OIDC or a gateway key
+- [Using an inference gateway](getting-started/inference-gateway.md) — Reach models through an OpenAI/Anthropic-compatible gateway with direct OIDC trust (no token exchange) or a gateway key
 - [Configuring GitHub](getting-started/configuring-github.md) — Install GitHub Apps and run the setup CLI
 - [Configuring GitLab](getting-started/configuring-gitlab.md) — Install via `repos install --forge gitlab`, runners, polling, and role-credential lifecycle
 
