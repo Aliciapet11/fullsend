@@ -27,7 +27,8 @@ Accepted
 Supersedes [ADR 0052](0052-functional-tests-for-agent-pipelines.md) where it
 places the functional-test suite in this repo's `eval/` directory and runs it
 on changes to `eval/` and `internal/scaffold/`. The test category itself, and
-its place in the test pyramid, are unchanged.
+its place in the test pyramid
+([testing-agents.md](../problems/testing-agents.md)), are unchanged.
 
 Since then, agent definitions moved to
 [fullsend-ai/agents](https://github.com/fullsend-ai/agents), which grew its
