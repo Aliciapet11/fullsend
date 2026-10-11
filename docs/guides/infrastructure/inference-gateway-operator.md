@@ -1,5 +1,13 @@
 # Run an inference gateway that trusts GitHub Actions OIDC
 
+<!--
+Maintainers: the pre-commit hook check-gateway-doc-configs (hack/check-gateway-doc-configs)
+validates the agentgateway config blocks on this page, with examples/inference-gateway/echo-upstream.yaml,
+using agentgateway's own config check at the version this page names. It also checks that the
+workflow excerpt matches examples/inference-gateway/gateway-check.yml, which actionlint lints.
+Every yaml block on this page needs a "gateway-doc-check:" marker comment just above it.
+-->
+
 This guide is for the **platform operator** who runs the inference gateway that fullsend's agents
 call (pi, codex and Claude Code). When you finish, you have an [agentgateway](https://github.com/agentgateway/agentgateway)
 service on Cloud Run that:
@@ -110,6 +118,7 @@ Skip the `roles/aiplatform.user` binding if you serve no Vertex models.
 Save this as `config.tmpl.yaml`. Each rule in the comments is required, and the reason is on the line
 it applies to.
 
+<!-- gateway-doc-check: base -->
 ```yaml
 gateways:
   default: { port: 8080, bindAddress: 0.0.0.0 }
@@ -171,6 +180,7 @@ sed -e "s/VERTEX_PROJECT/$PROJECT/g" -e "s/AUDIENCE/$AUDIENCE/" \
 For a provider that takes a key rather than the service account (OpenAI, for example), the gateway
 reads the key from a file. You mount that file from Secret Manager in [step 6](#6-deploy-to-cloud-run).
 
+<!-- gateway-doc-check: openai-model -->
 ```yaml
   - name: gpt-6-luna
     provider: openAI
@@ -204,6 +214,7 @@ OIDC wherever it is possible.
 Add an agentgateway `apiKey` policy under `llm.policies`. Store each key's SHA-256 hash, never the
 key, and list the models each key may call:
 
+<!-- gateway-doc-check: api-key-policies -->
 ```yaml
   policies:
     jwtAuth:
@@ -222,6 +233,7 @@ key, and list the models each key may call:
 
 Admit the key on each model it may call, with a second rule next to the repository rule:
 
+<!-- gateway-doc-check: api-key-authorization -->
 ```yaml
     authorization:
       rules:
@@ -356,13 +368,13 @@ Starting new instance. Reason: DEPLOYMENT_ROLLOUT - Instance started due to traf
 
 ## 8. Check the gateway from GitHub Actions
 
-Add this workflow to an allowed repository, set a repository variable `GATEWAY_URL` to the service
-URL, and run it. It mints a token for your audience and checks one prompt per API, then the
-refusals.
+Copy [`gateway-check.yml`](examples/inference-gateway/gateway-check.yml) to `.github/workflows/`
+in an allowed repository, set a repository variable `GATEWAY_URL` to the service URL, and run it.
+It mints a token for your audience and checks one prompt per API, then the refusals. The job needs
+`id-token: write` to mint the token. Set `AUDIENCE` to your audience:
 
+<!-- gateway-doc-check: excerpt examples/inference-gateway/gateway-check.yml -->
 ```yaml
-name: gateway-check
-on: workflow_dispatch
 permissions:
   id-token: write
   contents: read
@@ -373,41 +385,12 @@ jobs:
     env:
       GATEWAY_URL: ${{ vars.GATEWAY_URL }}
       AUDIENCE: fullsend-inference
-    steps:
-    - name: check the gateway with this job's OIDC token
-      shell: bash
-      run: |
-        set -u +e
-        tok() { curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$1" | jq -r .value; }
-        call() { # call <label> <path> [curl args...]: prints label, HTTP status, body (first 700 bytes)
-          label=$1; path=$2; shift 2
-          code=$(curl -s -o /tmp/body -w '%{http_code}' "$GATEWAY_URL$path" "$@")
-          cat /tmp/body >> /tmp/all; echo "== $label"; echo "HTTP $code $(head -c 700 /tmp/body)"; echo
-        }
-        TOKEN=$(tok "$AUDIENCE")
-        echo "== claims (non-secret)"
-        cut -d. -f2 <<<"$TOKEN" | tr '_-' '/+' | base64 -d 2>/dev/null | jq -c '{iss,aud,repository,ttl:(.exp-.iat)}'
-        echo
-        J=(-H "authorization: Bearer $TOKEN" -H 'content-type: application/json')
-        call "GET /v1/models" /v1/models -H "authorization: Bearer $TOKEN"
-        call "POST /v1/messages (claude-sonnet-4-6)" /v1/messages "${J[@]}" -H 'anthropic-version: 2023-06-01' \
-          -d '{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"Reply with exactly: pong"}]}'
-        call "POST /v1/chat/completions (gemini-2.5-flash)" /v1/chat/completions "${J[@]}" \
-          -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Reply with exactly: pong"}]}'
-        call "POST /v1/responses (echo)" /v1/responses "${J[@]}" -d '{"model":"echo","input":"hi"}'
-        call "POST /v1/responses (claude-sonnet-4-6)" /v1/responses "${J[@]}" -d '{"model":"claude-sonnet-4-6","input":"hi"}'
-        call "custody: echo, requestHeaders.remove [x-api-key]" /v1/chat/completions "${J[@]}" \
-          -H 'x-api-key: canary' -H 'x-canary: 1' -d '{"model":"echo","messages":[{"role":"user","content":"hi"}]}'
-        call "custody: echo-noremove, no requestHeaders" /v1/chat/completions "${J[@]}" \
-          -H 'x-api-key: canary' -H 'x-canary: 1' -d '{"model":"echo-noremove","messages":[{"role":"user","content":"hi"}]}'
-        WRONG=$(tok some-other-audience)
-        call "negative: token minted for another audience" /v1/models -H "authorization: Bearer $WRONG"
-        call "negative: token only in x-api-key" /v1/messages -H "x-api-key: $TOKEN" -H 'content-type: application/json' \
-          -H 'anthropic-version: 2023-06-01' -d '{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
-        call "negative: no credential" /v1/models
-        echo "== does any body contain the token? $(grep -c -e "${TOKEN:0:40}" -e "${WRONG:0:40}" /tmp/all || true)"
 ```
+
+The job's one step defines two shell helpers. `tok` fetches a token for an audience, and `call`
+prints each call's label, HTTP status and the first 700 bytes of the response body. It then calls
+each API, the custody-check models and the refusal cases, and finally checks whether any response
+body contains the token.
 
 ```bash
 gh variable set GATEWAY_URL -R example-org/example-repo -b https://gateway.example.com
@@ -497,32 +480,12 @@ It answers every request with what it received: whether `authorization` equals t
 upstream key (`GATEWAY_KEY`), and whether `x-api-key` and a canary header arrived. Its key is read
 from the mounted `gateway-upstream-key` file, so it also proves the file-mounted key works.
 
-Add to `config.tmpl.yaml`, at the top level:
+Append the `binds` block in [`echo-upstream.yaml`](examples/inference-gateway/echo-upstream.yaml)
+to `config.tmpl.yaml`, at the top level. It defines the echo listener on port 9000 as a
+`directResponse` route, whose CEL body reports what the request carried. Then add the two models
+under `llm.models`:
 
-```yaml
-binds:
-- port: 9000
-  listeners:
-  - name: echo
-    hostname: "*"
-    routes:
-    - name: echo
-      policies:
-        directResponse:
-          status: 200
-          headers:
-            content-type: '"application/json"'
-          bodyExpression: >-
-            toJson({"id":"echo","object":"chat.completion","created":0,"model":"echo",
-            "choices":[{"index":0,"message":{"role":"assistant","content": toJson({
-            "authorization": !("authorization" in request.headers) ? "absent" : (request.headers["authorization"] == "Bearer ECHO_KEY" ? "GATEWAY_KEY" : "OTHER len=" + string(size(request.headers["authorization"]))),
-            "x_api_key_present": "x-api-key" in request.headers,
-            "canary_present": "x-canary" in request.headers})},"finish_reason":"stop"}],
-            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})
-```
-
-and under `llm.models`:
-
+<!-- gateway-doc-check: custody-models -->
 ```yaml
   - name: echo
     provider: { custom: { formats: [ { type: completions } ] } }
