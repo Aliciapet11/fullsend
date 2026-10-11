@@ -9,7 +9,8 @@
 # Vertex flag never removes the Vertex models; --delete removes exactly the
 # named resources; an image digest mismatch, an HTML 401 from Cloud Run's
 # front end and an unreadable resource fail the run; REAL_KEY_MODEL decides
-# the one model the real key may call. Change control: a config change that
+# the one model the real key may call; the config turns off agentgateway's
+# admin, stats and readiness listeners. Change control: a config change that
 # touches a frozen part exits 4 (the real key's rule or entry beyond one real
 # model included), a busy gateway exits 6 before any change (a pending
 # rollout and --delete included), a failed post-deploy check exits 5 with the
@@ -387,6 +388,9 @@ if [[ "$(grep -c 'requestHeaders: { remove: \[x-api-key\] }' "${CFG}")" == "2" ]
   pass "every model strips x-api-key"; else fail "requestHeaders.remove"; fi
 if ! grep -q 'provider: vertex' "${CFG}" && ! grep -q 'aiplatform' "${STATE}/project_policy"; then
   pass "no Vertex model or grant without --with-vertex"; else fail "unexpected Vertex"; fi
+if grep -qx 'config:' "${CFG}" && grep -qx '  adminAddr: "off"' "${CFG}" \
+    && grep -qx '  statsAddr: "off"' "${CFG}" && grep -qx '  readinessAddr: "off"' "${CFG}"; then
+  pass "config turns off the admin, stats and readiness listeners"; else fail "management listeners"; fi
 for s in "${CFG_SECRET}" "${KEY_SECRET}"; do
   if grep -qx "roles/secretmanager.secretAccessor ${SA}" "${STATE}/secrets/${s}.policy"; then
     pass "service account can read ${s}"; else fail "secretAccessor on ${s}"; fi
