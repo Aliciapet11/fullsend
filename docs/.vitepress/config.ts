@@ -244,6 +244,10 @@ export default defineConfig({
           link: "/guides/getting-started/",
           items: [
             { text: "Getting Inference", link: "/guides/getting-started/getting-inference" },
+            {
+              text: "Using an inference gateway",
+              link: "/guides/getting-started/inference-gateway",
+            },
             { text: "Choose a Runtime", link: "/guides/getting-started/choosing-a-runtime" },
             { text: "Configuring GitHub", link: "/guides/getting-started/configuring-github" },
             { text: "Configuring GitLab", link: "/guides/getting-started/configuring-gitlab" },
