@@ -79,7 +79,7 @@ The `admin` command group's `uninstall`/`analyze`/`enable`/`disable` subcommands
 | Category | Files |
 |----------|-------|
 | CLI reference | `docs/cli/inference.md` |
-| Guides | `docs/guides/getting-started/getting-inference.md`, `docs/guides/getting-started/operations.md`, `docs/guides/dev/cli-internals.md` |
+| Guides | `docs/guides/getting-started/getting-inference.md`, `docs/guides/getting-started/inference-gateway.md`, `docs/guides/getting-started/operations.md`, `docs/guides/dev/cli-internals.md` |
 | Go source | `internal/cli/inference.go` |
 
 ### `mint`

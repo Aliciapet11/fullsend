@@ -8,6 +8,7 @@ Guides for onboarding organizations and configuring GitHub or GitLab — the fir
 
 - [Mint enrollment](getting-started/README.md) — Enroll your repo in a token mint before configuring anything else
 - [Getting Inference](getting-started/getting-inference.md) — Provision GCP inference access for your org or repo
+- [Using an inference gateway](getting-started/inference-gateway.md) — Reach models through an OpenAI/Anthropic-compatible gateway with GitHub OIDC or a gateway key
 - [Configuring GitHub](getting-started/configuring-github.md) — Install GitHub Apps and run the setup CLI
 - [Configuring GitLab](getting-started/configuring-gitlab.md) — Install via `repos install --forge gitlab`, runners, polling, and role-credential lifecycle
 
