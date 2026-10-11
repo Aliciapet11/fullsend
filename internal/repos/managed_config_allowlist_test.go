@@ -166,6 +166,8 @@ func TestValidate_RejectsAllowlistBelowExplicitEmptyList(t *testing.T) {
 		"non-empty then empty":                  {list, "", empty, ""},
 		"non-empty then non-empty":              {list, list, list, ""},
 		"empty only at the most specific layer": {"", "", empty, ""},
+		"empty, non-empty, empty":               {empty, list, empty, ""},
+		"empty, non-empty, unset":               {empty, list, "", "github.config.allowed_remote_resources"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -212,7 +212,20 @@ type allowlistLayer struct {
 // [X], and the runtime would union the preset and code-default prefixes
 // back in, admitting prefixes the declared layer chain excluded. layers are
 // ordered least to most specific.
+//
+// The chain is evaluated as a whole: when the most specific declared list is
+// itself empty, it supersedes every earlier layer (an empty → non-empty →
+// empty chain resolves to deny-all and renders as []), so nothing is lost
+// and the chain is accepted.
 func rejectAllowlistBelowReset(layers []allowlistLayer) error {
+	for i := len(layers) - 1; i >= 0; i-- {
+		if list, declared := layers[i].cfg.ExplicitAllowedRemoteResources(); declared {
+			if len(list) == 0 {
+				return nil
+			}
+			break
+		}
+	}
 	reset := ""
 	for _, l := range layers {
 		list, declared := l.cfg.ExplicitAllowedRemoteResources()
