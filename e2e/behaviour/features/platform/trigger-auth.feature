@@ -13,7 +13,10 @@ Feature: Platform trigger authorization
   the denial assertion cannot pass because the harness never loaded.
   The denial assertions run before the label is added, so a leaked
   opened dispatch cannot be cancelled by the label run's concurrency
-  group and slip past the count.
+  group and slip past the count. The first of them waits for the
+  opened event's harness run and requires its Harness dispatch job to
+  succeed with an empty matrix, because the other two also pass when
+  that job errors or the run was never created.
 
   Background:
     Given the enrolled test repository
@@ -38,7 +41,8 @@ Feature: Platform trigger authorization
       | description     | op            | args                                                         |
       | Prove execution | write_fixture | output/dispatch-fork-auth-ok.json, fixtures/dispatch/ok.json |
     When a fork pull request is opened by the outsider
-    Then the harness "fork-auth-probe" agent did not run
+    Then the harness dispatch completes with an empty matrix
+    And the harness "fork-auth-probe" agent did not run
     And the harness "fork-auth-probe" was dispatched exactly 0 times
     When the fork pull request is labeled "ready-for-fork-auth"
     Then the harness "fork-auth-probe" workflow completes successfully

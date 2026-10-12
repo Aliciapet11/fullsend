@@ -1608,6 +1608,110 @@ func (d *Driver) settleHarnessDispatchCount(ctx context.Context, owner, repo, ag
 	return count, pending, nil
 }
 
+// WaitForHarnessEmptyMatrix implements ci.EmptyMatrixWaiter. It waits
+// for the harness runs created after the trigger time to settle, and
+// requires each run that was not cancelled to show an affirmative
+// empty-matrix decision: the run completed, its Harness dispatch job
+// succeeded, and no "Harness run (<agent>)" matrix job was expanded. A
+// run whose dispatch job failed (for example on an event or
+// authorization error) fails the wait immediately, and so does a run
+// that scheduled any agent. Absent runs are waited for rather than
+// treated as a pass, so a denial is never inferred from a run that has
+// not been created yet. Cancelled runs are concurrency noise and are
+// ignored.
+func (d *Driver) WaitForHarnessEmptyMatrix(ctx context.Context, owner, repo string, after time.Time) (*forge.WorkflowRun, error) {
+	deadline := d.now().Add(dispatchWait)
+	interval := dispatchPollInit
+	var lastErr error
+	var state string
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-d.timerAfter(interval):
+		}
+		interval = nextBackoff(interval, dispatchPollMax)
+		remaining := deadline.Sub(d.now())
+		if remaining < pollMinBudget {
+			break
+		}
+		run, done, err := d.emptyMatrixPollOnce(ctx, remaining, owner, repo, after, &state)
+		if done {
+			return run, err
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	msg := fmt.Sprintf("harness dispatch did not settle with an empty matrix within %s: %s", dispatchWait, state)
+	if lastErr != nil {
+		msg += fmt.Sprintf(" (last lookup error: %v)", lastErr)
+	}
+	return nil, errors.New(msg)
+}
+
+// emptyMatrixPollOnce performs one WaitForHarnessEmptyMatrix poll with
+// its API calls bounded by the remaining wait budget. done reports
+// whether the wait should end with the returned run and error; a non-nil
+// error with done false is a lookup failure to keep polling through. It
+// records a description of what the poll is still waiting for in state.
+func (d *Driver) emptyMatrixPollOnce(ctx context.Context, remaining time.Duration, owner, repo string, after time.Time, state *string) (*forge.WorkflowRun, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, remaining)
+	defer cancel()
+
+	runs, err := d.listHarnessRunsAfter(ctx, owner, repo, after)
+	if err != nil {
+		return nil, false, err
+	}
+	var settled *forge.WorkflowRun
+	pending := 0
+	for i := range runs {
+		r := runs[i]
+		if r.Status == "completed" && r.Conclusion == "cancelled" {
+			continue
+		}
+		if r.Status != "completed" {
+			pending++
+			continue
+		}
+		jobs, err := d.Client.ListWorkflowRunJobs(ctx, owner, repo, r.ID)
+		if err != nil {
+			return nil, false, fmt.Errorf("list jobs for run %d: %w", r.ID, err)
+		}
+		var dispatch *forge.WorkflowJob
+		for j := range jobs {
+			job := jobs[j]
+			if strings.HasSuffix(job.Name, harnessDispatchJobSuffix) {
+				dispatch = &jobs[j]
+			}
+			if strings.Contains(job.Name, harnessJobNameMarker) && !strings.HasSuffix(job.Name, harnessJobPlaceholder) {
+				return nil, true, fmt.Errorf("expected an empty harness matrix, but job %q was scheduled in workflow run %d", job.Name, r.ID)
+			}
+		}
+		switch {
+		case dispatch == nil:
+			// A completed run's jobs are final, but the job listing
+			// can lag; keep polling until the dispatch job shows up.
+			pending++
+		case dispatch.Status != "completed":
+			pending++
+		case dispatch.Conclusion != "success":
+			return nil, true, fmt.Errorf("expected the %q job to succeed with an empty matrix, but it concluded %s in workflow run %d; see the run logs", dispatch.Name, dispatch.Conclusion, r.ID)
+		case settled == nil:
+			settled = &runs[i]
+		}
+	}
+	switch {
+	case pending > 0:
+		*state = fmt.Sprintf("%d harness run(s) still in progress", pending)
+		return nil, false, nil
+	case settled == nil:
+		*state = "no harness run created after the trigger time"
+		return nil, false, nil
+	}
+	return settled, true, nil
+}
+
 // isConcurrencySuperseded reports whether a job conclusion indicates
 // the run was superseded by a concurrency group (cancelled or skipped).
 // These runs should not count toward dispatch totals because the
