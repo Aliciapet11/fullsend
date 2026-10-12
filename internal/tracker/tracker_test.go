@@ -395,6 +395,34 @@ func (staticClient) DeleteComment(_ context.Context, _ string, _ int, _ string) 
 var _ Client = staticClient{}
 var _ Client = (*ForgeClient)(nil)
 var _ Reactor = (*ForgeClient)(nil)
+var _ Mover = (*ForgeClient)(nil)
+
+// TestMoveIssue_NotSupported pins the one thing the move stubs promise:
+// consumers type-assert to Mover and then branch on IsNotSupported, so a
+// stub returning an error that doesn't wrap the sentinel would break them
+// silently. Delete the relevant case as each tracker gains a real move.
+func TestMoveIssue_NotSupported(t *testing.T) {
+	jc, err := NewFakeJiraClient("https://acme.atlassian.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name           string
+		mover          Mover
+		source, target string
+	}{
+		{"ForgeClient", NewForgeClient(forge.NewFakeClient()), "acme/widgets", "acme/gadgets"},
+		{"JiraClient", jc, "PROJ", "OTHER"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := tt.mover.MoveIssue(context.Background(), tt.source, 42, tt.target)
+			if res != nil || !IsNotSupported(err) {
+				t.Fatalf("MoveIssue = %+v, %v; want a nil result and an IsNotSupported error", res, err)
+			}
+		})
+	}
+}
 
 func TestForgeClient_AuthenticatedUser(t *testing.T) {
 	fc := forge.NewFakeClient()
