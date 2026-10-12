@@ -3,6 +3,8 @@ package forge
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -509,16 +511,17 @@ func (f *FakeClient) GetRepo(_ context.Context, owner, repo string) (*Repository
 		return nil, e
 	}
 
+	// Return copies: UpdateRepoVisibility and DeleteRepo write these slots in place.
 	fullName := owner + "/" + repo
-	for i := range f.Repos {
-		if f.Repos[i].FullName == fullName {
-			return &f.Repos[i], nil
+	for _, r := range f.Repos {
+		if r.FullName == fullName {
+			return &r, nil
 		}
 	}
 	// Also check created repos.
-	for i := range f.CreatedRepos {
-		if f.CreatedRepos[i].FullName == fullName {
-			return &f.CreatedRepos[i], nil
+	for _, r := range f.CreatedRepos {
+		if r.FullName == fullName {
+			return &r, nil
 		}
 	}
 	return nil, fmt.Errorf("%w: %s/%s", ErrNotFound, owner, repo)
@@ -1641,7 +1644,7 @@ func (f *FakeClient) ListIssueComments(_ context.Context, owner, repo string, nu
 	if f.IssueComments != nil {
 		key := fmt.Sprintf("%s/%s/%d", owner, repo, number)
 		if comments, ok := f.IssueComments[key]; ok {
-			return comments, nil
+			return slices.Clone(comments), nil
 		}
 	}
 	return nil, nil
@@ -1973,7 +1976,7 @@ func (f *FakeClient) ListPullRequestReviews(_ context.Context, owner, repo strin
 	if f.PRReviews != nil {
 		key := fmt.Sprintf("%s/%s/%d", owner, repo, number)
 		if reviews, ok := f.PRReviews[key]; ok {
-			return reviews, nil
+			return slices.Clone(reviews), nil
 		}
 	}
 	return nil, nil
@@ -2710,7 +2713,17 @@ func (f *FakeClient) ListPipelineSchedules(_ context.Context, owner, repo string
 		return nil, e
 	}
 
-	return f.PipelineSchedules[owner+"/"+repo], nil
+	// Deep copy: schedule writers change elements and their Variables maps in place.
+	src := f.PipelineSchedules[owner+"/"+repo]
+	if src == nil {
+		return nil, nil
+	}
+	out := make([]PipelineSchedule, len(src))
+	for i, s := range src {
+		out[i] = s
+		out[i].Variables = maps.Clone(s.Variables)
+	}
+	return out, nil
 }
 
 func (f *FakeClient) UpdateCIVariable(_ context.Context, owner, repo, name, value string, protected bool) error {
