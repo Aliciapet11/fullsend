@@ -742,12 +742,14 @@ Pool organizations intentionally do not keep the production agent apps
 installed as baseline test infrastructure. The test mint uses the isolated
 `fullsend-test-*` identities, which limits the blast radius of test credentials
 and prevents ordinary behaviour runs from acting as production agents. The
-suite still has both credential paths available: the public mint backed by the
-production `fullsend-ai-*` apps and the per-test mint backed by the
-`fullsend-test-*` apps. Tests that need to emulate a third-party agent can use
-the production identities explicitly through the public mint path; those
-identities remain available for that purpose without being permanently trusted
-by every test organization.
+suite can use both credential paths: the public mint backed by the production
+`fullsend-ai-*` apps and a per-run preview or durable stage mint backed by the
+`fullsend-test-*` apps. Tests that need to emulate a third-party production
+agent can opt into the public mint path only after an operator has installed
+the corresponding production app on the target organization and granted any
+required cross-organization access. Ordinary tests use the isolated test
+identities without permanently trusting production apps in every test
+organization.
 
 > **Warning:** Do **not** enroll these apps on the production community mint.
 > They are strictly for test infrastructure.
