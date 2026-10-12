@@ -3,8 +3,8 @@ package steps
 import (
 	"context"
 	"fmt"
-	"strings"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
