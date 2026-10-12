@@ -15,13 +15,8 @@
 #                               dispatched STAGE name itself must be a
 #                               registered role or agent alias.
 #
-# Gate FULLSEND_GITLAB_ROLE_MIGRATION (case-insensitive) is validated
-# for a legal value (unset/disabled/migrating/rollback/enforced) but no
-# longer changes credential selection: every mode requires the
-# registered per-role secret, matching gitlabroles.Resolve on the Go
-# side (internal/gitlabroles/gitlabroles.go). There is no shared-token
-# path and no fallback to FULLSEND_FORGE_TOKEN in any mode, including
-# leftover disabled and explicit rollback.
+# Role credentials are selected unconditionally. There is no migration gate,
+# shared-token path, or fallback to FULLSEND_FORGE_TOKEN.
 #
 # Custom roles come from FULLSEND_GITLAB_ROLE_REGISTRY (install-state JSON).
 # Repository files cannot create or elevate a role. Unknown gate values and
@@ -39,17 +34,6 @@ fullsend_select_gitlab_role_token() {
     *)
       echo "ERROR: FULLSEND_JOB_KIND must be 'poller' or 'agent', got '${_fs_kind:-<empty>}'" >&2
       unset _fs_kind
-      return 1
-      ;;
-  esac
-
-  _fs_mode=$(printf '%s' "${FULLSEND_GITLAB_ROLE_MIGRATION:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-  case "${_fs_mode}" in
-    "") _fs_mode="disabled" ;;
-    disabled|migrating|rollback|enforced) ;;
-    *)
-      echo "ERROR: invalid GitLab role migration mode '${FULLSEND_GITLAB_ROLE_MIGRATION}'" >&2
-      unset _fs_kind _fs_mode
       return 1
       ;;
   esac
@@ -169,7 +153,7 @@ if not re.match(r"^[A-Z][A-Z0-9_]*$", secret):
     sys.exit(1)
 print(role + "\t" + secret)
 ') || {
-            unset _fs_kind _fs_mode _fs_role _fs_secret _fs_agent _fs_custom
+            unset _fs_kind _fs_role _fs_secret _fs_agent _fs_custom
             return 1
           }
           if test -n "${_fs_custom}"; then
@@ -187,7 +171,7 @@ print(role + "\t" + secret)
     else
       echo "ERROR: GitLab role is not registered" >&2
     fi
-    unset _fs_kind _fs_mode _fs_role _fs_secret _fs_agent _fs_custom
+    unset _fs_kind _fs_role _fs_secret _fs_agent _fs_custom
     return 1
   fi
 
@@ -198,7 +182,7 @@ print(role + "\t" + secret)
     *)
       if ! [[ "${_fs_secret}" =~ ^FULLSEND_GITLAB_ROLE_[A-Z0-9_]+_TOKEN$ ]]; then
         echo "ERROR: invalid GitLab role secret name" >&2
-        unset _fs_kind _fs_mode _fs_role _fs_secret _fs_agent _fs_custom _fs_token _fs_name
+        unset _fs_kind _fs_role _fs_secret _fs_agent _fs_custom _fs_token _fs_name
         return 1
       fi
       ;;
@@ -211,7 +195,7 @@ print(role + "\t" + secret)
 
   if test -z "${_fs_token}"; then
     echo "ERROR: ${_fs_secret} is not set — ensure the protected CI/CD variable is configured" >&2
-    unset _fs_kind _fs_mode _fs_role _fs_secret _fs_agent _fs_custom _fs_token _fs_name _fs_role_value
+    unset _fs_kind _fs_role _fs_secret _fs_agent _fs_custom _fs_token _fs_name _fs_role_value
     return 1
   fi
 
@@ -223,7 +207,7 @@ print(role + "\t" + secret)
   # that `fullsend run` publishes later in the job for the same job
   # (internal/cli/gitlab_role.go).
   export FULLSEND_JOB_TOKEN_NAME="${_fs_name}"
-  unset _fs_kind _fs_mode _fs_role _fs_secret _fs_agent _fs_custom _fs_token _fs_name _fs_role_value
+  unset _fs_kind _fs_role _fs_secret _fs_agent _fs_custom _fs_token _fs_name _fs_role_value
 }
 
 fullsend_select_gitlab_role_token

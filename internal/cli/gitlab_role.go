@@ -80,7 +80,7 @@ func applyGitLabRoleSelection(sel gitlabroles.Selection, token string, setenv fu
 }
 
 // clearSiblingGitLabRoleSecrets blanks every registered role secret (and
-// the shared FULLSEND_FORGE_TOKEN) that sel.Present reports as configured
+// a legacy shared token) that sel.Present reports as configured
 // but that is not the credential this job selected. Without this, a
 // sibling secret such as FULLSEND_GITLAB_ANALYST_TOKEN remains sitting in
 // the process environment after a Coder job selects its own token; a
@@ -90,6 +90,12 @@ func applyGitLabRoleSelection(sel gitlabroles.Selection, token string, setenv fu
 // entirely — that check only runs inside `fullsend post-review` itself, not
 // for arbitrary script code reading a raw CI/CD variable (see PR #7510).
 func clearSiblingGitLabRoleSecrets(sel gitlabroles.Selection, setenv func(string, string)) {
+	// The legacy shared credential is not part of PresenceFrom, but it can
+	// still be inherited from the caller's environment. Never expose it to
+	// child scripts after role selection.
+	if sel.Source.SecretName != forge.SecretForgeToken {
+		setenv(forge.SecretForgeToken, "")
+	}
 	for name, present := range sel.Present {
 		if !present || name == sel.Source.SecretName {
 			continue
@@ -125,7 +131,7 @@ func wrapGitLabAuthFailure(sel gitlabroles.Selection, err error) error {
 	if err == nil || !isGitLabAuthFailure(err) {
 		return err
 	}
-	return fmt.Errorf("%w: %w", gitlabroles.AuthFailed(sel.Source.Role, sel.Mode, sel.Source.SecretName), err)
+	return fmt.Errorf("%w: %w", gitlabroles.AuthFailed(sel.Source.Role, sel.Source.SecretName), err)
 }
 
 // checkGitLabApprovalCapability rejects GitLab APPROVE reviews when the
@@ -153,10 +159,6 @@ func checkGitLabApprovalCapability(forgeName, action, token string, getenv func(
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	mode, err := gitlabroles.ModeFrom(getenv)
-	if err != nil {
-		return err
-	}
 	agentName := strings.TrimSpace(getenv(envGitLabRole))
 	if agentName == "" {
 		agentName = strings.TrimSpace(getenv("STAGE"))
@@ -173,7 +175,6 @@ func checkGitLabApprovalCapability(forgeName, action, token string, getenv func(
 	if authToken == "" || secretValue == "" || authToken != secretValue {
 		return &gitlabroles.Error{
 			Role:   sel.Source.Role,
-			Mode:   mode,
 			Secret: sel.Source.SecretName,
 			Err:    gitlabroles.ErrIdentityMismatch,
 		}

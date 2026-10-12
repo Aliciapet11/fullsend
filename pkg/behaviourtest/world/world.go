@@ -33,6 +33,19 @@ type World struct {
 
 	ScenarioStart time.Time
 
+	// ScenarioName is the godog scenario name, set by the Before hook.
+	// ScenarioBegin is the time the Before hook ran; unlike
+	// ScenarioStart, which trigger steps move forward, it never changes
+	// during the scenario. Failure log collection uses both to label its
+	// summary and to scope the repository's runs to this scenario.
+	ScenarioName  string
+	ScenarioBegin time.Time
+
+	// SavedLogRunIDs records the workflow runs whose logs have already
+	// been written under BEHAVIOUR_ARTIFACT_DIR during the scenario, so
+	// failure log collection in the After hook does not fetch them again.
+	SavedLogRunIDs map[int]bool
+
 	DummyOps           []runtime.BehaviourOperation
 	ArtifactDir        string
 	TriageTriggerEvent string // GitHub event for triage dispatch (issues for label path)
@@ -50,6 +63,11 @@ type World struct {
 	ForkRepo     string
 	ForkPRNumber int
 	ForkPRBranch string
+	// ForkSCM is the driver of the test actor that owns the fork, set
+	// when the fork was created "owned by the <actor>". Fork-side
+	// operations (branch, commits, cleanup) go through it. Nil means
+	// the fork belongs to the e2e identity behind SCM.
+	ForkSCM scm.Driver
 
 	// URL harness hosting repo — set by URL dispatch step definitions.
 	URLHarnessRepoOwner string
@@ -99,6 +117,13 @@ type World struct {
 	WriteSCM   scm.Driver
 	WriteLogin string
 
+	// TriageSCM is an SCM driver authenticated as a GitHub User with
+	// triage-level access to the pool-org repos. Used by scenarios that
+	// act as the triage actor. Nil when TEST_ACTOR_TRIAGE_PAT is not
+	// set. Shared across scenarios, never reset.
+	TriageSCM   scm.Driver
+	TriageLogin string
+
 	// KillSwitchActivated records whether this scenario activated the
 	// repo-level kill switch. CleanupScenario uses this to deactivate
 	// the switch so the next scenario on this slot is not affected.
@@ -127,6 +152,19 @@ type World struct {
 	AgentsOverridden bool
 	AgentsOriginal   []config.AgentEntry
 
+	// GatewayConfigOverridden records that this scenario committed an
+	// inference.gateway block into .fullsend/config.yaml;
+	// GatewayConfigOriginal holds the pre-scenario file bytes.
+	// CleanupScenario commits them back, before the leased repo is
+	// deallocated, so the slot's next scenario does not inherit the block.
+	GatewayConfigOverridden bool
+	GatewayConfigOriginal   []byte
+
+	// GatewayAPIKeySecretSet records that this scenario set the enrolled
+	// repo's FULLSEND_INFERENCE_GATEWAY_API_KEY secret to the test key.
+	// CleanupScenario deletes it before the leased repo is deallocated.
+	GatewayAPIKeySecretSet bool
+
 	// OwnersAuthActivated records whether this scenario committed an
 	// OWNERS file and/or added owners_file to the authorization providers in config.yaml.
 	// CleanupScenario removes both.
@@ -136,6 +174,53 @@ type World struct {
 	JiraMockServer *httptest.Server
 	JiraMockState  *jiramock.State
 	JiraConfigDir  string // temp dir holding .fullsend/ layout for the poller
+
+	// PlaybackEntries accumulates the ordered list of canned-result
+	// directories a playback scenario will serve, built up by "a <agent>
+	// agent that returns <result>" steps before the triggering issue is
+	// created. PlaybackCommitted records whether the playlist (and its
+	// result fixtures) has already been committed to the leased repo,
+	// so a scenario that creates more than one issue does not commit
+	// the playlist twice. Both are only meaningful when IsPlaybackMode
+	// is true.
+	PlaybackEntries   []runtime.PlaybackEntry
+	PlaybackCommitted bool
+
+	// ConsumedHarnessRunIDs tracks, per agent, the harness-run IDs
+	// already matched by a prior "the <agent> agent completes
+	// successfully" step in this scenario. A playback scenario can
+	// trigger the same agent's harness more than once (e.g. review is
+	// retried after fix); WaitForHarnessAgentRound uses this set to
+	// select the earliest eligible successful run not yet consumed
+	// instead of re-matching (or skipping past) a round already recorded
+	// here.
+	ConsumedHarnessRunIDs map[string]map[int]bool
+
+	// HarnessRunArtifactDirs caches each harness run's downloaded
+	// artifact directory, keyed by run ID. A playback scenario dispatches
+	// several stages in one scenario (triage, code, review, fix); unlike
+	// ensureHarnessArtifacts (dispatch.go), which downloads once per
+	// scenario into the single ArtifactDir for the single-dispatch case,
+	// "the <agent> agent completes successfully" (playback.go) needs a
+	// fresh download per round so a later stage's artifacts — and any
+	// download failure — are not hidden behind an earlier stage's
+	// already-populated ArtifactDir.
+	HarnessRunArtifactDirs map[int]string
+
+	// StagePublishedSHA pins, per stage name (the leading path segment of
+	// a result fixture, e.g. "code" or "fix"), the pull request's head
+	// commit SHA captured at the earliest moment that stage's publication
+	// can be observed. "the published repository matches fixture" reads
+	// this instead of re-resolving the branch's live tip at comparison
+	// time: review and fix can progress automatically (dispatched by
+	// forge webhooks) independently of how quickly this scenario's own
+	// steps execute, so a later stage can advance the same branch before
+	// an earlier stage's own assertion gets around to resolving it
+	// (#7957 review). Currently populated only for the "code" stage, from
+	// the pull request's first commit (immutable once later stages append
+	// to the branch) rather than the branch's live tip; a stage with no
+	// pinned entry falls back to live resolution.
+	StagePublishedSHA map[string]string
 }
 
 // Clone creates a shallow copy of w. Drivers and shared state (SCM,
@@ -154,6 +239,14 @@ type World struct {
 func (w *World) Clone() *World {
 	clone := *w
 	return &clone
+}
+
+// IsPlaybackMode reports whether the world's Driver is a
+// *install.PlaybackDriver, i.e. the suite is running dummy-playback
+// scenarios rather than the standard behaviour suite.
+func (w *World) IsPlaybackMode() bool {
+	_, ok := w.Driver.(*install.PlaybackDriver)
+	return ok
 }
 
 const BehaviourScriptRepoPath = "behaviour/current-scenario.yaml"

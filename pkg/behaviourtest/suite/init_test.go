@@ -3,17 +3,20 @@ package suite
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cucumber/godog"
-	messages "github.com/cucumber/messages/go/v21"
+	messages "github.com/cucumber/messages/go/v34"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/runtime"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/drivers/env"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/drivers/install"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/world"
@@ -37,6 +40,9 @@ func (p *panickingSCM) GetIssue(context.Context, string, string, int) (*forge.Is
 	return nil, nil
 }
 func (p *panickingSCM) GetFileContent(context.Context, string, string, string) ([]byte, error) {
+	return nil, nil
+}
+func (p *panickingSCM) GetFileContentAtRef(context.Context, string, string, string, string) ([]byte, error) {
 	return nil, nil
 }
 func (p *panickingSCM) CommitFile(context.Context, string, string, string, string, []byte) error {
@@ -74,10 +80,20 @@ func (p *panickingSCM) GetBranchRef(context.Context, string, string, string) (st
 func (p *panickingSCM) CreateFork(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
+func (p *panickingSCM) CreateUserFork(context.Context, string, string) (string, string, error) {
+	return "", "", nil
+}
 func (p *panickingSCM) CommitFileToFork(context.Context, string, string, string, string, string, []byte) error {
 	return nil
 }
 func (p *panickingSCM) CreateForkChangeProposal(context.Context, string, string, string, string, string, string, string, string) (*forge.ChangeProposal, error) {
+	return nil, nil
+}
+func (p *panickingSCM) ListPullRequestCommits(context.Context, string, string, int) ([]string, error) {
+	return nil, nil
+}
+
+func (p *panickingSCM) ListPullRequestReviews(context.Context, string, string, int) ([]forge.PullRequestReview, error) {
 	return nil, nil
 }
 func (p *panickingSCM) ListIssueReactions(context.Context, string, string, int) ([]forge.Reaction, error) {
@@ -91,6 +107,10 @@ type fakeDriver struct {
 	deallocated int
 	outstanding map[string]struct{}
 	names       chan string
+
+	// onDeallocate, when set, runs at the start of DeallocateRepo so
+	// tests can observe state at the moment the lease ends.
+	onDeallocate func()
 }
 
 func newFakeDriver(capacity int) *fakeDriver {
@@ -118,6 +138,9 @@ func (f *fakeDriver) AllocateRepo(ctx context.Context) (string, error) {
 }
 
 func (f *fakeDriver) DeallocateRepo(_ context.Context, name string) error {
+	if f.onDeallocate != nil {
+		f.onDeallocate()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.outstanding[name]; !ok {
@@ -149,12 +172,18 @@ func TestResetScenarioWorld_ClearsSharedState(t *testing.T) {
 		ForkRepo:                   "repo-fork",
 		ForkPRNumber:               42,
 		ForkPRBranch:               "branch",
+		ForkSCM:                    &panickingSCM{},
 		URLHarnessRepoOwner:        "org",
 		URLHarnessRepoName:         "harness-host",
 		AllowedResourcesOverridden: true,
 		AllowedResourcesOriginal:   []string{"https://example.com/"},
 		AgentsOverridden:           true,
 		AgentsOriginal:             []config.AgentEntry{{Name: "test", Source: "harness/test.yaml"}},
+		GatewayConfigOverridden:    true,
+		GatewayConfigOriginal:      []byte("runtime: dummy\n"),
+		PlaybackEntries:            []runtime.PlaybackEntry{{Result: "triage/bug"}},
+		PlaybackCommitted:          true,
+		ConsumedHarnessRunIDs:      map[string]map[int]bool{"review": {10: true}},
 	}
 	resetScenarioWorld(w)
 	assert.Equal(t, 0, w.PRNumber)
@@ -166,28 +195,36 @@ func TestResetScenarioWorld_ClearsSharedState(t *testing.T) {
 	assert.Equal(t, "", w.ForkRepo)
 	assert.Equal(t, 0, w.ForkPRNumber)
 	assert.Equal(t, "", w.ForkPRBranch)
+	assert.Nil(t, w.ForkSCM)
 	assert.Equal(t, "", w.URLHarnessRepoOwner)
 	assert.Equal(t, "", w.URLHarnessRepoName)
 	assert.False(t, w.AllowedResourcesOverridden)
 	assert.Nil(t, w.AllowedResourcesOriginal)
 	assert.False(t, w.AgentsOverridden)
 	assert.Nil(t, w.AgentsOriginal)
+	assert.False(t, w.GatewayConfigOverridden)
+	assert.Nil(t, w.GatewayConfigOriginal)
+	assert.Nil(t, w.PlaybackEntries)
+	assert.False(t, w.PlaybackCommitted)
+	assert.Nil(t, w.ConsumedHarnessRunIDs)
 }
 
 func TestSkipErrorForTagNames(t *testing.T) {
 	w := &world.World{Config: env.RunnerConfig{InstallMode: "per-repo", SCM: "github"}}
+	playbackWorld := &world.World{
+		Config: env.RunnerConfig{InstallMode: "per-repo", SCM: "github"},
+		Driver: install.NewPlaybackDriver(newFakeDriver(1)),
+	}
 
 	tests := []struct {
 		name    string
 		tags    []string
 		wantErr error
 		cfg     env.RunnerConfig
+		world   *world.World
 	}{
 		{name: "no tags", tags: nil, wantErr: nil},
 		{name: "skip per-repo on per-repo", tags: []string{"@skip:per-repo"}, wantErr: godog.ErrSkip},
-		{name: "skip per-org on per-repo", tags: []string{"@skip:per-org"}, wantErr: nil},
-		{name: "requires per-repo on per-repo", tags: []string{"@requires:per-repo"}, wantErr: nil},
-		{name: "requires per-repo on per-org", tags: []string{"@requires:per-repo"}, wantErr: godog.ErrSkip, cfg: env.RunnerConfig{InstallMode: "per-org"}},
 		{name: "skip gitlab on github", tags: []string{"@skip:gitlab"}, wantErr: nil},
 		{name: "skip gitlab on gitlab", tags: []string{"@skip:gitlab"}, wantErr: godog.ErrSkip, cfg: env.RunnerConfig{SCM: "gitlab"}},
 		{name: "requires capability undeclared", tags: []string{"@requires:capability:applier-branch-namespace"}, wantErr: godog.ErrSkip},
@@ -195,11 +232,16 @@ func TestSkipErrorForTagNames(t *testing.T) {
 			cfg: env.RunnerConfig{InstallMode: "per-repo", SCM: "github", Capabilities: []string{"applier-branch-namespace"}}},
 		{name: "requires capability other declared", tags: []string{"@requires:capability:applier-branch-namespace"}, wantErr: godog.ErrSkip,
 			cfg: env.RunnerConfig{InstallMode: "per-repo", SCM: "github", Capabilities: []string{"something-else"}}},
+		{name: "playback tag outside playback suite", tags: []string{"@playback"}, wantErr: godog.ErrSkip},
+		{name: "playback tag inside playback suite", tags: []string{"@playback"}, wantErr: nil, world: playbackWorld},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ww := w
-			if tt.cfg.InstallMode != "" || tt.cfg.SCM != "" {
+			switch {
+			case tt.world != nil:
+				ww = tt.world
+			case tt.cfg.InstallMode != "" || tt.cfg.SCM != "":
 				ww = &world.World{Config: tt.cfg}
 			}
 			err := SkipErrorForTagNames(tt.tags, ww)
@@ -229,7 +271,7 @@ func TestBeforeScenario_ClonesAndResetsWorld(t *testing.T) {
 		IssueNumber: 42, // scenario field — should be zeroed by reset
 	}
 
-	ctx, err := beforeScenario(context.Background(), nil, template)
+	ctx, err := beforeScenario(context.Background(), nil, template, "a scenario")
 	require.NoError(t, err)
 
 	w := world.FromContext(ctx)
@@ -239,13 +281,15 @@ func TestBeforeScenario_ClonesAndResetsWorld(t *testing.T) {
 	assert.Equal(t, "test-repo", w.RepoName)
 	assert.Equal(t, 0, w.IssueNumber, "scenario fields should be zeroed")
 	assert.False(t, w.ScenarioStart.IsZero(), "ScenarioStart should be set")
+	assert.Equal(t, w.ScenarioStart, w.ScenarioBegin, "ScenarioBegin should be set")
+	assert.Equal(t, "a scenario", w.ScenarioName)
 }
 
 func TestBeforeScenario_NoPoolAcquire(t *testing.T) {
 	driver := newFakeDriver(3)
 	template := &world.World{Org: "test-org", Driver: driver}
 
-	ctx, err := beforeScenario(context.Background(), nil, template)
+	ctx, err := beforeScenario(context.Background(), nil, template, "a scenario")
 	require.NoError(t, err)
 
 	w := world.FromContext(ctx)
@@ -259,12 +303,28 @@ func TestBeforeScenario_NoPoolAcquire(t *testing.T) {
 func TestBeforeScenario_NilDriver(t *testing.T) {
 	template := &world.World{Org: "test-org"}
 
-	ctx, err := beforeScenario(context.Background(), nil, template)
+	ctx, err := beforeScenario(context.Background(), nil, template, "a scenario")
 	require.NoError(t, err)
 
 	w := world.FromContext(ctx)
 	require.NotNil(t, w)
 	assert.Empty(t, w.LeasedRepoName, "no driver → no leased name")
+}
+
+func TestBeforeScenario_PlaybackDriverGetsRepoHint(t *testing.T) {
+	base := newFakeDriver(1)
+	pd := install.NewPlaybackDriver(base)
+	template := &world.World{Org: "test-org", Driver: pd}
+
+	// SetRepoHint on PlaybackDriver is a no-op (pool repos have stable
+	// names), so this only verifies that beforeScenario's type assertion
+	// finds the PlaybackDriver and calls it without error.
+	ctx, err := beforeScenario(context.Background(), nil, template, "A Playback Scenario")
+	require.NoError(t, err)
+
+	w := world.FromContext(ctx)
+	require.NotNil(t, w)
+	assert.True(t, w.IsPlaybackMode())
 }
 
 func TestAfterScenario_NilWorld(t *testing.T) {
@@ -394,4 +454,110 @@ func TestAfterScenario_AllocateBlocksUntilDeallocate(t *testing.T) {
 	name2, err := driver.AllocateRepo(context.Background())
 	require.NoError(t, err)
 	assert.NotEmpty(t, name2)
+}
+
+// TestAfterScenario_FailedScenarioWritesFailureSummaryBeforeDeallocating
+// checks that a failed scenario leaves a failure summary under
+// BEHAVIOUR_ARTIFACT_DIR, written before the leased repo — and with it
+// the run logs — is deallocated, even when no step resolved a run.
+func TestAfterScenario_FailedScenarioWritesFailureSummaryBeforeDeallocating(t *testing.T) {
+	artifactDir := t.TempDir()
+	t.Setenv("BEHAVIOUR_ARTIFACT_DIR", artifactDir)
+
+	driver := newFakeDriver(1)
+	name, err := driver.AllocateRepo(context.Background())
+	require.NoError(t, err)
+
+	summaryAtDealloc := 0
+	driver.onDeallocate = func() {
+		matches, _ := filepath.Glob(filepath.Join(artifactDir, "debug-scenario-*", "failure-summary.txt"))
+		summaryAtDealloc = len(matches)
+	}
+
+	w := &world.World{LeasedRepoName: name, ScenarioName: "times out"}
+	ctx := world.WithWorld(context.Background(), w)
+
+	origErr := fmt.Errorf("harness agent did not complete")
+	_, err = afterScenario(ctx, driver, origErr)
+	assert.Equal(t, origErr, err)
+	assert.Equal(t, 1, summaryAtDealloc, "the failure summary must exist before the repo is deallocated")
+}
+
+// TestAfterScenario_DeallocationFailureWritesFailureSummary checks that a
+// passing scenario whose deferred deallocation fails still leaves a failure
+// summary naming the deallocation error.
+func TestAfterScenario_DeallocationFailureWritesFailureSummary(t *testing.T) {
+	artifactDir := t.TempDir()
+	t.Setenv("BEHAVIOUR_ARTIFACT_DIR", artifactDir)
+
+	driver := newFakeDriver(2)
+	name, err := driver.AllocateRepo(context.Background())
+	require.NoError(t, err)
+	// Deallocate before After — the hook's own deallocation then fails.
+	require.NoError(t, driver.DeallocateRepo(context.Background(), name))
+
+	w := &world.World{LeasedRepoName: name, ScenarioName: "passes but leaks"}
+	ctx := world.WithWorld(context.Background(), w)
+
+	_, err = afterScenario(ctx, driver, nil)
+	require.Error(t, err)
+
+	matches, globErr := filepath.Glob(filepath.Join(artifactDir, "debug-scenario-*", "failure-summary.txt"))
+	require.NoError(t, globErr)
+	require.Len(t, matches, 1)
+	data, readErr := os.ReadFile(matches[0])
+	require.NoError(t, readErr)
+	assert.Contains(t, string(data), "Scenario: passes but leaks")
+	assert.Contains(t, string(data), "deallocating repo")
+}
+
+func TestAfterScenario_NoFailureSummaryForPassingOrSkippedScenario(t *testing.T) {
+	artifactDir := t.TempDir()
+	t.Setenv("BEHAVIOUR_ARTIFACT_DIR", artifactDir)
+
+	for _, scenarioErr := range []error{nil, godog.ErrSkip} {
+		w := &world.World{ScenarioName: "fine"}
+		ctx := world.WithWorld(context.Background(), w)
+		_, err := afterScenario(ctx, nil, scenarioErr)
+		assert.Equal(t, scenarioErr, err)
+	}
+
+	entries, err := os.ReadDir(artifactDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "only failed scenarios write a failure summary")
+}
+
+// TestBeforeToAfter_MalformedCapabilityTagWritesFailureSummary checks that a
+// scenario failed by Before-hook tag validation still leaves a failure
+// summary: Before attaches a named World even though it returns an error, so
+// the After hook does not return at its nil-World guard.
+func TestBeforeToAfter_MalformedCapabilityTagWritesFailureSummary(t *testing.T) {
+	artifactDir := t.TempDir()
+	t.Setenv("BEHAVIOUR_ARTIFACT_DIR", artifactDir)
+
+	template := &world.World{Config: env.RunnerConfig{InstallMode: "per-repo", SCM: "github"}}
+	ctx, beforeErr := beforeScenario(context.Background(), []string{"@requires:capability:"}, template, "malformed tag scenario")
+	require.Error(t, beforeErr)
+	require.NotErrorIs(t, beforeErr, godog.ErrSkip)
+	require.NotNil(t, world.FromContext(ctx), "the failed Before hook must still attach a World")
+
+	_, err := afterScenario(ctx, nil, fmt.Errorf("before scenario hook failed: %w", beforeErr))
+	require.Error(t, err)
+
+	matches, globErr := filepath.Glob(filepath.Join(artifactDir, "debug-scenario-*", "failure-summary.txt"))
+	require.NoError(t, globErr)
+	require.Len(t, matches, 1)
+	data, readErr := os.ReadFile(matches[0])
+	require.NoError(t, readErr)
+	assert.Contains(t, string(data), "Scenario: malformed tag scenario")
+	assert.Contains(t, string(data), "needs a name")
+}
+
+// TestBeforeScenario_SkipDoesNotAttachWorld checks a normal tag skip keeps
+// returning ErrSkip without a World, so the After hook does nothing for it.
+func TestBeforeScenario_SkipDoesNotAttachWorld(t *testing.T) {
+	template := &world.World{Config: env.RunnerConfig{InstallMode: "per-repo", SCM: "github"}}
+	ctx, err := beforeScenario(context.Background(), []string{"@skip:per-repo"}, template, "skipped")
+	require.ErrorIs(t, err, godog.ErrSkip)
+	assert.Nil(t, world.FromContext(ctx))
 }

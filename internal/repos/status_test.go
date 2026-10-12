@@ -5,16 +5,21 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
+	"github.com/fullsend-ai/fullsend/internal/appsetup"
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/poll"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newTestManifest() *Manifest {
 	return &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -38,6 +43,7 @@ func populateInstalledRepo(t testing.TB, fc *forge.FakeClient, owner, repo, ref,
 	t.Helper()
 	fc.VariableValues[owner+"/"+repo+"/FULLSEND_MINT_URL"] = mintURL
 	fc.VariableValues[owner+"/"+repo+"/FULLSEND_GCP_REGION"] = region
+	fc.VariableValues[owner+"/"+repo+"/FULLSEND_APP_SET"] = appsetup.DefaultAppSet
 
 	if fc.Secrets == nil {
 		fc.Secrets = make(map[string]bool)
@@ -48,13 +54,14 @@ func populateInstalledRepo(t testing.TB, fc *forge.FakeClient, owner, repo, ref,
 	// Generate scaffold files from the same templates that status
 	// compares against, so content-drift detection is accurate.
 	files, err := BuildScaffoldFiles(InstallConfig{
-		Owner:       owner,
-		Repo:        repo,
-		Forge:       ForgeGitHub,
-		Roles:       config.PerRepoDefaultRoles(),
-		MintURL:     mintURL,
-		UpstreamRef: ref,
-		UpstreamTag: ref,
+		Owner:         owner,
+		Repo:          repo,
+		Forge:         ForgeGitHub,
+		Roles:         config.PerRepoDefaultRoles(),
+		MintURL:       mintURL,
+		UpstreamRef:   ref,
+		UpstreamTag:   ref,
+		ManagedConfig: emptyManagedOverlay(t),
 	})
 	if err != nil {
 		t.Fatalf("populateInstalledRepo: BuildScaffoldFiles: %v", err)
@@ -207,6 +214,54 @@ func TestProbeRepoState_GitLab_LegacyDispatchMarker(t *testing.T) {
 	}
 }
 
+// failForgeTokenSecretExistsClient fails RepoSecretExists only for the
+// GitLab shared/role secrets that ProbeRepoState itself checks, leaving the
+// generic required-secret checks inside ProbeComponents (GCP project ID and
+// WIF provider) unaffected. This isolates ProbeRepoState's own error path
+// from the shared RepoSecretExists method used by both.
+type failForgeTokenSecretExistsClient struct {
+	*forge.FakeClient
+}
+
+func (c *failForgeTokenSecretExistsClient) RepoSecretExists(ctx context.Context, owner, repo, name string) (bool, error) {
+	switch name {
+	case forge.SecretForgeToken, forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken:
+		return false, fmt.Errorf("denied")
+	}
+	return c.FakeClient.RepoSecretExists(ctx, owner, repo, name)
+}
+
+func TestProbeRepoState_GitLab_RepoSecretExistsError(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte("  ref: v2.5.0\n")
+	client := &failForgeTokenSecretExistsClient{FakeClient: fc}
+
+	_, err := ProbeRepoState(context.Background(), client, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err == nil {
+		t.Fatal("expected error when checking secret existence fails")
+	}
+	if !strings.Contains(err.Error(), "checking secret") {
+		t.Errorf("error = %q, want it to mention checking secret", err.Error())
+	}
+}
+
+func TestProbeRepoState_GitLab_InstalledViaRoleSecretAndWorkflow(t *testing.T) {
+	// A role-only install has no shared FULLSEND_FORGE_TOKEN and no pipeline
+	// schedule, but the workflow carrier plus any built-in role secret is
+	// sufficient install evidence.
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte("  ref: v2.5.0\n")
+	fc.Secrets["acme/api/"+forge.SecretGitLabPollerToken] = true
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if !state.Installed {
+		t.Fatal("Installed = false, want true (workflow carrier plus a role secret)")
+	}
+}
+
 func TestProbeRepoState_GitLab_NotInstalled(t *testing.T) {
 	fc := forge.NewFakeClient()
 	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte("  ref: v2.5.0\n")
@@ -322,6 +377,68 @@ func TestStatus_MintURLDrift(t *testing.T) {
 	}
 }
 
+// TestStatus_AppSetDrift verifies that when the manifest explicitly declares
+// app_set, status flags a repo whose FULLSEND_APP_SET variable has drifted from
+// the declared value. When app_set is not declared, status asserts presence only
+// and never flags a value difference (preserve semantics).
+func TestStatus_AppSetDrift(t *testing.T) {
+	fc := forge.NewFakeClient()
+	m := newTestManifest()
+	m.GitHub.AppSet = "custom-set"
+
+	populateInstalledRepo(t, fc, "acme-corp", "api-server", "v2.3.0",
+		"https://mint.example.com", "us-central1")
+	populateInstalledRepo(t, fc, "acme-corp", "web-frontend", "v2.3.0",
+		"https://mint.example.com", "us-central1")
+	// api-server matches the declared app_set; web-frontend has a stale value.
+	fc.VariableValues["acme-corp/api-server/FULLSEND_APP_SET"] = "custom-set"
+	fc.VariableValues["acme-corp/web-frontend/FULLSEND_APP_SET"] = "stale-set"
+
+	result, err := Status(context.Background(), m, newTestClientFactory(fc), 4, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Summary.Drifted != 1 {
+		t.Errorf("drifted = %d, want 1", result.Summary.Drifted)
+	}
+	for _, s := range result.Repos {
+		if s.Repo == "web-frontend" {
+			if len(s.Drifts) != 1 {
+				t.Fatalf("web-frontend: want 1 drift, got %d", len(s.Drifts))
+			}
+			if s.Drifts[0].Field != "FULLSEND_APP_SET" {
+				t.Errorf("drift field = %q, want FULLSEND_APP_SET", s.Drifts[0].Field)
+			}
+			if s.Drifts[0].Expected != "custom-set" {
+				t.Errorf("drift expected = %q, want custom-set", s.Drifts[0].Expected)
+			}
+		}
+	}
+}
+
+// TestStatus_AppSetNotDeclared_NoValueDrift verifies that a custom
+// FULLSEND_APP_SET is not reported as drift when the manifest does not declare
+// app_set.
+func TestStatus_AppSetNotDeclared_NoValueDrift(t *testing.T) {
+	fc := forge.NewFakeClient()
+	m := newTestManifest()
+
+	populateInstalledRepo(t, fc, "acme-corp", "api-server", "v2.3.0",
+		"https://mint.example.com", "us-central1")
+	populateInstalledRepo(t, fc, "acme-corp", "web-frontend", "v2.3.0",
+		"https://mint.example.com", "us-central1")
+	fc.VariableValues["acme-corp/web-frontend/FULLSEND_APP_SET"] = "some-custom-set"
+
+	result, err := Status(context.Background(), m, newTestClientFactory(fc), 4, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Summary.Drifted != 0 {
+		t.Errorf("drifted = %d, want 0 (app_set not declared → presence-only)", result.Summary.Drifted)
+	}
+}
+
 func TestStatus_RefDrift(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := newTestManifest()
@@ -412,7 +529,8 @@ func TestStatus_MultipleDrifts(t *testing.T) {
 func TestStatus_WorkflowMissing_NotInstalled(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -434,7 +552,8 @@ func TestStatus_WorkflowMissing_NotInstalled(t *testing.T) {
 func TestStatus_WorkflowYAMLExtension(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -502,7 +621,8 @@ func TestStatus_RepoFilterCaseInsensitive(t *testing.T) {
 func TestStatus_APIError(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL: "https://mint.example.com",
 			Repos:   []RepoEntry{{Name: "acme-corp/api-server"}},
@@ -537,7 +657,8 @@ func TestStatus_GlobExpansion(t *testing.T) {
 	}
 
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -567,7 +688,8 @@ func TestStatus_GlobExpansion(t *testing.T) {
 func TestStatus_PerRepoOverride(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -596,7 +718,8 @@ func TestStatus_PerRepoOverride(t *testing.T) {
 func TestStatus_DefaultConcurrency(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL: "https://mint.example.com",
 			Repos:   []RepoEntry{{Name: "org/repo"}},
@@ -615,7 +738,8 @@ func TestStatus_DefaultConcurrency(t *testing.T) {
 func TestStatus_EmptyManifest(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL: "https://mint.example.com",
 		},
@@ -633,7 +757,8 @@ func TestStatus_EmptyManifest(t *testing.T) {
 func TestStatus_InstalledButWorkflowGetError(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -664,7 +789,8 @@ func TestStatus_InstalledButWorkflowGetError(t *testing.T) {
 func TestStatus_NoWorkflowFiles(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -903,7 +1029,8 @@ func TestFilterRepos(t *testing.T) {
 func TestStatus_NoKnownVariables(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL: "https://mint.example.com",
 			Repos:   []RepoEntry{{Name: "org/repo"}},
@@ -923,7 +1050,8 @@ func TestStatus_NoKnownVariables(t *testing.T) {
 func TestStatus_MultiOrg(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -955,7 +1083,8 @@ func TestStatus_GlobExpandError(t *testing.T) {
 	fc.Errors["ListOrgRepos"] = fmt.Errorf("org not found")
 
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL: "https://mint.example.com",
 			Repos:   []RepoEntry{{Name: "bad-org/*"}},
@@ -971,7 +1100,8 @@ func TestStatus_GlobExpandError(t *testing.T) {
 func TestStatus_DefaultMintURL_NoDrift(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			FullsendRef: "v2.3.0",
 			Repos:       []RepoEntry{{Name: "org/repo"}},
@@ -993,7 +1123,8 @@ func TestStatus_DefaultMintURL_NoDrift(t *testing.T) {
 func TestStatus_EmptyExpectedRef_NoDrift(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL: "https://mint.example.com",
 			Repos:   []RepoEntry{{Name: "org/repo"}},
@@ -1021,7 +1152,8 @@ func TestStatus_SHADriftDetection(t *testing.T) {
 		fc.Refs["fullsend-ai/fullsend/tags/v0.35.0"] = sha
 
 		m := &Manifest{
-			Version: 1,
+			Version:  1,
+			Defaults: testInferenceDefaults(),
 			GitHub: &PlatformConfig{
 				MintURL:     "https://mint.example.com",
 				FullsendRef: "v0.35.0",
@@ -1048,7 +1180,8 @@ func TestStatus_SHADriftDetection(t *testing.T) {
 		fc.Refs["fullsend-ai/fullsend/tags/v0.36.0"] = "newsha000000000000000000000000000000000"
 
 		m := &Manifest{
-			Version: 1,
+			Version:  1,
+			Defaults: testInferenceDefaults(),
 			GitHub: &PlatformConfig{
 				MintURL:     "https://mint.example.com",
 				FullsendRef: "v0.36.0",
@@ -1074,7 +1207,8 @@ func TestStatus_SHADriftDetection(t *testing.T) {
 		fc.Refs["fullsend-ai/fullsend/heads/main"] = "latestsha00000000000000000000000000000"
 
 		m := &Manifest{
-			Version: 1,
+			Version:  1,
+			Defaults: testInferenceDefaults(),
 			GitHub: &PlatformConfig{
 				MintURL:     "https://mint.example.com",
 				FullsendRef: "main",
@@ -1105,7 +1239,8 @@ func TestStatus_SymbolicRefMatch_NoDrift(t *testing.T) {
 	fc.Refs["fullsend-ai/fullsend/tags/v0"] = sha
 
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v0",
@@ -1134,7 +1269,8 @@ func TestStatus_DifferentSymbolicRefs_Drift(t *testing.T) {
 	fc.Refs["fullsend-ai/fullsend/tags/v1"] = "newsha000000000000000000000000000000000"
 
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v1",
@@ -1165,7 +1301,8 @@ func TestStatus_DifferentSymbolicRefs_Drift(t *testing.T) {
 func TestStatus_Concurrency(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -1230,7 +1367,8 @@ func TestStatus_RepoFilterPartialUnmatched(t *testing.T) {
 func TestStatus_DetectsContentDrift_Workflow(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -1308,7 +1446,8 @@ jobs:
 func TestStatus_DetectsContentDrift_ThinCaller(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -1344,7 +1483,8 @@ func TestStatus_DetectsContentDrift_ThinCaller(t *testing.T) {
 func TestStatus_DetectsOrphanFile(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -1381,7 +1521,8 @@ func TestStatus_DetectsOrphanFile(t *testing.T) {
 func TestStatus_DetectsOrphanVariable(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -1417,7 +1558,8 @@ func TestStatus_DetectsOrphanVariable(t *testing.T) {
 func TestStatus_OrphanCheckError_ReportsStatusError(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -1475,7 +1617,8 @@ func TestStatus_ContentDrift_BranchRef(t *testing.T) {
 	// that content drift is detected even when the ref matches.
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "main",
@@ -1543,7 +1686,8 @@ func TestStatus_ContentDrift_RefDifference_NoFalsePositive(t *testing.T) {
 	// the template structure is the same (only the ref differs).
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.4.0",
@@ -1591,7 +1735,8 @@ func TestStatus_NoContentDrift_IndependentInstalledContent(t *testing.T) {
 	// them tautological for content-drift verification.
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v2.3.0",
@@ -1659,7 +1804,8 @@ func TestStatus_NoContentDrift_IndependentInstalledContent(t *testing.T) {
 func TestStatus_GitLab_MissingSchedules_ReportsDrift(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := &Manifest{
-		Version: 1,
+		Version:  1,
+		Defaults: testInferenceDefaults(),
 		GitLab: &PlatformConfig{
 			URL:         "https://gitlab.example.com",
 			FullsendRef: "v2.5.0",
@@ -1763,7 +1909,7 @@ func TestStatus_ConfigPresetDrift(t *testing.T) {
 	}
 }
 
-func TestStatus_NoPresetDoesNotCompareBase(t *testing.T) {
+func TestStatus_NoPresetExistingBaseIsDrift(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := newTestManifest()
 
@@ -1777,17 +1923,109 @@ func TestStatus_NoPresetDoesNotCompareBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Summary.Drifted != 0 {
-		t.Errorf("drifted = %d, want 0 when no preset is declared", result.Summary.Drifted)
+	if result.Summary.Drifted != 1 {
+		t.Fatalf("drifted = %d, want 1 for the undeclared base", result.Summary.Drifted)
 	}
+	for _, r := range result.Repos {
+		if r.Repo != "api-server" {
+			continue
+		}
+		found := false
+		for _, d := range r.Drifts {
+			if d.Field == ".fullsend/config.base.yaml" && d.Expected == undeclaredBaseExpected {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("api-server drifts = %+v, want undeclared base drift", r.Drifts)
+		}
+	}
+}
+
+// TestStatus_NotInstalledChecksConfigLayers covers #8218: a manifest repo
+// with no Fullsend components still has both configuration layers
+// checked, so findings that would block install surface beforehand,
+// while files install would simply add are not reported as missing.
+func TestStatus_NotInstalledChecksConfigLayers(t *testing.T) {
+	t.Run("undeclared base", func(t *testing.T) {
+		fc := forge.NewFakeClient()
+		m := newTestManifest()
+		fc.FileContents["acme-corp/api-server/.fullsend/config.base.yaml"] = []byte(testPresetYAML)
+
+		result, err := Status(context.Background(), m, newTestClientFactory(fc), 4, []string{"acme-corp/api-server"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(result.Repos) != 1 {
+			t.Fatalf("repos = %d, want 1", len(result.Repos))
+		}
+		r := result.Repos[0]
+		if r.Installed {
+			t.Fatal("repo should not be installed")
+		}
+		if len(r.Drifts) != 1 || r.Drifts[0].Field != ".fullsend/config.base.yaml" {
+			t.Errorf("drifts = %+v, want undeclared base drift", r.Drifts)
+		}
+	})
+
+	t.Run("markerless managed overlay", func(t *testing.T) {
+		fc := forge.NewFakeClient()
+		m := newTestManifest()
+		m.Defaults.Config = mustManagedConfig(t, "kill_switch: true\n")
+		fc.FileContents["acme-corp/api-server/.fullsend/config.yaml"] = []byte("kill_switch: false\n")
+
+		result, err := Status(context.Background(), m, newTestClientFactory(fc), 4, []string{"acme-corp/api-server"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		r := result.Repos[0]
+		if r.Error != "" {
+			t.Fatalf("unexpected error: %s", r.Error)
+		}
+		if len(r.Drifts) != 1 || r.Drifts[0].Field != ".fullsend/config.yaml" ||
+			!strings.Contains(r.Drifts[0].Expected, "adoption required") {
+			t.Errorf("drifts = %+v, want adoption-required overlay drift", r.Drifts)
+		}
+	})
+
+	t.Run("absent files are not drift before install", func(t *testing.T) {
+		fc := forge.NewFakeClient()
+		m := newTestManifest()
+		m.Defaults.Config = mustManagedConfig(t, "kill_switch: true\n")
+		m.Defaults.ConfigBase = ConfigBase{Source: writePresetFile(t, testPresetYAML)}
+
+		result, err := Status(context.Background(), m, newTestClientFactory(fc), 4, []string{"acme-corp/api-server"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		r := result.Repos[0]
+		if r.Error != "" || len(r.Drifts) != 0 {
+			t.Errorf("error=%q drifts=%+v, want none", r.Error, r.Drifts)
+		}
+	})
+
+	t.Run("base read error", func(t *testing.T) {
+		fc := forge.NewFakeClient()
+		m := newTestManifest()
+		fc.GetFileContentErrors = map[string]error{
+			"acme-corp/api-server/.fullsend/config.base.yaml": fmt.Errorf("boom"),
+		}
+		result, err := Status(context.Background(), m, newTestClientFactory(fc), 4, []string{"acme-corp/api-server"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(result.Repos[0].Error, "reading .fullsend/config.base.yaml") {
+			t.Errorf("error = %q", result.Repos[0].Error)
+		}
+	})
 }
 
 func TestStatus_GitLab_ConfigPresetDrift(t *testing.T) {
 	presetPath := writePresetFile(t, testPresetYAML)
-	fc := forge.NewFakeClient()
+	fc := newFakeClientForBatch("acme/api")
 	m := &Manifest{
 		Version:  1,
-		Defaults: DefaultsConfig{ConfigBase: ConfigBase{Source: presetPath}},
+		Defaults: DefaultsConfig{ConfigBase: ConfigBase{Source: presetPath}, Inference: InferenceSettings{Auth: InferenceAuthVertexWIF}},
 		GitLab: &PlatformConfig{
 			URL:         "https://gitlab.example.com",
 			FullsendRef: "v2.5.0",
@@ -1810,4 +2048,45 @@ func TestStatus_GitLab_ConfigPresetDrift(t *testing.T) {
 	if !found {
 		t.Errorf("GitLab status must report config.base.yaml drift, got %v", result.Repos[0].Drifts)
 	}
+}
+
+func setWorkflowFile(fc *forge.FakeClient, owner, repo, content string) {
+	fc.FileContents[owner+"/"+repo+"/.github/workflows/fullsend.yml"] = []byte(content)
+}
+
+func TestReadWorkflowRef_YmlExtension(t *testing.T) {
+	fc := forge.NewFakeClient()
+	setWorkflowFile(fc, "acme", "api",
+		"    uses: fullsend-ai/fullsend/.github/workflows/reusable-dispatch.yml@v2.3.0")
+
+	ref, err := readWorkflowRef(context.Background(), fc, "acme", "api", defaultForgeConfig)
+	require.NoError(t, err)
+	assert.Equal(t, "v2.3.0", ref)
+}
+
+func TestReadWorkflowRef_YamlExtension(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.github/workflows/fullsend.yaml"] = []byte(
+		"    uses: fullsend-ai/fullsend/.github/workflows/reusable-dispatch.yml@v1.0.0")
+
+	ref, err := readWorkflowRef(context.Background(), fc, "acme", "api", defaultForgeConfig)
+	require.NoError(t, err)
+	assert.Equal(t, "v1.0.0", ref)
+}
+
+func TestReadWorkflowRef_NoWorkflowFile(t *testing.T) {
+	fc := forge.NewFakeClient()
+	ref, err := readWorkflowRef(context.Background(), fc, "acme", "api", defaultForgeConfig)
+	require.NoError(t, err)
+	assert.Empty(t, ref)
+}
+
+func TestReadWorkflowRef_NonNotFoundError(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.Errors["GetFileContent"] = fmt.Errorf("network timeout")
+
+	ref, err := readWorkflowRef(context.Background(), fc, "acme", "api", defaultForgeConfig)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "network timeout")
+	assert.Empty(t, ref)
 }

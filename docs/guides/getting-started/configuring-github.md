@@ -4,13 +4,15 @@ sidebar_position: 3
 
 # Configuring GitHub For Fullsend
 
+> Background: [How fullsend authenticates](../user/how-fullsend-authenticates.md).
+
 The goal of this document is that you configure Fullsend for your GitHub repository.
 GitLab repositories use a different command (`fullsend repos install --forge gitlab`).
 See [Configuring GitLab](configuring-gitlab.md) for that flow.
 
 ## Prerequisites
 
-* You have your WIF provider URL from [Getting Inference](getting-inference.md).
+* For Vertex agents, you have your WIF provider URL from [Getting Inference](getting-inference.md). OpenAI-only setup does not need it.
 * Download the latest [fullsend](https://github.com/fullsend-ai/fullsend/releases) CLI.
 * Download the latest [gh](https://cli.github.com/) CLI and authenticate with it.
 
@@ -45,10 +47,9 @@ and provide them permissions to the repository you want to install Fullsend to.
 | retro | <https://github.com/apps/fullsend-ai-retro/installations/new> |
 | prioritize | <https://github.com/apps/fullsend-ai-prioritize/installations/new> |
 
-> **Note:** The `fullsend` dispatch app (`fullsend-ai-fullsend`) is only
-> required for [organization-mode](org-mode.md) installations. Per-repo
-> mode uses the repository's own shim workflow for dispatch and does not
-> need the `fullsend` app.
+> **Note:** You do not need the `fullsend` dispatch app
+> (`fullsend-ai-fullsend`). Each repository dispatches through its own shim
+> workflow.
 
 > **Note:** Installing a subset of GitHub Apps does **not** automatically
 > limit which agents are active. You must also pass the `--agents` flag
@@ -70,7 +71,15 @@ Where `<org>/<repo>` refers to the GitHub organization and repository you want t
 for, `<gcp-project>` is your GCP project name, and `<wif-provider-url>` is the WIF Provider URL
 created at [Getting Inference](getting-inference.md).
 
-The command creates files, secrets and variables in your repository.
+The command creates files, secrets and variables in your repository. If you
+will use only OpenAI agents, omit both `--inference-project` and
+`--inference-wif-provider`. Setup then writes no GCP inference secrets;
+a later Vertex run requires both credentials.
+Configure each enabled agent's runtime and model for OpenAI before it runs.
+For OpenAI credentials, see [OpenAI Workload Identity](../infrastructure/openai-workload-identity.md).
+For repositories managed with `fullsend repos install`, select OpenAI Workload Identity with
+`--inference-auth openai-wif` (or `inference.auth: openai-wif` in `repos.yaml`); see
+[Manifest-managed repositories](../infrastructure/openai-workload-identity.md#manifest-managed-repositories-repos-install).
 
 ### Enabling a subset of agents
 
@@ -109,7 +118,12 @@ When `--config` is provided, the preset content is committed unchanged as
 `--agents`, `--mint-url`, `--inference-*`) are written to the
 `.fullsend/config.yaml` overlay and override the same values from the
 preset. Omitted flags inherit from the preset, then from compiled-in
-defaults. The `--config-hash` flag is optional but recommended for remote
+defaults. If you pass a persistent flag whose value already matches the
+preset or compiled default, setup still writes it into the overlay and
+warns that the field is now pinned locally — later updates to the base
+layer or default will not apply until you remove that key from
+`.fullsend/config.yaml`. Per-run flags such as `--dry-run` never pin.
+The `--config-hash` flag is optional but recommended for remote
 URLs — it verifies the SHA-256 digest of the fetched content before
 committing. `--config` is only valid for per-repo mode.
 
@@ -125,8 +139,8 @@ Actions tab to see the Fullsend workflow in action. In some minutes the
 
 ## Next steps
 
-* Read [Organization installation mode](org-mode.md) to learn how to share GCP project with other repositories
-within your GitHub organization.
+* Read [Repo Management](repo-management.md) to learn how to install and manage Fullsend across
+many repositories, including sharing configuration presets between them.
 * Read the [Agents](../../agents/README.md) section to learn about the default agents Fullsend
 ships with.
 * Explore other sections of this documentation for more information.

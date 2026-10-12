@@ -23,13 +23,16 @@ import (
 )
 
 type bootstrapInput struct {
-	sandboxName  string
-	agentPath    string
-	agentName    string
-	skillDirs    []string
-	plugins      []PluginInput
-	modelAliases map[string]string
-	repoDir      string
+	sandboxName            string
+	agentPath              string
+	agentName              string
+	skillDirs              []string
+	plugins                []PluginInput
+	modelAliases           map[string]string
+	repoDir                string
+	agentSubagents         map[string]*string
+	parentModel            string
+	openAIProviderAttached bool
 }
 
 func (b bootstrapInput) SandboxName() string                { return b.sandboxName }
@@ -38,8 +41,9 @@ func (b bootstrapInput) AgentName() string                  { return b.agentName
 func (b bootstrapInput) SkillDirs() []string                { return b.skillDirs }
 func (b bootstrapInput) Plugins() []PluginInput             { return b.plugins }
 func (b bootstrapInput) ModelAliases() map[string]string    { return b.modelAliases }
-func (b bootstrapInput) AgentSubagents() map[string]*string { return nil }
-func (b bootstrapInput) ParentModel() string                { return "" }
+func (b bootstrapInput) AgentSubagents() map[string]*string { return b.agentSubagents }
+func (b bootstrapInput) ParentModel() string                { return b.parentModel }
+func (b bootstrapInput) OpenAIProviderAttached() bool       { return b.openAIProviderAttached }
 func (b bootstrapInput) RepoDir() string {
 	if b.repoDir == "" {
 		return "/sandbox/workspace/repo"
@@ -1148,7 +1152,7 @@ func TestInstallClaudeHooks_HappyPath(t *testing.T) {
 	t.Setenv("PATH", stubDir)
 
 	hooks := security.SandboxHookConfig{} // default hooks (all enabled)
-	require.NoError(t, installClaudeHooks("test-sandbox", hooks))
+	require.NoError(t, installClaudeHooks("test-sandbox", hooks, nil))
 
 	logBytes, err := os.ReadFile(logPath)
 	require.NoError(t, err)
@@ -1167,7 +1171,7 @@ func TestInstallClaudeHooks_SettingsUploadError(t *testing.T) {
 	t.Setenv("PATH", stubDir)
 
 	hooks := security.SandboxHookConfig{}
-	err := installClaudeHooks("test-sandbox", hooks)
+	err := installClaudeHooks("test-sandbox", hooks, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "copying hooks.json to sandbox")
 }
@@ -1178,7 +1182,7 @@ func TestInstallClaudeHooks_OpenshellNotInPath(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	hooks := security.SandboxHookConfig{}
-	err := installClaudeHooks("test-sandbox", hooks)
+	err := installClaudeHooks("test-sandbox", hooks, nil)
 	require.Error(t, err)
 }
 
@@ -1204,7 +1208,7 @@ func TestInstallClaudeHooks_TempFileError(t *testing.T) {
 		UnicodePostTool:         &off,
 		ContextSuppressPostTool: &off,
 	}}}
-	err := installClaudeHooks("test-sandbox", security.SandboxHookConfigFromHarness(h))
+	err := installClaudeHooks("test-sandbox", security.SandboxHookConfigFromHarness(h), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "creating temp hooks file")
 }

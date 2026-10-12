@@ -2,15 +2,214 @@ package repos
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/gitlabroles"
 )
+
+var gitlabRoleOperationLocks sync.Map // map[string]chan struct{}
+
+// gitlabRoleOperationLock returns the process-local lock for one project: a
+// one-slot channel, so acquisition can observe cancellation and a deadline
+// where a sync.Mutex could not.
+func gitlabRoleOperationLock(owner, repo string) chan struct{} {
+	key := owner + "/" + repo
+	actual, _ := gitlabRoleOperationLocks.LoadOrStore(key, make(chan struct{}, 1))
+	return actual.(chan struct{})
+}
+
+// GitLabProjectLeaseVar names the project CI/CD variable that serves as the
+// cross-process lease for GitLab role-credential and webhook transactions.
+// It exists only while an installer holds it and carries no secret.
+const GitLabProjectLeaseVar = "FULLSEND_GITLAB_INSTALL_LEASE"
+
+// gitlabLeaseWait bounds how long an installer waits for another installer's
+// lease; gitlabLeasePoll is the interval between attempts.
+var (
+	gitlabLeaseWait = 2 * time.Minute
+	gitlabLeasePoll = 2 * time.Second
+)
+
+// gitlabCleanupTimeout bounds compensating requests (such as freeing the
+// project lease) that run on a context detached from cancellation.
+var gitlabCleanupTimeout = 30 * time.Second
+
+// gitlabCleanupContext returns a bounded context detached from ctx's
+// cancellation, so a canceled operation can still undo what it started.
+func gitlabCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), gitlabCleanupTimeout)
+}
+
+// LockGitLabProject serializes every GitLab role-credential and webhook
+// write transaction on one project: within this process by a mutex, and
+// across installer processes (any host) by a lease taken atomically on the
+// project itself (see forge.ProjectLeaser). The returned release function
+// must be deferred with the caller's error pointer; it frees the lease and
+// joins a failed release into *errp so a stuck lease is reported rather than
+// silent. A dry run takes only the process-local mutex, since it must not
+// write to the project. A nil error pointer still releases both locks but
+// discards release errors.
+//
+// It fails closed: a client that cannot take a lease, or a lease that stays
+// held past the wait budget, is an error, and the caller must not proceed
+// with credential or webhook changes. The lease is never taken over: a held
+// lease is reported, not removed. The lease is not reentrant.
+func LockGitLabProject(ctx context.Context, client forge.Client, owner, repo string, dryRun bool) (func(errp *error), error) {
+	local := gitlabRoleOperationLock(owner, repo)
+	// One deadline-bound context covers the whole acquisition: the
+	// process-local lock and every cross-process lease request, including a
+	// request the live client is retrying on Retry-After. The release below
+	// stays on a detached context.
+	acquireCtx, cancelAcquire := context.WithTimeout(ctx, gitlabLeaseWait)
+	defer cancelAcquire()
+	// budgetErr reports why acquisition stopped when it was the caller's own
+	// cancellation; nil means the acquisition budget ran out.
+	budgetErr := func(what string) error {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s: %w", what, ctx.Err())
+		}
+		return nil
+	}
+	select {
+	case local <- struct{}{}:
+	case <-acquireCtx.Done():
+		if err := budgetErr("waiting for another operation in this process to finish"); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("another fullsend operation in this process holds the project lock. Wait for it to finish, then re-run")
+	}
+	unlockLocal := func() { <-local }
+	// A free channel and cancellation can both be ready. Do not let select's
+	// random choice admit an already-canceled operation, including dry runs.
+	if err := acquireCtx.Err(); err != nil {
+		unlockLocal()
+		return nil, fmt.Errorf("taking the process-local project lock: %w", err)
+	}
+	if dryRun {
+		return func(*error) { unlockLocal() }, nil
+	}
+	leaser, ok := client.(forge.ProjectLeaser)
+	if !ok {
+		unlockLocal()
+		return nil, errors.New("this GitLab client cannot take the project lease that serializes installers across processes, so the operation was refused")
+	}
+	holder, err := newGitLabLeaseHolder()
+	if err != nil {
+		unlockLocal()
+		return nil, err
+	}
+	// releaseOnFailure frees a lease this acquisition may have created
+	// before giving up. The release is holder-checked, so it frees only a
+	// lease carrying this acquisition's holder and never another
+	// installer's.
+	releaseOnFailure := func(why string) error {
+		releaseCtx, cancel := gitlabCleanupContext(ctx)
+		defer cancel()
+		relErr := leaser.ReleaseProjectLease(releaseCtx, owner, repo, GitLabProjectLeaseVar, holder)
+		unlockLocal()
+		if relErr != nil {
+			return safeAPIError(fmt.Sprintf("releasing the project lease %s; delete CI/CD variable %s manually if it remains", why, GitLabProjectLeaseVar), relErr)
+		}
+		return nil
+	}
+	heldElsewhere := fmt.Errorf("another fullsend installer holds the project lease (CI/CD variable %s). Wait for it to finish; if no installer is running, delete that variable, then re-run", GitLabProjectLeaseVar)
+	for {
+		acquired, err := leaser.AcquireProjectLease(acquireCtx, owner, repo, GitLabProjectLeaseVar, holder)
+		if acquired && err == nil && acquireCtx.Err() != nil {
+			// The lease request outlived the budget: do not proceed on a
+			// lease the caller was told it would not wait for.
+			cleanupErr := releaseOnFailure("granted after the wait budget expired")
+			if cerr := budgetErr("waiting for another installer to finish"); cerr != nil {
+				return nil, errors.Join(cerr, cleanupErr)
+			}
+			return nil, errors.Join(heldElsewhere, cleanupErr)
+		}
+		if err != nil {
+			// A failed request is ambiguous: GitLab may have committed the
+			// variable before the response was lost or the budget expired.
+			cleanupErr := releaseOnFailure("after a failed acquisition")
+			if acquireCtx.Err() != nil {
+				if cerr := budgetErr("waiting for another installer to finish"); cerr != nil {
+					return nil, errors.Join(cerr, cleanupErr)
+				}
+				return nil, errors.Join(heldElsewhere, cleanupErr)
+			}
+			return nil, errors.Join(safeAPIError("taking the project lease that serializes installers", err), cleanupErr)
+		}
+		if acquired {
+			break
+		}
+		select {
+		case <-acquireCtx.Done():
+			unlockLocal()
+			if cerr := budgetErr("waiting for another installer to finish"); cerr != nil {
+				return nil, cerr
+			}
+			return nil, heldElsewhere
+		case <-time.After(gitlabLeasePoll):
+		}
+	}
+	return func(errp *error) {
+		defer unlockLocal()
+		// The release is independent of the operation context so a canceled
+		// operation still frees the lease.
+		releaseCtx, cancel := gitlabCleanupContext(ctx)
+		defer cancel()
+		if relErr := leaser.ReleaseProjectLease(releaseCtx, owner, repo, GitLabProjectLeaseVar, holder); relErr != nil && errp != nil {
+			*errp = errors.Join(*errp, safeAPIError(fmt.Sprintf("releasing the project lease; delete CI/CD variable %s manually", GitLabProjectLeaseVar), relErr))
+		}
+	}, nil
+}
+
+// GitLabProjectLease is an opaque capability proving that its holder took the
+// cross-process project lease for one project. It is issued only by
+// LockGitLabProjectLease after a successful non-dry-run remote acquisition and
+// stops being valid when the lease is released.
+type GitLabProjectLease struct {
+	owner, repo string
+	held        atomic.Bool
+}
+
+// holds reports whether the lease is still held for owner/repo.
+func (l *GitLabProjectLease) holds(owner, repo string) bool {
+	return l != nil && l.owner == owner && l.repo == repo && l.held.Load()
+}
+
+// LockGitLabProjectLease is LockGitLabProject for a non-dry-run transaction
+// that must prove it holds the project lease: it also returns the lease
+// capability, which is invalidated before the lease is released.
+func LockGitLabProjectLease(ctx context.Context, client forge.Client, owner, repo string) (*GitLabProjectLease, func(errp *error), error) {
+	release, err := LockGitLabProject(ctx, client, owner, repo, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	lease := &GitLabProjectLease{owner: owner, repo: repo}
+	lease.held.Store(true)
+	return lease, func(errp *error) {
+		lease.held.Store(false)
+		release(errp)
+	}, nil
+}
+
+// newGitLabLeaseHolder returns a value unique to this lock acquisition. It
+// contains only an opaque nonce, without local machine identifiers.
+func newGitLabLeaseHolder() (string, error) {
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("generating the project lease holder: %w", err)
+	}
+	return hex.EncodeToString(nonce), nil
+}
 
 // gitlabMaskablePattern matches GitLab's allowed charset for a maskable
 // CI/CD variable value. A value outside this charset, shorter than 8
@@ -57,19 +256,9 @@ type RoleProvisionConfig struct {
 	// RegistryProvided is true when the operator explicitly supplied
 	// --gitlab-role-registry this run, as opposed to Registry being
 	// populated from a previously stored registry variable. Used only
-	// to decide whether to surface a diagnostic when the gate is
-	// rollback/disabled and the supplied registry is not persisted.
+	// to decide whether to surface a diagnostic when the supplied
+	// registry is not persisted.
 	RegistryProvided bool
-	// DesiredMode is written to FULLSEND_GITLAB_ROLE_MIGRATION.
-	// Empty means ModeMigrating (internal install intermediate).
-	// ModeDisabled and ModeRollback write the gate without creating or
-	// revoking tokens. Operators cannot set ModeDisabled or ModeMigrating
-	// via --gitlab-role-migration; leftover values remain writable here so
-	// install can converge them.
-	DesiredMode gitlabroles.Mode
-	// RollbackConfirmed authorizes replacing a role-required gate
-	// (migrating or enforced) with a shared-token-only mode.
-	RollbackConfirmed bool
 	// ProvidedTokens maps a role name to an administrator-supplied
 	// PAT (free-tier enrollment or a custom own credential). Values
 	// must never be logged.
@@ -89,15 +278,12 @@ type RoleProvisionFailure struct {
 // RoleProvisionResult is the observable outcome of a provision run.
 // Token values are not included.
 type RoleProvisionResult struct {
-	Mode            gitlabroles.Mode
 	Report          gitlabroles.Report
 	Created         []gitlabroles.Role
 	Enrolled        []gitlabroles.Role
 	Skipped         []gitlabroles.Role
 	Reused          []gitlabroles.Role
 	Failed          []RoleProvisionFailure
-	SharedPreserved bool
-	GateWritten     bool
 	RegistryWritten bool
 	DryRun          bool
 	Diagnostics     []string
@@ -110,13 +296,18 @@ func GitLabPATExpiresAt(now time.Time) string {
 }
 
 // IsGitLabRoleManagedVar reports whether a FULLSEND_* CI/CD variable is
-// a GitLab role-credential artifact (gate, registry, built-in or custom
-// role secret). These are managed, not orphans, and are removed on
-// uninstall.
+// a GitLab role-credential artifact (registry, built-in or custom role
+// secret), or the legacy shared token. This is an orphan-detection
+// classification only: it tells drift/orphan scans that the name is
+// recognized role-identity state, not an unmanaged leftover. It does not
+// mean the variable is removed on uninstall — the legacy FULLSEND_FORGE_TOKEN
+// shared token is deliberately excluded from automatic uninstall cleanup
+// (see gitLabRoleUninstallVars and extraGitLabRoleUninstallVars) and
+// requires manual cleanup.
 func IsGitLabRoleManagedVar(name string) bool {
 	switch name {
-	case forge.VarGitLabRoleMigration, forge.VarGitLabRoleRegistry,
-		forge.VarGitLabRoleRotation,
+	case forge.SecretForgeToken, forge.VarGitLabRoleRegistry,
+		forge.VarGitLabRoleRotation, forge.VarGitLabPollerGenerations,
 		forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken,
 		forge.SecretGitLabCoderToken:
 		return true
@@ -137,7 +328,7 @@ func appendBuiltinRoleReadiness(status *RepoStatus, present map[string]bool, reg
 
 // appendRegisteredRoleReadiness adds readiness diagnostics for every role in
 // the trusted registry, including custom roles. This keeps repos status honest
-// about the same mapping checks that cutover will enforce.
+// about the same mapping checks job routing enforces.
 func appendRegisteredRoleReadiness(status *RepoStatus, present map[string]bool, reg gitlabroles.Registry, lifecycle map[gitlabroles.Role]gitlabroles.LifecycleState) gitlabroles.RegisteredReadiness {
 	if status == nil {
 		return gitlabroles.RegisteredReadiness{}
@@ -149,9 +340,12 @@ func appendRegisteredRoleReadiness(status *RepoStatus, present map[string]bool, 
 
 // gitLabRoleUninstallVars is the static role-credential variable set
 // deleted on uninstall. Custom FULLSEND_GITLAB_ROLE_*_TOKEN names are
-// discovered at uninstall time from ListRepoVariables.
+// discovered at uninstall time from ListRepoVariables. This does not
+// include the legacy FULLSEND_FORGE_TOKEN shared secret: uninstall no
+// longer removes it automatically, so a repository installed before
+// the role-only rollout may require manual cleanup of that secret and
+// its matching fullsend-bot project access token.
 var gitLabRoleUninstallVars = []string{
-	forge.VarGitLabRoleMigration,
 	forge.VarGitLabRoleRegistry,
 	forge.VarGitLabRoleRotation,
 	forge.SecretGitLabPollerToken,
@@ -161,29 +355,28 @@ var gitLabRoleUninstallVars = []string{
 
 // ProvisionGitLabRoleCredentials creates or enrolls credentials for
 // every registered role (built-in and custom), stores them as
-// protected masked CI/CD variables, writes the registry and migration
-// gate, and reports which roles are ready.
+// protected masked CI/CD variables, writes the registry, and reports
+// which roles are ready.
 //
 // It never revokes or overwrites FULLSEND_FORGE_TOKEN. Existing role
 // secrets are left in place (reinstall / retry). A failed role does
-// not roll back roles that already succeeded. SharedPreserved is
-// always true on a successful return.
-func ProvisionGitLabRoleCredentials(ctx context.Context, cfg RoleProvisionConfig) (RoleProvisionResult, error) {
-	result := RoleProvisionResult{SharedPreserved: true, DryRun: cfg.DryRun}
+// not roll back roles that already succeeded. A repository installed
+// before the role-only rollout may still carry FULLSEND_FORGE_TOKEN;
+// provisioning does not retire it, and no automated path does — that
+// leftover secret and its matching fullsend-bot project access token
+// require manual cleanup.
+func ProvisionGitLabRoleCredentials(ctx context.Context, cfg RoleProvisionConfig) (_ RoleProvisionResult, err error) {
+	result := RoleProvisionResult{DryRun: cfg.DryRun}
 	if cfg.Client == nil {
 		return result, fmt.Errorf("GitLab role provisioning requires a forge client")
 	}
-	operationLock := gitlabRoleOperationLock(cfg.Owner, cfg.Repo)
-	operationLock.Lock()
-	defer operationLock.Unlock()
-	mode := cfg.DesiredMode
-	if mode == "" {
-		mode = gitlabroles.ModeMigrating
+	// A typed-nil service-account client counts as no token client.
+	cfg.Tokens = normalizeServiceAccountClient(cfg.Tokens)
+	release, lockErr := LockGitLabProject(ctx, cfg.Client, cfg.Owner, cfg.Repo, cfg.DryRun)
+	if lockErr != nil {
+		return result, lockErr
 	}
-	if !mode.Valid() {
-		return result, fmt.Errorf("%w: %q", gitlabroles.ErrInvalidMode, mode)
-	}
-	result.Mode = mode
+	defer release(&err)
 	reg := cfg.Registry
 	if len(reg.Registrations()) == 0 {
 		reg = gitlabroles.BuiltinRegistry()
@@ -193,34 +386,20 @@ func ProvisionGitLabRoleCredentials(ctx context.Context, cfg RoleProvisionConfig
 	if presErr != nil {
 		return result, fmt.Errorf("reading GitLab role credential presence: %w", presErr)
 	}
-
-	// Write the gate (and registry) before creating any role tokens. If the
-	// gate write fails, no tokens are created and nothing is orphaned. If
-	// token creation subsequently fails partway through, the gate already
-	// reflects the desired mode, so a follow-up unflagged `repos install`
-	// sees the live gate as migrating/enforced and retries the missing
-	// roles instead of treating the repo as still on the legacy path.
-	skipTokens := mode.UsesSharedOnly()
-	if err := writeGitLabRoleGate(ctx, cfg, mode, skipTokens, &result); err != nil {
+	if err := writeGitLabRoleRegistry(ctx, cfg, &result); err != nil {
 		return result, err
 	}
 
-	if !skipTokens {
-		provisionOwnRoles(ctx, cfg, reg, present, &result)
-	}
+	provisionOwnRoles(ctx, cfg, reg, present, &result)
 
 	present, presErr = gitLabRolePresence(ctx, cfg.Client, cfg.Owner, cfg.Repo, reg)
 	if presErr != nil {
 		return result, fmt.Errorf("reading GitLab role credential presence: %w", presErr)
 	}
-	result.Report = gitlabroles.Diagnose(mode, present, reg)
-	result.Diagnostics = result.Report.Diagnostics
-	if skipTokens && (cfg.RegistryProvided || len(cfg.ProvidedTokens) > 0) {
-		result.Diagnostics = append(result.Diagnostics, fmt.Sprintf(
-			"--gitlab-role-registry/--gitlab-role-token input was ignored: GitLab role migration gate is %q, so role credentials are not minted or persisted", mode))
-	}
+	result.Report = gitlabroles.Diagnose(present, reg)
+	result.Diagnostics = append(result.Diagnostics, result.Report.Diagnostics...)
 	if secretLeak(result) != "" {
-		return RoleProvisionResult{SharedPreserved: true}, fmt.Errorf("internal error: provision result leaked a secret value")
+		return RoleProvisionResult{}, fmt.Errorf("internal error: provision result leaked a secret value")
 	}
 	return result, nil
 }
@@ -267,6 +446,12 @@ func provisionOwnRoles(ctx context.Context, cfg RoleProvisionConfig, reg gitlabr
 			if !cfg.DryRun {
 				backfillInitialDistributionProof(ctx, cfg, rec, now, result)
 			}
+			convergeInstalledServiceAccount(ctx, cfg, rec, now, true, result)
+			continue
+		}
+		failedBefore := len(result.Failed)
+		convergeInstalledServiceAccount(ctx, cfg, rec, now, false, result)
+		if len(result.Failed) > failedBefore {
 			continue
 		}
 		if provided := strings.TrimSpace(cfg.ProvidedTokens[rec.Name]); provided != "" {
@@ -323,7 +508,26 @@ func provisionOwnRoles(ctx context.Context, cfg RoleProvisionConfig, reg gitlabr
 		if tokenName == "" {
 			tokenName = gitlabroles.CustomTokenName(rec.Name)
 		}
-		tok, err := cfg.Tokens.CreateProjectAccessToken(ctx, cfg.Owner, cfg.Repo, tokenName,
+		// Missing-secret provisioning honors the same project-wide exclusions
+		// as convergence: an account recorded as supplied or excluded under any
+		// role is never selected, re-membered, or given a credential here.
+		tokens := normalizeServiceAccountClient(cfg.Tokens)
+		if sa, ok := tokens.(ServiceAccountTokenClient); ok {
+			state, _, stateErr := loadRotationState(ctx, cfg.Client, cfg.Owner, cfg.Repo)
+			if stateErr == nil {
+				sa, _, stateErr = sa.withProjectExclusions(ctx, cfg.Owner, cfg.Repo, state)
+			}
+			if stateErr != nil {
+				result.Failed = append(result.Failed, RoleProvisionFailure{
+					Role:   rec.Name,
+					Secret: secret,
+					Reason: "project-wide account exclusions could not be resolved; no credential created",
+				})
+				continue
+			}
+			tokens = sa
+		}
+		tok, err := tokens.CreateProjectAccessToken(ctx, cfg.Owner, cfg.Repo, tokenName,
 			gitlabroles.TokenScopes(), gitlabroles.DeveloperAccessLevel, expiresAt)
 		if err != nil {
 			result.Failed = append(result.Failed, RoleProvisionFailure{
@@ -368,41 +572,9 @@ func provisionOwnRoles(ctx context.Context, cfg RoleProvisionConfig, reg gitlabr
 	}
 }
 
-func writeGitLabRoleGate(ctx context.Context, cfg RoleProvisionConfig, mode gitlabroles.Mode, skipTokens bool, result *RoleProvisionResult) error {
+func writeGitLabRoleRegistry(ctx context.Context, cfg RoleProvisionConfig, result *RoleProvisionResult) error {
 	if cfg.DryRun {
-		result.GateWritten = true
-		if !skipTokens {
-			result.RegistryWritten = true
-		}
-		return nil
-	}
-	// ProvisionGitLabRoleCredentials holds gitlabRoleOperationLock while it
-	// calls this helper. Re-read the gate inside that lock so a stale mode
-	// sampled by the caller cannot overwrite a concurrent cutover. Once the
-	// gate is enforced, only an explicit rollback operation may replace it;
-	// ordinary provisioning must never reopen the shared-token path.
-	liveRaw, _, err := cfg.Client.GetRepoVariable(ctx, cfg.Owner, cfg.Repo, forge.VarGitLabRoleMigration)
-	if err != nil {
-		return fmt.Errorf("reading %s before write: %w", forge.VarGitLabRoleMigration, err)
-	}
-	liveMode, parseErr := gitlabroles.ParseMode(liveRaw)
-	if parseErr == nil && liveMode == gitlabroles.ModeEnforced && mode == gitlabroles.ModeMigrating {
-		return fmt.Errorf("refusing to replace enforced %s with migrating; request rollback explicitly", forge.VarGitLabRoleMigration)
-	}
-	if parseErr == nil && liveMode.RequiresRoleCredentials() && mode.UsesSharedOnly() && !cfg.RollbackConfirmed {
-		return fmt.Errorf("leaving role-required %s requires explicit rollback confirmation", forge.VarGitLabRoleMigration)
-	}
-	if parseErr == nil && liveMode == mode {
-		// Avoid rewriting an already-current gate. This decision is made
-		// while holding the per-repository operation lock.
-		result.GateWritten = true
-	} else {
-		if err := cfg.Client.UpdateCIVariable(ctx, cfg.Owner, cfg.Repo, forge.VarGitLabRoleMigration, string(mode), true); err != nil {
-			return fmt.Errorf("writing %s: %w", forge.VarGitLabRoleMigration, err)
-		}
-		result.GateWritten = true
-	}
-	if skipTokens {
+		result.RegistryWritten = true
 		return nil
 	}
 	raw, err := gitlabroles.MarshalCustomRoles(cfg.Registry)
@@ -416,35 +588,26 @@ func writeGitLabRoleGate(ctx context.Context, cfg RoleProvisionConfig, mode gitl
 	return nil
 }
 
-// LoadGitLabRoleState reads the migration gate, registry, and per-secret
-// presence from a repository. Secret values are never retained.
-func LoadGitLabRoleState(ctx context.Context, client forge.Client, owner, repo string) (gitlabroles.Mode, gitlabroles.Registry, map[string]bool, error) {
-	modeRaw, _, err := client.GetRepoVariable(ctx, owner, repo, forge.VarGitLabRoleMigration)
-	if err != nil {
-		return "", gitlabroles.Registry{}, nil, fmt.Errorf("reading %s: %w", forge.VarGitLabRoleMigration, err)
-	}
-	mode, err := gitlabroles.ParseMode(modeRaw)
-	if err != nil {
-		return "", gitlabroles.Registry{}, nil, err
-	}
+// LoadGitLabRoleState reads the registered role policy and per-secret
+// presence from a repository. Migration state is deliberately not read.
+func LoadGitLabRoleState(ctx context.Context, client forge.Client, owner, repo string) (gitlabroles.Registry, map[string]bool, error) {
 	regRaw, _, err := client.GetRepoVariable(ctx, owner, repo, forge.VarGitLabRoleRegistry)
 	if err != nil {
-		return mode, gitlabroles.Registry{}, nil, fmt.Errorf("reading %s: %w", forge.VarGitLabRoleRegistry, err)
+		return gitlabroles.Registry{}, nil, fmt.Errorf("reading %s: %w", forge.VarGitLabRoleRegistry, err)
 	}
 	reg, err := gitlabroles.ParseRegistry(regRaw)
 	if err != nil {
-		return mode, gitlabroles.Registry{}, nil, err
+		return gitlabroles.Registry{}, nil, err
 	}
 	present, err := gitLabRolePresence(ctx, client, owner, repo, reg)
 	if err != nil {
-		return mode, reg, nil, err
+		return gitlabroles.Registry{}, nil, err
 	}
-	return mode, reg, present, nil
+	return reg, present, nil
 }
 
 func gitLabRolePresence(ctx context.Context, client forge.Client, owner, repo string, reg gitlabroles.Registry) (map[string]bool, error) {
 	names := make(map[string]struct{})
-	names[forge.SecretForgeToken] = struct{}{}
 	for _, rec := range reg.Registrations() {
 		if rec.Credential.SecretName != "" {
 			names[rec.Credential.SecretName] = struct{}{}
@@ -469,6 +632,22 @@ func extraGitLabRoleUninstallVars(ctx context.Context, client forge.Client, owne
 	var extra []string
 	add := func(name string) {
 		if name == "" {
+			return
+		}
+		// FULLSEND_FORGE_TOKEN is the legacy shared credential, not
+		// role-identity state: uninstall no longer retires it
+		// automatically, so it must not be auto-discovered here even
+		// though IsGitLabRoleManagedVar still recognizes the name for
+		// orphan-detection purposes elsewhere.
+		if name == forge.SecretForgeToken {
+			return
+		}
+		// The Poller generation document records quarantine and retirement
+		// obligations for replacement Poller accounts and triggers.
+		// Deleting it would forget them, so uninstall retains it until an
+		// operator has reconciled those obligations; the live handoff
+		// (#8243) and uninstall cleanup (#8210) may revisit this.
+		if name == forge.VarGitLabPollerGenerations {
 			return
 		}
 		if !IsGitLabRoleManagedVar(name) {
@@ -499,21 +678,25 @@ func extraGitLabRoleUninstallVars(ctx context.Context, client forge.Client, owne
 	return extra
 }
 
+// gitlabRoleIdentityVarNames returns the GitLab role-identity variables
+// and secrets that uninstall removes: the registry, rotation document,
+// and every built-in or custom role secret. It deliberately excludes
+// the legacy FULLSEND_FORGE_TOKEN shared credential — a repository
+// installed before the role-only rollout may require manual cleanup of
+// that secret and its matching fullsend-bot project access token.
 func gitlabRoleIdentityVarNames(ctx context.Context, client forge.Client, owner, repo string) []string {
-	already := make([]string, 0, 1+len(gitLabRoleUninstallVars))
-	already = append(already, forge.SecretForgeToken)
+	already := make([]string, 0, len(gitLabRoleUninstallVars))
 	already = append(already, gitLabRoleUninstallVars...)
 	return append(already, extraGitLabRoleUninstallVars(ctx, client, owner, repo, already)...)
 }
 
 func isGitLabIdentityUninstallVar(name string) bool {
-	return name == forge.SecretForgeToken || IsGitLabRoleManagedVar(name)
+	return IsGitLabRoleManagedVar(name)
 }
 
 func isGitLabRoleSecretName(name string) bool {
 	switch name {
-	case forge.SecretForgeToken, forge.SecretGitLabPollerToken,
-		forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken:
+	case forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken:
 		return true
 	}
 	return strings.HasPrefix(name, "FULLSEND_GITLAB_ROLE_") && strings.HasSuffix(name, "_TOKEN")
@@ -529,9 +712,6 @@ func secretLeak(result RoleProvisionResult) string {
 			}
 		}
 		return ""
-	}
-	if n := check(string(result.Mode)); n != "" {
-		return n
 	}
 	for _, d := range result.Diagnostics {
 		if n := check(d); n != "" {

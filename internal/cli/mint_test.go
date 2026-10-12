@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -110,8 +111,8 @@ func TestMintCommand_HasSubcommands(t *testing.T) {
 	}
 	assert.True(t, names["deploy"], "expected deploy subcommand")
 	assert.True(t, names["delete"], "expected delete subcommand")
-	assert.True(t, names["enroll <org|owner/repo>"], "expected enroll subcommand")
-	assert.True(t, names["unenroll <org|owner/repo>"], "expected unenroll subcommand")
+	assert.True(t, names["enroll <owner/repo>"], "expected enroll subcommand")
+	assert.True(t, names["unenroll <owner/repo>"], "expected unenroll subcommand")
 	assert.True(t, names["status [org]"], "expected status subcommand")
 	assert.True(t, names["token"], "expected token subcommand")
 	assert.True(t, names["add-role <role>"], "expected add-role subcommand")
@@ -1033,7 +1034,6 @@ func TestMintDeployCmd_CloudflareDeployWithConfigFlags(t *testing.T) {
 		"mint", "deploy",
 		"--platform=cloudflare",
 		"--source-dir=" + sourceDir,
-		"--allowed-orgs=acme,bigcorp",
 		"--per-repo-wif-repos=acme/widget,bigcorp/gadget",
 		"--workflow-host-repos=fullsend-ai/fullsend",
 	})
@@ -1042,8 +1042,8 @@ func TestMintDeployCmd_CloudflareDeployWithConfigFlags(t *testing.T) {
 
 	require.Len(t, fake.deployCalls, 1)
 	envVars := fake.deployCalls[0].envVars
-	assert.Equal(t, "acme,bigcorp", envVars["ALLOWED_ORGS"],
-		"ALLOWED_ORGS should be set from --allowed-orgs flag")
+	assert.NotContains(t, envVars, "ALLOWED_ORGS",
+		"mint deploy must not manage ALLOWED_ORGS")
 	assert.Equal(t, "acme/widget,bigcorp/gadget", envVars["PER_REPO_WIF_REPOS"],
 		"PER_REPO_WIF_REPOS should be set from --per-repo-wif-repos flag")
 	assert.Equal(t, "fullsend-ai/fullsend", envVars["WORKFLOW_HOST_REPOS"],
@@ -1063,7 +1063,6 @@ func TestMintDeployCmd_CloudflarePreviewDeployWithConfigFlags(t *testing.T) {
 		"--platform=cloudflare",
 		"--preview=bt-test-99",
 		"--source-dir=" + sourceDir,
-		"--allowed-orgs=acme",
 		"--per-repo-wif-repos=acme/widget",
 		"--workflow-host-repos=fullsend-ai/fullsend",
 	})
@@ -1074,8 +1073,8 @@ func TestMintDeployCmd_CloudflarePreviewDeployWithConfigFlags(t *testing.T) {
 	assert.Equal(t, "bt-test-99", fake.deployCalls[0].previewAlias,
 		"preview alias should be passed to deploy")
 	envVars := fake.deployCalls[0].envVars
-	assert.Equal(t, "acme", envVars["ALLOWED_ORGS"],
-		"ALLOWED_ORGS should be set for preview deploys")
+	assert.NotContains(t, envVars, "ALLOWED_ORGS",
+		"ALLOWED_ORGS should not be set for preview deploys")
 	assert.Equal(t, "acme/widget", envVars["PER_REPO_WIF_REPOS"],
 		"PER_REPO_WIF_REPOS should be set for preview deploys")
 	assert.Equal(t, "fullsend-ai/fullsend", envVars["WORKFLOW_HOST_REPOS"],
@@ -1137,7 +1136,6 @@ func TestMintDeployCmd_CloudflareDryRunWithConfigFlags(t *testing.T) {
 		"mint", "deploy",
 		"--platform=cloudflare",
 		"--dry-run",
-		"--allowed-orgs=acme",
 		"--public",
 	})
 	err := cmd.Execute()
@@ -1149,7 +1147,7 @@ func TestMintDeployCmd_CloudflareDryRunWithConfigFlags(t *testing.T) {
 	stdout := string(out)
 
 	require.NoError(t, err)
-	assert.Contains(t, stdout, "ALLOWED_ORGS=acme")
+	assert.NotContains(t, stdout, "ALLOWED_ORGS")
 	assert.Contains(t, stdout, "PER_REPO_WIF_REPOS=*")
 }
 
@@ -1176,7 +1174,7 @@ func TestMintDeployCmd_CloudflareNoConfigFlagsOmitsEnvVars(t *testing.T) {
 	_, hasAllowedOrgs := envVars["ALLOWED_ORGS"]
 	_, hasPRWR := envVars["PER_REPO_WIF_REPOS"]
 	_, hasWHR := envVars["WORKFLOW_HOST_REPOS"]
-	assert.False(t, hasAllowedOrgs, "ALLOWED_ORGS should not be set when --allowed-orgs is omitted")
+	assert.False(t, hasAllowedOrgs, "ALLOWED_ORGS should never be set by mint deploy")
 	assert.False(t, hasPRWR, "PER_REPO_WIF_REPOS should not be set when --per-repo-wif-repos is omitted")
 	assert.False(t, hasWHR, "WORKFLOW_HOST_REPOS should not be set when --workflow-host-repos is omitted")
 	// On a durable deploy, ALLOWED_WORKFLOW_FILES should NOT be set when
@@ -1198,7 +1196,7 @@ func TestMintDeployCmd_CloudflareConfigFlagsWarnOnGCP(t *testing.T) {
 		"--platform=gcp",
 		"--project=my-project-id",
 		"--dry-run",
-		"--allowed-orgs=acme",
+		"--per-repo-wif-repos=acme/widget",
 	})
 	_ = cmd.Execute()
 
@@ -1207,8 +1205,25 @@ func TestMintDeployCmd_CloudflareConfigFlagsWarnOnGCP(t *testing.T) {
 
 	out, _ := io.ReadAll(r)
 	stderr := string(out)
-	assert.Contains(t, stderr, "--allowed-orgs is a Cloudflare flag",
-		"--allowed-orgs should produce a warning on GCP")
+	assert.Contains(t, stderr, "--per-repo-wif-repos is a Cloudflare flag",
+		"--per-repo-wif-repos should produce a warning on GCP")
+}
+
+func TestMintDeployCmd_AllowedOrgsFlagRemoved(t *testing.T) {
+	cmd := newMintDeployCmd()
+	assert.Nil(t, cmd.Flags().Lookup("allowed-orgs"),
+		"--allowed-orgs was removed with per-org mint enrollment")
+
+	root := newRootCmd()
+	root.SetArgs([]string{
+		"mint", "deploy",
+		"--platform=cloudflare",
+		"--dry-run",
+		"--allowed-orgs=acme",
+	})
+	err := root.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown flag: --allowed-orgs")
 }
 
 func TestMintDeployCmd_CloudflarePublicNoWarning(t *testing.T) {
@@ -1239,9 +1254,6 @@ func TestMintDeployCmd_CloudflarePublicNoWarning(t *testing.T) {
 
 func TestMintDeployCmd_NewFlagsExist(t *testing.T) {
 	cmd := newMintDeployCmd()
-
-	allowedOrgsFlag := cmd.Flags().Lookup("allowed-orgs")
-	require.NotNil(t, allowedOrgsFlag, "expected --allowed-orgs flag")
 
 	perRepoWIFReposFlag := cmd.Flags().Lookup("per-repo-wif-repos")
 	require.NotNil(t, perRepoWIFReposFlag, "expected --per-repo-wif-repos flag")
@@ -1544,35 +1556,6 @@ func TestMintDeployCmd_CloudflarePerRepoWIFAloneWorks(t *testing.T) {
 
 // --- Empty-flag-clears-var semantics tests ---
 
-func TestMintDeployCmd_CloudflareEmptyAllowedOrgsClearsBinding(t *testing.T) {
-	withCFEnvVars(t)
-	sourceDir := createMinimalWorkerSourceDir(t)
-
-	fake := &fakeCFWranglerRunner{
-		deployURL: "https://fullsend-mint.workers.dev",
-	}
-	withMintCFWrangler(t, fake)
-
-	// --allowed-orgs= (explicit empty) should include ALLOWED_ORGS with
-	// an empty value. For durable deploys, --keep-vars clears the
-	// existing binding; for preview deploys, the var is set to "".
-	cmd := newRootCmd()
-	cmd.SetArgs([]string{
-		"mint", "deploy",
-		"--platform=cloudflare",
-		"--source-dir=" + sourceDir,
-		"--allowed-orgs=",
-	})
-	err := cmd.Execute()
-	require.NoError(t, err)
-
-	require.Len(t, fake.deployCalls, 1)
-	envVars := fake.deployCalls[0].envVars
-	val, present := envVars["ALLOWED_ORGS"]
-	assert.True(t, present, "ALLOWED_ORGS should be present when --allowed-orgs is explicitly empty")
-	assert.Equal(t, "", val, "ALLOWED_ORGS should be empty string to clear existing binding")
-}
-
 func TestMintDeployCmd_CloudflareEmptyPerRepoWIFReposClearsBinding(t *testing.T) {
 	withCFEnvVars(t)
 	sourceDir := createMinimalWorkerSourceDir(t)
@@ -1660,14 +1643,13 @@ func TestMintDeployCmd_CloudflareMultipleEmptyFlagsClearBindings(t *testing.T) {
 	}
 	withMintCFWrangler(t, fake)
 
-	// Simulate switching from dual/per-repo mode to org-only:
-	// keep ALLOWED_ORGS with a value, clear PER_REPO_WIF_REPOS.
+	// Set ALLOWED_WORKFLOW_FILES while clearing PER_REPO_WIF_REPOS.
 	cmd := newRootCmd()
 	cmd.SetArgs([]string{
 		"mint", "deploy",
 		"--platform=cloudflare",
 		"--source-dir=" + sourceDir,
-		"--allowed-orgs=fullsand-ai",
+		"--allowed-workflow-files=*",
 		"--per-repo-wif-repos=",
 	})
 	err := cmd.Execute()
@@ -1675,8 +1657,8 @@ func TestMintDeployCmd_CloudflareMultipleEmptyFlagsClearBindings(t *testing.T) {
 
 	require.Len(t, fake.deployCalls, 1)
 	envVars := fake.deployCalls[0].envVars
-	assert.Equal(t, "fullsand-ai", envVars["ALLOWED_ORGS"],
-		"ALLOWED_ORGS should be set to the provided value")
+	assert.Equal(t, "*", envVars["ALLOWED_WORKFLOW_FILES"],
+		"ALLOWED_WORKFLOW_FILES should be set to the provided value")
 	prwr, present := envVars["PER_REPO_WIF_REPOS"]
 	assert.True(t, present, "PER_REPO_WIF_REPOS should be present (cleared)")
 	assert.Equal(t, "", prwr, "PER_REPO_WIF_REPOS should be empty to clear binding")
@@ -1697,7 +1679,7 @@ func TestMintDeployCmd_CloudflareDryRunShowsClearedVars(t *testing.T) {
 		"mint", "deploy",
 		"--platform=cloudflare",
 		"--dry-run",
-		"--allowed-orgs=acme",
+		"--workflow-host-repos=fullsend-ai/fullsend",
 		"--per-repo-wif-repos=",
 	})
 	err := cmd.Execute()
@@ -1709,8 +1691,8 @@ func TestMintDeployCmd_CloudflareDryRunShowsClearedVars(t *testing.T) {
 	stdout := string(out)
 
 	require.NoError(t, err)
-	assert.Contains(t, stdout, "Would set ALLOWED_ORGS=acme",
-		"dry-run should show setting ALLOWED_ORGS")
+	assert.Contains(t, stdout, "Would set WORKFLOW_HOST_REPOS=fullsend-ai/fullsend",
+		"dry-run should show setting WORKFLOW_HOST_REPOS")
 	assert.Contains(t, stdout, "Would clear PER_REPO_WIF_REPOS",
 		"dry-run should show clearing PER_REPO_WIF_REPOS")
 }
@@ -3488,9 +3470,13 @@ func TestRolesFromAppIDs_RoleOnly(t *testing.T) {
 	assert.Equal(t, []string{"coder", "triage"}, roles)
 }
 
-func TestParseAllowedOrgs_SkipsPlaceholder(t *testing.T) {
-	orgs := parseAllowedOrgs("widget, " + gcf.PlaceholderOrg + ", acme")
-	assert.Equal(t, []string{"acme", "widget"}, orgs)
+func TestHasEnrolledRepoInOrg(t *testing.T) {
+	repos := []string{"Acme/widget", "bigcorp/gadget"}
+	assert.True(t, hasEnrolledRepoInOrg(repos, "acme"))
+	assert.True(t, hasEnrolledRepoInOrg(repos, "BigCorp"))
+	assert.False(t, hasEnrolledRepoInOrg(repos, "acm"))
+	assert.False(t, hasEnrolledRepoInOrg(repos, "other"))
+	assert.False(t, hasEnrolledRepoInOrg(nil, "acme"))
 }
 
 func TestIsPublicMintRepos(t *testing.T) {
@@ -3512,69 +3498,6 @@ func TestMintValidationMessage(t *testing.T) {
 func TestPemSecretRoles_DeduplicatesAliases(t *testing.T) {
 	roles := pemSecretRoles([]string{"fix", "coder", "triage", "fix"})
 	assert.Equal(t, []string{"coder", "triage"}, roles)
-}
-
-type fakeEnrollmentVerifier struct {
-	revInfo *gcf.ServiceRevisionInfo
-	revErr  error
-	envVars map[string]string
-	envErr  error
-}
-
-func (f *fakeEnrollmentVerifier) GetServiceRevisionInfo(context.Context) (*gcf.ServiceRevisionInfo, error) {
-	return f.revInfo, f.revErr
-}
-
-func (f *fakeEnrollmentVerifier) GetServiceTrafficEnvVars(context.Context) (map[string]string, error) {
-	return f.envVars, f.envErr
-}
-
-func TestVerifyEnrollment_OrgPresent(t *testing.T) {
-	printer := ui.New(&strings.Builder{})
-	verifyEnrollment(context.Background(), printer, &fakeEnrollmentVerifier{
-		revInfo: &gcf.ServiceRevisionInfo{
-			TrafficRevisionShort:   "fullsend-mint-00001",
-			TrafficPercent:         100,
-			TemplateMatchesTraffic: true,
-			TrafficEnvVars: map[string]string{
-				"ALLOWED_ORGS": "acme,widget",
-			},
-		},
-	}, "widget", "my-project")
-}
-
-func TestVerifyEnrollment_OrgMissing(t *testing.T) {
-	out := &strings.Builder{}
-	printer := ui.New(out)
-	verifyEnrollment(context.Background(), printer, &fakeEnrollmentVerifier{
-		envVars: map[string]string{
-			"ALLOWED_ORGS": "acme",
-		},
-	}, "widget", "my-project")
-	assert.Contains(t, out.String(), "FAILED")
-}
-
-func TestVerifyEnrollment_PublicMode(t *testing.T) {
-	out := &strings.Builder{}
-	printer := ui.New(out)
-	verifyEnrollment(context.Background(), printer, &fakeEnrollmentVerifier{
-		envVars: map[string]string{
-			"ALLOWED_ORGS":       "*",
-			"PER_REPO_WIF_REPOS": "*",
-		},
-	}, "any-org", "my-project")
-	assert.Contains(t, out.String(), "Public mint mode")
-	assert.NotContains(t, out.String(), "FAILED")
-}
-
-func TestVerifyEnrollment_FallsBackToTrafficEnvVars(t *testing.T) {
-	printer := ui.New(&strings.Builder{})
-	verifyEnrollment(context.Background(), printer, &fakeEnrollmentVerifier{
-		revErr: fmt.Errorf("revision unavailable"),
-		envVars: map[string]string{
-			"ALLOWED_ORGS": "acme",
-		},
-	}, "acme", "my-project")
 }
 
 func withMintGCFClient(t *testing.T, client gcf.GCFClient) {
@@ -3644,71 +3567,6 @@ func publicMintDiscoveryClient() gcf.GCFClient {
 			},
 		}),
 	)
-}
-
-func TestRunMintEnrollOrg_DryRun(t *testing.T) {
-	withMintGCFClient(t, mintDiscoveryClient())
-	printer := ui.New(&strings.Builder{})
-	err := runMintEnrollOrg(context.Background(), printer, "acme", "my-project", "us-central1", true)
-	require.NoError(t, err)
-}
-
-func TestRunMintEnrollOrg_DryRunPreservesCaseInPreview(t *testing.T) {
-	withMintGCFClient(t, mintDiscoveryClient())
-	out := &strings.Builder{}
-	printer := ui.New(out)
-	err := runMintEnrollOrg(context.Background(), printer, "AcmeCorp", "my-project", "us-central1", true)
-	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Would add AcmeCorp to WIF provider condition")
-}
-
-func TestRunMintEnrollOrg_NoRoleAppIDs(t *testing.T) {
-	withMintGCFClient(t, gcf.NewFakeGCFClient(
-		gcf.WithFakeFunctionInfo(&gcf.FunctionInfo{
-			URI:     "https://mint.example.com",
-			EnvVars: map[string]string{"ROLE_APP_IDS": `{"acme/coder":"100"}`},
-		}),
-	))
-	printer := ui.New(&strings.Builder{})
-	err := runMintEnrollOrg(context.Background(), printer, "acme", "my-project", "us-central1", true)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no role app IDs")
-}
-
-func TestRunMintEnrollOrg_PlaceholderOrgRejected(t *testing.T) {
-	printer := ui.New(&strings.Builder{})
-	err := runMintEnrollOrg(context.Background(), printer, gcf.PlaceholderOrg, "my-project", "us-central1", true)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "placeholder")
-}
-
-func TestRunMintEnrollOrg_Success(t *testing.T) {
-	withMintGCFClient(t, mintDiscoveryClient())
-	printer := ui.New(&strings.Builder{})
-	err := runMintEnrollOrg(context.Background(), printer, "acme", "my-project", "us-central1", false)
-	require.NoError(t, err)
-}
-
-func TestRunMintEnrollOrg_PreservesCaseInWIFCondition(t *testing.T) {
-	client := mintDiscoveryClient()
-	withMintGCFClient(t, client)
-	printer := ui.New(&strings.Builder{})
-	err := runMintEnrollOrg(context.Background(), printer, "AcmeCorp", "my-project", "us-central1", false)
-	require.NoError(t, err)
-
-	condition := gcf.LastWIFProviderCondition(client)
-	assert.Contains(t, condition, "AcmeCorp")
-	assert.NotContains(t, condition, "acmecorp")
-}
-
-func TestRunMintEnrollOrg_PublicMode(t *testing.T) {
-	withMintGCFClient(t, publicMintDiscoveryClient())
-	out := &strings.Builder{}
-	printer := ui.New(out)
-	err := runMintEnrollOrg(context.Background(), printer, "acme", "my-project", "us-central1", false)
-	require.NoError(t, err)
-	assert.Contains(t, out.String(), "public mode")
-	assert.Contains(t, out.String(), "not required")
 }
 
 func TestRunMintEnrollRepo_DryRun(t *testing.T) {
@@ -3788,7 +3646,9 @@ func TestRunMintStatus_Healthy(t *testing.T) {
 	err := runMintStatus(context.Background(), printer, "my-project", "us-central1", "acme")
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "coder = 100")
-	assert.Contains(t, out.String(), "existing-org")
+	// ALLOWED_ORGS no longer authorizes callers, so status does not list it.
+	assert.NotContains(t, out.String(), "Enrolled Organizations")
+	assert.NotContains(t, out.String(), "existing-org")
 }
 
 func TestRunMintStatus_WithHealthVersion(t *testing.T) {
@@ -3932,7 +3792,16 @@ func TestRunMintStatus_OrgNotEnrolled(t *testing.T) {
 	printer := ui.New(out)
 	err := runMintStatus(context.Background(), printer, "my-project", "us-central1", "missing-org")
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "not in ALLOWED_ORGS")
+	assert.Contains(t, out.String(), "No missing-org/* repository is in PER_REPO_WIF_REPOS")
+	assert.NotContains(t, out.String(), "ALLOWED_ORGS")
+}
+
+func TestRunMintStatus_OrgWithEnrolledRepo(t *testing.T) {
+	withMintGCFClient(t, perRepoStatusClient("acme/widget", "acme/widget"))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "acme")
+	require.NoError(t, err)
+	assert.NotContains(t, out.String(), "repository is in PER_REPO_WIF_REPOS")
 }
 
 func TestRunMintStatus_PublicMode(t *testing.T) {
@@ -3942,8 +3811,9 @@ func TestRunMintStatus_PublicMode(t *testing.T) {
 	err := runMintStatus(context.Background(), printer, "my-project", "us-central1", "any-org")
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "Public (PER_REPO_WIF_REPOS=*)")
-	assert.Contains(t, out.String(), "public mode — all orgs")
-	assert.NotContains(t, out.String(), "not in ALLOWED_ORGS")
+	assert.NotContains(t, out.String(), "repository is in PER_REPO_WIF_REPOS")
+	assert.Contains(t, out.String(), "Enrolled repos: unrestricted (public mode)")
+	assert.NotContains(t, out.String(), "Enrolled repos: 1")
 }
 
 func TestRunMintStatus_TemplateDivergence(t *testing.T) {
@@ -3973,6 +3843,206 @@ func TestRunMintStatus_TemplateDivergence(t *testing.T) {
 	assert.Contains(t, out.String(), "diverges")
 }
 
+func perRepoStatusClient(discoveryRepos, trafficRepos string) gcf.GCFClient {
+	roleIDs := `{"coder":"100"}`
+	discoveryEnv := map[string]string{
+		"ROLE_APP_IDS": roleIDs,
+		"ALLOWED_ORGS": gcf.PlaceholderOrg,
+	}
+	trafficEnv := map[string]string{
+		"ROLE_APP_IDS": roleIDs,
+		"ALLOWED_ORGS": gcf.PlaceholderOrg,
+	}
+	if discoveryRepos != "" {
+		discoveryEnv["PER_REPO_WIF_REPOS"] = discoveryRepos
+	}
+	if trafficRepos != "" {
+		trafficEnv["PER_REPO_WIF_REPOS"] = trafficRepos
+	}
+	return gcf.NewFakeGCFClient(
+		gcf.WithFakeFunctionInfo(&gcf.FunctionInfo{
+			URI:     "https://mint.example.com",
+			EnvVars: discoveryEnv,
+		}),
+		gcf.WithFakeTrafficEnvVars(trafficEnv),
+		gcf.WithFakeRevisionInfo(&gcf.ServiceRevisionInfo{
+			TrafficRevisionShort:   "fullsend-mint-00001",
+			TrafficPercent:         100,
+			TemplateMatchesTraffic: true,
+			TrafficEnvVars:         trafficEnv,
+		}),
+	)
+}
+
+func TestRunMintStatus_RepoEnrolledWithoutAllowedOrgs(t *testing.T) {
+	// Tight mint: only the placeholder org, enrolled via PER_REPO_WIF_REPOS.
+	withMintGCFClient(t, perRepoStatusClient("acme/widget", "acme/widget"))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "acme/widget")
+	assert.Contains(t, out.String(), "Health: healthy")
+	assert.Contains(t, out.String(), "Enrolled repos: 1")
+	assert.NotContains(t, out.String(), "no enrolled")
+}
+
+func TestRunMintStatus_NoEnrolledRepos(t *testing.T) {
+	withMintGCFClient(t, perRepoStatusClient("", ""))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Health: degraded")
+	assert.Contains(t, out.String(), "no enrolled repos")
+}
+
+func TestRunMintStatus_PerRepoReposFromTrafficRevision(t *testing.T) {
+	// Cloud Functions metadata is stale; the traffic-serving revision is authoritative.
+	withMintGCFClient(t, perRepoStatusClient("stale/repo", "acme/widget,acme/gadget"))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "acme/gadget")
+	assert.Contains(t, out.String(), "acme/widget")
+	assert.NotContains(t, out.String(), "stale/repo")
+	assert.Contains(t, out.String(), "Enrolled repos: 2")
+}
+
+// templateFallbackStatusClient simulates a failed traffic-revision read inside
+// GetServiceRevisionInfo: its env vars come from the template and list repos
+// that differ from the traffic-serving revision.
+func templateFallbackStatusClient(trafficRepos string, trafficErr error) gcf.GCFClient {
+	roleIDs := `{"coder":"100"}`
+	templateEnv := map[string]string{
+		"ROLE_APP_IDS":       roleIDs,
+		"ALLOWED_ORGS":       gcf.PlaceholderOrg,
+		"PER_REPO_WIF_REPOS": "template/only",
+	}
+	trafficEnv := map[string]string{
+		"ROLE_APP_IDS":       roleIDs,
+		"ALLOWED_ORGS":       gcf.PlaceholderOrg,
+		"PER_REPO_WIF_REPOS": trafficRepos,
+	}
+	opts := []gcf.FakeGCFOption{
+		gcf.WithFakeFunctionInfo(&gcf.FunctionInfo{
+			URI:     "https://mint.example.com",
+			EnvVars: templateEnv,
+		}),
+		gcf.WithFakeTrafficEnvVars(trafficEnv),
+		gcf.WithFakeRevisionInfo(&gcf.ServiceRevisionInfo{
+			TrafficRevisionShort:       "fullsend-mint-00001",
+			TrafficPercent:             100,
+			TemplateMatchesTraffic:     true,
+			TrafficEnvVars:             templateEnv,
+			TrafficEnvVarsFromTemplate: true,
+		}),
+	}
+	if trafficErr != nil {
+		opts = append(opts, gcf.WithFakeErrors(map[string]error{"GetServiceTrafficEnvVars": trafficErr}))
+	}
+	return gcf.NewFakeGCFClient(opts...)
+}
+
+func TestRunMintStatus_TemplateFallbackEnvUsesTrafficRead(t *testing.T) {
+	withMintGCFClient(t, templateFallbackStatusClient("acme/widget", nil))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "acme/widget")
+	assert.NotContains(t, out.String(), "template/only")
+	assert.Contains(t, out.String(), "Enrolled repos: 1")
+	assert.NotContains(t, out.String(), "unverified")
+}
+
+func TestRunMintStatus_NoServingRevisionKeepsEnrollmentUnverified(t *testing.T) {
+	// With no resolved serving revision, the direct traffic read would also
+	// return template data, so enrollment must stay unverified.
+	templateEnv := map[string]string{
+		"ROLE_APP_IDS":       `{"coder":"100"}`,
+		"ALLOWED_ORGS":       gcf.PlaceholderOrg,
+		"PER_REPO_WIF_REPOS": "template/only",
+	}
+	withMintGCFClient(t, gcf.NewFakeGCFClient(
+		gcf.WithFakeFunctionInfo(&gcf.FunctionInfo{
+			URI:     "https://mint.example.com",
+			EnvVars: templateEnv,
+		}),
+		gcf.WithFakeTrafficEnvVars(templateEnv),
+		gcf.WithFakeRevisionInfo(&gcf.ServiceRevisionInfo{
+			TrafficEnvVars:             templateEnv,
+			TrafficEnvVarsFromTemplate: true,
+		}),
+	))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Health: degraded")
+	assert.Contains(t, out.String(), "Enrolled repos: unverified")
+	assert.Contains(t, out.String(), "enrollment unverified")
+}
+
+func TestRunMintStatus_PartialRevisionInfoKeepsEnrollmentUnverified(t *testing.T) {
+	// Partial revision info (no resolved revision, nil traffic env vars, no
+	// fallback flag) must not let the direct traffic read supply template data.
+	templateEnv := map[string]string{
+		"ROLE_APP_IDS":       `{"coder":"100"}`,
+		"ALLOWED_ORGS":       gcf.PlaceholderOrg,
+		"PER_REPO_WIF_REPOS": "template/only",
+	}
+	withMintGCFClient(t, gcf.NewFakeGCFClient(
+		gcf.WithFakeFunctionInfo(&gcf.FunctionInfo{
+			URI:     "https://mint.example.com",
+			EnvVars: templateEnv,
+		}),
+		gcf.WithFakeTrafficEnvVars(templateEnv),
+		gcf.WithFakeRevisionInfo(&gcf.ServiceRevisionInfo{
+			TrafficEnvVars:             nil,
+			TrafficEnvVarsFromTemplate: false,
+		}),
+	))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Health: degraded")
+	assert.Contains(t, out.String(), "Enrolled repos: unverified")
+	assert.Contains(t, out.String(), "enrollment unverified")
+}
+
+func TestRunMintStatus_TemplateFallbackEnvTrafficReadFails(t *testing.T) {
+	withMintGCFClient(t, templateFallbackStatusClient("acme/widget", errors.New("boom")))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Health: degraded")
+	assert.Contains(t, out.String(), "Enrolled repos: unverified")
+	assert.Contains(t, out.String(), "enrollment unverified")
+}
+
+func TestRunMintStatus_RevisionInfoFailsKeepsEnrollmentUnverified(t *testing.T) {
+	// When GetServiceRevisionInfo fails, the direct traffic read can return
+	// service-template env vars with a nil error, so it must not be treated
+	// as verified enrollment.
+	templateEnv := map[string]string{
+		"ROLE_APP_IDS":       `{"coder":"100"}`,
+		"ALLOWED_ORGS":       gcf.PlaceholderOrg,
+		"PER_REPO_WIF_REPOS": "template/only",
+	}
+	withMintGCFClient(t, gcf.NewFakeGCFClient(
+		gcf.WithFakeFunctionInfo(&gcf.FunctionInfo{
+			URI:     "https://mint.example.com",
+			EnvVars: templateEnv,
+		}),
+		gcf.WithFakeTrafficEnvVars(templateEnv),
+		gcf.WithFakeErrors(map[string]error{"GetServiceRevisionInfo": errors.New("boom")}),
+	))
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Health: degraded")
+	assert.Contains(t, out.String(), "Enrolled repos: unverified")
+	assert.Contains(t, out.String(), "enrollment unverified")
+	assert.NotContains(t, out.String(), "Enrolled repos: 1")
+}
+
 func TestRunMintStatusAPI_Success(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
@@ -3984,7 +4054,6 @@ func TestRunMintStatusAPI_Success(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"allowed_orgs":        []string{"acme", "bigcorp"},
 			"roles":               []string{"coder", "triage", "review"},
 			"workflow_host_repos": []string{"fullsend-ai/fullsend"},
 			"version":             "2.0.0",
@@ -4006,8 +4075,7 @@ func TestRunMintStatusAPI_Success(t *testing.T) {
 
 	output := out.String()
 	assert.Contains(t, output, "GitHub")
-	assert.Contains(t, output, "acme")
-	assert.Contains(t, output, "bigcorp")
+	assert.NotContains(t, output, "Allowed Organizations")
 	assert.Contains(t, output, "coder")
 	assert.Contains(t, output, "triage")
 	assert.Contains(t, output, "review")
@@ -4236,44 +4304,6 @@ func TestRunMintEnrollRepo_PublicMode(t *testing.T) {
 	assert.Contains(t, out.String(), "default WIF provider")
 }
 
-func TestRunMintUnenrollOrg_DryRun(t *testing.T) {
-	withMintGCFClient(t, mintDiscoveryClient())
-	printer := ui.New(&strings.Builder{})
-	err := runMintUnenrollOrg(context.Background(), printer, "acme", "my-project", "us-central1", true, true, os.Stdin)
-	require.NoError(t, err)
-}
-
-func TestRunMintUnenrollOrg_PublicMode(t *testing.T) {
-	withMintGCFClient(t, publicMintDiscoveryClient())
-	out := &strings.Builder{}
-	printer := ui.New(out)
-	err := runMintUnenrollOrg(context.Background(), printer, "acme", "my-project", "us-central1", false, true, os.Stdin)
-	require.NoError(t, err)
-	assert.Contains(t, out.String(), "public mode")
-	assert.Contains(t, out.String(), "not supported")
-}
-
-func TestRunMintUnenrollOrg_Success(t *testing.T) {
-	client := gcf.NewFakeGCFClient(
-		gcf.WithFakeFunctionInfo(&gcf.FunctionInfo{
-			URI: "https://mint.example.com",
-			EnvVars: map[string]string{
-				"ALLOWED_ORGS": "acme,other",
-			},
-		}),
-		gcf.WithFakeTrafficEnvVars(map[string]string{
-			"ALLOWED_ORGS": "acme,other",
-		}),
-		gcf.WithFakeWIFProvider(&gcf.WIFProviderInfo{
-			AttributeCondition: "assertion.repository_owner in ['acme', 'other']",
-		}),
-	)
-	withMintGCFClient(t, client)
-	printer := ui.New(&strings.Builder{})
-	err := runMintUnenrollOrg(context.Background(), printer, "acme", "my-project", "us-central1", false, true, os.Stdin)
-	require.NoError(t, err)
-}
-
 func TestRunMintUnenrollRepo_DryRun(t *testing.T) {
 	withMintGCFClient(t, mintDiscoveryClient())
 	printer := ui.New(&strings.Builder{})
@@ -4316,11 +4346,15 @@ func TestRunMintUnenrollRepo_DeleteProvider(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestMintEnrollCmd_DryRunOrg(t *testing.T) {
+func TestMintEnrollCmd_OrgTargetRejected(t *testing.T) {
 	withMintGCFClient(t, mintDiscoveryClient())
 	cmd := newRootCmd()
 	cmd.SetArgs([]string{"mint", "enroll", "acme", "--project=my-project-id", "--dry-run"})
-	require.NoError(t, cmd.Execute())
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires an owner/repo target")
+	assert.Contains(t, err.Error(), "per-org enrollment has been removed")
+	assert.Contains(t, err.Error(), `"acme"`)
 }
 
 func TestMintEnrollCmd_DryRunRepo(t *testing.T) {
@@ -4330,26 +4364,32 @@ func TestMintEnrollCmd_DryRunRepo(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 }
 
-func TestMintUnenrollCmd_DryRunOrg(t *testing.T) {
-	withMintGCFClient(t, mintDiscoveryClient())
-	cmd := newRootCmd()
-	cmd.SetArgs([]string{"mint", "unenroll", "acme", "--project=my-project-id", "--dry-run"})
-	require.NoError(t, cmd.Execute())
+func TestMintUnenrollCmd_OrgTargetRejected(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--dry-run"},
+		{"--yolo"},
+		{"--delete-provider", "--yolo"},
+	} {
+		t.Run(strings.Join(extra, " "), func(t *testing.T) {
+			client := mintDiscoveryClient()
+			withMintGCFClient(t, client)
+			cmd := newRootCmd()
+			cmd.SetArgs(append([]string{"mint", "unenroll", "acme", "--project=my-project-id"}, extra...))
+			err := cmd.Execute()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "requires an owner/repo target")
+			assert.Contains(t, err.Error(), "per-org unenrollment has been removed")
+			assert.Contains(t, err.Error(), `"acme"`)
+			assert.NotContains(t, gcf.RecordedCalls(client), "UpdateServiceEnvVars")
+		})
+	}
 }
 
-func TestVerifyEnrollment_TrafficRevisionWarning(t *testing.T) {
-	out := &strings.Builder{}
-	printer := ui.New(out)
-	verifyEnrollment(context.Background(), printer, &fakeEnrollmentVerifier{
-		revInfo: &gcf.ServiceRevisionInfo{
-			TrafficRevisionShort:   "fullsend-mint-00001",
-			TemplateMatchesTraffic: false,
-		},
-		envVars: map[string]string{
-			"ALLOWED_ORGS": "acme",
-		},
-	}, "acme", "my-project")
-	assert.Contains(t, out.String(), "may not be serving")
+func TestMintUnenrollCmd_DryRunRepo(t *testing.T) {
+	withMintGCFClient(t, mintDiscoveryClient())
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"mint", "unenroll", "acme/widget", "--project=my-project-id", "--dry-run"})
+	require.NoError(t, cmd.Execute())
 }
 
 // --- confirmUnenroll tests ---

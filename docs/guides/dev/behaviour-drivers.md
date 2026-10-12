@@ -20,7 +20,7 @@ v1 reference implementations:
 - `pkg/behaviourtest/drivers/install/repopool_cfmint_previews.go` (RepoPoolCFMintPreviews)
 - `pkg/behaviourtest/drivers/install/repopool_cfmint_stage.go` (RepoPoolCFMintStage)
 - `pkg/behaviourtest/drivers/install/repopool_external_mint.go` (RepoPoolExternalMint)
-- `pkg/behaviourtest/drivers/install/common/setup.go` (shared helpers: `RunGitHubSetup`, `ProvisionInference`)
+- `pkg/behaviourtest/drivers/install/common/setup.go` (shared helpers: `RunGitHubSetup`, `ResolveInferenceWIFProvider`, `InferenceStatusWIFProvider`, `ProvisionInference`)
 
 ## Runner configuration
 
@@ -31,6 +31,7 @@ BEHAVIOUR_SCM=github              # also: gitlab; future: forgejo
 BEHAVIOUR_CI=githubactions        # also: gitlabci; future: tekton
 BEHAVIOUR_INSTALL_MODE=per-repo   # v1 default and only supported value
 BEHAVIOUR_CONFIG_PRESET=          # optional local path or HTTPS URL forwarded as github setup --config
+PLAYBACK_RUNTIME=                 # unset: normal "dummy" runtime; "dummy-playback": installs with playback tracking hooks (see behaviour-testing.md)
 ENVIRONMENT=dev                   # mint/infra target: dev (default) or stage
 ```
 
@@ -54,7 +55,7 @@ Each concrete driver owns the full lifecycle:
 
 The Factory takes the allocated org name plus runtime dependencies (forge client, token, CLI binary, GCP project, logger). Driver-specific inputs (PEMs, allowlists, pool size, mint URL, optional `BEHAVIOUR_CONFIG_PRESET`) come from env or are computed inside the driver. When `BEHAVIOUR_CONFIG_PRESET` is set, `github setup` receives `--config <value>` and omits `--runtime dummy` so the preset's `runtime: dummy` is inherited rather than pinned in the overlay. The suite does not construct or thread pool, ensurer, or mint driver types directly — all internal lifecycle is encapsulated inside the concrete driver returned by the factory. Default concurrency is `driver.Capacity()`; `GODOG_CONCURRENCY` overrides it (warn, do not fail, if concurrency > Capacity).
 
-Pool orgs must already have shared GitHub Apps, org-level mint enrollment, and per-repo mint enrollment for each numbered repo (one-time GCP admin step on the hosted mint project). The driver does not run `fullsend admin install` or `fullsend mint enroll`. See [e2e-testing.md](e2e-testing.md#behaviour-tests-and-per-repo-mint-enrollment).
+Pool orgs must already have shared GitHub Apps and per-repo mint enrollment for each numbered repo (one-time GCP admin step on the hosted mint project). The driver does not run `fullsend admin install` or `fullsend mint enroll`. See [e2e-testing.md](e2e-testing.md#behaviour-tests-and-per-repo-mint-enrollment).
 
 `Finalize` (RepoPoolCFMintPreviews) abandons the preview alias via `fullsend mint delete --platform=cloudflare` and reclaims any outstanding leases with an error. The RepoPoolCFMintStage driver's teardown is a no-op (the durable Worker persists across runs). The RepoPoolExternalMint driver's teardown is a no-op.
 
@@ -69,9 +70,11 @@ Use `forge.Client` for operations it already exposes; add REST helpers inside th
 
 ## Adding a CI driver
 
-1. Implement `ci.Driver` — `WaitForWorkflow`, `FindCompletedWorkflowRun`, `AssertNoWorkflow`, `GetRunLogs`, `DownloadArtifacts`, `DownloadNamedArtifactFromRun`, `DownloadNamedArtifactAfter`, `WaitForHarnessAgent`, `WaitForFailedHarnessAgent`, `AssertNoHarnessAgentArtifact`, `CountHarnessDispatches`.
-2. Map forge `WorkflowRun` types to portable polling logic; reuse patterns from `e2e/admin/admin_test.go`.
-3. Register in `behaviourtest.RunSuite` for the matching `BEHAVIOUR_CI` value.
+1. Implement `ci.Driver` — `WaitForWorkflow`, `FindCompletedWorkflowRun`, `AssertNoWorkflow`, `GetRunLogs`, `DownloadArtifacts`, `DownloadNamedArtifactFromRun`, `DownloadNamedArtifactAfter`, `WaitForHarnessAgent`, `WaitForHarnessAgentRound`, `WaitForFailedHarnessAgent`, `AssertNoHarnessAgentArtifact`, `CountHarnessDispatches`.
+2. Also implement the optional `ci.RunLister` interface (`ListRecentRuns`). A failed scenario's After hook uses it to save the logs of runs that no step resolved before the leased repository is deleted. Without it, only the run a step resolved has its logs collected.
+3. Also implement the optional `ci.EmptyMatrixWaiter` interface (`WaitForHarnessEmptyMatrix`). The `the harness dispatch completes with an empty matrix` step needs it to assert that a harness run succeeded without dispatching any agent.
+4. Map forge `WorkflowRun` types to portable polling logic; reuse patterns from the GitHub Actions driver in `pkg/behaviourtest/drivers/ci/githubactions/`.
+5. Register in `behaviourtest.RunSuite` for the matching `BEHAVIOUR_CI` value.
 
 ## Adding an install driver
 
@@ -86,7 +89,7 @@ Use `forge.Client` for operations it already exposes; add REST helpers inside th
    your driver will invoke (e.g., `internal/cli/mint.go` for
    `mint deploy`, `internal/cli/mint_delete.go` for `mint delete`).
    Check the full flag surface — especially optional flags like
-   `--worker-name`, `--allowed-orgs`, `--workflow-host-repos`,
+   `--worker-name`, `--workflow-host-repos`,
    `--per-repo-wif-repos`, `--app-set`, and `--pem-dir`. Ensure deploy
    and teardown commands receive symmetric identifying flags (e.g., both
    `mint deploy` and `mint delete` need `--worker-name` if the Worker
@@ -100,7 +103,7 @@ Use `forge.Client` for operations it already exposes; add REST helpers inside th
    the same package (e.g., `repopool_cfmint_previews.go`,
    `repopool_external_mint.go`) behind the shared `install.Driver`
    interface. Place common helpers shared across drivers in
-   `install/common/` (e.g., `RunGitHubSetup`, `ProvisionInference`).
+   `install/common/` (e.g., `RunGitHubSetup`, `ResolveInferenceWIFProvider`).
 5. **Register the driver** in `behaviourtest.RunSuite` (`installFactoryFor`
    in `pkg/behaviourtest/select.go`). Install driver selection is keyed by
    `ENVIRONMENT`, not `BEHAVIOUR_INSTALL_MODE`.
@@ -122,7 +125,7 @@ Steps use `w.Org` and `w.RepoName` (the allocated repo name) plus per-repo const
 
 ## Testing drivers
 
-Prefer unit tests with `httptest` for REST helpers. Optional smoke scenarios against live backends mirror admin e2e credentials (`GITHUB_TOKEN`, halfsend org pool).
+Prefer unit tests with `httptest` for REST helpers. Optional smoke scenarios against live backends use the behaviour suite's credentials (`GITHUB_TOKEN`, halfsend org pool).
 
 ## Future backends checklist
 

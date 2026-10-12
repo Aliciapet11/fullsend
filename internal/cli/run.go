@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,8 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/spf13/cobra"
 
@@ -39,6 +38,8 @@ import (
 	gl "github.com/fullsend-ai/fullsend/internal/forge/gitlab"
 	"github.com/fullsend-ai/fullsend/internal/gitfetch"
 	"github.com/fullsend-ai/fullsend/internal/harness"
+	vertexinference "github.com/fullsend-ai/fullsend/internal/inference/vertex"
+	"github.com/fullsend-ai/fullsend/internal/inference/vertexauth"
 	"github.com/fullsend-ai/fullsend/internal/lock"
 	"github.com/fullsend-ai/fullsend/internal/mintclient"
 	"github.com/fullsend-ai/fullsend/internal/mintcore"
@@ -90,7 +91,21 @@ const (
 	// to avoid exceeding command-line or context limits. 10 KiB is enough for
 	// lint/type-check diagnostics without overwhelming the model's context.
 	maxFeedbackBytes = 10 * 1024
+
+	// Run-scoped inference providers resolved from the selected agent.
+	runProviderVertex = "vertex"
+	runProviderOpenAI = "openai"
+	// runProviderGateway marks a pi or codex parent on the inference gateway route
+	// (a gateway/ model, ADR 0137).
+	runProviderGateway = "gateway"
+	// runProviderNone marks runtimes that do no inference (dummy,
+	// dummy-playback).
+	runProviderNone = "none"
 )
+
+// prepareGitHubWIF is a seam so tests can stub the GitHub-to-Google
+// credential exchange.
+var prepareGitHubWIF = vertexauth.PrepareGitHubWIF
 
 // preflightCheckTimeout bounds the execution time for a validation_loop
 // preflight_check command. Mirrors the preflightGitHubTimeout pattern —
@@ -107,13 +122,13 @@ var preflightCheckTimeout = 30 * time.Second
 // outage from hanging teardown indefinitely; remint failure is non-fatal.
 //
 // Set to mintclient.MaxMintDuration rather than an unrelated fixed number:
-// mintclient.MintToken has its own retry schedule (fetchOIDCJWT up to 3
-// attempts, callMint up to 5, both with exponential backoff — see that
-// const's doc for the full accounting), which can already take longer
-// than a shorter, arbitrarily-chosen bound. A bound shorter than the
-// client's own schedule would routinely cut retries short mid-backoff and
-// fall through to the expired token this remint exists to replace — the
-// exact failure this remint exists to fix (#7231).
+// mintclient.MintToken has its own retry schedule (fetchOIDCJWT for up to
+// about a minute, callMint up to 5 attempts, both with exponential
+// backoff — see that const's doc for the full accounting), which can
+// already take longer than a shorter, arbitrarily-chosen bound. A bound
+// shorter than the client's own schedule would routinely cut retries
+// short mid-backoff and fall through to the expired token this remint
+// exists to replace — the exact failure this remint exists to fix (#7231).
 var remintForPostScriptTimeout = mintclient.MaxMintDuration
 
 // defaultAgentsRepoURLPrefix is the base URL for fetching agent harnesses
@@ -212,11 +227,12 @@ type aggregateMetrics struct {
 	// "harness", "default") so a silent override is visible after the fact.
 	OverrideSource string `json:"override_source,omitempty"`
 	// PerModelUsage attributes the totals above to the model specs that
-	// spent them. Only runtimes that dispatch sub-agents fill it (pi's
-	// Agent tool), and then on every iteration of such a run — including
-	// one that dispatched nothing, whose parent entry is what keeps the
-	// breakdown summing to the totals across a retry. A run on a runtime
-	// without sub-agents keeps metrics.json as it was.
+	// spent them. Only runtimes that dispatch sub-agents fill it: pi's
+	// Agent tool on every iteration of such a run — including one that
+	// dispatched nothing, whose parent entry is what keeps the breakdown
+	// summing to the totals across a retry — and claude from each
+	// iteration's result modelUsage. A run on a runtime without sub-agents
+	// keeps metrics.json as it was.
 	PerModelUsage map[string]agentruntime.ModelUsage `json:"per_model_usage,omitempty"`
 }
 
@@ -232,26 +248,6 @@ var (
 	errParsingConfigRuntime = errors.New("parsing config for runtime selection")
 	errResolvingRuntime     = errors.New("resolving runtime")
 )
-
-// resolveBackendFromConfigData selects the runtime for agentName from raw
-// config.yaml bytes (org or per-repo). Only the single file is consulted;
-// backendFromConfigFile is the layered (config.base.yaml-aware) entry point.
-func resolveBackendFromConfigData(configData []byte, agentName string) (agentruntime.Backend, error) {
-	if isOrgConfigData(configData) {
-		orgCfg, orgErr := config.ParseOrgConfig(configData)
-		if orgErr != nil {
-			return agentruntime.Backend{}, fmt.Errorf("%w: %w", errParsingConfigRuntime, orgErr)
-		}
-		backend, _, err := resolveBackendForAgent(orgCfg.AgentEntries(), orgCfg.OrgRepoDefaults().Runtime, agentName)
-		return backend, err
-	}
-	perRepoCfg, perRepoErr := config.ParsePerRepoConfig(configData)
-	if perRepoErr != nil {
-		return agentruntime.Backend{}, fmt.Errorf("%w: %w", errParsingConfigRuntime, perRepoErr)
-	}
-	backend, _, err := resolveBackendForAgent(perRepoCfg.AgentEntries(), perRepoCfg.ConfigRuntime(), agentName)
-	return backend, err
-}
 
 // resolveBackendForAgent applies the agents: entry's runtime for agentName
 // (validated like the repo-wide key) before falling back to repoRuntime.
@@ -273,53 +269,26 @@ func agentSettingsSource(configPath, agentName string) string {
 	return fmt.Sprintf("%s agents.%s", configPath, agentName)
 }
 
-func isOrgConfigData(data []byte) bool {
-	text := string(data)
-	if strings.Contains(text, "fullsend per-repo configuration") {
-		return false
-	}
-	if strings.Contains(text, "fullsend organization configuration") {
-		return true
-	}
-	var probe struct {
-		Dispatch *struct {
-			Platform string `yaml:"platform"`
-		} `yaml:"dispatch"`
-		Defaults *struct {
-			Roles []string `yaml:"roles"`
-		} `yaml:"defaults"`
-		Repos map[string]any `yaml:"repos"`
-	}
-	if err := yaml.Unmarshal(data, &probe); err != nil {
-		return false
-	}
-	return probe.Dispatch != nil || probe.Defaults != nil || len(probe.Repos) > 0
-}
-
 // runConfig is the config file consulted by `fullsend run` for runtime
 // selection and per-agent settings: the file at the requested path, or the
-// sibling .fullsend/config.yaml when that is absent. Per-repo configs are
-// loaded layered (config.yaml over config.base.yaml, ADR 0069) so a preset
-// base can carry runtime: or agents: entries; org configs keep their raw
-// bytes and are parsed by resolveBackendFromConfigData.
+// sibling .fullsend/config.yaml when that is absent. Configs are loaded
+// layered (config.yaml over config.base.yaml, ADR 0069) so a preset base
+// can carry runtime: or agents: entries.
 type runConfig struct {
 	// source is the file the values came from, or "" when none exists.
 	source string
-	// perRepo is the layered per-repo config; nil for org configs and
-	// when no file exists.
+	// perRepo is the layered per-repo config; nil when no file exists.
 	perRepo config.PerRepoConfigReader
-	// orgData holds the raw bytes of an org-mode config; nil otherwise.
-	orgData []byte
 }
 
 // loadRunConfig reads the config for `fullsend run` (see runConfig). A
 // missing file is not an error: the zero runConfig means "use defaults".
 func loadRunConfig(path string) (runConfig, error) {
-	data, readErr := os.ReadFile(path)
+	_, readErr := os.ReadFile(path)
 	source := path
 	if readErr != nil && os.IsNotExist(readErr) {
 		alt := filepath.Join(filepath.Dir(path), ".fullsend", config.OverlayConfigFile)
-		data, readErr = os.ReadFile(alt)
+		_, readErr = os.ReadFile(alt)
 		if readErr == nil {
 			source = alt
 		}
@@ -346,17 +315,13 @@ func loadRunConfig(path string) (runConfig, error) {
 		}
 		return runConfig{}, nil
 	}
-	if isOrgConfigData(data) {
-		return runConfig{source: source, orgData: data}, nil
-	}
 	cfg, loadErr := config.LoadConfig(filepath.Dir(source), config.LoadOpts{MissingOK: false})
 	if loadErr != nil {
 		return runConfig{source: source}, fmt.Errorf("%w: %w", errParsingConfigRuntime, loadErr)
 	}
 	perRepoCfg, ok := cfg.(config.PerRepoConfigReader)
 	if !ok {
-		// Header said per-repo but the keys say org: parse as org.
-		return runConfig{source: source, orgData: data}, nil
+		return runConfig{source: source}, fmt.Errorf("%w: unexpected config type %T", errParsingConfigRuntime, cfg)
 	}
 	return runConfig{source: source, perRepo: perRepoCfg}, nil
 }
@@ -377,12 +342,6 @@ func backendFromConfigFile(path, agentName string) (agentruntime.Backend, string
 // backend resolves the runtime for agentName from the loaded config.
 func (rc runConfig) backend(agentName string) (agentruntime.Backend, string, error) {
 	switch {
-	case rc.orgData != nil:
-		backend, resolveErr := resolveBackendFromConfigData(rc.orgData, agentName)
-		if resolveErr != nil {
-			return agentruntime.Backend{}, rc.source, resolveErr
-		}
-		return backend, rc.source, nil
 	case rc.perRepo != nil:
 		backend, perAgent, resolveErr := resolveBackendForAgent(rc.perRepo.AgentEntries(), rc.perRepo.ConfigRuntime(), agentName)
 		if resolveErr != nil {
@@ -412,12 +371,6 @@ func (rc runConfig) agentSettings(agentName string) (config.AgentEntry, bool, er
 	switch {
 	case rc.perRepo != nil:
 		agents, allowlist = rc.perRepo.AgentEntries(), rc.perRepo.AllowedResources()
-	case rc.orgData != nil:
-		orgCfg, err := config.ParseOrgConfig(rc.orgData)
-		if err != nil {
-			return config.AgentEntry{}, false, fmt.Errorf("%w: %w", errParsingConfigRuntime, err)
-		}
-		agents, allowlist = orgCfg.AgentEntries(), orgCfg.AllowedResources()
 	default:
 		return config.AgentEntry{}, false, nil
 	}
@@ -477,7 +430,7 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&fullsendDir, "fullsend-dir", "", "path to the .fullsend configuration directory")
+	addFullsendDirFlag(cmd, &fullsendDir)
 	cmd.Flags().StringVar(&outputBase, "output-dir", "", "base directory for run output (default: /tmp/fullsend)")
 	cmd.Flags().StringVar(&targetRepo, "target-repo", "", "path to the target repository")
 	cmd.Flags().StringVar(&fullsendBinary, "fullsend-binary", "", "path to a Linux fullsend binary to copy into the sandbox (default: current executable)")
@@ -497,9 +450,8 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().IntVar(&sOpts.statusComment, "status-comment-id", 0, "ID of the triggering comment, for comment-scoped reactions on slash-command runs (optional)")
 	cmd.Flags().StringVar(&sOpts.mintURL, "mint-url", "", "mint service URL for on-demand status tokens (default: $FULLSEND_MINT_URL)")
 	cmd.Flags().StringVar(&oFlags.runtime, "runtime", "", "override the agent runtime from config.yaml for this run (claude, pi, codex, dummy or dummy-playback; also $FULLSEND_RUNTIME)")
-	cmd.Flags().StringVar(&oFlags.model, "model", "", "override the harness/agent model for this run (alias such as opus/sonnet/haiku, a model id, or provider/id on pi and codex — codex takes OpenAI ids only; also $FULLSEND_MODEL)")
+	cmd.Flags().StringVar(&oFlags.model, "model", "", "override the harness/agent model for this run (alias such as opus/sonnet/haiku, a model id, or provider/id on pi and codex — codex takes OpenAI ids and gateway/<model> only; also $FULLSEND_MODEL)")
 	cmd.Flags().StringVar(&oFlags.effort, "effort", "", "override the harness effort level for this run (low, medium, high, xhigh, max; also $FULLSEND_EFFORT)")
-	_ = cmd.MarkFlagRequired("fullsend-dir")
 	_ = cmd.MarkFlagRequired("target-repo")
 
 	return cmd
@@ -547,7 +499,19 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// to agents-repo resolution; a malformed file is warned by
 	// tryLoadOrgConfig but not surfaced as a distinct error here.
 	orgConfigPath := filepath.Join(absFullsendDir, "config.yaml")
-	orgCfg := tryLoadOrgConfig(orgConfigPath, printer)
+	//
+	// The layered config (config.yaml over config.base.yaml) is loaded
+	// strictly: a layer that exists but cannot be loaded (malformed,
+	// unreadable, or a rejected per-org format) must not be treated as
+	// absent, and a base-only config must be honored. Substituting the
+	// default allowlist for an explicit allowed_remote_resources
+	// (including a deny-all) would allow remote fetching before the load
+	// error surfaces. The config is absent only when neither layer exists.
+	orgCfg, err := loadLockConfig(orgConfigPath)
+	if err != nil {
+		printer.StepFail("Failed to load fullsend config")
+		return err
+	}
 
 	// Detect forge platform after config is loaded so config.forge can be consulted (ADR 0088).
 	forgePlatform, err := detectForgePlatform(forgeFlag, orgCfg)
@@ -610,8 +574,9 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// channel when --event-file is not provided. The Go dispatch path
 	// (ProjectExecutionRef) embeds the complete normalized event in the
 	// legacy event_payload as _normalized_event (#6748). Try the on-disk
-	// dispatch file first (per-org path), then GITHUB_EVENT_PATH (per-repo
-	// workflow_call path where event_payload is nested in inputs).
+	// dispatch file first (written by reusable-dispatch.yml), then
+	// GITHUB_EVENT_PATH (workflow_call path where event_payload is nested
+	// in inputs).
 	if eventMap == nil {
 		eventMap = extractNormalizedEventFromDispatch(absFullsendDir)
 	}
@@ -756,7 +721,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 				harnessHash := fetch.ComputeSHA256(harnessData)
 
 				if entry.IsStale(harnessHash) {
-					printer.StepWarn(fmt.Sprintf("Harness has changed since lock file was generated. Run 'fullsend lock %s --fullsend-dir %s' to update.", agentName, fullsendDir))
+					printer.StepWarn(fmt.Sprintf("Harness has changed since lock file was generated. Run 'fullsend lock %s%s' to update.", agentName, fullsendDirArg(fullsendDir)))
 				} else {
 					printer.StepStart("Using pinned dependencies from lock file")
 					lockResult, lockResolveErr := resolveFromLock(h, entry, absFullsendDir, orgAllowlist, printer)
@@ -930,93 +895,6 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		defer mintCleanup()
 	}
 
-	// Expand env vars in runner_env values. FULLSEND_DIR is injected so
-	// harness configs can reference files relative to the fullsend directory
-	// (e.g., ${FULLSEND_DIR}/schemas/triage-result.schema.json).
-	expander := func(key string) string {
-		if key == "FULLSEND_DIR" {
-			return absFullsendDir
-		}
-		// Refuse OIDC credential vars and provider-only keys so ${VAR}
-		// expansion in harness YAML cannot leak mint-usable or workflow
-		// credentials (#5832, #6649).
-		return harnessEnvExpand(key)
-	}
-	lookup := func(key string) (string, bool) {
-		if key == "FULLSEND_DIR" {
-			return absFullsendDir, true
-		}
-		// Refuse OIDC credential vars and provider-only keys (#5832, #6649).
-		// Unlike expander (which silently returns "" to produce an empty
-		// expansion), lookup returns false so ValidateRunnerEnvWith treats
-		// the reference as an unresolvable variable and fails validation.
-		return harnessEnvLookup(key)
-	}
-	if err := h.ValidateRunnerEnvWith(lookup); err != nil {
-		printer.StepFail("Environment validation failed")
-		return fmt.Errorf("validating env: %w", err)
-	}
-	for k, v := range h.RunnerEnv {
-		h.RunnerEnv[k] = os.Expand(v, expander)
-	}
-
-	// Expand ${VAR} references in env.runner and env.sandbox (ADR 0055).
-	if h.Env != nil {
-		for k, v := range h.Env.Runner {
-			h.Env.Runner[k] = os.Expand(v, expander)
-		}
-		for k, v := range h.Env.Sandbox {
-			h.Env.Sandbox[k] = os.Expand(v, expander)
-		}
-	}
-
-	// Expand ${VAR} references in validation_loop.schema so the path
-	// resolves before ValidateFilesExist stat-checks it.
-	if h.ValidationLoop != nil && strings.Contains(h.ValidationLoop.Schema, "${") {
-		h.ValidationLoop.Schema = os.Expand(h.ValidationLoop.Schema, expander)
-	}
-	if h.ValidationLoop != nil && strings.Contains(h.ValidationLoop.PreflightCheck, "${") {
-		h.ValidationLoop.PreflightCheck = os.Expand(h.ValidationLoop.PreflightCheck, expander)
-	}
-
-	if err := h.ValidateFilesExist(); err != nil {
-		printer.StepFail("File validation failed")
-		return fmt.Errorf("validating files: %w", err)
-	}
-	// Ensure scripts are executable. The GitHub Contents API does not
-	// preserve file permissions, so scripts written via admin install
-	// may lack the execute bit.
-	for _, script := range h.Scripts() {
-		if script != "" {
-			if chmodErr := os.Chmod(script, 0o755); chmodErr != nil {
-				printer.StepWarn("Could not chmod " + script + ": " + chmodErr.Error())
-			}
-		}
-	}
-	printer.StepDone(fmt.Sprintf("Harness loaded (%.1fs)", time.Since(harnessStart).Seconds()))
-
-	// Run lint checks before merging env.runner into RunnerEnv so that
-	// Lint() sees the original YAML state and only warns when runner_env
-	// was actually declared (not when env.runner entries are merged in).
-	for _, diag := range h.Lint() {
-		emitDiagnostic(printer, diag)
-	}
-
-	// ADR 0055: build effective runner env — start with runner_env,
-	// overlay env.runner so the new field takes precedence.
-	effectiveRunnerEnv := make(map[string]string)
-	for k, v := range h.RunnerEnv {
-		effectiveRunnerEnv[k] = v
-	}
-	if h.Env != nil {
-		for k, v := range h.Env.Runner {
-			effectiveRunnerEnv[k] = v
-		}
-	}
-	// NOTE: after this point h.RunnerEnv contains the merged effective set
-	// (runner_env + env.runner), not just the declared runner_env entries.
-	h.RunnerEnv = effectiveRunnerEnv
-
 	// Resolve the per-run overrides (flag > env) and the runtime early so
 	// both appear in the plan block. The full backend is used later (step
 	// 5b) for sandbox setup. Overrides are resolved once, here; runtimes
@@ -1104,13 +982,185 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	if id, ok := configModelAliases[h.Model]; ok {
 		resolvedModel, modelRemapped = id, true
 	}
+	// Thread the agent's subagents config through early: both the
+	// provider-creation gate below and BootstrapInput (#7031, #7981) need
+	// it, and it is already known once the agents: entry is resolved.
+	var agentSubagents map[string]*string
+	if entryFound {
+		agentSubagents = entry.Subagents
+	}
+	agentDefModel := agentruntime.AgentDefinitionModel(h.Agent)
+	// parentNeedsOpenAIProvider decides which inference credential the
+	// *parent's own call* needs (runInferenceProvider, just below) and must
+	// stay parent-only: a Vertex parent with an OpenAI persona still needs
+	// its own Vertex ADC validated, regardless of what its children run on.
+	parentNeedsOpenAIProvider := agentruntime.NeedsOpenAIProvider(runtimeBackend.Runtime.Name(), h.Model, agentDefModel, configModelAliases)
+	// parentNeedsGateway is the same parent-only decision for the inference
+	// gateway route (ADR 0137): a pi parent on a gateway/ model calls no
+	// Vertex, so it must not need Vertex credentials. It depends on the
+	// model alone, not on an inference.gateway block: with no block the
+	// harness may load the extension as a plugin (the local guide), which
+	// is no Vertex call either. Its children are classified on their own,
+	// as for openai (vertexGap below).
+	parentNeedsGateway := agentruntime.NeedsGatewayRoute(runtimeBackend.Runtime.Name(), h.Model, agentDefModel, configModelAliases)
+	provider := runInferenceProvider(runtimeBackend.Runtime.Name(), parentNeedsOpenAIProvider, parentNeedsGateway)
+	// openAIChildren are the configured pi children (subagents.<persona>,
+	// subagents.default, a persona's frontmatter model:) that resolve to
+	// the openai provider. They need the run-scoped OpenAI provider even
+	// when the parent does not (#7981), so they widen the provider gate
+	// below; the parent's own credential path above stays parent-only.
+	openAIChildren := agentruntime.OpenAIChildren(runtimeBackend.Runtime.Name(), h.Agent, agentSubagents, harness.SkillSources(h.Skills), agentName, configModelAliases)
+	needsOpenAIProvider := parentNeedsOpenAIProvider || len(openAIChildren) > 0
+	// Prepare credentials before env validation and expansion, so harness
+	// references to GOOGLE_APPLICATION_CREDENTIALS resolve to the prepared file.
+	vertexSetupFailed := false
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		cleanup, failed, err := setupActionsVertexCredentials(ctx, provider, printer, setFlagEnv)
+		if err != nil {
+			printer.StepFail("Vertex credential setup failed")
+			return err
+		}
+		vertexSetupFailed = failed
+		defer cleanup()
+	}
+	// A required mount needs its credential file whatever the provider:
+	// validateVertexGCPCredentials checks only optional mounts.
+	if err := validateRequiredGCPHostFile(h, provider); err != nil {
+		printer.StepFail("Inference credential validation failed")
+		return err
+	}
+	if provider == runProviderVertex {
+		if err := validateVertexGCPCredentials(h); err != nil {
+			printer.StepFail("Inference credential validation failed")
+			return err
+		}
+	}
+	// A pi parent off Vertex can still dispatch Vertex children. When the
+	// harness mounts ${GOOGLE_APPLICATION_CREDENTIALS} and the variable has
+	// no usable file, a subagents entry on Vertex fails here; the Agent
+	// extension refuses any other Vertex child at dispatch (#7980).
+	vertexGap := ""
+	if provider != runProviderVertex && provider != runProviderNone && runtimeBackend.Runtime.Name() == "pi" {
+		vertexGap = vertexCredentialGap(h)
+	}
+	if vertexGap != "" && vertexSetupFailed {
+		vertexGap += " (Vertex credential setup failed; see the warning above)"
+	}
+	if vertexGap != "" {
+		var configured []string
+		for _, c := range agentruntime.VertexChildren("pi", h.Agent, agentSubagents, harness.SkillSources(h.Skills), agentName, configModelAliases) {
+			// google-vertex also authenticates with an API key; dispatch decides for it.
+			if strings.HasPrefix(c.Spec, "google-vertex/") {
+				continue
+			}
+			if c.Configured {
+				configured = append(configured, c.String())
+			}
+		}
+		if len(configured) > 0 {
+			printer.StepFail("Sub-agent model needs Vertex credentials")
+			return fmt.Errorf("sub-agent model resolves to Vertex, but %s: %s; "+
+				"set GOOGLE_APPLICATION_CREDENTIALS to a credential file mounted in host_files, or move the sub-agent off Vertex",
+				vertexGap, strings.Join(configured, ", "))
+		}
+		printer.StepInfo("Vertex sub-agents need a credential file: " + vertexGap)
+	}
+
+	// Expand env vars in runner_env values. FULLSEND_DIR is injected so
+	// harness configs can reference files relative to the fullsend directory
+	// (e.g., ${FULLSEND_DIR}/schemas/triage-result.schema.json).
+	expander := func(key string) string {
+		if key == "FULLSEND_DIR" {
+			return absFullsendDir
+		}
+		// Refuse OIDC credential vars and provider-only keys so ${VAR}
+		// expansion in harness YAML cannot leak mint-usable or workflow
+		// credentials (#5832, #6649).
+		return harnessEnvExpand(key)
+	}
+	lookup := func(key string) (string, bool) {
+		if key == "FULLSEND_DIR" {
+			return absFullsendDir, true
+		}
+		// Refuse OIDC credential vars and provider-only keys (#5832, #6649).
+		// Unlike expander (which silently returns "" to produce an empty
+		// expansion), lookup returns false so ValidateRunnerEnvWith treats
+		// the reference as an unresolvable variable and fails validation.
+		return harnessEnvLookup(key)
+	}
+	if err := h.ValidateRunnerEnvWith(lookup); err != nil {
+		printer.StepFail("Environment validation failed")
+		return fmt.Errorf("validating env: %w", err)
+	}
+	for k, v := range h.RunnerEnv {
+		h.RunnerEnv[k] = os.Expand(v, expander)
+	}
+
+	// Expand ${VAR} references in env.runner and env.sandbox (ADR 0055).
+	if h.Env != nil {
+		for k, v := range h.Env.Runner {
+			h.Env.Runner[k] = os.Expand(v, expander)
+		}
+		for k, v := range h.Env.Sandbox {
+			h.Env.Sandbox[k] = os.Expand(v, expander)
+		}
+	}
+
+	// Expand ${VAR} references in validation_loop.schema so the path
+	// resolves before ValidateFilesExist stat-checks it.
+	if h.ValidationLoop != nil && strings.Contains(h.ValidationLoop.Schema, "${") {
+		h.ValidationLoop.Schema = os.Expand(h.ValidationLoop.Schema, expander)
+	}
+	if h.ValidationLoop != nil && strings.Contains(h.ValidationLoop.PreflightCheck, "${") {
+		h.ValidationLoop.PreflightCheck = os.Expand(h.ValidationLoop.PreflightCheck, expander)
+	}
+
+	if err := h.ValidateFilesExist(); err != nil {
+		printer.StepFail("File validation failed")
+		return fmt.Errorf("validating files: %w", err)
+	}
+	// Ensure scripts are executable. The GitHub Contents API does not
+	// preserve file permissions, so scripts written via admin install
+	// may lack the execute bit.
+	for _, script := range h.Scripts() {
+		if script != "" {
+			if chmodErr := os.Chmod(script, 0o755); chmodErr != nil {
+				printer.StepWarn("Could not chmod " + script + ": " + chmodErr.Error())
+			}
+		}
+	}
+	printer.StepDone(fmt.Sprintf("Harness loaded (%.1fs)", time.Since(harnessStart).Seconds()))
+
+	// Run lint checks before merging env.runner into RunnerEnv so that
+	// Lint() sees the original YAML state and only warns when runner_env
+	// was actually declared (not when env.runner entries are merged in).
+	for _, diag := range h.Lint() {
+		emitDiagnostic(printer, diag)
+	}
+
+	// ADR 0055: build effective runner env — start with runner_env,
+	// overlay env.runner so the new field takes precedence.
+	effectiveRunnerEnv := make(map[string]string)
+	for k, v := range h.RunnerEnv {
+		effectiveRunnerEnv[k] = v
+	}
+	if h.Env != nil {
+		for k, v := range h.Env.Runner {
+			effectiveRunnerEnv[k] = v
+		}
+	}
+	// NOTE: after this point h.RunnerEnv contains the merged effective set
+	// (runner_env + env.runner), not just the declared runner_env entries.
+	h.RunnerEnv = effectiveRunnerEnv
 
 	// provider/id is pi's model form; Claude Code takes an alias or an
 	// Anthropic model id. The syntax is accepted for every runtime (ids are
 	// not a closed set), so flag the likely mismatch instead of rejecting it.
 	// Check the resolved value: an alias whose entry is a provider/id spec
-	// reaches Claude Code as that spec.
-	if runtimeBackend.Runtime.Name() == "claude" && strings.Contains(resolvedModel, "/") {
+	// reaches Claude Code as that spec. A gateway/ model is the exception:
+	// it selects the inference gateway route, and Claude Code is given the
+	// id after the prefix (planGatewayRoute refuses it without a block).
+	if runtimeBackend.Runtime.Name() == "claude" && strings.Contains(resolvedModel, "/") && !isGatewayModel(resolvedModel) {
 		printer.StepWarn(fmt.Sprintf("model %q has a provider/id form, which is pi's; Claude Code expects an alias (opus, sonnet, ...) or an Anthropic model id", resolvedModel))
 	}
 	if overrides.effort != "" {
@@ -1333,14 +1383,41 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	if len(sandboxName) > maxSandboxNameLen {
 		return fmt.Errorf("sandbox name %q is %d characters, exceeding the OpenShell limit of %d", sandboxName, len(sandboxName), maxSandboxNameLen)
 	}
+	// Inference gateway route (ADR 0137, #8280): selected per model by the
+	// gateway/ prefix, with no precedence against the OpenAI routes, and
+	// attached in addition to every other provider, never instead of
+	// them. Decided here, before Bootstrap, because the runtime renders
+	// its gateway config from the block (PrepareGatewayRun).
+	gatewayChildren := agentruntime.GatewayChildren(runtimeBackend.Runtime.Name(), h.Agent, agentSubagents, harness.SkillSources(h.Skills), agentName, configModelAliases)
+	gatewayModels := []string{agentruntime.EffectiveModel(resolvedModel, agentDefModel)}
+	for _, c := range gatewayChildren {
+		gatewayModels = append(gatewayModels, c.Spec)
+	}
+	needsGateway := parentNeedsGateway || len(gatewayChildren) > 0
+	if runtimeBackend.Runtime.Name() == "claude" {
+		if err := validateClaudeGatewayFallbacks(parentNeedsGateway, overrides.fallbackModels, configModelAliases); err != nil {
+			printer.StepFail("Inference gateway route unavailable")
+			return err
+		}
+	}
+	gatewayPlan, err := planGatewayRoute(runCfg, runtimeBackend, sandboxName, gatewayModels, needsGateway)
+	if err != nil {
+		printer.StepFail("Inference gateway route unavailable")
+		return err
+	}
+	if gatewayPlan != nil {
+		iterations := 1
+		if h.ValidationLoop != nil && h.ValidationLoop.MaxIterations > 0 {
+			iterations = h.ValidationLoop.MaxIterations
+		}
+		gatewayPlan.runLifetime = gatewayAPIKeyLifetimeFor(iterations, time.Duration(effectiveTimeoutMinutes(h))*time.Minute)
+		if gatewayPlan.prepared != nil {
+			defer gatewayPlan.prepared.ClearGatewayRun(sandboxName)
+		}
+	}
 	// runScopedProviders maps a harness provider name to the run-scoped
 	// instance created for it; sandbox creation attaches the latter.
 	runScopedProviders := map[string]string{}
-	// The agent definition's frontmatter `model:` is the runtime's fallback
-	// when nothing else names a model (pi launches on it), so the decision
-	// below has to see it too — reading it here keeps it to one read for
-	// every provider entry.
-	agentDefModel := agentruntime.AgentDefinitionModel(h.Agent)
 	// skippedProviders are harness-declared providers the selected runtime
 	// does not need (an openai entry on a Vertex run, see
 	// runtime.NeedsOpenAIProvider): nothing is created for them and their
@@ -1395,6 +1472,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			printer.StepFail("Failed to load provider definitions")
 			return fmt.Errorf("loading provider definitions: %w", err)
 		}
+		warnReservedProviderNameOverrides(localDefs, result.Providers, printer)
+		listedReservedProfiles := warnReservedProfileCopies(result.Profiles, printer)
 
 		// A bare provider name with no local or URL-resolved definition
 		// falls back to the definition the scaffold embeds in this binary
@@ -1422,8 +1501,21 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// provider must not outlive the run (#6689).
 		created := make(map[string]struct{}, len(allDefs))
 		sharedDefs := allDefs[:0:0]
+		handledEmbeddedProfiles := make(map[string]struct{}, len(allDefs))
 		for _, pd := range allDefs {
 			if !strings.EqualFold(pd.Type, openAIProviderType) {
+				if _, done := handledEmbeddedProfiles[pd.Type]; !done && isReservedProfileID(pd.Type) {
+					handledEmbeddedProfiles[pd.Type] = struct{}{}
+					// A listed copy of a reserved profile was imported above
+					// and stays live for this release (warned about by
+					// warnReservedProfileCopies); importing the embedded one
+					// now would replace it under the same id (#7268).
+					if _, listed := listedReservedProfiles[pd.Type]; !listed {
+						if err := ensureEmbeddedProfile(ctx, pd.Type, printer); err != nil {
+							return err
+						}
+					}
+				}
 				sharedDefs = append(sharedDefs, pd)
 				continue
 			}
@@ -1445,7 +1537,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			// the Vertex provider without making every run resolve an
 			// OpenAI credential (#6920); the profile is not imported and
 			// the instance is not created or attached.
-			if !agentruntime.NeedsOpenAIProvider(runtimeBackend.Runtime.Name(), h.Model, agentDefModel, configModelAliases) {
+			if !needsOpenAIProvider {
 				skippedProviders[pd.Name] = struct{}{}
 				// Counts as handled, so the "declared but no definition
 				// found" warning below does not also fire for it.
@@ -1461,10 +1553,22 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 				printer.StepInfo(fmt.Sprintf("Provider %q declared by the harness but not needed by runtime %s with model %s; skipped", pd.Name, runtimeBackend.Runtime.Name(), model))
 				continue
 			}
-			if err := ensureOpenAIProfile(ctx, pd.Type, printer); err != nil {
+			if err := ensureEmbeddedProfile(ctx, pd.Type, printer); err != nil {
 				return err
 			}
 			handle, err := ensureOpenAIProvider(ctx, pd, sandboxName, openAIConfigIDs(runCfg), runtimeBackend, printer)
+			var credErr openAICredentialError
+			if err != nil && !parentNeedsOpenAIProvider && !anyConfiguredOpenAIChild(openAIChildren) && errors.As(err, &credErr) {
+				// Only a persona's own frontmatter wanted openai. Before
+				// #7981 Bootstrap skipped such a persona with a warning; a
+				// runner with no OpenAI credential keeps that behaviour
+				// rather than failing a run nothing in the config asked
+				// to touch OpenAI.
+				skippedProviders[pd.Name] = struct{}{}
+				created[pd.Name] = struct{}{}
+				printer.StepWarn(fmt.Sprintf("Provider %q skipped: only persona frontmatter wanted it (%v); those personas will be skipped", pd.Name, err))
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -1528,6 +1632,56 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		allProviderNames = applyRunScopedProviderNames(dropSkippedProviders(sandboxProviderNames(h.Providers, result.Providers), skippedProviders), runScopedProviders)
 	}
 
+	// The gateway provider is the runner's, not the harness's: it is
+	// created whenever the route applies, alongside whatever the harness
+	// declared. Its refresher is independent of the OpenAI ones, so a run
+	// on both routes keeps two handoffs. Like them it reads the forge's
+	// OIDC env and spawns openshell, so it is paused around the pre-script
+	// remints, and the sandbox cleanup defer stops it before the sandbox
+	// is deleted (its own stop-defers would only fire after the
+	// post-script, under LIFO).
+	var gatewayHandles []gatewayProviderHandle
+	var stopGatewayRefreshers []func()
+	if gatewayPlan != nil {
+		if err := sandbox.EnableProvidersV2(); err != nil {
+			printer.StepFail("Failed to enable providers v2")
+			return fmt.Errorf("enabling providers v2: %w", err)
+		}
+		gwHandle, err := startGatewayRoute(ctx, gatewayPlan, sandboxName, printer)
+		if err != nil {
+			return err
+		}
+		gatewayHandles = append(gatewayHandles, gwHandle)
+		allProviderNames = append(allProviderNames, gwHandle.name)
+		// LIFO: the refresher stops before the provider is deleted.
+		defer cleanupRunScopedProvider(gwHandle.name, []string{gatewayCredentialKey}, keepSandbox, printer)
+		stopGatewayRefreshers = startGatewayRefreshers(gatewayHandles, printer)
+		for _, stop := range stopGatewayRefreshers {
+			defer stop()
+		}
+	}
+
+	// A subagents entry on openai with no openai provider to attach would
+	// only fail at Bootstrap, after the sandbox exists. Fail here instead,
+	// naming the entry and the fix (#7981). A persona's own frontmatter
+	// model is left to Bootstrap, which skips that persona with a warning,
+	// as it always has. A parent on an openai model is not this check's
+	// concern: its own launch path reports that case.
+	if !parentNeedsOpenAIProvider && len(openAIHandles) == 0 {
+		var configured []string
+		for _, c := range openAIChildren {
+			if c.Configured {
+				configured = append(configured, c.String())
+			}
+		}
+		if len(configured) > 0 {
+			printer.StepFail("Sub-agent model needs the openai provider")
+			return fmt.Errorf("sub-agent model resolves to the openai provider, but the harness declares no openai provider: %s; "+
+				"declare \"openai\" in the harness providers list, or move the sub-agent off openai/",
+				strings.Join(configured, ", "))
+		}
+	}
+
 	workItemID := resolveWorkItemID()
 
 	// 3. Create run directory and initialise tracer.
@@ -1544,6 +1698,11 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// span continues the parent trace.
 	var lastExitCode int
 	var transcriptErrorOverride bool
+	var agentExitReason string // behavioral exit subtype (e.g., "error_max_turns") passed to post-script; see #6877
+	// iterExitReasons records each iteration's behavioral exit reason so the
+	// post-loop sweep can assign the reason of the iteration it validates
+	// rather than the last iteration's. See #6877.
+	iterExitReasons := map[int]string{}
 	var runCount int
 	tracer, tracingCleanup := telemetry.Setup(runDir, Version())
 	tid := resolveTraceIdentity(ctx, tracer, os.Getenv("TRACEPARENT"), os.Getenv("TRACESTATE"), []attribute.KeyValue{
@@ -1615,9 +1774,16 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		for _, stop := range stopOpenAIRefreshers {
 			stop()
 		}
+		for _, stop := range stopGatewayRefreshers {
+			stop()
+		}
 		preRestore, remintErr := maybeRemintAgentTokenForStage(ctx, h, mintURL, forgePlatform, harness.PrivilegeStagePreScript, runtimeLevel, printer)
 		stopOpenAIRefreshers = startOpenAIRefreshers(openAIHandles, printer)
 		for _, stop := range stopOpenAIRefreshers {
+			defer stop()
+		}
+		stopGatewayRefreshers = startGatewayRefreshers(gatewayHandles, printer)
+		for _, stop := range stopGatewayRefreshers {
 			defer stop()
 		}
 		if remintErr != nil {
@@ -1627,9 +1793,16 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		for _, stop := range stopOpenAIRefreshers {
 			stop()
 		}
+		for _, stop := range stopGatewayRefreshers {
+			stop()
+		}
 		preRestore()
 		stopOpenAIRefreshers = startOpenAIRefreshers(openAIHandles, printer)
 		for _, stop := range stopOpenAIRefreshers {
+			defer stop()
+		}
+		stopGatewayRefreshers = startGatewayRefreshers(gatewayHandles, printer)
+		for _, stop := range stopGatewayRefreshers {
 			defer stop()
 		}
 		if err != nil {
@@ -1684,6 +1857,9 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		printer.StepFail("Failed to create sandbox")
 		return fmt.Errorf("creating sandbox: %w", err)
 	}
+	// Anchor for waitForOpenShellFirstPoll (OpenShell #3809) before the first
+	// network request.
+	sandboxReadyAt := time.Now()
 	finalizeSandboxSpan(sandboxSpan, nil)
 
 	if len(runScopedProviders) > 0 {
@@ -1692,13 +1868,27 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// after the agent has retried its first request.
 		if err := checkOpenAIEgressInspected(ctx, sandboxName); err != nil {
 			printer.StepFail("Sandbox policy cannot deliver the OpenAI credential")
+			discardSandbox(sandboxName, runDir, keepSandbox, printer)
 			return err
 		}
-		// From here a refresh must also re-seed the running agent's
-		// credential file (when its runtime has one).
-		for _, h := range openAIHandles {
-			h.sandboxUp.Store(true)
+	}
+	if gatewayPlan != nil {
+		// The same preflight for the configured gateway host: the token
+		// only reaches it through an inspected route.
+		if err := checkGatewayEgressInspected(ctx, sandboxName, gatewayPlan.host); err != nil {
+			printer.StepFail("Sandbox policy cannot deliver the inference gateway credential")
+			discardSandbox(sandboxName, runDir, keepSandbox, printer)
+			return err
 		}
+	}
+	// From here a refresh must also re-seed the running agent's credential
+	// file (when its runtime has one). Set only once every preflight has
+	// passed, so no refresher re-seeds a sandbox a failed one deletes.
+	for _, h := range openAIHandles {
+		h.sandboxUp.Store(true)
+	}
+	for _, gh := range gatewayHandles {
+		gh.sandboxUp.Store(true)
 	}
 
 	// repoExtractedOK tracks whether hostRepositoryDownloadDir is safe
@@ -1738,26 +1928,22 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 
 	// Post-script runs after sandbox cleanup (defers are LIFO).
 	// When a validation_loop is configured, the post-script only runs if
-	// validation passed (ADR 0022). When no validation_loop exists (e.g.,
-	// the code agent), the post-script runs unconditionally after a
-	// successful agent run — the post-script itself is responsible for
-	// any output checks it needs.
+	// validation passed (ADR 0022). Without one it runs after a successful
+	// agent run, and after a failed agent only when the agent left a result
+	// file that parses (#8305): the result is still reported, and the run
+	// still fails. The post-script itself is responsible for any further
+	// output checks it needs.
 	if h.PostScript != "" {
 		defer func() {
 			if noPostScript {
 				printer.StepWarn(fmt.Sprintf("Skipping post-script %s: --no-post-script", h.PostScript))
 				return
 			}
-			if h.ValidationLoop != nil && !validationPassed {
-				printer.StepWarn("Skipping post-script: validation did not pass")
-				return
+			gate := postScriptGate(h, validationPassed, transcriptErrorOverride, runErr, filepath.Join(runDir, fmt.Sprintf("iteration-%d", runCount), "output"))
+			if gate.message != "" {
+				printer.StepWarn(gate.message)
 			}
-			if runErr != nil {
-				printer.StepWarn("Skipping post-script: agent run failed")
-				return
-			}
-			if transcriptErrorOverride {
-				printer.StepWarn("Skipping post-script: agent reported error via transcript")
+			if !gate.run {
 				return
 			}
 			postStart := time.Now()
@@ -1770,7 +1956,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			// privilege-downgrade case it fails closed on instead.
 			// os.Setenv is safe here: sandbox streaming and OIDC refresh
 			// goroutines have already been torn down (LIFO defers). The
-			// OpenAI credential refreshers are the exception — their own
+			// OpenAI credential refreshers are the exception (the gateway
+			// refreshers were stopped by the sandbox cleanup defer) — their own
 			// stop-defers are registered earlier in the function, so under
 			// LIFO they would not fire until after this defer completes —
 			// so stop them explicitly first to avoid racing this os.Setenv
@@ -1847,6 +2034,17 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			if postValidatedIterDir != "" {
 				postCmd.Env = append(postCmd.Env, fmt.Sprintf("FULLSEND_VALIDATED_ITERATION_DIR=%s", postValidatedIterDir))
 			}
+			// Pass the behavioral exit reason (e.g., "error_max_turns",
+			// "error_max_budget_usd") so the post-script can distinguish "agent
+			// chose not to change anything" from "agent was interrupted
+			// mid-work." See #6877.
+			if agentExitReason != "" {
+				postCmd.Env = append(postCmd.Env, fmt.Sprintf("FULLSEND_AGENT_EXIT_REASON=%s", agentExitReason))
+			}
+			// Set only when the post-script runs after a failed agent (#8305).
+			if gate.agentExitCode != 0 {
+				postCmd.Env = append(postCmd.Env, fmt.Sprintf("FULLSEND_AGENT_EXIT_CODE=%d", gate.agentExitCode))
+			}
 			postCmd.Stdout = os.Stdout
 			postCmd.Stderr = os.Stderr
 			if err := postCmd.Run(); err != nil {
@@ -1860,6 +2058,11 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		}()
 	}
 	defer func() {
+		// The gateway refreshers re-seed this sandbox; stop them before it
+		// goes, and before the post-script and its remint run.
+		for _, stop := range stopGatewayRefreshers {
+			stop()
+		}
 		// Collect OpenShell logs before sandbox deletion for post-mortem debugging.
 		collectOpenshellLogs(sandboxName, runDir, printer)
 
@@ -1906,6 +2109,20 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	aggMetrics.OverrideSource = aliasOverrideSource(modelOverrideSource(overrides, h.Model), modelRemapped, runCfg.source)
 	tx := backend.Transcripts
 
+	// The dummy-playback runtime (e2e behaviour tests) reads and updates a
+	// forge tracking comment to recover its position in the canned
+	// playlist across separate sandbox invocations. Per the
+	// forge-abstraction rule (AGENTS.md, docs/contributing/forge-abstraction.md),
+	// that must go through forge.Client rather than shelling out to
+	// gh/glab, so build a platform-correct client here and thread it
+	// through RunParams.ForgeClient. Built lazily (only for this runtime)
+	// so a missing GitLab token never affects other runtimes, which have
+	// no use for it.
+	var playbackForgeClient forge.Client
+	if rt.Name() == "dummy-playback" {
+		playbackForgeClient = resolvePlaybackForgeClient(forgePlatform, fallbackForgeClient, printer)
+	}
+
 	// 6. Start runtime fetch service (Phase 4, ADR-0038).
 	var fetchEnvVal fetchServiceEnv
 	startFetch, deprecationWarning := shouldStartFetchService(h)
@@ -1947,13 +2164,13 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			forgeEgressEntry = host + ":" + port
 		}
 	}
-	// Thread the agent's subagents config into BootstrapInput so the pi
-	// runtime can resolve each persona's model (#7031).
-	var agentSubagents map[string]*string
-	if entryFound {
-		agentSubagents = entry.Subagents
-	}
-	boot, err := newHarnessBootstrap(h, sandboxName, agentName, forgeEgressEntry, configModelAliases, agentSubagents, resolvedModel, remoteRepositoryDir)
+	// agentSubagents is threaded into BootstrapInput so the pi runtime can
+	// resolve each persona's model (#7031); openAIProviderAttached tells it
+	// whether OPENAI_API_KEY actually landed in the sandbox this run, so a
+	// pre-configured child naming the openai provider can be trusted only
+	// when the credential it needs is really there (#7981).
+	openAIProviderAttached := len(openAIHandles) > 0
+	boot, err := newHarnessBootstrap(h, sandboxName, agentName, forgeEgressEntry, configModelAliases, agentSubagents, resolvedModel, remoteRepositoryDir, openAIProviderAttached)
 	if err != nil {
 		printer.StepFail("Failed to bootstrap sandbox")
 		return err
@@ -2137,6 +2354,13 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		}
 	}
 
+	// 9b-1. Let OpenShell 0.1.2's first settings poll pass before any network
+	// request; it terminates connections in flight (OpenShell #3809). Remove
+	// with openShellFirstPollSettle once the pin includes the upstream fix.
+	if _, err := waitForOpenShellFirstPoll(ctx, sandboxReadyAt, printer); err != nil {
+		return fmt.Errorf("waiting for the sandbox's first policy poll: %w", err)
+	}
+
 	// 9b-2. Pre-flight GitHub API connectivity check.
 	// Validates that the sandbox can reach api.github.com through the proxy
 	// before starting the agent. Without this, agents that depend on gh CLI
@@ -2242,6 +2466,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	for iteration := 1; iteration <= maxIterations; iteration++ {
 		runCount = iteration
 		transcriptErrorOverride = false
+		agentExitReason = ""
 
 		// Each iteration gets its own subdirectory for output and transcripts.
 		iterDir := filepath.Join(runDir, fmt.Sprintf("iteration-%d", iteration))
@@ -2339,6 +2564,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			Prompt:            agentPrompt,
 			Forge:             forgePlatform,
 			ModelAliases:      configModelAliases,
+			ForgeClient:       playbackForgeClient,
 			OnEvent:           iterationEventHandler(agentruntime.NewEventRenderer(printer).Handle, collector, toolSpans),
 		}, printer, agentStart, &metrics)
 		close(heartbeatDone)
@@ -2393,25 +2619,29 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		lastExitCode = exitCode
 
 		// Check the tee'd output.jsonl for is_error:true result events.
-		// Claude Code may exit 0 on API/infrastructure failures (e.g.,
-		// invalid_grant, quota exhaustion) while setting is_error:true in
-		// the transcript. Treat these as failures so downstream gating
-		// (transcript surfacing, post-script skip) can act. See #2786.
+		// The transcript is checked regardless of exit code to catch both:
+		// 1. API/infra failures where Claude exits 0 but reports errors
+		//    (is_error:true) — these count as exit 1 (#2786), which skips
+		//    the post-script unless postScriptGate lets a result through.
+		// 2. Behavioral limits (error_max_turns, error_max_budget_usd) where
+		//    Claude exits non-zero mid-work — these pass the reason to
+		//    the post-script so it can report accurately (#6877).
 		// This runs before the agent span is finalized so the span's
 		// status reflects the transcript-reported failure (#5361).
 		var transcriptErrMsg string
-		if exitCode == 0 {
-			outputJSONL := filepath.Join(iterDir, "output.jsonl")
-			if te, ok := tx.ParseTranscriptFile(outputJSONL); ok && te.IsError {
+		outputJSONL := filepath.Join(iterDir, "output.jsonl")
+		if te, ok := tx.ParseTranscriptFile(outputJSONL); ok && te.IsError {
+			transcriptErrMsg = transcriptErrorMessage(te)
+			outcome := classifyTranscriptError(transcriptErrMsg, te.Subtype, exitCode)
+			if outcome.exitReason != "" {
+				agentExitReason = outcome.exitReason
+				iterExitReasons[iteration] = outcome.exitReason
+			}
+			if outcome.overrideExitCode {
 				lastExitCode = 1
 				transcriptErrorOverride = true
-				transcriptErrMsg = transcriptErrorMessage(te)
-				// The console line prints the same bounded, sanitized string
-				// the span event records: the raw fields can carry ANSI
-				// escapes, a newline-led ::workflow-command::, or an
-				// unbounded Subtype into the CI job log.
-				printer.StepWarn("Agent exited with code 0 but transcript contains error: " + transcriptErrMsg)
 			}
+			printer.StepWarn(outcome.warnMsg)
 		}
 
 		// finish_reason reflects how the generation ended: a clean exit is
@@ -2427,13 +2657,14 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		finalizeAgentSpan(agentSpan, nil, iteration, exitCode, genAISystem, rt.Name(), &metrics, transcriptErrMsg, toolSpans)
 
 		printer.Blank()
-		// Non-zero exit is a warning, not a failure — the validation loop is the success gate.
+		// Non-zero exit is a warning here, not a failure — with a loop, validation is
+		// the success gate; without one, runTerminalError fails the run (#8305).
 		if lastExitCode == 0 {
 			printer.StepDone(fmt.Sprintf("Agent exited with code %d (%.1fs)", exitCode, time.Since(agentStart).Seconds()))
 		} else {
 			printer.StepWarn(fmt.Sprintf("Agent exited with code %d", lastExitCode))
 		}
-		lastIterTimedOut = iterationTimedOut(lastExitCode, lastIterElapsed, timeout)
+		lastIterTimedOut = iterationTimedOutUnlessBehavioral(lastExitCode, lastIterElapsed, timeout, agentExitReason)
 		if lastIterTimedOut {
 			// The exec ended at the budget but the agent's processes did
 			// not (OpenShell has no per-exec kill). Terminate them before
@@ -2561,8 +2792,9 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// while success sets it to true immediately above. Pass the
 		// repo dir directly.
 		// Strip OIDC credential vars from the full composed env so keys
-		// injected via h.RunnerEnv are also removed (#5832).
-		valCmd.Env = stripOIDCEnv(append(os.Environ(), validationEnv(h, hostRepositoryDownloadDir, runDir)...))
+		// injected via h.RunnerEnv are also removed (#5832), and drop
+		// inherited named workflow secrets (#8154).
+		valCmd.Env = validationScriptEnv(h, hostRepositoryDownloadDir, runDir)
 		valOut, valErr := valCmd.CombinedOutput()
 
 		if valErr == nil {
@@ -2606,6 +2838,13 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		validationPassed = sweep.passed
 		repoExtractedOK = sweep.repoExtractedOK
 		validatedIterNum = sweep.validatedIter
+		// Assign the behavioral exit reason of the iteration the sweep
+		// validated, not the last iteration's: an earlier validated
+		// iteration neither inherits a later iteration's reason nor loses
+		// its own. See #6877.
+		if sweep.validatedIter > 0 {
+			agentExitReason = iterExitReasons[sweep.validatedIter]
+		}
 	}
 
 	// Write aggregated behavioral metrics.
@@ -2681,7 +2920,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	}
 	printer.Blank()
 
-	return runTerminalError(h.ValidationLoop != nil, validationPassed, lastIterTimedOut, runCount, lastIterElapsed, timeout)
+	return runTerminalError(h.ValidationLoop != nil, validationPassed, lastIterTimedOut, lastExitCode, agentExitReason, runCount, lastIterElapsed, timeout)
 }
 
 func bootstrapCommon(sandboxName, fullsendBinary string, h *harness.Harness) error {
@@ -2864,6 +3103,11 @@ var oidcDenyKeys = map[string]bool{
 	"ACTIONS_ID_TOKEN_REQUEST_TOKEN": true,
 	"FULLSEND_GCP_OIDC_URL":          true,
 	"FULLSEND_GCP_OIDC_AUTH_FILE":    true,
+	// Vertex routing inputs are runner-only. They select and configure the
+	// trusted credential setup above and must not reach harness expansion,
+	// scripts, providers, or the sandbox.
+	"FULLSEND_GCP_PROJECT_ID":   true,
+	"FULLSEND_GCP_WIF_PROVIDER": true,
 	// OpenAI WIF configuration (#6689): non-secret but runner-controlled and
 	// useless inside the sandbox. Stripped like GCP OIDC vars.
 	"FULLSEND_OPENAI_AUDIENCE":             true,
@@ -2875,6 +3119,24 @@ var oidcDenyKeys = map[string]bool{
 	// harness cannot copy the real key under another name, and keeps it out
 	// of pre/post scripts.
 	"OPENAI_API_KEY": true,
+	// The GitLab CI/CD variable `fullsend repos install` provisions. The job
+	// script maps it to OPENAI_API_KEY and unsets it; if it is ever still
+	// present it holds the real key and must stay runner-only too.
+	"FULLSEND_OPENAI_API_KEY": true,
+	// The inference gateway's api-key credential (ADR 0138) reaches the
+	// sandbox only as the run-scoped gateway provider's placeholder, the
+	// same way: no harness expansion may copy it, and pre/post scripts
+	// never see it.
+	gatewayAPIKeyEnv: true,
+	// The GitLab webhook fast-path credentials `fullsend repos install`
+	// provisions as protected, wildcard-scoped CI/CD variables. The trigger
+	// token is a bearer credential that starts pipelines on the protected
+	// default branch; no run needs either value. The job scripts unset both,
+	// and listing them here is defense in depth so a harness cannot expand
+	// them into sandbox-visible values and host-side scripts never inherit
+	// them.
+	"FULLSEND_TRIGGER_TOKEN":  true,
+	"FULLSEND_WEBHOOK_SECRET": true,
 }
 
 // workflowTokenEnv is the Actions workflow token preserved across minting
@@ -2887,6 +3149,46 @@ const workflowTokenEnv = "GH_WORKFLOW_TOKEN"
 // pushed to sandbox.DenyExpansionKeys. See #6649.
 var providerOnlyKeys = map[string]bool{
 	workflowTokenEnv: true,
+}
+
+// inheritedScriptDenyKeys are named workflow secrets that host-side scripts
+// (pre/post, preflight, validation) must not inherit from the `fullsend run`
+// process environment (#8154). Unlike oidcDenyKeys they stay expandable at
+// harness ${VAR} sites, so a harness that declares one in env.runner (e.g.
+// `JIRA_TOKEN: "${JIRA_TOKEN}"`) still passes it to its scripts; one that
+// does not declare it no longer receives it. The parent process keeps them
+// for its own Jira client and trace exporter. The OTLP *_HEADERS variants
+// are matched by isInheritedScriptDenyKey.
+var inheritedScriptDenyKeys = map[string]bool{
+	"JIRA_TOKEN":      true,
+	"JIRA_USER_EMAIL": true,
+}
+
+// isInheritedScriptDenyKey reports whether key must be dropped from the
+// inherited process environment of a host-side script: an
+// inheritedScriptDenyKeys entry, or an OTLP exporter header variable
+// (OTEL_EXPORTER_OTLP_HEADERS and the per-signal OTEL_EXPORTER_OTLP_*_HEADERS),
+// which carry trace collector credentials only fullsend's own exporter needs.
+func isInheritedScriptDenyKey(key string) bool {
+	if inheritedScriptDenyKeys[key] {
+		return true
+	}
+	return strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_HEADERS")
+}
+
+// inheritedScriptEnv returns os.Environ() without the names
+// isInheritedScriptDenyKey matches. Callers layer the harness RunnerEnv on
+// top, so a value the harness declares explicitly still reaches the script.
+func inheritedScriptEnv() []string {
+	env := os.Environ()
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		if i := strings.IndexByte(e, '='); i > 0 && isInheritedScriptDenyKey(e[:i]) {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
 }
 
 // harnessExpansionDenied reports whether a ${VAR} reference must be refused
@@ -2941,6 +3243,7 @@ var reservedSandboxKeys = map[string]bool{
 	"FULLSEND_TIMEOUT_MINUTES":    true,
 	"FULLSEND_ITERATION_DEADLINE": true,
 	"TRACEPARENT":                 true,
+	runnerPathVar:                 true,
 	// OPENAI_API_KEY is reserved through oidcDenyKeys (merged by init()).
 	// GH_WORKFLOW_TOKEN is reserved through providerOnlyKeys (merged by init()).
 }
@@ -3046,6 +3349,20 @@ func iterationTimedOut(exitCode int, elapsed, timeout time.Duration) bool {
 	return exitCode != 0 && agentTimedOut(elapsed, timeout)
 }
 
+// iterationTimedOutUnlessBehavioral is iterationTimedOut except that an
+// iteration which ended with a recognized behavioral limit (error_max_turns,
+// error_max_budget_usd — the agent ran to completion and reported why it stopped)
+// and a positive exit code is not presumed killed, even when it finished
+// past 90 % of the budget. That keeps the post-script reachable so it can
+// report the interruption reason. A killed exit (negative code) still counts
+// as a timeout. See #6877.
+func iterationTimedOutUnlessBehavioral(exitCode int, elapsed, timeout time.Duration, exitReason string) bool {
+	if exitCode > 0 && isBehavioralExitSubtype(exitReason) {
+		return false
+	}
+	return iterationTimedOut(exitCode, elapsed, timeout)
+}
+
 // iterationEnvFile is the runner-owned file .env sources after every
 // harness-controlled entry; it holds the budget, the deadline (#7042),
 // and the current agent span's W3C TRACEPARENT.
@@ -3053,6 +3370,79 @@ const (
 	iterationEnvDir  = sandbox.SandboxWorkspace + "/.fullsend"
 	iterationEnvFile = iterationEnvDir + "/iteration.env"
 )
+
+// hostFileChmodCommand is the sandbox command that marks an uploaded host file
+// executable. dest is harness text, so it is quoted: unquoted, a dest holding
+// `;` or a space would run as shell after validation already passed it.
+// ValidateHostFileDest requires an absolute path, so it cannot start with "-".
+func hostFileChmodCommand(dest string) string {
+	return "chmod +x " + shellQuote(dest)
+}
+
+// runnerPathVar holds the PATH .env builds, captured before the .env.d loop
+// and marked read-only, so runnerPathRestoreLine can put it back in front
+// after every harness-controlled entry.
+const runnerPathVar = "FULLSEND_RUNNER_PATH"
+
+// runnerPathCaptureLine records the PATH .env has just exported. `readonly`
+// is a special builtin, so an .env.d file that assigns the same name is an
+// error: under a POSIX sh such as dash it aborts the sourcing shell, and under
+// any shell the pinned value stands. The subshell probe asks whether the name
+// is already read-only — true only on a second `. .env` in the same shell —
+// rather than whether it is set, so a value inherited from the exec
+// environment (never read-only: the attribute does not cross exec) is
+// overwritten, not trusted.
+func runnerPathCaptureLine() string {
+	return fmt.Sprintf(`if ( %s= ) 2>/dev/null; then %s="$PATH"; readonly %s; fi`, runnerPathVar, runnerPathVar, runnerPathVar)
+}
+
+// runnerPathRestoreLine puts the runner's PATH back in front after the .env.d
+// files and env.sandbox exports. This enforces reservedSandboxKeys' PATH entry
+// for host_files env files too: a directory an .env.d file prepends cannot
+// come before the runner's entries, so it cannot change which binary a name
+// the runner's PATH already provides resolves to. Directories it adds still
+// follow, so an extra toolchain directory keeps working for names not found
+// earlier.
+//
+// ${PATH:+:$PATH} appends nothing when an .env.d file left PATH empty, rather
+// than a trailing empty entry, which the shell reads as the current directory.
+func runnerPathRestoreLine() string {
+	return fmt.Sprintf(`export PATH="$%s${PATH:+:$PATH}"`, runnerPathVar)
+}
+
+// runnerPathLines are the first lines of .env: the runner's PATH, then its
+// read-only copy. /sandbox/workspace/bin comes last, after the image's own
+// PATH: host_files can drop files there, so it may add commands (my-tool.sh,
+// and the runner's own fullsend and fullsend-check-output, which exist only
+// there) but not replace one the image provides — python3 and tirith for the
+// security hooks, node for codex and pi, git, find.
+func runnerPathLines() []string {
+	pathExport := "export PATH=/usr/local/go/bin"
+	pathExport += ":$HOME/go/bin"
+	pathExport += ":$PATH"
+	pathExport += fmt.Sprintf(":%s/bin", sandbox.SandboxWorkspace)
+	return []string{pathExport, runnerPathCaptureLine()}
+}
+
+// harnessEnvLines are the last lines of .env: the harness-controlled entries,
+// then the runner-owned lines that must come after them.
+func harnessEnvLines(h *harness.Harness) []string {
+	// Source all env files from .env.d/ (populated by host_files with expand: true).
+	lines := []string{fmt.Sprintf("for f in %s/.env.d/*.env; do [ -f \"$f\" ] && . \"$f\"; done", sandbox.SandboxWorkspace)}
+
+	// ADR 0055: export env.sandbox vars. Placed after .env.d sourcing so
+	// env.sandbox takes precedence on collision — the common use case is
+	// overriding a single var from a shared host_files .env file.
+	lines = append(lines, buildSandboxEnvLines(h)...)
+
+	// The runner's PATH goes back in front after every harness-controlled
+	// entry, the same ordering rule as iteration.env below.
+	lines = append(lines, runnerPathRestoreLine())
+
+	// Runner-owned budget, deadline, and TRACEPARENT come after every
+	// harness-controlled entry so none of them can shadow the values (#7042).
+	return append(lines, iterationEnvSourceLine())
+}
 
 // iterationEnvSourceLine is the last line bootstrapEnv writes to .env. The
 // `if` keeps .env's exit status 0 while the file is absent.
@@ -3132,9 +3522,12 @@ func timeoutNoRetryMessage(elapsed, timeout time.Duration) string {
 
 // runTerminalError decides how the run ends after the post-loop steps. A
 // valid result wins; the timeout error replaces "validation failed" only when
-// nothing validated (#7042). Without a loop the timeout alone fails the run
-// (#5075).
-func runTerminalError(hasLoop, validationPassed, timedOut bool, runCount int, elapsed, timeout time.Duration) error {
+// nothing validated (#7042). Without a loop the timeout fails the run (#5075),
+// and so does a failed agent (#8305): exitCode is the runner's lastExitCode,
+// already 1 for an exit 0 with a transcript-reported error (#2786). A
+// behavioral limit exit (exitReason, #6877) does not fail a run without a
+// loop, so the post-script still runs and can report the interruption.
+func runTerminalError(hasLoop, validationPassed, timedOut bool, exitCode int, exitReason string, runCount int, elapsed, timeout time.Duration) error {
 	timeoutErr := fmt.Errorf("agent timed out after %s without completing (timeout: %s)", elapsed.Round(time.Second), timeout)
 	switch {
 	case hasLoop && !validationPassed && timedOut:
@@ -3143,23 +3536,109 @@ func runTerminalError(hasLoop, validationPassed, timedOut bool, runCount int, el
 		return fmt.Errorf("validation failed after %d iteration(s)", runCount)
 	case !hasLoop && timedOut:
 		return timeoutErr
+	case !hasLoop && exitCode != 0 && !(exitCode > 0 && isBehavioralExitSubtype(exitReason)):
+		return &agentFailedError{exitCode: exitCode}
 	}
 	return nil
+}
+
+// agentFailedError ends a run without a validation_loop whose agent failed
+// (#8305). The post-script gate tells it apart from other run errors.
+type agentFailedError struct {
+	exitCode int
+}
+
+func (e *agentFailedError) Error() string {
+	return fmt.Sprintf("agent failed with exit code %d", e.exitCode)
+}
+
+// postScriptDecision says whether the post-script runs, with the warning to
+// print. agentExitCode is set when it runs after a failed agent.
+type postScriptDecision struct {
+	run           bool
+	message       string
+	agentExitCode int
+}
+
+// postScriptGate decides whether the post-script runs once the agent is done.
+// With a validation_loop it needs a validated result (ADR 0022). Without one
+// it runs after a successful agent, and after a failed agent only when the
+// agent left a result file that parses (#8305), so the result is still
+// reported while the run fails. --no-post-script is checked by the caller.
+func postScriptGate(h *harness.Harness, validationPassed, transcriptErrorOverride bool, runErr error, outputDir string) postScriptDecision {
+	if h.ValidationLoop != nil && !validationPassed {
+		return postScriptDecision{message: "Skipping post-script: validation did not pass"}
+	}
+	var agentErr *agentFailedError
+	if errors.As(runErr, &agentErr) {
+		resultFile, ok := agentResultFile(h, outputDir)
+		if !ok {
+			return postScriptDecision{message: fmt.Sprintf("Skipping post-script: agent failed with exit code %d and left no result file that parses", agentErr.exitCode)}
+		}
+		return postScriptDecision{
+			run:           true,
+			message:       fmt.Sprintf("Agent failed with exit code %d but left %s: running the post-script; the run still fails", agentErr.exitCode, filepath.Base(resultFile)),
+			agentExitCode: agentErr.exitCode,
+		}
+	}
+	if runErr != nil {
+		return postScriptDecision{message: "Skipping post-script: agent run failed"}
+	}
+	if transcriptErrorOverride {
+		return postScriptDecision{message: "Skipping post-script: agent reported error via transcript"}
+	}
+	return postScriptDecision{run: true}
+}
+
+// agentResultMaxBytes caps how much of the sandbox-written result file the
+// runner reads; a larger file counts as no result.
+const agentResultMaxBytes = 4 << 20
+
+// agentResultFile returns the agent's result file in outputDir when it exists
+// and holds a JSON object. The name is the harness's FULLSEND_OUTPUT_FILE,
+// defaulting to agent-result.json as fullsend-check-output does.
+func agentResultFile(h *harness.Harness, outputDir string) (string, bool) {
+	name := h.RunnerEnv["FULLSEND_OUTPUT_FILE"]
+	if name == "" {
+		name = "agent-result.json"
+	}
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		return "", false
+	}
+	path := filepath.Join(outputDir, name)
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, agentResultMaxBytes+1))
+	if err != nil || len(data) > agentResultMaxBytes {
+		return "", false
+	}
+	var obj map[string]any
+	if json.Unmarshal(data, &obj) != nil || obj == nil {
+		return "", false
+	}
+	return path, true
 }
 
 func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, runtimeEnvExports []string, fetchEnv ...fetchServiceEnv) error {
 	remoteEnvFile := sandbox.SandboxWorkspace + "/.env"
 	outputDir := sandbox.SandboxWorkspace + "/output"
 
+	// Validate already refuses runner-owned dests; checked again before
+	// anything is uploaded so a harness that reached bootstrap by another
+	// route cannot overwrite the .env written below or a runner binary.
+	for i, hf := range h.HostFiles {
+		if err := harness.ValidateHostFileDest(hf.Dest); err != nil {
+			return fmt.Errorf("host_files[%d]: %w", i, err)
+		}
+	}
+
 	var lines []string
 
 	// Infrastructure vars.
-	pathExport := fmt.Sprintf("export PATH=%s/bin", sandbox.SandboxWorkspace)
-	pathExport += ":/usr/local/go/bin"
-	pathExport += ":$HOME/go/bin"
-	pathExport += ":$PATH"
-
-	lines = append(lines, pathExport)
+	lines = append(lines, runnerPathLines()...)
 	lines = append(lines, runtimeEnvExports...)
 	lines = append(lines, fmt.Sprintf("export FULLSEND_OUTPUT_DIR=%s", outputDir))
 	lines = append(lines, fmt.Sprintf("export FULLSEND_TARGET_REPO_DIR=%s", remoteRepositoryDir))
@@ -3206,17 +3685,7 @@ func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, r
 		lines = append(lines, fmt.Sprintf("export FULLSEND_FETCH_TOKEN='%s'", escToken))
 	}
 
-	// Source all env files from .env.d/ (populated by host_files with expand: true).
-	lines = append(lines, fmt.Sprintf("for f in %s/.env.d/*.env; do [ -f \"$f\" ] && . \"$f\"; done", sandbox.SandboxWorkspace))
-
-	// ADR 0055: export env.sandbox vars. Placed after .env.d sourcing so
-	// env.sandbox takes precedence on collision — the common use case is
-	// overriding a single var from a shared host_files .env file.
-	lines = append(lines, buildSandboxEnvLines(h)...)
-
-	// Runner-owned budget, deadline, and TRACEPARENT come after every
-	// harness-controlled entry so none of them can shadow the values (#7042).
-	lines = append(lines, iterationEnvSourceLine())
+	lines = append(lines, harnessEnvLines(h)...)
 
 	content := strings.Join(lines, "\n") + "\n"
 
@@ -3238,19 +3707,12 @@ func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, r
 
 	// Copy host files into the sandbox.
 	for _, hf := range h.HostFiles {
-		// Use safeExpandEnv instead of os.ExpandEnv to refuse OIDC
-		// credential vars in host_files src path expansion (#5832).
-		hostPath := safeExpandEnv(hf.Src)
-		if hostPath == "" {
+		hostPath, copied := hostFileSource(hf)
+		if !copied {
 			if hf.Optional {
 				continue
 			}
 			return fmt.Errorf("host_files: src %q expanded to empty string", hf.Src)
-		}
-		if hf.Optional {
-			if _, err := os.Stat(hostPath); err != nil {
-				continue
-			}
 		}
 
 		if hf.Expand {
@@ -3292,8 +3754,7 @@ func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, r
 		// landing in a bin/ directory.
 		// https://github.com/fullsend-ai/fullsend/issues/345#issuecomment-4300740512
 		if strings.Contains(hf.Dest, "/bin/") {
-			chmodCmd := fmt.Sprintf("chmod +x %s", hf.Dest)
-			if _, _, _, execErr := sandbox.Exec(sandboxName, chmodCmd, 10*time.Second); execErr != nil {
+			if _, _, _, execErr := sandbox.Exec(sandboxName, hostFileChmodCommand(hf.Dest), 10*time.Second); execErr != nil {
 				return fmt.Errorf("chmod host file %s in sandbox: %w", hf.Dest, execErr)
 			}
 		}
@@ -3473,6 +3934,9 @@ func sensitiveEnvKey(key string) bool {
 	case "PUSH_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "GITHUB_TOKEN", "FULLSEND_FETCH_TOKEN":
 		return true
 	}
+	if isInheritedScriptDenyKey(key) {
+		return true
+	}
 	for _, suffix := range []string{"_TOKEN", "_SECRET", "_PASSWORD", "_KEY", "_CREDENTIALS"} {
 		if strings.HasSuffix(key, suffix) {
 			return true
@@ -3596,8 +4060,9 @@ func postLoopValidationSweep(h *harness.Harness, runDir string, runCount int, cu
 		valCmd := exec.Command(h.ValidationLoop.Script)
 		valCmd.Dir = iterDir
 		// Strip OIDC credential vars from the full composed env so keys
-		// injected via h.RunnerEnv are also removed (#5832).
-		valCmd.Env = stripOIDCEnv(append(os.Environ(), validationEnv(h, "", runDir)...))
+		// injected via h.RunnerEnv are also removed (#5832), and drop
+		// inherited named workflow secrets (#8154).
+		valCmd.Env = validationScriptEnv(h, "", runDir)
 		valOut, valErr := valCmd.CombinedOutput()
 
 		if valErr == nil {
@@ -3741,7 +4206,7 @@ func resolveWorkItemID() string {
 	if prNum := strings.TrimSpace(os.Getenv("PR_NUMBER")); prNum != "" {
 		return prNum
 	}
-	// GitHub retro: reusable-retro.yml sets ORIGINATING_URL (PR/issue HTML URL).
+	// GitHub retro: the retro job in reusable-dispatch.yml sets ORIGINATING_URL (PR/issue HTML URL).
 	// GitLab agent jobs export GITLAB_ISSUE_URL (issue or MR) when IID is known.
 	if v := strings.TrimSpace(os.Getenv("ORIGINATING_URL")); v != "" {
 		return v
@@ -3900,6 +4365,61 @@ func finalizeSandboxSpan(span trace.Span, err error) {
 		span.SetStatus(codes.Ok, "")
 	}
 	span.End()
+}
+
+// isBehavioralExitSubtype reports whether a transcript error subtype
+// indicates a behavioral limit (the agent was interrupted mid-work) rather
+// than an infrastructure or API failure. Behavioral exits pass context to
+// the post-script via FULLSEND_AGENT_EXIT_REASON rather than skipping it
+// entirely, so the post-script can report accurately instead of emitting
+// a misleading "no changes needed" message. See #6877.
+func isBehavioralExitSubtype(subtype string) bool {
+	switch subtype {
+	case "error_max_turns", "error_max_budget_usd":
+		return true
+	default:
+		return false
+	}
+}
+
+// transcriptCheckOutcome captures how a transcript error should be handled
+// by the iteration loop. See classifyTranscriptError.
+type transcriptCheckOutcome struct {
+	// exitReason is the behavioral exit subtype to pass to the post-script
+	// (e.g., "error_max_turns"). Empty for non-behavioral errors.
+	exitReason string
+	// overrideExitCode indicates that lastExitCode should be set to 1 and
+	// transcriptErrorOverride should be set to true (API/infra failures
+	// where Claude exits 0 but reports errors in the transcript). See #2786.
+	overrideExitCode bool
+	// warnMsg is the console warning message for the printer.
+	warnMsg string
+}
+
+// classifyTranscriptError determines how a transcript error should be
+// handled based on its subtype and the process exit code. Three categories:
+//  1. Behavioral limits (error_max_turns, error_max_budget_usd): pass the reason
+//     to the post-script so it can report accurately. See #6877.
+//  2. API/infra failures with exit code 0: override the exit code to 1 so
+//     the run counts as failed. See #2786.
+//  3. Non-behavioral errors with non-zero exit code: the exit code already
+//     signals failure; the transcript error enriches span telemetry.
+func classifyTranscriptError(errMsg, subtype string, exitCode int) transcriptCheckOutcome {
+	if isBehavioralExitSubtype(subtype) {
+		return transcriptCheckOutcome{
+			exitReason: subtype,
+			warnMsg:    "Agent hit behavioral limit: " + errMsg,
+		}
+	}
+	if exitCode == 0 {
+		return transcriptCheckOutcome{
+			overrideExitCode: true,
+			warnMsg:          "Agent exited with code 0 but transcript contains error: " + errMsg,
+		}
+	}
+	return transcriptCheckOutcome{
+		warnMsg: "Transcript contains error: " + errMsg,
+	}
 }
 
 // transcriptErrorMessage builds the message for a transcript-reported
@@ -4064,6 +4584,324 @@ func resolveTraceIdentity(ctx context.Context, tracer trace.Tracer, inboundTP, i
 		SpanKind:        spanKind,
 		PropagatedFlags: propagatedFlags,
 	}
+}
+
+// deleteSandboxFn deletes a sandbox (sandbox.Delete). Override in tests to
+// record the deletion or return an error without a gateway.
+var deleteSandboxFn = sandbox.Delete
+
+// collectOpenshellLogsFn copies a sandbox's OpenShell logs into the run
+// directory (collectOpenshellLogs). Override in tests to record the call
+// without a gateway.
+var collectOpenshellLogsFn = collectOpenshellLogs
+
+// discardSandbox deletes a sandbox that failed a credential egress
+// preflight. Those preflights run before the run's own sandbox cleanup
+// defer is registered (it must follow the post-script's), so without this
+// a failed preflight would leave the sandbox running. Like that defer it
+// collects the OpenShell logs first: a policy failure is when they help.
+// --keep-sandbox keeps it, as it does for every other failure.
+func discardSandbox(sandboxName, runDir string, keep bool, printer *ui.Printer) {
+	collectOpenshellLogsFn(sandboxName, runDir, printer)
+	if keep {
+		printer.StepWarn(fmt.Sprintf("Sandbox kept (--keep-sandbox): %s", sandboxName))
+		return
+	}
+	if err := deleteSandboxFn(sandboxName); err != nil {
+		printer.StepWarn("Sandbox cleanup failed: " + err.Error())
+		return
+	}
+	printer.StepDone("Sandbox deleted after the failed preflight")
+}
+
+// runInferenceProvider maps the resolved runtime to the provider the parent
+// agent calls. A parent model resolves to at most one of openai and
+// gateway; every other pi, Claude Code or OpenCode parent stays on Vertex.
+func runInferenceProvider(runtimeName string, needsOpenAI, needsGateway bool) string {
+	switch {
+	case needsOpenAI:
+		return runProviderOpenAI
+	case needsGateway:
+		return runProviderGateway
+	case runtimeName == "dummy" || runtimeName == "dummy-playback":
+		return runProviderNone
+	default:
+		return runProviderVertex
+	}
+}
+
+// setupActionsVertexCredentials selects the Vertex credentials for a GitHub
+// Actions run. With both GCP inputs set it prepares WIF credentials and
+// overrides GOOGLE_APPLICATION_CREDENTIALS; with neither set it keeps an
+// existing credential file from an earlier workflow step; one input alone is
+// an error. For a parent that does not use Vertex, credentials are still
+// prepared if both inputs are set (Vertex sub-agents, and fleet harnesses
+// that mount the file), and any failure is a warning. A run
+// whose parent does not use Vertex never mounts an existing credential file
+// that fails validation. The returned cleanup is never nil. failed reports
+// that a non-Vertex run warned and has no usable credential file.
+func setupActionsVertexCredentials(ctx context.Context, provider string, printer *ui.Printer, setEnv func(key, value string)) (cleanup func(), failed bool, err error) {
+	noop := func() {}
+	projectID := strings.TrimSpace(os.Getenv(vertexinference.SecretProjectID))
+	wifProvider := strings.TrimSpace(os.Getenv(vertexinference.SecretWIFProvider))
+	inputsSet := projectID != "" && wifProvider != ""
+	partial := !inputsSet && (projectID != "" || wifProvider != "")
+	partialErr := fmt.Errorf("Vertex inference requires both %s and %s; only one is set",
+		vertexinference.SecretProjectID, vertexinference.SecretWIFProvider)
+
+	if provider != runProviderVertex {
+		switch {
+		case partial:
+			printer.StepWarn("Vertex credentials for sub-agents skipped: " + partialErr.Error())
+			failed = true
+		case inputsSet:
+			cleanup, err := prepareActionsWIF(ctx, projectID, wifProvider, setEnv)
+			if err == nil {
+				printer.StepDone("Vertex credentials: prepared GitHub WIF (for Vertex sub-agents)")
+				return cleanup, false, nil
+			}
+			printer.StepWarn("Vertex credentials for sub-agents unavailable: " + err.Error())
+			failed = true
+		}
+		if dropUnusableCredentialFile(printer, setEnv) {
+			failed = true
+		}
+		return noop, failed, nil
+	}
+
+	if partial {
+		return nil, false, partialErr
+	}
+	if !inputsSet {
+		path := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+		if path == "" {
+			return nil, false, fmt.Errorf("Vertex inference requires %s and %s, or GOOGLE_APPLICATION_CREDENTIALS pointing to a credential file",
+				vertexinference.SecretProjectID, vertexinference.SecretWIFProvider)
+		}
+		if err := validateExistingGCPCredentialFile(path); err != nil {
+			return nil, false, err
+		}
+		printer.StepDone("Vertex credentials: existing GOOGLE_APPLICATION_CREDENTIALS file")
+		return noop, false, nil
+	}
+	cleanup, err = prepareActionsWIF(ctx, projectID, wifProvider, setEnv)
+	if err != nil {
+		return nil, false, err
+	}
+	printer.StepDone("Vertex credentials: prepared GitHub WIF")
+	return cleanup, false, nil
+}
+
+// prepareActionsWIF exchanges the job's OIDC token for Google credentials
+// and exports the resulting environment for the rest of the run.
+func prepareActionsWIF(ctx context.Context, projectID, wifProvider string, setEnv func(key, value string)) (func(), error) {
+	env, cleanup, err := prepareGitHubWIF(ctx, vertexauth.Config{
+		ProjectID:                projectID,
+		WorkloadIdentityProvider: wifProvider,
+		OIDCRequestURL:           os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL"),
+		OIDCRequestToken:         os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+		TempDir:                  os.Getenv("RUNNER_TEMP"),
+		OnSubjectToken:           maskActionsValue,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range env {
+		setEnv(key, value)
+	}
+	return cleanup, nil
+}
+
+// dropUnusableCredentialFile clears GOOGLE_APPLICATION_CREDENTIALS when the
+// file it names fails validation, so an optional mount cannot copy it into
+// the sandbox. It reports whether it cleared the variable.
+func dropUnusableCredentialFile(printer *ui.Printer, setEnv func(key, value string)) bool {
+	path := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	if path == "" {
+		return false
+	}
+	if err := validateExistingGCPCredentialFile(path); err != nil {
+		printer.StepWarn("Ignoring GOOGLE_APPLICATION_CREDENTIALS: " + err.Error())
+		setEnv("GOOGLE_APPLICATION_CREDENTIALS", "")
+		return true
+	}
+	return false
+}
+
+// maskActionsValue asks GitHub Actions to mask a secret in the job log.
+func maskActionsValue(value string) {
+	if value != "" && os.Getenv("GITHUB_ACTIONS") == "true" {
+		fmt.Fprintf(os.Stderr, "::add-mask::%s\n", value)
+	}
+}
+
+// validateExistingGCPCredentialFile checks a credential file prepared by an
+// earlier workflow step before the run relies on it. An external_account
+// file must read its subject token from a file: the sandbox cannot reach a
+// URL source, and URL headers would copy the runner's request token into
+// the sandbox.
+func validateExistingGCPCredentialFile(path string) error {
+	info, ok := nonEmptyRegularFile(path)
+	if !ok {
+		return fmt.Errorf("GOOGLE_APPLICATION_CREDENTIALS must point to a non-empty credential file")
+	}
+	if info.Size() > maxGCPCredentialFileBytes {
+		return fmt.Errorf("the GOOGLE_APPLICATION_CREDENTIALS file exceeds %d bytes", maxGCPCredentialFileBytes)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading the GOOGLE_APPLICATION_CREDENTIALS file failed")
+	}
+	var creds gcpCredentialFile
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return fmt.Errorf("the GOOGLE_APPLICATION_CREDENTIALS file is not valid credential JSON")
+	}
+	return creds.check()
+}
+
+const maxGCPCredentialFileBytes = 64 << 10
+
+// nonEmptyRegularFile stats path and reports whether it is a regular file
+// with content.
+func nonEmptyRegularFile(path string) (os.FileInfo, bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		return nil, false
+	}
+	return info, true
+}
+
+// gcpCredentialFile is the part of a Google credential file the runner
+// checks. Impersonation files nest their source in source_credentials.
+type gcpCredentialFile struct {
+	Type             string `json:"type"`
+	CredentialSource *struct {
+		File    string          `json:"file"`
+		URL     string          `json:"url"`
+		Headers json.RawMessage `json:"headers"`
+	} `json:"credential_source"`
+	SourceCredentials *gcpCredentialFile `json:"source_credentials"`
+}
+
+func (creds *gcpCredentialFile) check() error {
+	if strings.TrimSpace(creds.Type) == "" {
+		return fmt.Errorf("the GOOGLE_APPLICATION_CREDENTIALS file has no credential type")
+	}
+	if creds.Type == "impersonated_service_account" && creds.SourceCredentials != nil {
+		return creds.SourceCredentials.check()
+	}
+	if creds.Type != "external_account" {
+		return nil
+	}
+	src := creds.CredentialSource
+	if src != nil && (src.URL != "" || (len(src.Headers) > 0 && string(src.Headers) != "null")) {
+		return fmt.Errorf("the GOOGLE_APPLICATION_CREDENTIALS file uses credential_source.url or headers; the sandbox needs a credential_source.file token")
+	}
+	if src == nil || src.File == "" {
+		return fmt.Errorf("the GOOGLE_APPLICATION_CREDENTIALS file has no credential_source.file")
+	}
+	return nil
+}
+
+// validateRequiredGCPHostFile fails a run before its pre-script when a
+// required GCP host-file mount has no credential file, for example after
+// dropUnusableCredentialFile cleared it. A Vertex parent needs the file, so
+// its message does not suggest an optional mount.
+func validateRequiredGCPHostFile(h *harness.Harness, provider string) error {
+	for i, hf := range h.HostFiles {
+		if !hf.Optional && hf.Src == "${GOOGLE_APPLICATION_CREDENTIALS}" && os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
+			if provider == runProviderVertex {
+				return fmt.Errorf("host_files[%d]: GOOGLE_APPLICATION_CREDENTIALS is empty; provide a credential file", i)
+			}
+			return fmt.Errorf("host_files[%d]: GOOGLE_APPLICATION_CREDENTIALS is empty; mark the mount optional or provide a credential file", i)
+		}
+	}
+	return nil
+}
+
+// validateVertexGCPCredentials fails a Vertex run before its pre-script can
+// cause side effects when its optional GCP host-file mount has no source.
+func validateVertexGCPCredentials(h *harness.Harness) error {
+	for i, hf := range h.HostFiles {
+		if !hf.Optional || hf.Src != "${GOOGLE_APPLICATION_CREDENTIALS}" {
+			continue
+		}
+		path := safeExpandEnv(hf.Src)
+		if path == "" {
+			return fmt.Errorf("host_files[%d]: Vertex inference requires GOOGLE_APPLICATION_CREDENTIALS to point to an existing file", i)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("host_files[%d]: Vertex inference requires GOOGLE_APPLICATION_CREDENTIALS to point to an existing file: %w", i, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("host_files[%d]: Vertex inference requires GOOGLE_APPLICATION_CREDENTIALS to point to a regular file", i)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("host_files[%d]: Vertex inference requires GOOGLE_APPLICATION_CREDENTIALS to point to a non-empty file", i)
+		}
+	}
+	return nil
+}
+
+// hostFileSource expands hf.Src and reports whether bootstrapEnv copies
+// it: an empty path is never copied, and an optional mount whose file is
+// missing is skipped. Use safeExpandEnv, not os.ExpandEnv, so OIDC
+// credential vars are refused in src expansion (#5832).
+func hostFileSource(hf harness.HostFile) (string, bool) {
+	hostPath := safeExpandEnv(hf.Src)
+	if hostPath == "" {
+		return "", false
+	}
+	if hf.Optional {
+		if _, err := os.Stat(hostPath); err != nil {
+			return hostPath, false
+		}
+	}
+	return hostPath, true
+}
+
+// vertexCredentialGap returns why a harness that mounts
+// ${GOOGLE_APPLICATION_CREDENTIALS} has no usable credential file, or ""
+// when it has one or the sandbox path is not clearly that mount: env.sandbox
+// names another path, or it is unset and another credential file is
+// mounted. Those cases are judged in the sandbox, at dispatch.
+func vertexCredentialGap(h *harness.Harness) string {
+	for _, hf := range h.HostFiles {
+		if hf.Src != "${GOOGLE_APPLICATION_CREDENTIALS}" {
+			continue
+		}
+		pinned, set := "", false
+		if h.Env != nil {
+			pinned, set = h.Env.Sandbox["GOOGLE_APPLICATION_CREDENTIALS"]
+		}
+		if set && pinned != hf.Dest {
+			return ""
+		}
+		if !set && otherGCPCredentialMounted(h) {
+			return ""
+		}
+		path := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+		if path == "" {
+			return "GOOGLE_APPLICATION_CREDENTIALS is not set"
+		}
+		if _, ok := nonEmptyRegularFile(path); !ok {
+			return "GOOGLE_APPLICATION_CREDENTIALS does not point to a non-empty credential file"
+		}
+		return ""
+	}
+	return ""
+}
+
+// otherGCPCredentialMounted reports whether a host_files entry other than
+// ${GOOGLE_APPLICATION_CREDENTIALS} is copied and holds a GCP credential file.
+func otherGCPCredentialMounted(h *harness.Harness) bool {
+	for _, hf := range h.HostFiles {
+		if path, copied := hostFileSource(hf); hf.Src != "${GOOGLE_APPLICATION_CREDENTIALS}" && copied && validateExistingGCPCredentialFile(path) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // runPreScript executes the harness pre-script with the pre-script output
@@ -4264,6 +5102,11 @@ func stripControlChars(s string) string {
 // retains them for mintAgentToken and provider credential expansion.
 // See #5832, #6649.
 //
+// Named workflow secrets (inheritedScriptDenyKeys: JIRA_TOKEN,
+// JIRA_USER_EMAIL, OTEL_EXPORTER_OTLP_*HEADERS) are dropped from the
+// inherited process environment only; a runnerEnv entry for one of them is
+// kept, so a harness that declares it in env.runner still gets it (#8154).
+//
 // GitLab role-routing vars (isPinnedGitLabRoleRoutingKey) are pinned to the
 // process environment: a runnerEnv entry for one of those keys is dropped
 // rather than allowed to shadow the value applyGitLabRoleSelection already
@@ -4271,8 +5114,10 @@ func stripControlChars(s string) string {
 // without this a harness runner_env/env.runner entry could silently swap
 // the GitLab identity or credential a pre/post script observes after
 // dispatch already selected one. See #7499, review on PR #7510.
+//
+// PYTHONDONTWRITEBYTECODE=1 is always forced (#7137).
 func childScriptEnv(runnerEnv map[string]string, traceparent string) []string {
-	merged := os.Environ()
+	merged := inheritedScriptEnv()
 	for _, e := range envToList(runnerEnv) {
 		if i := strings.IndexByte(e, '='); i > 0 && isPinnedGitLabRoleRoutingKey(e[:i]) {
 			continue
@@ -4293,12 +5138,29 @@ func childScriptEnv(runnerEnv map[string]string, traceparent string) []string {
 	if traceparent != "" {
 		env = append(env, "TRACEPARENT="+traceparent)
 	}
-	return env
+	return withPythonNoBytecode(env)
+}
+
+// pythonNoBytecodeEnv keeps CPython from writing .pyc files into the
+// hash-verified fetch cache, which would fail the next integrity check (#7137).
+const pythonNoBytecodeEnv = "PYTHONDONTWRITEBYTECODE=1"
+
+// withPythonNoBytecode replaces any PYTHONDONTWRITEBYTECODE entry in env with
+// pythonNoBytecodeEnv.
+func withPythonNoBytecode(env []string) []string {
+	result := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if strings.HasPrefix(e, "PYTHONDONTWRITEBYTECODE=") {
+			continue
+		}
+		result = append(result, e)
+	}
+	return append(result, pythonNoBytecodeEnv)
 }
 
 // gitlabRoleRoutingKeyPrefix is the env var prefix used by the GitLab
 // role-credential contract's diagnostic and credential vars (#7499):
-// FULLSEND_GITLAB_ROLE, FULLSEND_GITLAB_ROLE_MIGRATION,
+// FULLSEND_GITLAB_ROLE,
 // FULLSEND_GITLAB_ROLE_REGISTRY, FULLSEND_GITLAB_ROLE_SECRET,
 // FULLSEND_GITLAB_ROLE_SOURCE, the built-in FULLSEND_GITLAB_{POLLER,
 // ANALYST,CODER}_TOKEN secrets, and custom FULLSEND_GITLAB_ROLE_<NAME>_TOKEN
@@ -4341,6 +5203,16 @@ func postScriptEnv(h *harness.Harness, traceparent string) []string {
 // mechanism rather than completing on its own. See #5075.
 func agentTimedOut(elapsed, timeout time.Duration) bool {
 	return elapsed >= timeout*9/10
+}
+
+// validationScriptEnv builds the full environment for the validation script:
+// the inherited process environment minus named workflow secrets (#8154),
+// then validationEnv layered on top, with OIDC credential vars and
+// provider-only keys stripped from the composed result so keys injected via
+// h.RunnerEnv are removed too (#5832, #6649). PYTHONDONTWRITEBYTECODE is
+// forced on (#7137).
+func validationScriptEnv(h *harness.Harness, hostRepoDir, runDir string) []string {
+	return withPythonNoBytecode(stripOIDCEnv(append(inheritedScriptEnv(), validationEnv(h, hostRepoDir, runDir)...)))
 }
 
 // validationEnv builds the extra environment entries for the validation
@@ -4557,6 +5429,12 @@ func refreshOIDCToken(ctx context.Context, sandboxName, oidcURL, oidcAuth string
 	if !json.Valid(body) {
 		return fmt.Errorf("OIDC endpoint returned non-JSON response")
 	}
+	var token struct {
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(body, &token) == nil {
+		maskActionsValue(token.Value)
+	}
 
 	tmpFile, err := os.CreateTemp("", "fullsend-oidc-*.token")
 	if err != nil {
@@ -4620,12 +5498,15 @@ func buildScanContextCommand(repoDir, traceID string) string {
 	sort.Strings(inames) // deterministic ordering
 	inameExpr := strings.Join(inames, " -o ")
 
-	// Source .env to get PATH where fullsend is installed
+	// Source .env for the run's environment. The scanner is the binary
+	// bootstrapCommon uploaded, named by its absolute path so the version
+	// that runs matches the runner whatever PATH .env ends up with.
 	envFile := sandbox.SandboxWorkspace + "/.env"
+	scanner := sandbox.SandboxWorkspace + "/bin/fullsend"
 
 	return fmt.Sprintf(
-		". %s && FULLSEND_TRACE_ID='%s' find '%s' -maxdepth %d -type f \\( %s \\) -exec fullsend scan context {} +",
-		envFile, traceID, escapedDir, maxContextScanDepth, inameExpr,
+		". %s && FULLSEND_TRACE_ID='%s' find '%s' -maxdepth %d -type f \\( %s \\) -exec %s scan context {} +",
+		envFile, traceID, escapedDir, maxContextScanDepth, inameExpr, scanner,
 	)
 }
 
@@ -5108,6 +5989,42 @@ func sandboxArch() string {
 	return runtime.GOARCH
 }
 
+// resolvePlaybackForgeClient returns the forge.Client the dummy-playback
+// runtime should use for its tracking-comment reads/updates (see
+// RunParams.ForgeClient), or nil if none could be resolved. GitLab has no
+// equivalent client in scope yet, so one is built from GITLAB_TOKEN/CI env
+// vars. GitHub builds a fresh client from the current credential via
+// newAuthenticatedGitHubClient rather than reusing fallbackForgeClient:
+// fallbackForgeClient is constructed once, early in Run, from
+// composeGitToken — before this call's caller mints the agent token and
+// replaces GH_TOKEN (mintAgentTokenAtLevel). Reusing it would snapshot the
+// pre-mint credential, so tracking-comment reads/updates could run
+// anonymously or with a token lacking update permission even though
+// minting succeeded. If the current credential cannot be resolved (rare:
+// it would mean composeGitToken's earlier resolution has since become
+// invalid), GitHub falls back to fallbackForgeClient with a warning
+// rather than losing tracking entirely. A GitLab resolution failure is
+// reported as a warning and yields a nil client, matching the existing
+// fail-open handling of a missing/unreadable tracking comment (the
+// runtime falls back to the local playlist position rather than erroring
+// out).
+func resolvePlaybackForgeClient(forgePlatform string, fallbackForgeClient forge.Client, printer *ui.Printer) forge.Client {
+	if forgePlatform != "gitlab" {
+		client, err := newAuthenticatedGitHubClient("", "")
+		if err != nil {
+			printer.StepWarn("dummy-playback: resolving current GitHub credential: " + err.Error())
+			return fallbackForgeClient
+		}
+		return client
+	}
+	client, err := newGitLabClientFromEnv("dummy-playback tracking comment")
+	if err != nil {
+		printer.StepWarn("dummy-playback: " + err.Error())
+		return nil
+	}
+	return client
+}
+
 // detectForgePlatform determines the forge platform from the CLI flag, config,
 // or CI environment variables. Precedence (per ADR 0088):
 //  1. explicit --forge flag
@@ -5210,7 +6127,7 @@ func setupStatusNotifierGitHub(notifyCfg config.StatusNotificationConfig, owner,
 	sha := os.Getenv("GITHUB_SHA")
 	// Prefer explicit PR_HEAD_SHA (set by per-repo workflow_call callers
 	// where GITHUB_EVENT_PATH lacks the dispatched event_payload wrapper).
-	// Fall back to extracting from event payload (per-org workflow_dispatch).
+	// Fall back to extracting from the workflow_dispatch event payload.
 	if prSHA := os.Getenv("PR_HEAD_SHA"); prSHA != "" {
 		sha = prSHA
 	} else if prSHA := prHeadSHAFromEventPath(os.Getenv("GITHUB_EVENT_PATH")); prSHA != "" {
@@ -5389,10 +6306,10 @@ func prHeadSHAFromEventPath(path string) string {
 // embedded by ProjectExecutionRef in the legacy event_payload channel (#6748).
 //
 // It checks two locations in order:
-//  1. <fullsendDir>/dispatch/event-payload.json — written by the per-org
+//  1. <fullsendDir>/dispatch/event-payload.json — written by the
 //     reusable-dispatch workflow before invoking the action.
-//  2. GITHUB_EVENT_PATH → inputs.event_payload — the per-repo workflow_call
-//     path where event_payload is a nested JSON string inside the
+//  2. GITHUB_EVENT_PATH → inputs.event_payload — the workflow_call path
+//     where event_payload is a nested JSON string inside the
 //     workflow_dispatch event file.
 //
 // In both cases, the function looks for a top-level "_normalized_event" key
@@ -5401,11 +6318,11 @@ func prHeadSHAFromEventPath(path string) string {
 // if the normalized event is absent or invalid (best-effort; overlays fall
 // back to the empty-map behavior documented in ResolveOverlays).
 func extractNormalizedEventFromDispatch(fullsendDir string) map[string]any {
-	// Try 1: on-disk dispatch event-payload.json (per-org path).
+	// Try 1: on-disk dispatch event-payload.json (reusable-dispatch path).
 	if m := extractNormalizedEventFromFile(filepath.Join(fullsendDir, "dispatch", "event-payload.json")); m != nil {
 		return m
 	}
-	// Try 2: GITHUB_EVENT_PATH → inputs.event_payload (per-repo path).
+	// Try 2: GITHUB_EVENT_PATH → inputs.event_payload (workflow_call path).
 	ghEventPath := os.Getenv("GITHUB_EVENT_PATH")
 	if ghEventPath == "" {
 		return nil
@@ -6181,6 +7098,64 @@ func mergeProviderDefs(localDefs []harness.ProviderDef, urlProviders []resolve.R
 	return allDefs, shadowed
 }
 
+// builtinProviderNames are the provider names fullsend ships an embedded
+// definition and profile for (internal/scaffold/fullsend-repo/providers,
+// internal/scaffold/fullsend-repo/profiles). A bare name in a harness's
+// providers: list that matches one of these resolves to the embedded
+// provider definition (appendEmbeddedProviderDefs); the profile id the
+// definition declares, "fullsend-"+name, is reserved for the embedded copy
+// of the profile (#7268 — see isReservedProfileID, rejectReservedProfileID,
+// warnReservedProviderNameOverrides, ensureEmbeddedProfile).
+var builtinProviderNames = []string{
+	"vertex-ai", "github", "github-ro", "github-artifacts",
+	"gitleaks", "package-registries", "atlassian-cloud", "openai",
+}
+
+// isBuiltinProviderName reports whether name is one fullsend ships an
+// embedded provider definition for.
+func isBuiltinProviderName(name string) bool {
+	return slices.Contains(builtinProviderNames, name)
+}
+
+// isReservedProfileID reports whether id is the profile id fullsend's
+// embedded copy of a builtin provider's profile declares.
+func isReservedProfileID(id string) bool {
+	for _, n := range builtinProviderNames {
+		if "fullsend-"+n == id {
+			return true
+		}
+	}
+	return false
+}
+
+// warnReservedProviderNameOverrides warns about every provider definition
+// the run uses under a name fullsend ships an embedded definition for:
+// a file in the workspace's providers/ directory, a path-form harness entry
+// (what agent new wrote on v0.44.0), or a URL-resolved one. The name is
+// reserved so a stale copy can never silently shadow a fix shipped in the
+// binary (#7268, #7973). For one release the copy is still used and this
+// only warns; a later release makes it an error.
+func warnReservedProviderNameOverrides(localDefs []harness.ProviderDef, resolved []resolve.ResolvedProvider, printer *ui.Printer) {
+	warn := func(name, source string) {
+		if isBuiltinProviderName(name) {
+			printer.StepWarn(fmt.Sprintf("provider %q: the name is reserved for the definition built into fullsend, and a future release rejects %s. It is still used for now. Declare the bare name %q and delete the copy, or rename it to a name fullsend does not ship", name, source, name))
+		}
+	}
+	for _, d := range localDefs {
+		warn(d.Name, "the copy in the workspace providers/ directory")
+	}
+	for _, rp := range resolved {
+		if rp.FromURL {
+			warn(rp.Def.Name, "the URL-resolved copy")
+		} else {
+			// A repository file name must not inject log lines (%q escapes
+			// newlines and control characters) or a legacy "##[" workflow
+			// command, which the runner matches anywhere in a line.
+			warn(rp.Def.Name, "the copy at "+strings.ReplaceAll(fmt.Sprintf("%q", rp.LocalPath), "##[", `#\#[`))
+		}
+	}
+}
+
 // rejectReservedProfileID fails when the run resolved a provider profile
 // whose id the runner reserves for its embedded copy. Directory profiles
 // are not checked because they are no longer imported (#7095).
@@ -6191,6 +7166,27 @@ func rejectReservedProfileID(id string, resolved []resolve.ResolvedProfile) erro
 		}
 	}
 	return nil
+}
+
+// warnReservedProfileCopies warns once for each reserved profile id that
+// the harness lists its own copy of (openshell.profiles, by path or URL),
+// whether or not a provider in this run uses it, and returns those ids.
+// For one release the listed copy stays live: the caller does not import
+// the embedded profile over it. fullsend-openai is skipped here because it
+// is already an error (rejectReservedProfileID) (#7268).
+func warnReservedProfileCopies(resolved []resolve.ResolvedProfile, printer *ui.Printer) map[string]struct{} {
+	listed := make(map[string]struct{})
+	for _, rp := range resolved {
+		if rp.ID == openAIProviderType || !isReservedProfileID(rp.ID) {
+			continue
+		}
+		if _, seen := listed[rp.ID]; seen {
+			continue
+		}
+		listed[rp.ID] = struct{}{}
+		printer.StepWarn(fmt.Sprintf("provider profile %q will be rejected in a future release: the id is reserved for the copy built into fullsend. Your copy is still used for now. Remove it from openshell.profiles and declare the bare provider name %q instead", rp.ID, strings.TrimPrefix(rp.ID, "fullsend-")))
+	}
+	return listed
 }
 
 // appendEmbeddedProviderDefs adds the scaffold's embedded definition for
@@ -6222,13 +7218,17 @@ func appendEmbeddedProviderDefs(localDefs []harness.ProviderDef, resolved []reso
 			continue // not a scaffold-shipped provider; the caller warns
 		}
 		def, err := harness.ParseProviderDef(data)
-		if err != nil || def.Name != name || !strings.EqualFold(def.Type, openAIProviderType) {
-			// Only the OpenAI definition is filled in: its credential is
-			// resolved by the runner, so the file carries no secret reference
-			// and the embedded copy is exactly what CI layers in. The other
-			// scaffold providers keep their existing "no definition" warning.
+		if err != nil || def.Name != name {
 			continue
 		}
+		// Filling in an embedded definition is safe even when it carries a
+		// ${VAR} credential reference (github, github-ro: GH_TOKEN). The
+		// reference is fixed in this binary, not supplied by the repository
+		// or a URL, so it is created with fromURL=false like any local
+		// definition; it expands from the operator's own environment; and in
+		// CI it is byte-identical to the copy workspace preparation used to
+		// layer in. OpenAI's credential is resolved in process instead
+		// (ensureOpenAIProvider) (#7268).
 		printer.StepInfo(fmt.Sprintf("Provider %q: using the definition shipped with fullsend (no providers/%s.yaml in the workspace)", name, name))
 		localDefs = append(localDefs, def)
 		have[name] = true
@@ -6329,9 +7329,10 @@ func checkProviderProfileIntegrity(providers []resolve.ResolvedProvider, profile
 	var mismatches []string
 	for _, rp := range providers {
 		// Profile types the runner imports from its embedded scaffold
-		// itself (ensureOpenAIProfile) are known even when nothing on disk
+		// itself (ensureEmbeddedProfile) are known even when nothing on disk
 		// declares them.
-		if strings.EqualFold(rp.Def.Type, openAIProviderType) {
+		// The OpenAI path normalizes the spelling; the others must match.
+		if strings.EqualFold(rp.Def.Type, openAIProviderType) || isReservedProfileID(rp.Def.Type) {
 			continue
 		}
 		if !profileIDs[rp.Def.Type] {

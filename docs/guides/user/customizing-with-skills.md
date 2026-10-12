@@ -60,6 +60,12 @@ Instructions the agent follows when this skill is invoked.
 Skills can reference companion scripts and data files in the same directory,
 giving agents the ability to dynamically gather information at runtime.
 
+This repository also includes workflow-oriented skills exposed as portable
+slash commands. For example, [`/nextwork`](../../../skills/nextwork/SKILL.md)
+builds a readiness queue, while
+[`/adr-corner`](../../../skills/adr-corner/SKILL.md) inventories open pull
+requests that change Architecture Decision Records.
+
 ## Adding skills to your repository
 
 Place skills in `.agents/skills/` in your target repository and symlink
@@ -215,5 +221,5 @@ Bring Your Own Agent covers the same decision frame in
   [tuning existing agents](customizing-agents.md#tuning-agents-with-augmentation-skills)
 - [`author-fullsend-augmentations`](../../../skills/author-fullsend-augmentations/SKILL.md)
   — discovery-driven authoring procedure for augmentations and sub-agents
-- [Default, derived, and custom agents](../../agents/topics/default-vs-custom.md)
+- [Default, derived, and custom agents](default-vs-custom.md)
   — adding skills keeps you in "configured default agent" territory

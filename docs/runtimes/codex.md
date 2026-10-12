@@ -1,8 +1,10 @@
 # Codex
 
-[Codex](https://github.com/openai/codex) is fullsend's third agent runtime. It runs **OpenAI models
-only**, through the same sandbox, egress policy and secretless credential path pi uses for GPT — the
-runner holds the credential, the sandbox never sees it. Turn it on for one repo, for one agent, or
+[Codex](https://github.com/openai/codex) is fullsend's third agent runtime. It runs **OpenAI models**,
+through the same sandbox, egress policy and secretless credential path pi uses for GPT — the runner
+holds the credential, the sandbox never sees it. Through an
+[inference gateway](#models-through-an-inference-gateway-experimental) it also runs any
+Responses-capable model (`gateway/<model>`). Turn it on for one repo, for one agent, or
 as a `repos.yaml` default.
 
 ```bash
@@ -14,16 +16,18 @@ This page is what changes once you are on it.
 
 ## Models
 
-**Codex takes an OpenAI model id** — `openai/<id>` or the bare id — and nothing else. It serves the
-OpenAI Responses API, so there is no Claude, Gemini or Grok on codex.
+**Codex takes an OpenAI model id** — `openai/<id>` or the bare id — or a `gateway/<model>` id when an
+inference gateway is configured ([below](#models-through-an-inference-gateway-experimental)). It
+speaks the Responses API only, so there is no Claude, Gemini or Grok on codex's direct route.
 
 **The Claude aliases do not apply.** `opus`, `sonnet`, `haiku` and `fable` name Anthropic models, so
 codex refuses them rather than picking a GPT model on your behalf:
 
 ```
-codex takes OpenAI model ids only, and the Claude model aliases do not apply to it: "opus" is one
-of them. To run this agent on codex, set FULLSEND_CODEX_MODEL=openai/<id> for the repo, or
-model: openai/<id> on the agent's agents: entry or the harness
+codex takes OpenAI model ids or gateway/<model> only, and the Claude model aliases do not apply to
+it: "opus" is one of them. To run this agent on codex, set FULLSEND_CODEX_MODEL=openai/<id> for
+the repo, or model: openai/<id> on the agent's agents: entry or the harness (or gateway/<model>
+with an inference.gateway block)
 ```
 
 A model carrying another provider's prefix, and a run with no model named at all, fail the same way
@@ -68,18 +72,77 @@ Effort maps onto codex's own reasoning levels:
 Codex has no equivalent of a fallback model chain: `FULLSEND_FALLBACK_MODELS` is ignored with a
 warning.
 
+### Models through an inference gateway (experimental)
+
+A `gateway/<model>` spec sends codex's model calls to a Responses-capable inference gateway (Praxis,
+LiteLLM, agentgateway, ...) instead of `api.openai.com`
+([ADR 0137](../ADRs/0137-inference-gateway-credential-route.md)). Everything after `gateway/` is the
+model id the gateway receives, slashes included: `gateway/vendor/org/model` reaches it as
+`vendor/org/model`.
+
+```yaml
+inference:
+  gateway:
+    url: https://gateway.example.com
+    audience: my-gateway
+agents:
+  - name: triage
+    runtime: codex
+    model: gateway/vendor/org/model
+```
+
+**It needs an `inference.gateway` block** in `.fullsend/config.yaml` — see the
+[config reference](../reference/config-reference.md). The block applies with `auth: oidc` (the
+default) on a run with a forge OIDC endpoint, and with `auth: api-key` on every run, local runs
+included
+([ADR 0138](../ADRs/0138-inference-gateway-api-key-credential-mode.md)). A `gateway/` model on a
+run where no block applies fails before the agent starts:
+
+```
+gateway/ models on codex need an inference.gateway block that applies to this run: add one to
+.fullsend/config.yaml (with auth: oidc it applies on a run with a forge OIDC endpoint, with auth:
+api-key on every run)
+```
+
+**The runner owns the route.** It renders a second model provider, `fullsend-gateway`, into the
+digest-guarded `config.toml`, with `base_url = <url>/v1`, `wire_api = "responses"` and its own
+runner-written `auth.command`, and selects it with `-c` overrides. It puts the gateway credential
+behind a run-scoped provider: the job's OIDC token (refreshed and re-seeded into the token file
+`auth.command` reads, so a running iteration follows each refresh), or the
+`FULLSEND_INFERENCE_GATEWAY_API_KEY` key. The sandbox holds only a placeholder. OpenAI variables in
+`.env` (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `CODEX_API_KEY`) are still unset before codex starts,
+as on the direct route, so the gateway cannot be pointed anywhere from `.env`: its URL comes only
+from the block. The direct `openai/` route is unchanged, and the harness needs no
+`providers:` entry for a gateway run: the runner attaches the gateway provider and its egress profile
+itself.
+
+**Pin the model.** fullsend renders no model catalog for codex, so the block's `models` list is not
+used on codex, and codex's own `GET /v1/models` probe is denied by the gateway profile: the id after
+`gateway/` is what codex sends. The gateway must serve
+it on `POST /v1/responses` with Bearer auth (`POST <prefix>/v1/responses` when the gateway `url`
+has a path prefix).
+
+**Token counts can read 0.** Codex takes usage from the gateway's final Responses event. On the E2E
+test gateway, `gpt-oss-120b`'s usage arrives after the finish chunk, and `metrics.json` records 0
+tokens for runs that did answer. If you see this with your gateway, read usage from the gateway's
+own log.
+
+**Check the effort level against the model.** Effort is passed to the gateway as is, and some models
+refuse some levels with an upstream 400. Check the levels your model accepts before you set `effort`.
+
 ## At a glance
 
 | | |
 |---|---|
-| Credentials | A runner-exchanged OpenAI WIF token in CI, or your `OPENAI_API_KEY` on the runner locally — never in the sandbox. Codex reads a placeholder from a runner-owned token file and re-reads it when the credential is refreshed ([ADR 0092](../ADRs/0092-openai-wif-credential-delivery.md)) |
+| Credentials | A runner-exchanged OpenAI WIF token in CI, or your `OPENAI_API_KEY` on the runner locally — never in the sandbox. Codex reads a placeholder from a runner-owned token file and re-reads it when the credential is refreshed ([ADR 0092](../ADRs/0092-openai-wif-credential-delivery.md)). A `gateway/` model uses the inference gateway's credential the same way ([Models through an inference gateway](#models-through-an-inference-gateway-experimental)) |
 | Unattended | Approvals off; codex's own sandbox off, because OpenShell is the boundary. A missing credential exits before the agent starts |
 | Artifacts | `output.jsonl` (the `codex exec --json` stream), `transcripts/<agent>-<rollout>.jsonl`, `metrics.json` with `runtime: codex`, plus `codex-debug.log` with `--debug`. Only uncompressed rollouts are extracted — codex compresses older sessions, so a `.jsonl.zst` is never the run's own transcript. The agent's final message is in the stream; `--output-last-message` also drops it in the runner-owned config directory inside the sandbox, which is a convenience when inspecting a kept sandbox rather than a downloaded artifact |
 | Extra knobs | `FULLSEND_CODEX_MODEL` (the runner-side model default for codex runs; see [Models](#models)) |
-| Not supported | Sub-agents, `plugins:`, fallback chains, non-OpenAI providers |
+| Not supported | Sub-agents, `plugins:`, fallback chains, non-OpenAI providers (other than through a Responses-capable inference gateway), Chat Completions or Messages on a gateway |
 
 Cost is **not** in `metrics.json` on codex: the `codex exec --json` stream carries no cost field, so
-the value stays `0`. Token counts are recorded normally.
+the value stays `0`. Token counts are recorded normally on the direct route; through a gateway they
+can read 0 (see [Models through an inference gateway](#models-through-an-inference-gateway-experimental)).
 
 ## Running it locally
 
@@ -111,7 +174,7 @@ bare — and `metrics.json` records the same (`runtime`, `runtime_source`, `requ
 ...
 runtime: selected "codex" from --runtime flag
 ...
-→ Agent: gpt-5.6-luna (v0.157.0)
+→ Agent: gpt-5.6-luna (v0.159.3)
   ✓ Agent exited with code 0
 ```
 
@@ -127,7 +190,7 @@ What a local codex run needs, beyond the guide:
 - **fullsend from the release that carries `CODEX_VERSION`** — the first one cut after the codex
   runtime lands. The release download and the container image both work as-is.
 - **A sandbox image that includes codex** — `ghcr.io/fullsend-ai/fullsend-sandbox` built with
-  `CODEX_VERSION` (0.157.0 today). A stale image fails Bootstrap's preflight before the agent
+  `CODEX_VERSION` (0.159.3 today). A stale image fails Bootstrap's preflight before the agent
   starts, with ``codex preflight: `codex --version` exited 127``; `podman pull
   ghcr.io/fullsend-ai/fullsend-sandbox:latest` fixes it.
 - **A harness that declares the provider and a policy** — `providers: [openai]` and
@@ -152,7 +215,7 @@ What a local codex run needs, beyond the guide:
   ([ADR 0027](../ADRs/0027-allowed-and-disallowed-tools-for-agents.md)).
 - **Reads the repo's root `AGENTS.md` through `$CODEX_HOME`.** Codex skips a project's own
   `AGENTS.md` while the project is untrusted, so the runner copies the repo's root `AGENTS.md` (or
-  the org-level one fullsend injects when the repo has none) to `$CODEX_HOME/AGENTS.md`, which codex
+  the fallback one fullsend injects when the repo has none) to `$CODEX_HOME/AGENTS.md`, which codex
   loads as instructions. Only the root file is read, cut at 32 KiB: nested `AGENTS.md` files and
   `AGENTS.override.md` are not, and a symlinked `AGENTS.md` is skipped. No `CLAUDE.md` bridge is
   injected.
@@ -185,7 +248,7 @@ What a local codex run needs, beyond the guide:
   scrubbed before they are written.
 - **Skills** work as they do on Claude Code: the harness's skills, plus your repository's own
   `.agents/skills` (codex's documented location for repository skills), both scanned for injected
-  content before the agent sees them. Codex 0.157.0 also picks up `.codex/skills` even though the
+  content before the agent sees them. Codex 0.159.3 also picks up `.codex/skills` even though the
   project is untrusted; that is not documented upstream and may change, so keep repository skills
   in `.agents/skills`. Codex's bundled skills (`skill-installer`, `imagegen` and friends) are
   switched off, so an agent sees only yours.
@@ -202,10 +265,12 @@ has no default behaviour-test coverage; its scenario is gated. What was run, and
 is recorded in [codex runtime
 internals](../contributing/runtime-implementation.md#codex-runtime-internals-6920).
 
-**Keep `review` and `retro` on Claude Code.** Codex has a `spawn_agent` tool, but fullsend does not
-build a persona roster for it yet, so those two agents run in a single context instead of with their
-reviewer personas. Nothing prevents a repo-wide `runtime: codex` from applying to them — they will
-run — so pin them with `runtime: claude` on their `agents:` entries if you want the roster:
+**Keep `review` and `retro` on Claude Code.** fullsend turns off Codex's native delegation
+(`agents.enabled = false` and `features.multi_agent_v2 = false` in the config it writes) because it
+does not yet support persona wiring or child token accounting, so those two agents run in a single
+context instead of with their reviewer personas. Nothing prevents a repo-wide `runtime: codex` from
+applying to them — they will run — so pin them with `runtime: claude` on their `agents:` entries if
+you want the roster:
 
 ```yaml
 agents:
@@ -225,6 +290,7 @@ probes on the way up and the policy refuses what the run does not need:
 | Denied | Why it appears |
 |---|---|
 | `GET /v1/models` on `api.openai.com` | Codex refreshes its model catalog on a custom provider. The `fullsend-openai` profile allows only `POST /v1/responses`, so the probe is denied at L7, up to three times. The first allowed `POST` follows about 100 ms later. |
+| `GET /v1/models` on the inference gateway host | The same catalog refresh on a `gateway/` run. The gateway profile allows only the model `POST`s, so it is denied at L7 and logged by codex as `failed to refresh available models: 403`. |
 | `chatgpt.com:443` | A sign-in/account probe the agent run has no use for; denied at L4. |
 | `api.github.com:443` | Denied at L4 from codex itself — the agent reaches GitHub through the `gh` CLI and its own provider, not from the model client. |
 
@@ -255,10 +321,10 @@ hold a gateway placeholder. Check that the harness declares `providers: [openai]
 admits `api.openai.com:443` without protocol inspection, so the gateway refuses to carry the
 credential over it. Add `policy: policies/base.yaml` to the harness.
 
-**`codex takes OpenAI model ids only ...`.** The resolved model is a Claude alias (`opus` and
-friends), carries another provider's prefix, or is missing entirely. The message names both fixes:
-`FULLSEND_CODEX_MODEL=openai/<id>` for the repo, or `model: openai/<id>` on the agent's `agents:`
-entry or the harness. See [Models](#models).
+**`codex takes OpenAI model ids or gateway/<model> only ...`.** The resolved model is a Claude alias (`opus` and
+friends), carries another provider's prefix, or is missing entirely. The message names the fixes:
+`FULLSEND_CODEX_MODEL=openai/<id>` for the repo, `model: openai/<id>` on the agent's `agents:`
+entry or the harness, or `gateway/<model>` with an `inference.gateway` block. See [Models](#models).
 
 **A guard refused the run.** The runner-written files under `CODEX_HOME` are checked before every
 launch, and a mismatch stops the run rather than continuing unprotected. Each message names what

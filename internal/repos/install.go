@@ -5,15 +5,17 @@
 package repos
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
+	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
-	"github.com/fullsend-ai/fullsend/internal/gitlabroles"
 	"github.com/fullsend-ai/fullsend/internal/maputil"
 	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/preset"
@@ -43,11 +45,35 @@ type InstallConfig struct {
 	InferenceProject string
 	InferenceRegion  string
 
+	// InferenceAuth is the repository's effective inference.auth
+	// (InferenceAuthVertexWIF, InferenceAuthOpenAIAPIKey or
+	// InferenceAuthOpenAIWIF). It selects
+	// which inference credentials Install writes. Empty keeps the legacy
+	// behavior: the Vertex secrets are written when InferenceProject is set.
+	InferenceAuth string
+
+	// OpenAIAPIKey is the static OpenAI API key written as
+	// FULLSEND_OPENAI_API_KEY when InferenceAuth is
+	// InferenceAuthOpenAIAPIKey. It comes from the command line only;
+	// it is never persisted to the manifest and never logged.
+	OpenAIAPIKey string
+
 	// UpstreamRef is the git ref (SHA) used to pin scaffold workflow refs.
 	// Empty for dev builds (falls back to config.DefaultUpstreamRef).
 	UpstreamRef string
 	// UpstreamTag is the version tag corresponding to UpstreamRef (e.g., "v0.42.0").
 	UpstreamTag string
+
+	// Pinned reports whether UpstreamRef came from an explicit manifest
+	// fullsend_ref pin (resolveTargetRef's manifestRef) rather than the
+	// running release's own default ref. A fresh install with no manifest
+	// pin uses the running binary's release-default UpstreamRef together
+	// with its embedded templates, which match that ref by construction —
+	// PrebuiltScaffoldFiles is unnecessary there. An explicit pin can
+	// target a different release, so GitLab requires PrebuiltScaffoldFiles
+	// fetched for that ref. Leave false for GitHub and for unpinned
+	// installs.
+	Pinned bool
 
 	// Skip flags control which install steps are executed. Set by callers
 	// that handle specific steps externally (e.g., admin.go handles mint
@@ -84,6 +110,12 @@ type InstallConfig struct {
 	// provenance of prior review comments.
 	ReviewAppClientID string
 
+	// AppSet is the GitHub App set prefix (apps named "{app_set}-{role}").
+	// When set, it is written as the FULLSEND_APP_SET repo variable so the
+	// scaffold workflows can derive bot identities. GitHub-only; empty for
+	// GitLab, where no FULLSEND_APP_SET variable is written.
+	AppSet string
+
 	// AgentRunnerTags is a list of GitLab CI runner tags embedded in the
 	// agent job so sandbox work is routed to the data-plane fleet.
 	AgentRunnerTags []string
@@ -97,22 +129,11 @@ type InstallConfig struct {
 	// branch; false creates a PR.
 	Direct bool
 
-	// ReuseSecrets indicates that GCP secrets (FULLSEND_GCP_PROJECT_ID and
-	// FULLSEND_GCP_WIF_PROVIDER) already exist on the repo and should not
-	// be overwritten. When true, InferenceProject and WIFProvider may be
-	// empty and secret writes are skipped.
+	// ReuseSecrets indicates that the inference secrets for InferenceAuth
+	// (see inferenceSecretsForAuth) already exist on the repo and should
+	// not be overwritten. When true, InferenceProject, WIFProvider and
+	// OpenAIAPIKey may be empty and secret writes are skipped.
 	ReuseSecrets bool
-
-	// ExistingSecrets lists the repo secret names (e.g.
-	// FULLSEND_GCP_PROJECT_ID) already confirmed present on the repo
-	// before this install runs. Install skips writing any secret named
-	// here individually, so an already-present secret is left untouched
-	// even when ReuseSecrets is false because only some of the required
-	// secrets exist yet (a partial-secret, workflow-missing re-install —
-	// see convergeRepo). ReuseSecrets remains the all-or-nothing signal
-	// used for the WIF-provider validation and progress messaging when
-	// every required secret already exists.
-	ExistingSecrets []string
 
 	// PrebuiltScaffoldFiles, when non-nil, replaces the embedded scaffold
 	// template collection. Used when fullsend_ref pins to a version that
@@ -130,6 +151,13 @@ type InstallConfig struct {
 	// repositories (ADR 0122). Unmanaged repos leave this nil so existing
 	// installer generation is preserved.
 	ManagedConfig []byte
+
+	// ExistingConfig, when non-nil and ManagedConfig is nil, is written
+	// byte-for-byte as .fullsend/config.yaml instead of generating an
+	// installer overlay. Used on a fresh install when a hand-authored
+	// config.yaml already exists and must survive (it may carry settings,
+	// such as OpenAI WIF identifiers, that the selected route depends on).
+	ExistingConfig []byte
 
 	// ManagedConfigAdoptionRequired, when true, skips writing
 	// .fullsend/config.yaml entirely, even though ManagedConfig may be
@@ -154,6 +182,49 @@ type InstallResult struct {
 	// WIFProvider is the WIF provider resource name, either pre-existing
 	// (from InstallConfig) or newly provisioned.
 	WIFProvider string
+
+	// GitLabTypedDispatch reports whether the GitLab wrapper queued for
+	// commit (the pending scaffold files, not a live re-read) uses the
+	// pipeline-input dispatch contract rather than the legacy
+	// pipeline-variable one. Only meaningful for ForgeGitLab installs.
+	// Callers that need to act on the install's dispatch transport (e.g.
+	// post-install schedule creation) must use this instead of re-reading
+	// the default branch: that commit may still be an unmerged upgrade MR,
+	// in which case a live read would see the prior (or absent) wrapper
+	// and misclassify a pending typed installation as legacy.
+	GitLabTypedDispatch bool
+
+	// ScaffoldFiles are the files delivered to the repository. Delivery can
+	// open an unmerged pull/merge request instead of landing on the default
+	// branch, so callers must not treat them as live (see
+	// scaffoldFilesOnDefaultBranch).
+	ScaffoldFiles []forge.TreeFile
+}
+
+// redactSecretValues replaces every occurrence of each non-empty secret
+// value in msg so forge error text that reflects a submitted credential or
+// inference identifier cannot reach command output.
+//
+// Values are replaced in one pass over the original message, longest first,
+// so a value that is a substring of another (a project ID inside a WIF
+// provider path) cannot break the longer value's match and leave a partial
+// identifier behind.
+func redactSecretValues(msg string, secrets map[string]string) string {
+	var values []string
+	for _, name := range maputil.SortedKeys(secrets) {
+		if secret := secrets[name]; secret != "" {
+			values = append(values, secret)
+		}
+	}
+	if len(values) == 0 {
+		return msg
+	}
+	sort.SliceStable(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	pairs := make([]string, 0, 2*len(values))
+	for _, v := range values {
+		pairs = append(pairs, v, "[redacted]")
+	}
+	return strings.NewReplacer(pairs...).Replace(msg)
 }
 
 // ScaffoldCommitFunc delivers scaffold files to a repository and returns
@@ -201,6 +272,14 @@ func Install(ctx context.Context, cfg InstallConfig,
 		Owner: cfg.Owner,
 		Repo:  cfg.Repo,
 	}
+	if cfg.Forge == ForgeGitLab {
+		if cfg.VendorBinary {
+			return result, fmt.Errorf("GitLab vendor mode is unsupported: its installer does not execute a matching vendored binary")
+		}
+		if cfg.Pinned && cfg.PrebuiltScaffoldFiles == nil {
+			return result, fmt.Errorf("pinned GitLab installation requires matching upstream scaffold templates")
+		}
+	}
 
 	mintURL := cfg.MintURL
 	if cfg.Forge == ForgeGitHub && mintURL == "" {
@@ -225,8 +304,8 @@ func Install(ctx context.Context, cfg InstallConfig,
 		return result, fmt.Errorf("invalid GCP region %q", cfg.InferenceRegion)
 	}
 
-	// Validate WIF provider when inference secrets will be written.
-	if !cfg.ReuseSecrets && cfg.InferenceProject != "" {
+	// Validate WIF provider when Vertex inference secrets will be written.
+	if !cfg.ReuseSecrets && cfg.InferenceAuth != InferenceAuthOpenAIAPIKey && cfg.InferenceProject != "" {
 		if wifProvider == "" {
 			return result, fmt.Errorf("WIF provider required for repository secret configuration; set WIFProvider or enable WIF provisioning")
 		}
@@ -254,16 +333,53 @@ func Install(ctx context.Context, cfg InstallConfig,
 		if err != nil && !forge.IsNotFound(err) {
 			return result, fmt.Errorf("reading existing .gitlab-ci.yml: %w", err)
 		}
-		if !HasFullsendEntries(existing) {
-			mergedRoot, mergeErr := MergeGitLabCI(existing)
+		wrapper, wrapperErr := effectiveGitLabWrapper(ctx, client, cfg.Owner, cfg.Repo, files)
+		if wrapperErr != nil {
+			return result, fmt.Errorf("reading effective GitLab wrapper: %w", wrapperErr)
+		}
+		result.GitLabTypedDispatch = gitlabWrapperHasDispatchInputs(wrapper)
+		if result.GitLabTypedDispatch {
+			if err := validateGitLabTypedContract(wrapper); err != nil {
+				return result, err
+			}
+			// Require the live restriction before delivering runnable jobs.
+			// Neither a planned update nor an error after delivery closes
+			// the unsafe interval. Do not strand a legacy poller by changing
+			// its setting or schedules before compatible templates land.
+			if err := requireGitLabRestrictionBeforeDelivery(ctx, client, cfg.Owner, cfg.Repo); err != nil {
+				return result, err
+			}
+			if err := requireGitLabPipelineVariableRestriction(ctx, client, cfg.Owner, cfg.Repo, true); err != nil {
+				return result, err
+			}
+		} else if err := requireCompleteGitLabDispatchContract(wrapper); err != nil {
+			return result, err
+		} else if gitlabWrapperHasDispatchInputs(existing) {
+			// Forced typed-to-legacy transition: the committed root
+			// already carries the typed spec:inputs header and
+			// include:inputs forwarding map from a previous typed
+			// install, but the wrapper this install would deliver is
+			// legacy and declares none of those inputs. The merge below
+			// is only invoked when HasFullsendEntries(existing) is false
+			// or the wrapper is typed, so it would never touch (or
+			// revert) that stale root contract here — delivering the
+			// legacy wrapper alongside it would leave an invalid include
+			// and restriction/schedule state incompatible with legacy
+			// dispatch. Refuse rather than commit that broken mix.
+			return result, fmt.Errorf("refusing GitLab typed-to-legacy transition: the installed root still forwards the typed pipeline-input contract, which the legacy wrapper does not declare; manually roll back the root contract before reverting to pipeline-variable dispatch")
+		}
+		if !HasFullsendEntries(existing) || gitlabWrapperHasDispatchInputs(wrapper) {
+			mergedRoot, mergeErr := mergeGitLabCIWithWrapper(existing, wrapper)
 			if mergeErr != nil {
 				return result, fmt.Errorf("merging .gitlab-ci.yml: %w", mergeErr)
 			}
-			files = append(files, forge.TreeFile{
-				Path:    ".gitlab-ci.yml",
-				Content: mergedRoot,
-				Mode:    "100644",
-			})
+			if !bytes.Equal(existing, mergedRoot) {
+				files = append(files, forge.TreeFile{
+					Path:    ".gitlab-ci.yml",
+					Content: mergedRoot,
+					Mode:    "100644",
+				})
+			}
 		}
 	}
 
@@ -300,28 +416,19 @@ func Install(ctx context.Context, cfg InstallConfig,
 		}
 	}
 
-	// Step 6: Write repository secrets. Skipped entirely when reusing all
-	// existing secrets; otherwise each secret already present (per
-	// ExistingSecrets) is left untouched and only the missing ones are
-	// written, so a partial secret state does not get an already-written
-	// secret silently retargeted (e.g. by a re-run with a different
-	// --inference-project or resolved WIF provider).
+	// Step 6: Write repository secrets. Skipped entirely when reusing the
+	// existing secrets; otherwise the supplied values replace every
+	// inference secret of the selected method. Secret values are never
+	// logged.
 	repoSecrets := installSecretsForForge(cfg, wifProvider)
 	if cfg.ReuseSecrets {
 		progress(repoFullName, "secrets", "Reusing existing repository secrets")
 	} else if len(repoSecrets) > 0 {
-		existing := make(map[string]bool, len(cfg.ExistingSecrets))
-		for _, name := range cfg.ExistingSecrets {
-			existing[name] = true
-		}
 		progress(repoFullName, "secrets", "Configuring repository secrets")
 		written := 0
 		for _, name := range maputil.SortedKeys(repoSecrets) {
-			if existing[name] {
-				continue
-			}
 			if err := client.CreateRepoSecret(ctx, cfg.Owner, cfg.Repo, name, repoSecrets[name]); err != nil {
-				return result, fmt.Errorf("setting repo secret %s: %w", name, err)
+				return result, fmt.Errorf("setting repo secret %s: %s", name, redactSecretValues(err.Error(), repoSecrets))
 			}
 			written++
 		}
@@ -338,6 +445,23 @@ func Install(ctx context.Context, cfg InstallConfig,
 		return result, fmt.Errorf("committing scaffold: %w", commitErr)
 	}
 	progress(repoFullName, "scaffold", "Scaffold files committed")
+	result.ScaffoldFiles = files
+
+	// Step 7b: Now that scaffold delivery has succeeded, perform the
+	// typed-dispatch activation validated (but not applied) in step 4b:
+	// migrate managed schedule variables under the already-required
+	// restriction. commitScaffold can fall back to a merge
+	// request instead of landing a direct commit (see ScaffoldCommitFunc),
+	// so activateGitLabTypedDispatch independently re-reads the wrapper
+	// and only activates once it actually observes the typed contract —
+	// an unmerged upgrade MR correctly leaves activation for a later run.
+	if cfg.Forge == ForgeGitLab {
+		for _, a := range activateGitLabTypedDispatch(ctx, client, cfg.Owner, cfg.Repo) {
+			if a.Action == "error" {
+				return result, errors.New(a.Detail)
+			}
+		}
+	}
 
 	result.Success = true
 	progress(repoFullName, "done", "Installation complete")
@@ -349,6 +473,11 @@ func Install(ctx context.Context, cfg InstallConfig,
 // fields come from the manifest or CLI flags and are not part of the
 // per-repo resolved config.
 type DriftConfig struct {
+	// UpstreamRef and UpstreamTag identify the running release. Matching
+	// recorded refs use its embedded templates even without an upstream client.
+	UpstreamRef string
+	UpstreamTag string
+
 	// InferenceRegion is the GCP region for inference. Only available
 	// from CLI flags on repos install; empty on the status path.
 	InferenceRegion string
@@ -385,6 +514,7 @@ func driftInstallConfig(resolved ResolvedConfig, dcfg DriftConfig) InstallConfig
 		UpstreamTag:       ref,
 		Runtime:           resolved.Runtime,
 		VendorBinary:      resolved.Vendor,
+		InferenceAuth:     resolved.InferenceAuth,
 		InferenceRegion:   dcfg.InferenceRegion,
 		ReviewAppClientID: dcfg.ReviewAppClientID,
 		AgentRunnerTags:   dcfg.AgentRunnerTags,
@@ -411,7 +541,24 @@ func ExpectedScaffoldContent(ctx context.Context, resolved ResolvedConfig, dcfg 
 	if resolved.FullsendRef == "" {
 		return nil, nil
 	}
+	matchingRelease := resolved.FullsendRef == dcfg.UpstreamRef || resolved.FullsendRef == dcfg.UpstreamTag
+	if resolved.Forge == ForgeGitLab && (resolved.Vendor || (refResolver == nil && !matchingRelease)) {
+		return nil, fmt.Errorf("matching pinned GitLab templates require an upstream client and non-vendored runtime")
+	}
 	installCfg := driftInstallConfig(resolved, dcfg)
+	if matchingRelease {
+		// resolved.FullsendRef is the running release's own SHA or tag,
+		// not a differing explicit pin — driftInstallConfig collapsed
+		// UpstreamRef and UpstreamTag to that single recorded string.
+		// Render with the release's actual (ref, tag) pair instead,
+		// mirroring resolveTargetRef's matching-release normalization
+		// (see convergeContentDriftFiles), so version-derived fields
+		// like FULLSEND_VERSION match what installation/convergence
+		// actually render regardless of whether the manifest happened
+		// to record the SHA or the tag.
+		installCfg.UpstreamRef = dcfg.UpstreamRef
+		installCfg.UpstreamTag = dcfg.UpstreamTag
+	}
 
 	// When the manifest pins a fullsend_ref, fetch remote scaffold
 	// templates so the baseline matches the pinned version's templates
@@ -421,7 +568,7 @@ func ExpectedScaffoldContent(ctx context.Context, resolved ResolvedConfig, dcfg 
 	// When vendored, the running binary's embedded templates match the
 	// binary being committed to the repo — no version-skew concern, so
 	// skip the remote fetch to avoid unnecessary API calls.
-	if manifestRef != "" && refResolver != nil && !installCfg.VendorBinary {
+	if manifestRef != "" && !matchingRelease && refResolver != nil && !installCfg.VendorBinary {
 		ref := manifestRef
 		if isSemver(manifestRef) {
 			if sha := refResolver.Resolve(ctx, manifestRef); sha != manifestRef {
@@ -437,9 +584,11 @@ func ExpectedScaffoldContent(ctx context.Context, resolved ResolvedConfig, dcfg 
 		)
 		if fetchErr == nil {
 			installCfg.PrebuiltScaffoldFiles = scaffoldFiles
+		} else if resolved.Forge == ForgeGitLab {
+			return nil, fmt.Errorf("fetching pinned GitLab scaffold: %w", fetchErr)
 		}
-		// On fetch failure, fall back to embedded templates — same
-		// best-effort semantics as the converge path.
+		// GitHub may fall back to embedded templates. GitLab must preserve
+		// the pinned dispatch contract and therefore rejects fetch failures.
 	}
 
 	return BuildScaffoldFiles(installCfg)
@@ -454,6 +603,8 @@ func BuildScaffoldFiles(cfg InstallConfig) ([]forge.TreeFile, error) {
 	if !cfg.ManagedConfigAdoptionRequired {
 		if cfg.ManagedConfig != nil {
 			cfgYAML = cfg.ManagedConfig
+		} else if cfg.ExistingConfig != nil {
+			cfgYAML = cfg.ExistingConfig
 		} else {
 			var perRepoCfg config.PerRepoConfigWriter
 			switch {
@@ -566,6 +717,9 @@ func managedVarsForForge(cfg InstallConfig, mintURL string) ([]ManagedVar, error
 		if cfg.ReviewAppClientID != "" {
 			vars = append(vars, ManagedVar{Name: forge.VarReviewClientID, Value: cfg.ReviewAppClientID})
 		}
+		if cfg.AppSet != "" {
+			vars = append(vars, ManagedVar{Name: forge.VarAppSet, Value: cfg.AppSet})
+		}
 		return vars, nil
 	case ForgeGitLab:
 		var vars []ManagedVar
@@ -608,11 +762,18 @@ func installVarsForForge(cfg InstallConfig, mintURL string) (map[string]string, 
 	return vars, nil
 }
 
-// installSecretsForForge returns the inference secrets to write.
-// Returns nil when InferenceProject is not set (the convergence
-// layer validates that InferenceProject is provided for repos
-// without existing secrets).
+// installSecretsForForge returns the inference secrets to write for the
+// repository's inference.auth. For openai-api-key it returns
+// FULLSEND_OPENAI_API_KEY when a key was supplied; otherwise it returns
+// the Vertex pair when InferenceProject is set. Returns nil when no
+// input was supplied for the selected method.
 func installSecretsForForge(cfg InstallConfig, wifProvider string) map[string]string {
+	if cfg.InferenceAuth == InferenceAuthOpenAIAPIKey {
+		if cfg.OpenAIAPIKey == "" {
+			return nil
+		}
+		return map[string]string{forge.SecretOpenAIAPIKey: cfg.OpenAIAPIKey}
+	}
 	if cfg.InferenceProject == "" {
 		return nil
 	}
@@ -625,14 +786,16 @@ func installSecretsForForge(cfg InstallConfig, wifProvider string) map[string]st
 
 // requiredVariables lists the per-repo variables that must exist for a
 // complete installation. FULLSEND_GCP_REGION is excluded because it is
-// conditionally set (only when --inference-region is provided) and may
-// not be present when secrets are reused. Shared by install,
-// checkInstallComponents, and uninstall.
-var requiredVariables = []string{forge.VarMintURL}
+// conditionally set (only when --vertex-region is provided) and may
+// not be present when secrets are reused. FULLSEND_APP_SET is required:
+// every GitHub install writes it (defaulting to the built-in app set), so
+// its absence on an existing repo is drift that convergence repairs.
+// Shared by install, checkInstallComponents, and uninstall.
+var requiredVariables = []string{forge.VarMintURL, forge.VarAppSet}
 
-// requiredSecrets lists the per-repo secrets that must exist for a
-// complete installation. Shared by install, checkInstallComponents,
-// and uninstall.
+// requiredSecrets lists the managed GCP inference secrets. Both may be
+// absent from an installation; probe checks pair consistency. Shared by
+// install, checkInstallComponents, and uninstall.
 var requiredSecrets = []string{forge.SecretGCPProjectID, forge.SecretGCPWIFProvider}
 
 // gitlabRetiredLegacyVars is the set of GitLab poller CI/CD variables
@@ -748,33 +911,95 @@ func requiredVarsForForge(forgeName string) []string {
 	return requiredVariables
 }
 
-// requiredSecretsForForge returns the secret names that must exist for
-// the given forge. On GitLab, FULLSEND_FORGE_TOKEN is included because
-// secrets are stored as masked CI/CD variables and ListRepoVariables
-// returns them — excluding them from the required set would cause
-// orphan detection to flag them as false positives.
-//
-// GitLab role tokens (FULLSEND_GITLAB_*_TOKEN) and the role registry
-// stay optional in this required set so existing installations and
-// partial migrations do not fail health checks. Missing role secrets
-// under an enabled gate are reported by Diagnose / repos status, not
-// by requiredSecretsForForge. See internal/gitlabroles.
+// requiredSecretsForForge returns the secret names that must exist for the
+// given forge. GitLab runtime authentication is role-credential-only; role
+// readiness is checked by the GitLab role registry/status path.
 func requiredSecretsForForge(forgeName string) []string {
-	return requiredSecretsForForgeMode(forgeName, "", false)
+	return requiredSecrets
 }
 
-func requiredSecretsForForgeMode(forgeName, migrationMode string, migrationExists bool) []string {
-	if forgeName == ForgeGitLab {
-		mode, err := gitlabroles.ParseMode(migrationMode)
-		if migrationExists && err == nil && mode == gitlabroles.ModeEnforced {
-			return requiredSecrets
-		}
-		if migrationExists && err != nil {
-			return requiredSecrets
-		}
-		return slices.Concat(requiredSecrets, []string{forge.SecretForgeToken})
+// inferenceSecretsForAuth returns the Fullsend-managed repository secrets
+// that carry the inference credentials for auth. openai-api-key uses
+// FULLSEND_OPENAI_API_KEY on both forges; vertex-wif (and the legacy
+// empty selection) uses the GCP project ID and WIF provider pair.
+// openai-wif needs no secret of its own; it returns the GCP pair, which
+// stays optional there and is written only when Vertex inputs are
+// supplied, so an OpenAI parent can keep Vertex sub-agents.
+func inferenceSecretsForAuth(auth string) []string {
+	if auth == InferenceAuthOpenAIAPIKey {
+		return []string{forge.SecretOpenAIAPIKey}
 	}
 	return requiredSecrets
+}
+
+// requiredInferenceSecretsForAuth returns the inference secrets that must
+// exist (or be supplied) for auth to be usable. openai-wif requires none:
+// its identifiers are non-secret configuration checked separately.
+func requiredInferenceSecretsForAuth(auth string) []string {
+	if auth == InferenceAuthOpenAIWIF {
+		return nil
+	}
+	return inferenceSecretsForAuth(auth)
+}
+
+// managedInferenceSecrets returns every Fullsend-managed inference
+// secret across all inference.auth methods, on both forges. Orphan
+// detection treats these names as managed and uninstall deletes all of
+// them, so leftovers from an earlier selection are cleaned up even when
+// inference.auth is missing or invalid. GitLab's unprefixed
+// OPENAI_API_KEY is never included: it may be shared with other jobs
+// and Fullsend does not manage it.
+func managedInferenceSecrets() []string {
+	var names []string
+	for _, auth := range ValidInferenceAuths() {
+		for _, s := range inferenceSecretsForAuth(auth) {
+			if !slices.Contains(names, s) {
+				names = append(names, s)
+			}
+		}
+	}
+	return names
+}
+
+// obsoleteInferenceSecrets returns the Fullsend-managed inference secrets
+// that belong to the method auth did not select. Convergence removes them
+// only after the selected method's credentials are established. GitLab's
+// unprefixed OPENAI_API_KEY is never included: it may be shared with
+// other jobs and Fullsend does not manage it.
+//
+// openai-wif makes only FULLSEND_OPENAI_API_KEY obsolete: the GCP pair
+// may still serve Vertex sub-agents of an OpenAI parent, so it is kept.
+func obsoleteInferenceSecrets(auth string) []string {
+	switch auth {
+	case InferenceAuthOpenAIAPIKey:
+		return requiredSecrets
+	case InferenceAuthVertexWIF, InferenceAuthOpenAIWIF:
+		return []string{forge.SecretOpenAIAPIKey}
+	default:
+		return nil
+	}
+}
+
+// obsoleteInferenceVariables returns the Fullsend-managed inference
+// variables that belong to a method auth did not select. Only Vertex uses
+// FULLSEND_GCP_REGION, so it is obsolete on openai-api-key repositories.
+// Like the obsolete secrets, convergence removes it only after the
+// selected method is established.
+func obsoleteInferenceVariables(auth string) []string {
+	if auth == InferenceAuthOpenAIAPIKey {
+		return []string{forge.VarGCPRegion}
+	}
+	return nil
+}
+
+// inferenceRegionForAuth returns region when auth uses Vertex and ""
+// otherwise, so OpenAI-only repositories never get FULLSEND_GCP_REGION
+// written or value-checked.
+func inferenceRegionForAuth(auth, region string) string {
+	if auth == InferenceAuthOpenAIAPIKey {
+		return ""
+	}
+	return region
 }
 
 // checkInstallComponents verifies that all per-repo installation

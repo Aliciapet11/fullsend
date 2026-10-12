@@ -84,6 +84,17 @@ func CheckFileContentDrift(ctx context.Context, client forge.Client,
 		if installed == nil {
 			// File not found — presence drift is handled by
 			// ProbeComponents; content comparison not applicable.
+			// Exception: the GitLab webhook dispatcher files are probed
+			// only when the installed wrapper already references them, so
+			// a rollout that is about to rewrite the wrapper must deliver
+			// them here when the selected version's scaffold includes them.
+			if forgeName == ForgeGitLab && slices.Contains(gitlabDispatcherPaths(), ef.Path) {
+				drifted = append(drifted, ContentDriftFile{
+					Path:          ef.Path,
+					InstalledPath: ef.Path,
+					Expected:      ef.Content,
+				})
+			}
 			continue
 		}
 
@@ -192,6 +203,9 @@ func CheckOrphanVars(ctx context.Context, client forge.Client,
 	if maxCfg.ReviewAppClientID == "" {
 		maxCfg.ReviewAppClientID = "placeholder"
 	}
+	if maxCfg.AppSet == "" {
+		maxCfg.AppSet = "placeholder"
+	}
 	managed, err := managedVarsForForge(maxCfg, mintURL)
 	if err != nil {
 		return nil, err
@@ -205,7 +219,8 @@ func CheckOrphanVars(ctx context.Context, client forge.Client,
 	// On GitLab, secrets are stored as masked CI/CD variables, so
 	// ListRepoVariables returns them. Exclude required secrets from
 	// orphan detection — they are not orphans.
-	for _, s := range requiredSecretsForForge(cfg.Forge) {
+	// Inference secrets of every auth method are managed.
+	for _, s := range managedInferenceSecrets() {
 		managedNames[s] = true
 	}
 	// FULLSEND_DISPATCH_SECRET is auto-provisioned by install/converge
@@ -235,7 +250,22 @@ func CheckOrphanVars(ctx context.Context, client forge.Client,
 		if managedNames[name] {
 			continue
 		}
+		// OpenAI WIF identifiers are a user-provided identifier source:
+		// supported, but not installer-owned. They configure the OpenAI
+		// provider for openai-wif repositories and for OpenAI WIF
+		// sub-agents of a vertex-wif parent, where they do not override
+		// the Vertex authentication. On an openai-api-key route they are
+		// retained drift: the runtime would still prefer them over the key.
+		if (cfg.InferenceAuth == InferenceAuthOpenAIWIF || cfg.InferenceAuth == InferenceAuthVertexWIF) &&
+			slices.Contains(openAIWIFVariables, name) {
+			continue
+		}
 		if cfg.Forge == ForgeGitLab && IsGitLabRoleManagedVar(name) {
+			continue
+		}
+		// The transient installer lease is not an orphan while a concurrent
+		// install holds it.
+		if cfg.Forge == ForgeGitLab && name == GitLabProjectLeaseVar {
 			continue
 		}
 		orphans = append(orphans, OrphanVar{Name: name})

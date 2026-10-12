@@ -32,7 +32,7 @@ When someone says they "customized an agent," ask which of these they mean — c
 
 | Goal | Resource |
 |------|----------|
-| Classify your change | [Default, derived, and custom agents](agents/topics/default-vs-custom.md) |
+| Classify your change | [Default, derived, and custom agents](guides/user/default-vs-custom.md) |
 | Configure a harness | [Configuring agents](guides/user/customizing-agents.md) |
 | Bring your own agent | [Bring Your Own Agent](guides/user/bring-your-own-agent.md) |
 | Add skills | [Configuring with skills](guides/user/customizing-with-skills.md) |
@@ -47,7 +47,7 @@ When someone says they "customized an agent," ask which of these they mean — c
 ### Additive Skill
 
 A [skill](#skill) that **extends** an agent's skill set without replacing a [built-in skill](#built-in-skill). Typical paths: list a new unique name under harness `skills:` via [base composition](#base-composition), or add a uniquely named [repo skill](#repo-skill). The default agent's identity is unchanged — this yields a [configured default agent](#configured-default-agent), not a [custom agent](#custom-agent). Example pattern: a team brevity or house-style skill composed alongside existing skills.
-See [Configuring with skills](guides/user/customizing-with-skills.md) and [Default, derived, and custom agents](agents/topics/default-vs-custom.md).
+See [Configuring with skills](guides/user/customizing-with-skills.md) and [Default, derived, and custom agents](guides/user/default-vs-custom.md).
 
 ### Agent Infrastructure
 
@@ -61,12 +61,17 @@ See [architecture.md](architecture.md).
 
 ### Agent Runtime
 
-The agent itself in execution — the LLM, its tool-use loop, and the interface to the model provider. This is the thing that actually reasons and acts; everything else in the architecture exists to support, constrain, or coordinate it. Claude Code is the default runtime; [pi](https://github.com/earendil-works/pi) and [Codex](https://github.com/openai/codex) are available as opt-in runtimes (`runtime: pi`, `runtime: codex`), and OpenCode is a stub. See [runtimes.md](runtimes.md).
+The agent itself in execution — the LLM, its tool-use loop, and the interface to the model provider. This is the thing that actually reasons and acts; everything else in the architecture exists to support, constrain, or coordinate it. Claude Code is the default runtime; [pi](https://github.com/earendil-works/pi) and [Codex](https://github.com/openai/codex) are available as opt-in runtimes (`runtime: pi`, `runtime: codex`), and OpenCode is a stub. Other projects call this layer a [harness](#harness); see that entry for the naming difference. See [runtimes.md](runtimes.md).
 See [architecture.md](architecture.md) and [agent-infrastructure.md](problems/agent-infrastructure.md).
 
 ### AGENTS.md
 
 Project-wide instructions for humans and agents (conventions, testing, architecture). Fullsend agents operating on a checked-out target repo read it there ([Configuring with AGENTS.md](guides/user/customizing-with-agents-md.md)). Using `AGENTS.md` keeps you in [configured default](#configured-default-agent) territory; it is not a [custom agent](#custom-agent). Prefer `AGENTS.md` for rules that apply to every agent; use a [skill](#skill) when behavior is agent- or task-specific.
+
+### Agent Spec
+
+The preferred docs term for the per-role [harness](#harness) YAML: skills, env, providers, sandbox profiles, and `base:` composition. It avoids confusion with the industry sense of "harness", which fullsend calls the [agent runtime](#agent-runtime). This is a docs preference, not a rename: the YAML schema, field names, the `internal/harness/` package, and ADR titles still say "harness".
+See [Harness](#harness), [Base Composition](#base-composition), and [harness-reference.md](reference/harness-reference.md).
 
 ### Always-on Skill
 
@@ -107,12 +112,12 @@ See [Bring Your Own Agent](guides/user/bring-your-own-agent.md), [ADR 0058](ADRs
 ### Configured Default Agent
 
 A [default agent](#default-agent) whose behavior was adjusted **without** changing identity-defining harness fields (`agent:`, [pre-script](#pre-script) / [post-script](#post-script), `role:`, `validation_loop`). Allowed paths include documented [extension points](#extension-point), [additive skills](#additive-skill), [skill overrides](#skill-override), [AGENTS.md](#agentsmd), env vars, plugins, host files, sandbox image layers, and policy composition. Changing install-time `slug:` alone stays a configured default (the mint never reads it). Replacing `role:` is normally [derived](#derived-agent), except when that agent's docs recommend a specific role override for a stated purpose. Still recognizably the same agent (for example "our triage, with team skills").
-See [Default, derived, and custom agents](agents/topics/default-vs-custom.md).
+See [Default, derived, and custom agents](guides/user/default-vs-custom.md).
 
 ### Custom Agent
 
 An agent whose `base` chain does **not** trace back to a default agent harness in `fullsend-ai/agents`, or that has no `base` at all. Built from scratch — even if it resembles triage, code, or review. Adding skills to triage is not a custom agent; that is a [configured default](#configured-default-agent). Contrast with [derived agent](#derived-agent) (starts from a default via `base:` but replaces identity).
-See [Default, derived, and custom agents](agents/topics/default-vs-custom.md) and [Bring Your Own Agent](guides/user/bring-your-own-agent.md).
+See [Default, derived, and custom agents](guides/user/default-vs-custom.md) and [Bring Your Own Agent](guides/user/bring-your-own-agent.md).
 
 ### Customized Agent
 
@@ -147,12 +152,17 @@ See [architecture.md](architecture.md) (building block 1).
 ### Default Agent
 
 An agent shipped by fullsend: harness files and agent definitions in `fullsend-ai/agents`. Unmodified, it is simply a default agent. Documented configuration yields a [configured default agent](#configured-default-agent). Replacing identity-defining fields on a `base:` of that harness yields a [derived agent](#derived-agent). An agent with no default `base` lineage is a [custom agent](#custom-agent).
-See [Agents reference](agents/) and [Default, derived, and custom agents](agents/topics/default-vs-custom.md).
+See [Agents reference](agents/) and [Default, derived, and custom agents](guides/user/default-vs-custom.md).
 
 ### Derived Agent
 
 An agent that uses `base` [base composition](#base-composition) from a [default agent](#default-agent) but replaces identity-defining components — system prompt (`agent:`), [pre-script](#pre-script) / [post-script](#post-script), mint `role:` (unless that agent's docs recommend a specific role override), or `validation_loop` — beyond documented [extension points](#extension-point). Changing install-time `slug:` alone does **not** make the agent derived. It reuses default lineage but is no longer recognizably that default. Example: changing the post-script so the agent can call a forge API the stock script does not support. Contrast with [configured default](#configured-default-agent) and [custom agent](#custom-agent).
-See [Default, derived, and custom agents](agents/topics/default-vs-custom.md).
+See [Default, derived, and custom agents](guides/user/default-vs-custom.md).
+
+### Direct OIDC Trust
+
+The inference gateway's `auth: oidc` mode: the gateway validates the job's forge OIDC token itself, with no token exchange. It is not [WIF](#wif-workload-identity-federation).
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
 
 ## E
 
@@ -183,7 +193,7 @@ A workflow concept where a repository automatically stays up-to-date with depend
 ### Extension Point
 
 A documented hook on a [default agent](#default-agent) that teams are expected to use — for example a named optional skill (`customer-research` on prioritize) or a published configuration variable (`REVIEW_FINDING_SEVERITY_THRESHOLD` on review). Using an extension point keeps the result a [configured default agent](#configured-default-agent). Each agent lists its extension points in [`docs/agents/<agent>.md`](agents/).
-See [Default, derived, and custom agents](agents/topics/default-vs-custom.md) and [Configuring with skills](guides/user/customizing-with-skills.md#extension-points).
+See [Default, derived, and custom agents](guides/user/default-vs-custom.md) and [Configuring with skills](guides/user/customizing-with-skills.md#extension-points).
 
 ## F
 
@@ -201,7 +211,9 @@ See [autonomy-spectrum.md](problems/autonomy-spectrum.md).
 
 ### Harness
 
-The configuration and context layer that prepares an agent for its task. The harness assembles skills, system prompts, codebase context, tool definitions, and behavioral instructions — it is what transforms a generic LLM into a specific agent with a specific role. "Harness engineering" is a relatively new term in the industry (emerging early 2026); in fullsend, the harness is a distinct architectural layer between the sandbox and the agent runtime.
+In fullsend, the configuration and context layer that prepares an agent for its task. It assembles skills, system prompts, codebase context, tool definitions, and behavioral instructions, turning a generic LLM into an agent with a specific role. Concretely, it is the per-role YAML between the sandbox and the [agent runtime](#agent-runtime): skills, env, providers, sandbox profiles, and `base:` composition. New docs call it the [agent spec](#agent-spec).
+
+Elsewhere in the industry (Anthropic's "agent harness" writing, meta-harness projects such as Omnigent), "harness" means the agent CLI itself — Claude Code, Codex, or pi — which fullsend calls the agent runtime. In those terms, fullsend is a [meta-harness](#meta-harness).
 See [architecture.md](architecture.md).
 
 ## I
@@ -211,11 +223,16 @@ See [architecture.md](architecture.md).
 A distinct GitHub App installation representing a specific agent role (e.g., triage, coder, reviewer). Each agent role gets its own identity so that actions are attributable and permissions can be scoped per-role. Identity is not the same as trust — an agent's identity lets it authenticate; trust derives from repository permissions and CODEOWNERS, not from which credentials the agent holds.
 See [architecture.md](architecture.md) and [agent-architecture.md](problems/agent-architecture.md).
 
+### Installation Token
+
+A short-lived GitHub App token that the token mint issues in exchange for the job's OIDC token. Agents use it for forge writes such as comments and pull requests.
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
+
 ## L
 
 ### Label State Machine
 
-The set of valid label transitions on issues and PRs that encode workflow state. Labels like `ready-for-triage`, `ready-to-code`, and `ready-for-review` drive agent dispatch; others such as `ready-for-merge` and `requires-manual-review` encode review outcomes. Every routing label carries the `ready-` prefix, but not every `ready-` label routes: `ready-for-merge` is a review outcome that reaches dispatch without matching a stage. Per-org shims filter on this prefix, while per-repo shims allow arbitrary labels for BYOA harness agents. In per-repo installs, `ready-for-review` on a PR also triggers review; applying it to a standalone issue does not. The label state machine guard validates that transitions are legal and enforces mutual exclusion — for example, starting a triage run clears downstream labels so stale state does not carry forward.
+The set of valid label transitions on issues and PRs that encode workflow state. Labels like `ready-for-triage`, `ready-to-code`, and `ready-for-review` drive agent dispatch; others such as `ready-for-merge` and `requires-manual-review` encode review outcomes. Every routing label carries the `ready-` prefix, but not every `ready-` label routes: `ready-for-merge` is a review outcome that reaches dispatch without matching a stage. Per-repo shims allow arbitrary labels for BYOA harness agents. In per-repo installs, `ready-for-review` on a PR also triggers review; applying it to a standalone issue does not. The label state machine guard validates that transitions are legal and enforces mutual exclusion — for example, starting a triage run clears downstream labels so stale state does not carry forward.
 See [ADR 0002](ADRs/0002-initial-fullsend-design.md) building block 3 and [Bring Your Own Agent — routing label convention](guides/user/bring-your-own-agent.md).
 
 ## M
@@ -224,6 +241,11 @@ See [ADR 0002](ADRs/0002-initial-fullsend-design.md) building block 3 and [Bring
 
 An external process that exposes tools to an agent via the Model Context Protocol. In fullsend, MCP servers are used as controlled access points outside the sandbox — for example, an MCP server that wraps the `gh` CLI can provide GitHub access while keeping credentials out of the agent's environment. MCP servers are preferred where necessary (particularly for mediating writes that the sandbox cannot natively constrain), while direct API calls or skills are preferred for static, deterministic processes to avoid performance overhead.
 See [#101](https://github.com/fullsend-ai/fullsend/issues/101) and [security-threat-model.md](problems/security-threat-model.md).
+
+### Meta-harness
+
+A platform that configures, sandboxes, and orchestrates agent harnesses — [agent runtimes](#agent-runtime) in fullsend terms — rather than being one itself. Fullsend is a meta-harness: it assembles the [agent spec](#agent-spec) for each role, provisions the [sandbox](#sandbox), and dispatches to a runtime such as Claude Code, Codex, or pi. Omnigent is another example.
+See [architecture.md](architecture.md).
 
 ### Model Armor
 
@@ -255,6 +277,11 @@ See [Distributed Tracing](guides/infrastructure/distributed-tracing.md) and [ADR
 
 ## P
 
+### Placeholder
+
+A stand-in value the sandbox holds instead of a real credential. The OpenShell proxy swaps in the real credential on the way out, so the credential never enters the sandbox.
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
+
 ### Policy Store
 
 Where agent behavioral rules live — autonomy levels, review requirements, allowed operations, and escalation rules. Policy is distinct from the harness (which configures *how* an agent works) and from intent (which defines *what* work is authorized). Policy defines the *boundaries* of agent behavior — what an agent is allowed to do regardless of what it's asked to do. The adopting organization's `.fullsend` repository is the natural home for policy configuration.
@@ -263,12 +290,12 @@ See [architecture.md](architecture.md) and [governance.md](problems/governance.m
 ### Post-script
 
 A host-side script declared as `post_script` in the harness. Runs **outside** the sandbox **after** the agent exits, with credentials, to apply untrusted agent output (labels, comments, pushes, board updates). Credential isolation depends on this boundary ([ADR 0017](ADRs/0017-credential-isolation-for-sandboxed-agents.md)). Changing `post_script` on a default `base:` is a [script override](#script-override) and makes the agent [derived](#derived-agent) — skills cannot replace post-script API actions the stock script does not perform.
-See [ADR 0024](ADRs/0024-harness-definitions.md) and [Default, derived, and custom agents](agents/topics/default-vs-custom.md).
+See [ADR 0024](ADRs/0024-harness-definitions.md) and [Default, derived, and custom agents](guides/user/default-vs-custom.md).
 
 ### Pre-script
 
 A host-side script declared as `pre_script` in the harness. Runs **outside** the sandbox **before** the agent starts, with credentials, to fetch inputs and write them into the workspace for the sandbox. Changing `pre_script` on a default `base:` is a [script override](#script-override) and makes the agent [derived](#derived-agent).
-See [ADR 0017](ADRs/0017-credential-isolation-for-sandboxed-agents.md), [ADR 0024](ADRs/0024-harness-definitions.md), and [Default, derived, and custom agents](agents/topics/default-vs-custom.md).
+See [ADR 0017](ADRs/0017-credential-isolation-for-sandboxed-agents.md), [ADR 0024](ADRs/0024-harness-definitions.md), and [Default, derived, and custom agents](guides/user/default-vs-custom.md).
 
 ## R
 
@@ -296,7 +323,7 @@ See [architecture.md](architecture.md) and [security-threat-model.md](problems/s
 ### Script Override
 
 Setting `pre_script` or `post_script` on a child harness so it **replaces** the base script. Under [base composition](#base-composition) these are scalars: override only — not additive concatenation (unlike unique skill names). Replacing scripts on a default `base:` yields a [derived agent](#derived-agent).
-See [ADR 0045](ADRs/0045-forge-portable-harness-schema.md), [Default, derived, and custom agents](agents/topics/default-vs-custom.md), and [Configuring agents](guides/user/customizing-agents.md).
+See [ADR 0045](ADRs/0045-forge-portable-harness-schema.md), [Default, derived, and custom agents](guides/user/default-vs-custom.md), and [Configuring agents](guides/user/customizing-agents.md).
 
 ### Sidecar
 
@@ -311,7 +338,7 @@ See [architecture.md](architecture.md), [codebase-context.md](problems/codebase-
 ### Skill Override
 
 Intentionally **replacing** a [built-in skill](#built-in-skill) so the agent does not load the shipped version. Distinct from an [additive skill](#additive-skill) (new unique name). Under [base composition](#base-composition), `skills` merges with **deduplication by skill identity** (declared `SKILL.md` name when on disk, otherwise basename) — a child entry with the same identity overrides the base. Nested forge skills that share a leaf directory (`skills/issue-labels/github` vs `skills/pr-review/github`) are not treated as the same skill. Historically also done via `customized/skills/` ([ADR 0035](ADRs/0035-layered-content-resolution.md)), now deprecated ([ADR 0064](ADRs/0064-deprecate-customized-directory-overlay.md) / [Customized Directory](#customized-directory)). Classification: still [configured default](#configured-default-agent) when you only replace the skill (not `agent:` or scripts). Do not rely on a same-named [repo skill](#repo-skill) for override — that path is shadowed without fail-fast (see [Repo Skill](#repo-skill) / [Skill precedence](guides/user/customizing-with-skills.md#skill-precedence)). Fail-fast on duplicate sandbox names applies only when two harness-listed skills collide in `SkillDirs()`, not to repo-vs-built-in collisions.
-See [Base composition](#base-composition), [ADR 0045](ADRs/0045-forge-portable-harness-schema.md), and [Default, derived, and custom agents](agents/topics/default-vs-custom.md).
+See [Base composition](#base-composition), [ADR 0045](ADRs/0045-forge-portable-harness-schema.md), and [Default, derived, and custom agents](guides/user/default-vs-custom.md).
 
 ### Stage
 
@@ -352,6 +379,11 @@ The overloading of "trust" across these contexts has been a recurring source of 
 See [security-threat-model.md](problems/security-threat-model.md) and [agent-architecture.md](problems/agent-architecture.md).
 
 ## W
+
+### WIF (Workload Identity Federation)
+
+A token exchange in which a provider trusts the job's OIDC token and returns its own short-lived access token. Fullsend uses GCP WIF for Vertex AI and OpenAI Workload Identity for OpenAI models; the inference gateway's [direct OIDC trust](#direct-oidc-trust) is not WIF.
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
 
 ### Work Coordinator
 

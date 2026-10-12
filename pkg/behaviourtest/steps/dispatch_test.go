@@ -196,6 +196,9 @@ type fakeDispatchSCM struct {
 func (f *fakeDispatchSCM) GetFileContent(_ context.Context, _, _, _ string) ([]byte, error) {
 	return f.fileContent, f.getFileErr
 }
+func (f *fakeDispatchSCM) GetFileContentAtRef(_ context.Context, _, _, _, _ string) ([]byte, error) {
+	return f.fileContent, f.getFileErr
+}
 func (f *fakeDispatchSCM) CommitFile(_ context.Context, _, _, _, _ string, content []byte) error {
 	f.commitCalled = true
 	f.committedContent = content
@@ -229,10 +232,20 @@ func (f *fakeDispatchSCM) DeleteRepo(context.Context, string, string) error     
 func (f *fakeDispatchSCM) CreateFork(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
+func (f *fakeDispatchSCM) CreateUserFork(context.Context, string, string) (string, string, error) {
+	return "", "", nil
+}
 func (f *fakeDispatchSCM) CommitFileToFork(context.Context, string, string, string, string, string, []byte) error {
 	return nil
 }
 func (f *fakeDispatchSCM) CreateForkChangeProposal(context.Context, string, string, string, string, string, string, string, string) (*forge.ChangeProposal, error) {
+	return nil, nil
+}
+func (f *fakeDispatchSCM) ListPullRequestCommits(context.Context, string, string, int) ([]string, error) {
+	return nil, nil
+}
+
+func (f *fakeDispatchSCM) ListPullRequestReviews(context.Context, string, string, int) ([]forge.PullRequestReview, error) {
 	return nil, nil
 }
 func (f *fakeDispatchSCM) CreateRepo(context.Context, string, string, string) error { return nil }
@@ -364,7 +377,7 @@ func TestGivenCustomHarness_CommitsAgentAndPolicy(t *testing.T) {
 
 	policyData := scm.files["test-org/test-repo/.fullsend/policies/test.md"]
 	require.NotNil(t, policyData, "policy resource should be committed")
-	assert.Contains(t, string(policyData), "Minimal policy")
+	assertBasePolicy(t, policyData)
 }
 
 func TestGivenCustomHarness_SkipsAbsoluteAgentPath(t *testing.T) {

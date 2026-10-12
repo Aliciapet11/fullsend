@@ -44,27 +44,6 @@ func TestResolve(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestResolveFromConfig(t *testing.T) {
-	t.Parallel()
-
-	defaultBackend, err := ResolveFromConfig(nil)
-	require.NoError(t, err)
-	assert.Equal(t, "claude", defaultBackend.Runtime.Name())
-
-	cfg, parseErr := config.ParseOrgConfig([]byte(`version: "1"
-dispatch:
-  platform: github-actions
-defaults:
-  roles: [triage]
-  runtime: dummy
-repos: {}
-`))
-	require.NoError(t, parseErr)
-	dummyBackend, err := ResolveFromConfig(cfg)
-	require.NoError(t, err)
-	assert.Equal(t, "dummy", dummyBackend.Runtime.Name())
-}
-
 func TestResolveFromPerRepoConfig(t *testing.T) {
 	t.Parallel()
 
@@ -118,28 +97,6 @@ func TestResolveFromPerRepoConfig_RejectsStubRuntimes(t *testing.T) {
 		rt, err := Resolve(name)
 		require.NoError(t, err)
 		assert.Equal(t, name, rt.Runtime.Name())
-	}
-}
-
-func TestResolveFromConfig_RejectsStubRuntimes(t *testing.T) {
-	t.Parallel()
-
-	// Org config with a stub runtime should fail at resolution time.
-	cfg, parseErr := config.ParseOrgConfig([]byte(`version: "1"
-dispatch:
-  platform: github-actions
-defaults:
-  roles: [triage]
-  runtime: opencode
-repos: {}
-`))
-	// ParseOrgConfig calls Validate() which also rejects "opencode",
-	// so this may fail at parse time.  If parsing succeeds (e.g. because
-	// Validate() is not called), ResolveFromConfig must still reject it.
-	if parseErr == nil {
-		_, err := ResolveFromConfig(cfg)
-		require.Error(t, err, "stub runtime %q should fail via org config path", "opencode")
-		assert.Contains(t, err.Error(), "invalid runtime")
 	}
 }
 

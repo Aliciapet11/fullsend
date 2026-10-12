@@ -68,9 +68,11 @@ This means the person who commented `/fs-triage` on a Jira issue will see the ru
 | `JIRA_USER_EMAIL` | Email associated with the token |
 | `JIRA_BASE_URL` | Jira instance URL, e.g. `https://myteam.atlassian.net` |
 
+`fullsend run` reads `JIRA_TOKEN` and `JIRA_USER_EMAIL` for its own Jira calls but does not pass them on to host-side pre/post/validation scripts by default. A harness whose scripts call Jira must declare them under `env.runner` (for example `JIRA_TOKEN: "${JIRA_TOKEN}"`). See [Harness reference § `env.runner`](../../reference/harness-reference.md#field-details).
+
 ### Sandbox credentials and network access
 
-The fullsend scaffold includes an OpenShell credential provider (`providers/atlassian-cloud.yaml`) and network profile (`profiles/fullsend-atlassian-cloud.yaml`) that grant sandboxed agents access to Jira Cloud. These are layered content — they are provided at runtime by reusable workflows, not written to the `.fullsend` directory:
+The fullsend binary ships an OpenShell credential provider (`atlassian-cloud`) and network profile (`fullsend-atlassian-cloud`) that grant sandboxed agents access to Jira Cloud. List the bare name `atlassian-cloud` under a harness's `providers:` and `fullsend run` uses the built-in definition and imports its profile; nothing is written to the `.fullsend` directory:
 
 - **Provider** (`atlassian-cloud`) — declares the `atlassian-cloud` credential provider using the `fullsend-atlassian-cloud` profile type. Jira Cloud Basic auth requires a base64-encoded `email:api-token` string; because OpenShell does not yet support composite credential injection, provide a single pre-encoded token (generate with `printf 'you@example.com:your-api-token' | base64`).
 - **Profile** (`fullsend-atlassian-cloud`) — allows outbound HTTPS to `*.atlassian.net:443` with read-write access and endpoint enforcement. Permitted binaries are `curl` and `node`.

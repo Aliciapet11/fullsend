@@ -23,6 +23,11 @@ scope covers GitHub, GitLab, and Jira** (see [Scope](#scope-v1)).
   decision is recorded in
   [ADR 0054](../../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md).
 
+> **ADR 0107 target contract — not yet implemented:** The bot-specific actor
+> fields and lookup semantics described below are normative design, but current
+> adapters and Go event types have not yet been migrated to emit or enforce
+> them. Existing compatibility behavior remains authoritative until migration.
+
 ## Scope (v1)
 
 v1 adapters and examples target **GitHub** webhooks, **GitLab** cron-poll
@@ -34,7 +39,8 @@ and native-webhook input, and **Jira poll** input:
   events (see [jira-poll-adapter.md](jira-poll-adapter.md)).
 - The `gha-event` input driver is the production GitHub adapter; `gitlab-poll`
   is the production GitLab poll adapter ([ADR 0067](../../../ADRs/0067-gitlab-cron-polling-event-dispatch.md));
-  `gitlab-webhook` is the planned GitLab native-webhook adapter
+  `gitlab-webhook` is the GitLab native-webhook adapter, provisioned at
+  install time once its readiness gates hold and not yet live-validated
   ([ADR 0125](../../../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md));
   `jira-poll` is the production Jira poll adapter; `json` supports tests and
   replay.
@@ -60,6 +66,21 @@ Breaking changes require `docs/normative/normalized-event/v2/`.
 |--------|-----------|
 | **Breaking** (requires v2): remove or rename fields, change field types, remove enum values, add new required top-level fields, tighten patterns that reject previously valid documents | Consumers must migrate |
 | **Non-breaking** (allowed in v1.x schema/README): add optional fields, add new enum values, relax validation, clarify documentation | Existing fixtures and triggers keep working |
+
+The new optional actor fields are additive, but consumers that vendor this
+schema with `additionalProperties: false` must refresh their copy before an
+adapter emits `bot_role` or `role_verified`; otherwise their local validator
+may reject an otherwise valid v1 event. Fullsend controls the supported
+NormalizedEvent producers and consumers, so the bundled validator and other
+supported consumers MUST be updated to this v1 schema before any adapter emits
+the new fields. Older strict schema copies are not a supported
+producer/consumer combination after that rollout. v1 compatibility means that
+existing events without these fields remain valid; it does not require a
+stale `additionalProperties: false` schema to accept newly emitted fields.
+The JSON Schema's cross-field rules are currently stricter than the Go
+`normevent.Validate()` implementation. The adapter migration MUST bring the Go
+validator to parity before emitting the new fields; until then the schema
+remains the normative stricter check.
 
 Adding a new `transition.kind` is **non-breaking** — CEL triggers use boolean
 expressions, not exhaustive enum matching.
@@ -102,11 +123,18 @@ not emit events with a missing or synthetic entity.
 [ADR 0054](../../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md))
 treats schedule and manual dispatch as **trusted operator actions**, not
 end-user webhook events.
-Adapters set `actor.id` to the configured service identity (e.g. the GitHub App
-bot or workflow `GITHUB_ACTOR`), `actor.kind` to `bot`, and `actor.role` to the
-effective permission of that identity on the target repo (typically `write` for
-installed apps). `fullsend dispatch` applies the same permission check as
-webhook paths; it does not default schedule/manual actors to `role: none`.
+Adapters set `actor.id` to the configured operator or service identity (e.g. a
+GitHub App bot or workflow `GITHUB_ACTOR`) and classify `actor.kind` as either
+`human` or `bot` using authoritative provider metadata. Under [ADR
+0107](../../../ADRs/0107-bot-identity-resolution-for-dispatch-authorization.md),
+human identities use verified forge permissions, while bot identities may
+resolve `actor.bot_role` and retain `actor.role: none` for v1 compatibility.
+Authorization therefore follows the identity kind: human permission thresholds
+for humans, and recognized bot identity for bots.
+`fullsend dispatch` applies the same identity lookup as webhook paths.
+If that lookup returns no recognized role or fails/unverifiable, authorization
+is denied. These lookup and denial rules are ADR 0107 target behavior and are
+not yet enforced by the production runtime.
 
 ### Transition sub-objects
 
@@ -150,7 +178,7 @@ This moves instruction extraction from downstream workflow steps (e.g.
 
 ### Actor role mapping (GitHub)
 
-`actor.role` uses permission levels aligned with
+For human actors, `actor.role` uses permission levels aligned with
 [ADR 0054](../../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)
 and the GitHub collaborator permission API:
 
@@ -165,10 +193,34 @@ and the GitHub collaborator permission API:
 | `external` | — | Actor outside the repository (fork PR author, drive-by commenter) |
 
 Adapters populate `role` from the GitHub collaborator permission API for human
-actors. For **GitHub App bots**, use the installation's effective permission on
-the repository (typically `write`), not `none` — the collaborator API often
-returns 404 for `[bot]` accounts even when the app has write access via
-installation token.
+actors. Current adapters may also populate a GitHub App bot's legacy forge
+permission in `actor.role`, and that representation remains valid in
+NormalizedEvent v1 while the adapter has not adopted ADR 0107. Once an adapter
+adopts ADR 0107, it MUST use the provider's authoritative bot
+classification, emit `role: none` for bots, and use the provider-backed
+optional `bot_role` lookup instead. Both representations are therefore
+intentional v1 compatibility forms; the adapter implementation determines
+which one it emits.
+
+`actor.role_verified` is an optional additive field. For humans, it is true
+only when `actor.role` is a trusted forge permission. For bots, it is true
+when the bot-role lookup completed, whether it found a role or not. A
+recognized bot has `role_verified: true` and a provider-resolved `bot_role`; an
+unknown bot has `role_verified: true` and an absent or null `bot_role`; failed
+resolution has `role_verified: false` and no `bot_role`.
+
+For a label-added event, the permanent label authorization exception does not
+require bot-role lookup. On that path, the provider's positive bot
+classification and the forge-authorized label mutation are sufficient; an
+absent `role_verified` field means that bot-role lookup was not applicable. At
+the time of this ADR, GitHub is the only production adapter implementing this
+exception; other source adapters must provide equivalent authoritative label
+and actor-transition evidence before enabling the target behavior.
+Whether an event uses the legacy representation is determined by the adapter's
+implementation contract, not inferred from field omission alone.
+
+This is the ADR 0107 target representation; it is not yet emitted by the
+production adapters or available as a runtime CEL field.
 
 ### Fork security (`state.change_proposal.is_fork`)
 
@@ -177,6 +229,50 @@ change proposal). Write-capable agents (code, fix) that push commits or open
 follow-up PRs **must** gate on `!state.change_proposal.is_fork` in harness
 `trigger` expressions or rely on dispatch-level authorization per ADR 0054.
 Read-only agents (triage, review, retro) may run on fork PRs when policy allows.
+
+### Change facts (`state.change_proposal.diff`, `state.change_proposal.linked_work_items`)
+
+Optional and added for
+[ADR 0112](../../../ADRs/0112-overlays-may-set-any-harness-field.md)'s routing; no v1
+adapter populates them yet. When known, adapters set
+`state.change_proposal.diff` (file count, additions, deletions and changed
+paths at `head_sha`, with `paths_complete` false when the forge truncated the
+list, in which case a check for a path's absence should treat it as unknown)
+and `linked_work_items` (each linked work item's id, optional key, state and
+labels).
+Harness `trigger` and `overlays:` expressions may read them, for example to
+route `model` and `effort` per task; they are untrusted (see below)
+([ADR 0112](../../../ADRs/0112-overlays-may-set-any-harness-field.md)). A
+`trigger` that reads them lets the change's author decide whether a harness
+runs, so security-relevant harnesses shouldn't trigger on them.
+
+### Trusted fields
+
+A field is **trusted** when neither the change's or entity's author nor an
+actor below the permission level [ADR 0054](../../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)
+requires can choose its value beyond what their permission already allows
+(for example, only an author with write access can make `is_fork` false). An
+overlay that sets a guarded harness field may read only these fields, `runtime.forge` and `config`
+([ADR 0112](../../../ADRs/0112-overlays-may-set-any-harness-field.md)):
+
+- `repo`
+- `source.system`, and `entity.source.system` in the entity context of
+  [ADR 0098](../../../ADRs/0098-entity-first-harness-evaluation.md)
+- `actor.role`
+- `state.change_proposal.base_repo` and `is_fork`
+
+Every other field, including a field added to this schema later, is untrusted
+until it is listed here. For example `transition.comment` (its `body`,
+`command` and `instruction` all come from the comment text), the action fields
+(`transition.kind`, `source.raw_type`, `source.raw_action`, `entity.kind`),
+`actor.kind` (some adapters infer it from a display name),
+`actor.is_entity_author` (the author makes it true by acting), `state.labels`,
+`base_ref` (the author picks the target branch), `head_*` and the change facts
+are untrusted. A guarded overlay may test `has()` only on objects the schema
+always requires, such as `source`; reading `is_fork` when there is no change
+proposal is simply no match. `actor.role` says who triggered the event, not
+who wrote the change, so an overlay that loosens a guarded value on a change
+proposal should also require `!state.change_proposal.is_fork`.
 
 ## CEL trigger examples
 
@@ -209,11 +305,16 @@ event.entity.kind == "conversation"
   && event.state.conversation.category.slug == "vouch-request"
 ```
 
-See [`examples/`](examples/) for matching `NormalizedEvent` fixtures.
+See [`examples/`](examples/) for matching `NormalizedEvent` fixtures. The
+existing top-level fixtures retain the legacy v1 representation; target
+fixtures for ADR 0107 are under
+[`examples/adr-0107/`](examples/adr-0107/).
 
 ## Examples
 
-See [`examples/`](examples/).
+See [`examples/`](examples/). The `examples/adr-0107/` subdirectory contains
+target representations and is not emitted until an adapter adopts the ADR 0107
+target implementation.
 
 ## Execution ref projection
 
@@ -306,7 +407,7 @@ GitLab is a normative v1 source system ([gitlab-implementation.md](../../../prob
 
 | Concern | Mapping |
 |---------|---------|
-| Input driver | `gitlab-poll` (production, cron-polled; [ADR 0067](../../../ADRs/0067-gitlab-cron-polling-event-dispatch.md)) and `gitlab-webhook` (planned fast-path from the file `TRIGGER_PAYLOAD` points to, re-fetched with a `CI_JOB_TOKEN`-pinned project identity — host/base-URL pin still open — and fail-closed on mismatch; see the Adapters table above; [ADR 0125](../../../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md)) |
+| Input driver | `gitlab-poll` (production, cron-polled; [ADR 0067](../../../ADRs/0067-gitlab-cron-polling-event-dispatch.md)) and `gitlab-webhook` (fast-path, provisioned at install time behind readiness gates, with live-GitLab validation still outstanding, from the file `TRIGGER_PAYLOAD` points to, re-fetched with a `CI_JOB_TOKEN`-pinned project identity — host/base-URL pin still open — and fail-closed on mismatch; see the Adapters table above; [ADR 0125](../../../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md)) |
 | `source.system` | `gitlab` |
 | `repo` slug | Nested group path (`group/subgroup/project`) — `repo_path` pattern supports multi-segment paths |
 | MR events | Cron-polled MR → `entity.kind: change_proposal` (native `merge_request_event` dispatch removed in [#7322](https://github.com/fullsend-ai/fullsend/issues/7322); see [ADR 0067](../../../ADRs/0067-gitlab-cron-polling-event-dispatch.md)) |
@@ -315,6 +416,7 @@ GitLab is a normative v1 source system ([gitlab-implementation.md](../../../prob
 | MR closed (unmerged) | Cron poll (`closed_at` > watermark, `merged_at` empty) → `transition.kind: closed` (retro) |
 | Notes | `note` → `transition.kind: comment_added` |
 | Role mapping | Guest→`read`, Reporter→`triage`, Developer→`write`, Maintainer→`maintain`, Owner→`admin` |
+| Bot identity | GitLab provider metadata may classify project-token actors as bots, but bot classification alone does not provide the registered `bot_role` required for non-label bot dispatch; an equivalent provider lookup is required. |
 
 The MR/note rows above are the **cron-poll** watermark mappings. The webhook
 fast-path derives the transition from the payload action instead of a
@@ -341,6 +443,30 @@ mapped:
 | `issue` | `close` | `closed` | issue exists and `state == "closed"` |
 | `issue` | `update` + `changes.labels` | `label_changed` (one per label diffed) | each named label present (add) / absent (remove) as claimed |
 | `issue` | `update` (other) | — | **uncheckable as a unit → MUST fail closed** |
+
+**Dispatch stack and implementation status.** The webhook event builder
+(`BuildWebhookEvents` in `internal/poll/webhook.go`, [#7770](https://github.com/fullsend-ai/fullsend/issues/7770))
+reuses the **poll** stack (`RoutableEvent` → `toNormalizedEvent` →
+`dispatch.HarnessRouter` → the ADR 0131 signed pipeline-input dispatch), not
+the CEL spine over `normevent.Event`. That way the fast-path and the poller
+backstop share one authorization gate, one `RoutableEvent.Key()`
+deduplication scheme, and one launch transport. A `dispatch.NormalizedEvent`
+→ `normevent.Event` bridge belongs to any later work that moves GitLab onto
+the CEL spine. The builder only takes the project from its caller-pinned
+client, so the base-URL and `CI_JOB_TOKEN` identity-pin requirements above
+fall on the driver that wires it in ([#7773](https://github.com/fullsend-ai/fullsend/issues/7773)).
+That driver MUST NOT ship until those residuals close. Current builder
+behavior, all of it fail-closed:
+
+- Rows whose actor has no event-time evidence in the re-fetch are rejected:
+  `merge_request`/`reopen` and `issue`/`reopen`, which need resource state
+  events.
+- `merge_request` + `changes.labels` is rejected because the poll stack has
+  no MR label transition.
+- Label removals are validated and then dropped, because the poll stack
+  routes only label additions.
+- Every re-fetched event time must fall within a 30-minute window. This
+  narrows replay but does not close it.
 
 The `MUST fail closed` cells above have **no implementer-defined extension
 point**: an `update` action that is not resolved by a row in this table MUST

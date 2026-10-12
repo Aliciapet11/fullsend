@@ -41,6 +41,10 @@ feature that consumes it.
 
 When a CLI change makes an ADR's decision obsolete, write a **new ADR** that supersedes the old one rather than editing the original decision text. Minor annotations (status updates, "see also" links) are welcome — see [ADR conventions](adrs.md) for the full rules.
 
+## Heading anchors
+
+Heading anchors on the docs site follow GitHub's slug rules (for example `## 4. Next step` is `#4-next-step`), so a link that lychee (`make lint-md-links`) accepts also works on the site.
+
 ## Cross-reference by command group
 
 Each row lists the documentation touchpoints for a major CLI command group. The **Go source** column is where inline `Short`/`Long` help text lives.
@@ -56,7 +60,7 @@ Each row lists the documentation touchpoints for a major CLI command group. The 
 
 ### `admin foreign`
 
-The `admin` command group's `install`/`uninstall`/`analyze`/`enable`/`disable` subcommands are deprecated per-org installation tooling ([ADR-0044](../ADRs/0044-deprecate-per-org-installation-mode.md)). The actively supported subcommand is `admin foreign` (cross-org mint-authorization allow-list).
+The `admin` command group's `uninstall`/`analyze`/`enable`/`disable` subcommands were removed with per-org installation ([ADR-0044](../ADRs/0044-deprecate-per-org-installation-mode.md)); `admin install` remains as repository-only (`<owner/repo>`) installation. The other actively supported subcommand is `admin foreign` (cross-org mint-authorization allow-list).
 
 | Category | Files |
 |----------|-------|
@@ -79,7 +83,7 @@ The `admin` command group's `install`/`uninstall`/`analyze`/`enable`/`disable` s
 | Category | Files |
 |----------|-------|
 | CLI reference | `docs/cli/inference.md` |
-| Guides | `docs/guides/getting-started/getting-inference.md`, `docs/guides/getting-started/operations.md`, `docs/guides/dev/cli-internals.md` |
+| Guides | `docs/guides/getting-started/getting-inference.md`, `docs/guides/user/inference-gateway.md`, `docs/guides/getting-started/operations.md`, `docs/guides/dev/cli-internals.md` |
 | Go source | `internal/cli/inference.go` |
 
 ### `mint`
@@ -87,7 +91,7 @@ The `admin` command group's `install`/`uninstall`/`analyze`/`enable`/`disable` s
 | Category | Files |
 |----------|-------|
 | CLI reference | `docs/cli/mint.md` |
-| Guides | `docs/guides/getting-started/operations.md`, `docs/guides/getting-started/org-mode.md`, `docs/guides/infrastructure/mint-administration.md`, `docs/guides/infrastructure/infrastructure-reference.md`, `docs/guides/infrastructure/advanced-setup.md`, `docs/guides/infrastructure/standalone-mint.md`, `docs/guides/dev/cli-internals.md` |
+| Guides | `docs/guides/getting-started/operations.md`, `docs/guides/infrastructure/mint-administration.md`, `docs/guides/infrastructure/infrastructure-reference.md`, `docs/guides/infrastructure/advanced-setup.md`, `docs/guides/infrastructure/standalone-mint.md`, `docs/guides/dev/cli-internals.md` |
 | ADRs | `docs/ADRs/0059-public-mint-mode-with-wildcard-allowlists.md`, `docs/ADRs/0060-cross-org-mint-authorization-via-org-variables.md`, `docs/ADRs/0073-named-mint-privilege-levels.md`, `docs/ADRs/0077-mint-repos-scope-hardening.md`, `docs/ADRs/0078-simplified-mint-authorization-policy.md`, `docs/ADRs/0082-workflow-host-allow-list.md` |
 | Go source | `internal/cli/mint.go`, `internal/cli/mint_setup.go`, `internal/cli/mint_delete.go`, `internal/cli/minttoken.go` |
 
@@ -122,6 +126,6 @@ The `admin` command group's `install`/`uninstall`/`analyze`/`enable`/`disable` s
 
 The commands below have lighter documentation footprints. Apply the general `grep` rule when changing them:
 
-`dispatch`, `scan`, `lock`, `poll`, `fetch-skill`, `post-review`, `post-comment`, `reconcile-status`, `resolve-mr-source`
+`dispatch`, `scan`, `lock`, `poll`, `fetch-skill`, `fetch-review-threads`, `post-review`, `post-comment`, `reconcile-status`, `resolve-mr-source`, `check-protected-branch`
 
 The most comprehensive single reference for all commands (including minor ones) is `docs/guides/dev/cli-internals.md`, which documents the full command tree with flags.

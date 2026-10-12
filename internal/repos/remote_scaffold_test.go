@@ -17,6 +17,11 @@ func TestFetchRemoteScaffold_GitLab(t *testing.T) {
 
 	for _, sp := range scaffoldGitLabPaths {
 		content := "---\n__AGENT_RUNNER_TAGS__\n__CONTROL_RUNNER_TAGS__\nVERSION=\"__FULLSEND_VERSION__\"\n"
+		if sp.outPath == fullsendPipelineInclude {
+			// A wrapper that includes the dispatcher template requires
+			// the dispatcher files to be fetched too.
+			content += "# include: " + fullsendDispatcherTemplatePath + "\n"
+		}
 		fc.FileContentsRef[shimOwner+"/"+shimRepo+"/"+sp.repoPath+"@"+ref] = []byte(content)
 	}
 
@@ -64,6 +69,85 @@ func TestFetchRemoteScaffold_GitLab(t *testing.T) {
 	}
 }
 
+// A pin that predates the webhook dispatcher ships neither dispatcher file
+// and its wrapper does not include the template; the fetch must succeed and
+// must not synthesize them.
+func TestFetchRemoteScaffold_GitLab_PreDispatcherPin(t *testing.T) {
+	fc := forge.NewFakeClient()
+	ref := "v0.30.0"
+	sha := "deadbeef1234567890abcdef1234567890abcdef"
+
+	for _, sp := range scaffoldGitLabPaths {
+		if slices.Contains(gitlabDispatcherPaths(), sp.outPath) {
+			continue
+		}
+		fc.FileContentsRef[shimOwner+"/"+shimRepo+"/"+sp.repoPath+"@"+ref] = []byte("---\n# pre-dispatcher\n")
+	}
+
+	files, err := FetchRemoteScaffold(context.Background(), fc, ref, sha, ForgeGitLab, nil, nil, false)
+	if err != nil {
+		t.Fatalf("FetchRemoteScaffold() error for pre-dispatcher pin: %v", err)
+	}
+	if want := len(scaffoldGitLabPaths) - len(gitlabDispatcherPaths()); len(files) != want {
+		t.Fatalf("expected %d files, got %d", want, len(files))
+	}
+	for _, f := range files {
+		if slices.Contains(gitlabDispatcherPaths(), f.Path) {
+			t.Errorf("pre-dispatcher pin must not produce %s", f.Path)
+		}
+	}
+}
+
+// A wrapper that includes the dispatcher template requires both dispatcher
+// files; a missing one fails the fetch instead of installing a broken include.
+func TestFetchRemoteScaffold_GitLab_DispatcherReferencedButMissing(t *testing.T) {
+	fc := forge.NewFakeClient()
+	ref := "v0.40.0"
+	sha := "deadbeef1234567890abcdef1234567890abcdef"
+
+	for _, sp := range scaffoldGitLabPaths {
+		if sp.outPath == gitlabDispatcherJobScriptPath {
+			continue
+		}
+		content := "---\n"
+		if sp.outPath == fullsendPipelineInclude {
+			content += "# include: " + fullsendDispatcherTemplatePath + "\n"
+		}
+		fc.FileContentsRef[shimOwner+"/"+shimRepo+"/"+sp.repoPath+"@"+ref] = []byte(content)
+	}
+
+	if _, err := FetchRemoteScaffold(context.Background(), fc, ref, sha, ForgeGitLab, nil, nil, false); err == nil {
+		t.Fatal("expected error when the wrapper references the dispatcher but its script is missing")
+	}
+}
+
+func TestGitLabScaffoldListsIncludePinCIJobIdentityScript(t *testing.T) {
+	files, err := scaffold.CollectGitLabPerRepoInstallFiles(nil, nil, "", "")
+	if err != nil {
+		t.Fatalf("CollectGitLabPerRepoInstallFiles() error: %v", err)
+	}
+	found := false
+	for _, f := range files {
+		if f.Path == gitlabPinCIJobIdentityScriptPath {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("embedded GitLab install files missing pin-ci-job-identity.sh")
+	}
+	remoteFound := false
+	for _, sp := range scaffoldGitLabPaths {
+		if sp.outPath == gitlabPinCIJobIdentityScriptPath {
+			remoteFound = true
+			break
+		}
+	}
+	if !remoteFound {
+		t.Error("scaffoldGitLabPaths missing pin-ci-job-identity.sh")
+	}
+}
+
 func TestGitLabScaffoldListsIncludeTrustScript(t *testing.T) {
 	files, err := scaffold.CollectGitLabPerRepoInstallFiles(nil, nil, "", "")
 	if err != nil {
@@ -82,6 +166,8 @@ func TestGitLabScaffoldListsIncludeTrustScript(t *testing.T) {
 	for _, yamlPath := range []string{
 		".gitlab/ci/fullsend-poll.yml",
 		".gitlab/ci/fullsend-agent.yml",
+		fullsendDispatcherTemplatePath,
+		gitlabDispatcherJobScriptPath,
 	} {
 		if !installPaths[yamlPath] {
 			t.Fatalf("embedded GitLab install files missing %s", yamlPath)
@@ -245,10 +331,10 @@ func TestFetchRemoteScaffold_GitHub_IncludesThinCallers(t *testing.T) {
 		}
 		content := string(files[i+1].Content)
 		if !strings.Contains(content, "install_mode: per-repo") {
-			t.Errorf("thin caller %s should have install_mode: per-repo, got:\n%s", tcPath, content)
+			t.Errorf("thin caller %s should normalize legacy install_mode, got:\n%s", tcPath, content)
 		}
 		if strings.Contains(content, "install_mode: per-org") {
-			t.Errorf("thin caller %s should not have install_mode: per-org", tcPath)
+			t.Errorf("thin caller %s should not retain per-org install_mode, got:\n%s", tcPath, content)
 		}
 	}
 }

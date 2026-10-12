@@ -84,6 +84,20 @@ func ValidateSlotClean(w *world.World) error {
 func CleanupScenario(w *world.World) {
 	ctx := context.Background()
 
+	// --- Inference gateway config cleanup ---
+	// Restore the pre-scenario config.yaml first, while the leased repo
+	// still exists (suite.afterScenario deallocates it after this returns).
+	if err := cleanupRetry(w.Logf, "restore config after inference gateway scenario", func() error {
+		return restoreGatewayConfig(w)
+	}); err != nil {
+		worldLogf(w, "behaviour cleanup: restore config after inference gateway scenario: %v", err)
+	}
+	if err := cleanupRetry(w.Logf, "delete inference gateway api-key secret", func() error {
+		return deleteGatewayAPIKeySecret(w)
+	}); err != nil {
+		worldLogf(w, "behaviour cleanup: delete inference gateway api-key secret: %v", err)
+	}
+
 	// --- Issue / PR cleanup ---
 	if w.IssueNumber > 0 {
 		desc := fmt.Sprintf("close issue #%d", w.IssueNumber)
@@ -174,20 +188,30 @@ func CleanupScenario(w *world.World) {
 	// deleting the fork repo removes the branch implicitly, but we
 	// still attempt branch deletion first so partial failures leave
 	// less debris.
+	//
+	// DeleteRepo success (and a subsequent GetRepo 404) does not mean
+	// GitHub has released the name. Uniqueness can lag; givenFork
+	// retries CreateFork on 403 "Name already exists on this account"
+	// rather than polling here, because 404 is not a sufficient signal.
+	//
+	// A fork owned by a test actor (givenActorFork) lives in that
+	// actor's account, so fork-side deletes go through forkSCM, and it
+	// usually shares the base repo's name — the guard compares owner
+	// and name together so it still protects only the base repo.
 	if w.ForkPRBranch != "" && w.ForkOwner != "" && w.ForkRepo != "" {
 		desc := fmt.Sprintf("delete fork branch %s", w.ForkPRBranch)
 		if err := cleanupRetry(w.Logf, desc, func() error {
-			return w.SCM.DeleteBranch(ctx, w.ForkOwner, w.ForkRepo, w.ForkPRBranch)
+			return forkSCM(w).DeleteBranch(ctx, w.ForkOwner, w.ForkRepo, w.ForkPRBranch)
 		}); err != nil {
 			if !forge.IsNotFound(err) {
 				worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
 			}
 		}
 	}
-	if w.ForkOwner != "" && w.ForkRepo != "" && w.ForkRepo != w.RepoName {
+	if w.ForkOwner != "" && w.ForkRepo != "" && (w.ForkOwner != w.RepoOwner || w.ForkRepo != w.RepoName) {
 		desc := fmt.Sprintf("delete fork repo %s/%s", w.ForkOwner, w.ForkRepo)
 		if err := cleanupRetry(w.Logf, desc, func() error {
-			return w.SCM.DeleteRepo(ctx, w.ForkOwner, w.ForkRepo)
+			return forkSCM(w).DeleteRepo(ctx, w.ForkOwner, w.ForkRepo)
 		}); err != nil {
 			if !forge.IsNotFound(err) {
 				worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
@@ -224,6 +248,18 @@ func CleanupScenario(w *world.World) {
 	if w.ArtifactDir != "" && shouldRemoveArtifactDir(w.ArtifactDir, os.Getenv("BEHAVIOUR_ARTIFACT_DIR")) {
 		if err := os.RemoveAll(w.ArtifactDir); err != nil {
 			worldLogf(w, "behaviour cleanup: remove artifact dir: %v", err)
+		}
+	}
+	// A playback scenario's per-round artifact directories
+	// (HarnessRunArtifactDirs, playback.go) are cached separately from
+	// ArtifactDir above and include it, so clean up any not already
+	// removed. os.RemoveAll is idempotent on an already-removed path.
+	for _, dir := range w.HarnessRunArtifactDirs {
+		if dir == "" || !shouldRemoveArtifactDir(dir, os.Getenv("BEHAVIOUR_ARTIFACT_DIR")) {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			worldLogf(w, "behaviour cleanup: remove round artifact dir: %v", err)
 		}
 	}
 

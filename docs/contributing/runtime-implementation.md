@@ -57,8 +57,8 @@ content that must be updated whenever a runtime is added or renamed.
 **Tests:**
 
 - [ ] `internal/runtime/registry_test.go` — add a `Resolve("<name>")`
-  assertion block to `TestResolve` (and to `TestResolveFromConfig` /
-  `TestResolveFromPerRepoConfig` if the runtime is user-selectable).
+  assertion block to `TestResolve` (and to `TestResolveFromPerRepoConfig`
+  if the runtime is user-selectable).
 - [ ] `internal/config/config_test.go` — update any assertion on
   `ValidRuntimes()` to include the new name.
 
@@ -183,12 +183,14 @@ Harness `security.fail_mode` controls whether critical findings **block** the ru
 | Interface | Responsibility |
 |-----------|----------------|
 | `runtime.Runtime` | Name, config dir, env exports, bootstrap, run loop, per-iteration cleanup, user processes cleanup |
-| `runtime.BootstrapInput` | Portable agent name/path, skill dirs, declared plugins (`Plugins() []PluginInput` — name, host path, format kind, env, pi args; ADR 0094) to upload, and the per-repo model alias overrides (`ModelAliases() map[string]string`, from `models.aliases`; nil when the repo sets none). A runtime loads the entries whose `Kind` it reads and must warn and skip the rest, never drop them silently, and the agent's per-persona sub-agent model map (`AgentSubagents() map[string]*string`, from `agents[].subagents`; a nil value is a tombstone; ADR 0104) |
+| `runtime.BootstrapInput` | Portable agent name/path, skill dirs, declared plugins (`Plugins() []PluginInput` — name, host path, format kind, env, pi args; ADR 0094) to upload, and the per-repo model alias overrides (`ModelAliases() map[string]string`, from `models.aliases`; nil when the repo sets none). A runtime loads the entries whose `Kind` it reads and must warn and skip the rest, never drop them silently, and the agent's per-persona sub-agent model map (`AgentSubagents() map[string]*string`, from `agents[].subagents`; a nil value is a tombstone; ADR 0104), the parent's resolved model (`ParentModel() string`), and whether the run-scoped OpenAI provider was attached (`OpenAIProviderAttached() bool`). pi admits a configured child's `openai/` model only when that is true, because `OPENAI_API_KEY` is in the sandbox only then (#7981) |
 | `runtime.SandboxHooksBootstrap` | Optional `BootstrapInput` extension — runtime-neutral sandbox tool hook config (`security.SandboxHookConfig`); every runtime should honour it |
 | `runtime.TranscriptHandler` | Extract transcripts/debug logs; parse errors for CI annotations |
 | `runtime.DebugLogNamer` | Optional — names the per-iteration debug-log artifact (default `agent-debug.log`) |
 | `runtime.ContextBridger` | Optional — runtime auto-loads only `CLAUDE.md`, so the runner injects a `CLAUDE.md`→`AGENTS.md` pointer (Claude Code: yes; runtimes that read `AGENTS.md` natively: omit) |
-| `runtime.OpenAICredentialSeeder` | Optional — for a runtime that reaches OpenAI through the run-scoped provider (ADR 0092): names the in-sandbox credential file the agent re-reads per request and the `sh` fragment that writes the current placeholder into it, so a mid-run credential refresh reaches the running process. Omit when the runtime has no OpenAI path; a stub returning `""` means "no re-seed" and the provider is still created and refreshed |
+| `runtime.OpenAICredentialSeeder` | Optional — for a runtime that reaches OpenAI through the run-scoped provider (ADR 0092): names the in-sandbox credential file the agent re-reads per request and the `sh` fragment that writes the current placeholder into it, so a mid-run credential refresh reaches the running process. Write the file through `orderedSeedWrite`, so an iteration-start seed holding an older placeholder cannot replace a newer one the runner re-seeded (#8311). Omit when the runtime has no OpenAI path; a stub returning `""` means "no re-seed" and the provider is still created and refreshed |
+| `runtime.GatewayRouteRuntime` | Optional — for a runtime that carries the inference gateway route (ADR 0137). `PrepareGatewayRun(sandboxName, GatewayRun)` receives the resolved `inference.gateway` block, the committed `models_file` bytes and the gateway base URL before Bootstrap, and `ClearGatewayRun` releases it at the end of the run. `GatewayCredentialSeed() CredentialSeed` names the route's placeholder env key, `sh` seed fragment and credential file, which the runner re-runs after each token refresh, independently of the OpenAI route's seed (`OpenAIRouteSeed`). pi, codex and Claude Code implement it. pi and Claude Code read the placeholder before the agent-writable `.env` and own the route's environment after it. pi, and Claude Code in the `oidc` mode, seed the placeholder into a token file with the shared `gatewayTokenSeed`, and codex with its own seed; both write through `orderedSeedWrite`; Claude Code in the `api-key` mode writes no token file: it captures the placeholder in a readonly shell variable and exports it as `ANTHROPIC_AUTH_TOKEN` after `.env`. Claude Code ignores the block's model list, and its `GatewayRun` registration also feeds its `--settings` document: the route pins and the helper, merged with the hooks and passed inline on gateway runs, never as the uploaded `hooks.json` path. The runner refuses a `gateway/` model on a runtime that does not implement it |
+
 | `runtime.ProviderResolver` | Optional — multi-provider runtimes return the OTEL GenAI serving-endpoint identity for the model the run will call (`ProviderFor`). The runner writes it as both `gen_ai.system` and `gen_ai.provider.name`. Single-vendor runtimes omit this and `GenAISystemFor` falls back to `System()` |
 
 **Per-iteration cleanup contract.** When a validation retry reuses the sandbox, the runner calls `ClearIterationArtifacts` before the next iteration. Every runtime runs the shared `clearStrayProcesses` sweep first (it terminates the processes the previous iteration left running as the sandbox user, sparing the exec channel and the `sandbox.KeepAliveCommand` main process), then deletes the iteration's output, sessions and debug log. A failed sweep is reported as a warning and never fails the iteration. The runner holds its sandbox lock (`withSandboxLock` in `internal/cli/run.go`) across the call so the credential refreshers' uploads are never killed mid-write. The same sweep runs as `TerminateStrayProcesses` right after an iteration ends at its budget: OpenShell's exec timeout drops the relay but leaves the agent's processes running, and a killed iteration is not followed by another `ClearIterationArtifacts` (see [`fullsend run` § Budget and deadline](../cli/run.md#budget-and-deadline)).
@@ -354,6 +356,7 @@ Two traps when reproducing by hand:
 |----------|---------|-----------|
 | `TIRITH_FAIL_ON`, `TIRITH_REQUIRED` | `tirith_check.py` | written by `appendHookEnv`; `TIRITH_REQUIRED=1` turns the fail-open into fail-closed |
 | `FULLSEND_EGRESS_ALLOWLIST` | `ssrf_pretool.py` | comma-separated `host:port` entries; supports exact hostnames and leading-wildcard patterns (e.g. `*.example.com:443`) matched by domain-anchored suffix comparison — bare `*`, mid-string globs, and single-label TLD wildcards (e.g. `*.com`) are rejected with a warning on stderr; the rejection check requires >= 2 dots in the full pattern (e.g. `*.com` has 1 dot and is rejected, `*.example.com` has 2 and is accepted), so multi-label public suffixes (e.g. `*.co.uk`, `*.github.io`) also have 2 dots, pass the check, and are accepted — this is an accepted residual risk since the allowlist is operator-controlled config, not attacker input, and the L7 proxy remains the primary SSRF enforcement boundary; on DNS failure the hook defers to the L7 proxy for allowlisted hosts instead of failing closed; if DNS succeeds but resolves to a blocked IP, the allowlist is not consulted |
+| `OPENSHELL_SANDBOX` | `ssrf_pretool.py` | set by OpenShell, not `appendHookEnv`. When non-empty and `policy.local` resolves to `198.18.0.1` (policy DNS is answering), a host name whose every DNS answer is in `198.18.0.0/15` is allowed, and the supervisor enforces the real destination on connect. IP literals in any spelling, blocked hostnames, `policy.local` and the host-gateway names are still checked. Clearing the variable only turns this off |
 | `FULLSEND_TOOL_ALLOWLIST` | `tool_allowlist_pretool.py` | fail-closed when unset |
 | `FULLSEND_CANARY_TOKEN` | both canary hooks | no-ops when empty; supply it via harness `env.sandbox`/`host_files` |
 | `FULLSEND_TRACE_ID` | all scripts | correlates findings with the run |
@@ -382,10 +385,11 @@ Net: after #6358 and #6357, both PreToolUse and PostToolUse halves of the contra
 
 | Binary | Pin | Re-check on bump |
 |--------|-----|------------------|
-| Claude Code | `ARG CLAUDE_CODE_VERSION` (npm, Renovate-tracked). The OpenShell base image ships its **own** unpinned Claude Code at `/usr/local/bin/claude` (whatever `curl claude.ai/install.sh` fetched when the base was built), and `/usr/local/bin` precedes npm's `/usr/bin` on the sandbox `PATH` — so the Containerfile replaces that file with a symlink to the npm install and fails the build unless `claude --version` equals the pin (#6612; before that fix the base image's 2.1.156 shadowed every pin). `TestSandboxImageClaudeCodePinWins` guards the step | the [tool-name vocabulary](#tool-name-vocabulary-608); the hook contract caveats above; the alias table — on Vertex, `opus`/`sonnet`/`haiku` resolve from the running CLI's default table, which `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` steers for the main model and for sub-agents (Agent-tool `model` argument and frontmatter alike); the fleet sets the sonnet pin in fullsend-ai/agents `env/gcp-vertex.env`. A harness or `agents:` entry that needs a specific generation can still name the id. Per-repo `models.aliases` remaps only the parent `--model` ([Claude Code](../runtimes/claude.md) already documents this) and sub-agents follow the env variable until #7031 makes persona models runner-resolved |
+| Claude Code | `ARG CLAUDE_CODE_VERSION` (npm, Renovate-tracked). The OpenShell base image ships its **own** unpinned Claude Code at `/usr/local/bin/claude` (whatever `curl claude.ai/install.sh` fetched when the base was built), and `/usr/local/bin` precedes npm's `/usr/bin` on the sandbox `PATH` — so the Containerfile replaces that file with a symlink to the npm install and fails the build unless `claude --version` equals the pin (#6612; before that fix the base image's 2.1.156 shadowed every pin). `TestSandboxImageClaudeCodePinWins` guards the step | the [tool-name vocabulary](#tool-name-vocabulary-608); the hook contract caveats above; the alias table — on Vertex, `opus`/`sonnet`/`haiku` resolve from the running CLI's default table, which `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` steers for the main model and for sub-agents (Agent-tool `model` argument and frontmatter alike); the fleet sets the sonnet pin in fullsend-ai/agents `env/gcp-vertex.env`. A harness or `agents:` entry that needs a specific generation can still name the id. Per-repo `models.aliases` remaps only the parent `--model` ([Claude Code](../runtimes/claude.md) already documents this) and sub-agents follow the env variable until #7031 makes persona models runner-resolved; the inference gateway route's `apiKeyHelper` rules ([Claude Code § Inference gateway route](../runtimes/claude.md#inference-gateway-route)): which headers carry the helper value, when the cache is re-read (TTL, 401/403), that `""` in `--settings` overrides a project helper and project `env`, and that a 500 is not re-read |
 | pi | `ARG PI_VERSION` (npm, `--ignore-scripts`, Renovate-tracked; `TestSandboxImagePinsAreRenovateTracked`) | `parsePiStream` fixtures (`internal/runtime/testdata/pi/regen.sh`); the extension compatibility notes in [pi runtime internals](#pi-runtime-internals-6464); `piGoogleVertexModels` in `pi_bootstrap.go`, which is the bundled `google-vertex` catalog verbatim and is what the `Agent` tool accepts as a Gemini id — diff `dist/providers/data/google-vertex.json` between the old and new pin, not the generated wrapper, and add any new id; a missed entry makes the `Agent` tool reject a model the running pi serves. `internal/runtime/testdata/pi/check-vertex-catalog.sh` runs exactly that diff against the pinned `PI_VERSION`; the `retry` keys `piSettingsJSON` writes (`core/settings-manager.ts`) and the provider backoff they drive (pi-ai `utils/provider-retry.ts`), see #7191; the edit-repair stopgap, whose removal check is the comment above `ARG PI_VERSION` |
 | `pi-anthropic-vertex` | `ARG PI_ANTHROPIC_VERTEX_VERSION` + tarball SHA256, under `/usr/local/share/pi-extensions/anthropic-vertex` | the extension's own CI matrix (pinned `PI_VERSION` + latest pi); no compat file or SDK override to check |
 | `pi-xai-vertex` | `ARG PI_XAI_VERTEX_VERSION` + tarball SHA256, under `/usr/local/share/pi-extensions/xai-vertex` | its `peerDependencies` floor (it mirrors no pi internals; declared only — `--omit=peer` never installs it); `piXaiVertexModels` in `pi_bootstrap.go`, the ids it registers and what the `Agent` tool accepts as a Grok id |
+| `pi-inference-gateway` | `ARG PI_INFERENCE_GATEWAY_VERSION` + tarball SHA256, under `/usr/local/share/pi-extensions/inference-gateway` (no runtime dependencies, so no `npm ci`). Loaded when `run.go` registers a gateway run for a `gateway/` model (`PrepareGatewayRun`, which calls `SetPiGatewayRun`): the run then gets the `-e` load, the `INFERENCE_GATEWAY_*` clear, the `inference-gateway.json` guard (with the Agent extension's per-dispatch re-check of it) and `INFERENCE_GATEWAY_CONFIG_FILE` (v0.1.2 and later), which names the one config file the extension reads, so no other config-dir file or overlay is read | the extension's own CI matrix (pinned `PI_VERSION` + latest pi) |
 | Codex | `ARG CODEX_VERSION` (npm, Renovate-tracked; `TestSandboxImagePinsAreRenovateTracked`). The OpenShell base image already installs `@openai/codex` under the same npm prefix (`/usr`, binary `/usr/bin/codex`) — 0.117.0 on the base pinned today — so the pinned install replaces it in place. `/usr/local/bin/codex` is then symlinked at the npm install and the build fails unless `codex --version` reports `codex-cli <pin>`: nothing shadows the pin there today, and the symlink plus assertion make sure nothing can start to, the way the base image's Claude Code did in #6612. `TestSandboxImageCodexPinWins` guards the step | the codex stream parser fixtures (#6920); the JSONL event and hook wire shapes the codex runtime depends on |
 
 The run log's `Agent: <model> (vX.Y.Z)` line is the ground truth for which Claude Code version served a run; the Containerfile pin is a claim, the assertion at build time is what makes it true.
@@ -462,6 +466,13 @@ The sandbox has two key directories that map to Claude Code's config levels (plu
     ├── .env                            Environment variables (sourced before claude)
     ├── .env.d/                         Additional env files (host_files expand)
     │
+    │   claude is resolved on PATH before .env and launched by that path
+    │   (FULLSEND_CLAUDE_BIN), like codex and pi. .env puts workspace/bin
+    │   last on PATH and restores the runner's PATH in front after .env.d
+    │   (what claude and pi run under; codex restores its pre-.env PATH);
+    │   host_files may only target /sandbox/ or /tmp/ and not the runner's
+    │   paths (harness.ValidateHostFileDest).
+    │
     └── <repo-name>/                 ← Claude Code's working directory (cd target)
         ├── CLAUDE.md                   Project instructions (repo's own or injected bridge)
         ├── AGENTS.md                   Project rules (repo's own or org default injected)
@@ -506,8 +517,8 @@ slots:
 
 `run.go` step 8a (`hasAgentsMD()` / `injectClaudeMDPointer()`):
 
-1. If target repo has no AGENTS.md → inject org-level default from config repo,
-   add to `.git/info/exclude`
+1. If target repo has no AGENTS.md → inject the fallback `AGENTS.md` from the
+   configured fullsend content directory, add to `.git/info/exclude`
 2. If the runtime implements `ContextBridger` (Claude Code does), target
    repo has AGENTS.md but no CLAUDE.md → inject bridge CLAUDE.md pointing to
    AGENTS.md, add to `.git/info/exclude`
@@ -530,7 +541,7 @@ Critical findings block the run in `fail_mode: closed`.
 
 ## Dummy runtime operations
 
-The `dummy` runtime executes a YAML script of operations inside the real sandbox (behaviour tests only). Besides `write_fixture` and `fail`, dispatch behaviour tests use:
+The `dummy` runtime executes a YAML script of operations inside the real sandbox (behaviour tests only). Besides `write_fixture` and `fail`, behaviour tests can use:
 
 | Op | Args | Purpose |
 |----|------|---------|
@@ -541,7 +552,9 @@ The `dummy` runtime executes a YAML script of operations inside the real sandbox
 ## Dummy-playback runtime
 
 The `dummy-playback` runtime replays canned agent results from an ordered
-playlist without LLM inference (behaviour tests only). It reads
+playlist without LLM inference (behaviour tests only). The architectural
+decision is recorded in [ADR 0116](../ADRs/0116-dummy-playback-runtime.md).
+It reads
 `.fullsend/results/playlist.yaml`, serves the current entry's `result.json`
 to the sandbox output directory, copies companion files, and advances the
 playlist position.
@@ -568,18 +581,36 @@ treated as companion files:
 ### Playback comment tracking
 
 When a `.fullsend/playback-comment-url` file exists, the runtime reads the
-current playlist position from a forge comment (via `gh api` or `glab api`)
-instead of the local `playlist.yaml`. After serving a result, it updates the
-comment with the new position. The file format is `<cli>\n<api-path>` (e.g.
-`gh\n/repos/owner/repo/issues/comments/123`). Legacy single-line files
-default to `gh`.
+current playlist position from a forge comment through `RunParams.ForgeClient`
+instead of the local `playlist.yaml` — per the forge-abstraction rule, it
+never shells out to `gh`/`glab` itself. After serving a result, it updates
+the comment through the same client. The file format is `<cli>\n<api-path>`
+(e.g. `gh\n/repos/owner/repo/issues/comments/123` or
+`glab\n/projects/owner%2Frepo/merge_requests/7/notes/99`). Legacy
+single-line files default to `gh`.
+
+The API path is parsed into structured fields rather than replayed as a CLI
+argument: only the two known REST path shapes are accepted, and the owner
+and repository fields are restricted to the identifier charset GitHub/GitLab
+themselves allow. For GitLab, the noteable type (`issues` or
+`merge_requests`) and IID are also preserved and used to address the note
+directly through `forge.GitLabExtensions`, rather than through
+`GetIssueComment`/`UpdateIssueComment`'s bounded ID-only scan — a scan
+driven by the resolved client's own fixed noteable type, which cannot find
+a note whose actual parent differs from that type (e.g. an issue tracking
+reference during MR CI).
 
 ### Security
 
 - Path traversal: entry names are validated to stay within the results
   directory.
-- Argument injection: the `playback-comment-url` API path must start with `/`
-  to prevent flag injection into `gh`/`glab` CLI calls.
+- Request-target validation: the `playback-comment-url` API path must match
+  one of the two known REST path shapes exactly, and the owner/repository
+  fields may not contain URL delimiters, encoded separators, or control
+  characters — a looser pattern could redirect the request to a different
+  path or smuggle query data once interpolated back into a request path.
+  The GitHub client's comment-fetching and comment-updating methods also
+  percent-escape owner and repo as a second layer of defense.
 - Context propagation: forge API calls use `context.WithTimeout` to prevent
   indefinite blocking.
 
@@ -650,7 +681,7 @@ Parity with `claude -p --dangerously-skip-permissions`, verified against pi v0.8
   - `PI_CODING_AGENT_DIR/extensions/` is arbitrary TypeScript loaded at startup and the config dir is not a permission boundary, which is why only the explicit `-e` paths load (at most one vendored provider extension plus the hook adapter).
   - Right after `.env` is sourced, `Run` re-exports `EnvExports()` (`PI_CODING_AGENT_DIR`, the session dir, the offline switches) so a rewritten `.env` cannot relocate pi's config directory.
   - For the built-in `openai` provider (`openai/<id>`, [ADR 0092](../ADRs/0092-openai-wif-credential-delivery.md)) no extension loads and no `--api-key` is passed; `Run` instead seeds `auth.json` under `PI_CODING_AGENT_DIR` with the placeholder the sandbox environment carries for `OPENAI_API_KEY` (`PiOpenAIAuthSeed`, before `.env` is sourced), because pi re-reads that file on every revision change and resolves the key per request. The runner re-runs the same seed through `sandbox exec` after each credential refresh, which is what lets a running iteration follow a refresh on OpenShell 0.0.115, where a revision-scoped placeholder stays pinned to its generation and the unrevisioned alias is refused (`--api-key` would outrank the file and pin the iteration).
-  - `Run` unsets `OPENAI_BASE_URL`/`AZURE_OPENAI_API_KEY`/`OPENAI_API_KEY`/`NODE_OPTIONS`/`NODE_PATH` after `.env`, and fails the iteration with exit 1 when the environment holds anything but a gateway placeholder at seed time (before `.env`).
+  - `Run` unsets `OPENAI_BASE_URL`/`AZURE_OPENAI_API_KEY`/`OPENAI_API_KEY`/`NODE_OPTIONS`/`NODE_PATH` after `.env`, and fails the iteration with exit 91 (`piCredentialSeedFailedExit`) when the environment holds anything but a gateway placeholder at seed time (before `.env`).
   - A config-dir integrity guard exits 98 when `models.json` exists or `auth.json` is anything but pi's own `{}` or exactly the seeded placeholder entry — `models.json` is the only way to move the provider's base URL, a redirect to another allowed REST host is the placeholder-leak path ADR 0025 describes, and pi itself writes an empty `auth.json` on every start so only its content counts. The guard runs before the agent-writable `.env` is sourced and again after it behind `unset -f test command grep tr sed printf`, whether or not hooks are enabled.
   - When the agent's `tools:` allow sub-agents, `-e /sandbox/pi-config/fullsend-agent.js` is appended after the hook adapter and two more pre-`.env` guards join the block: the Agent extension must be byte-identical to the embedded copy (exit 94, its own code so `Run` names that extension rather than the hook adapter), and `fullsend-manifest.json` must be byte-identical to the one `Bootstrap` wrote (exit 95, re-checked after `.env` behind `unset -f test [ command sha256sum cut` — `[` is in that list because the guard uses it, and the sandbox's `sh` is dash, which accepts `unset -f [`). The digest is then exported as `FULLSEND_PI_MANIFEST_SHA256` so `fullsend-hooks.js` can re-verify the manifest whenever it loads, including inside a sub-agent started later in the iteration — see [Pi sub-agents](#pi-sub-agents-the-agent-tool-contract). Children are launched by that extension, not by `Run`: same flag set, prompt on stdin, own session dir, no `Agent` tool of their own.
   - When the agent's tools include `edit` (no `tools:` frontmatter, or a list naming `Edit`), `-e /sandbox/pi-config/fullsend-edit-repair.js` is appended after the Agent extension, before the declared extensions, with its own pre-`.env` guard (exit 93). It re-registers pi's own edit tool (`createEditToolDefinition`) with `prepareArguments` wrapped by `parseJsonWithRepair`, because pi rejects a stringified `edits` holding raw control characters, and an array of stringified items (earendil-works/pi#8521, #8962; 46 redone calls in one run, #7231). `tool_call` carries the prepared, validated arguments, so the hook adapter's PreToolUse scripts see the edits that are applied. The `edit` gate is a security boundary, not an optimisation: under `--no-builtin-tools` with no `--tools`, pi does not filter extension tools, so loading it there would grant `edit` to an agent that has none — which is why children get it from the manifest's `editRepairExtension`, added only when their `--tools` names `edit`, and never from the shared `extensions` list. It is a stopgap; the removal check is the comment above `ARG PI_VERSION`.
@@ -909,9 +940,10 @@ with `-e`, after the hook adapter — when the agent definition has no `tools:` 
 | `sessionsDir` | Parent's session dir; child `<seq>` gets `--session-dir <sessionsDir>/agent-<seq>` |
 | `extensions` | The `-e` list every child gets, in order: the vendored provider extensions actually present in the image (`test -d` at `Bootstrap`) then the hook adapter when security is on. Never `fullsend-agent.js` itself |
 | `extensionDigests` | SHA-256 (hex) of each child `-e` entry `Bootstrap` itself wrote under the config dir — the hook adapter and the edit-repair extension, the same bytes their launch guards check. Re-hashed before every dispatch; a mismatch refuses the dispatch naming the file. The vendored provider extensions are absent on purpose: root-owned and read-only in the image, outside anything the agent can write. Omitted when neither applies (hooks off and no `edit` tool) |
+| `gatewayConfigDigest` | SHA-256 (hex) of the `inference-gateway.json` the runner rendered, the same digest `piGatewayConfigGuard` checks at launch. Present only when a gateway run is registered for the sandbox (`SetPiGatewayRun`); absent otherwise, and then nothing below applies. The Agent extension reads that file once, when it loads (just after the launch guard), and refuses every gateway dispatch unless it is a regular file (not a symlink) with this digest. It keeps those bytes and gives each child its own copy in a new `mkdtemp` directory (file mode 0400), named by `INFERENCE_GATEWAY_CONFIG_FILE` and removed when the child exits, so a child never reads the agent-writable file and a file swapped there after load cannot reach it. Parent and children run as one sandbox user, so the copy is not a permission boundary against a concurrent writer with that uid; it removes the shared, predictable path between verification and the child's read. Before every dispatch the extension also still refuses when `inference-gateway.json` no longer has this digest or an `inference-gateway.local.json` entry exists, which signals an agent writing there (#8280) |
 | `editRepairExtension` | The edit-repair extension's path, when the children's tool set has `edit`. Kept out of `extensions` because it registers the edit tool: the Agent extension adds it only for a child whose `--tools` names `edit`, since a persona declaring no tools runs under `--no-builtin-tools`, where pi would not filter it out |
 | `models` | `default` (the agent's model, translated) plus the Claude aliases on the Anthropic Vertex provider. The extension resolves a call's `model` through this table and **rejects** anything it cannot serve |
-| `providerModels` | Per provider a run can serve with no `models` entry, the model ids it can serve: `google-vertex` verbatim from the catalog the pinned pi bundles (`@earendil-works/pi-ai` `dist/providers/data/google-vertex.json`), and `xai-vertex` from the ids the vendored extension registers (`xai/grok-4.6`, the publisher-qualified wire form). A `provider/id` call is accepted only when the full spec is in `models`, is the parent's own spec, or is listed here — a provider prefix alone is not enough, or an invented id would reach the API. A Grok spec is normalized to `xai-vertex/xai/<id>` first, exactly as `normalizeXaiVertexModel` does for the parent, and then goes through this same set |
+| `providerModels` | Per provider a run can serve with no `models` entry, the model ids it can serve: `google-vertex` verbatim from the catalog the pinned pi bundles (`@earendil-works/pi-ai` `dist/providers/data/google-vertex.json`), and `xai-vertex` from the ids the vendored extension registers (`xai/grok-4.6`, the publisher-qualified wire form). `openai` is present only when the run-scoped OpenAI provider is attached, listing the ids that configured children resolve to (`subagents.<persona>`, `subagents.default`, a persona's frontmatter `model:`; `runtime.OpenAIChildren`), and its presence is what lets a non-openai parent dispatch to `openai` and turns on the OpenAI launch safeguards for the children (#7981). `gateway` is present only when a gateway run is registered, listing the ids of the rendered `inference-gateway.json`; it admits the `gateway` provider under any parent, since the extension's `-e` directory (`inference-gateway`) does not name the provider id (#8280). A `provider/id` call is accepted only when the full spec is in `models`, is the parent's own spec, or is listed here — a provider prefix alone is not enough, or an invented id would reach the API. A Grok spec is normalized to `xai-vertex/xai/<id>` first, exactly as `normalizeXaiVertexModel` does for the parent, and then goes through this same set |
 | `thinking` | Children's `--thinking`; `FULLSEND_PI_SUBAGENT_THINKING` (validated) else `medium` |
 | `tools` / `exploreTools` | The child `--tools` allowlist: the parent's built-ins minus `Agent`/`Task`, or — for `subagent_type: Explore` — the read-only set **intersected with** the parent's, so a child never reaches past its parent. An empty result becomes `--no-builtin-tools`, as it does for the parent |
 | `personas` | Per-persona model/tools table, keyed by persona name. Present when `sub-agents/*.md` files were discovered under skill roots. The extension dispatches a `subagent_type` that names a persona using its resolved model and tool set; an unknown non-empty type is rejected when personas are registered. Model resolution: repo `subagents.<persona>` > frontmatter `model:` > `subagents.default` > the parent's live model. An entry carries **no** `model` for that last case, so the extension inherits the parent the same way an anonymous child does — writing the agent definition's model here instead would split the two apart whenever config or a flag overrode the parent. A persona's `tools` are intersected with the parent's at dispatch; a present-but-empty array means no tools, and Bootstrap refuses such a persona rather than letting it fall back to the parent's set. Each spec is canonicalised and checked against the trusted set before it enters the manifest, so a persona never widens the set that admits it (#7031) |
@@ -997,7 +1029,7 @@ with `-e`, after the hook adapter — when the agent definition has no `tools:` 
 
 ### OpenAI via Workload Identity Federation
 
-GPT models run on pi's built-in `openai` provider with no OpenAI credential in the sandbox ([ADR 0092](../ADRs/0092-openai-wif-credential-delivery.md)): `fullsend run` exchanges the job's GitHub OIDC token for a ≤1 h access token (`internal/inference/openaiwif`, or `OPENAI_API_KEY` from the runner environment for local runs), imports the `fullsend-openai` profile from the scaffold embedded in the binary (this is a separate mechanism from harness-listed `openshell.profiles` imports; wholesale `.fullsend/profiles` directory import was removed (#7095), and the OpenAI profile is always sourced from the embedded scaffold copy rather than a repository file regardless), creates a run-scoped OpenShell provider `openai-<sandbox suffix>` of that type carrying it, and deletes that provider when the run ends; the `fullsend-openai` profile allows only `POST /v1/responses` on `api.openai.com`, and only for `**/node` (pi) and `**/codex` (the codex runtime's native binary, #6920). The provider is created only for a run whose selected runtime will actually call OpenAI (`runtime.NeedsOpenAIProvider`); a harness may declare it for every runtime, and a run that does not need it says so and skips it. A per-provider refresher re-exchanges a fresh assertion shortly before `expires_in` and hot-updates the provider (a static key only has its expiry pushed out), and is stopped before the deferred cleanup deletes — or, when a kept sandbox still references it, expires in place — the provider.
+GPT models run on pi's built-in `openai` provider with no OpenAI credential in the sandbox ([ADR 0092](../ADRs/0092-openai-wif-credential-delivery.md)): `fullsend run` exchanges the job's GitHub OIDC token for a ≤1 h access token (`internal/inference/openaiwif`, or `OPENAI_API_KEY` from the runner environment for local runs), imports the `fullsend-openai` profile from the scaffold embedded in the binary (this is a separate mechanism from harness-listed `openshell.profiles` imports; wholesale `.fullsend/profiles` directory import was removed (#7095), and the OpenAI profile is always sourced from the embedded scaffold copy rather than a repository file regardless), creates a run-scoped OpenShell provider `openai-<sandbox suffix>` of that type carrying it, and deletes that provider when the run ends; the `fullsend-openai` profile allows only `POST /v1/responses` on `api.openai.com`, and only for `**/node` (pi) and `**/codex` (the codex runtime's native binary, #6920). The provider is created only for a run whose selected runtime will actually call OpenAI: the parent's model (`runtime.NeedsOpenAIProvider`), or on pi a configured child's (`runtime.OpenAIChildren`: `subagents.<persona>`, `subagents.default`, or a persona's frontmatter `model:`, resolved exactly as Bootstrap resolves it, #7981). A harness may declare it for every runtime, and a run that does not need it says so and skips it. A `subagents` entry on `openai/` with no openai provider declared fails the run before the sandbox is created. A frontmatter-only one never fails the run over a missing declaration or credential: the provider is skipped, Bootstrap drops every `openai/` model-table entry (aliases included) when no provider is attached, and the persona is skipped with a warning. A per-provider refresher re-exchanges a fresh assertion shortly before `expires_in` and hot-updates the provider (a static key only has its expiry pushed out), and is stopped before the deferred cleanup deletes — or, when a kept sandbox still references it, expires in place — the provider.
 
 ### Other clouds
 
@@ -1012,7 +1044,7 @@ re-checked on a `CODEX_VERSION` bump. The decisions are
 [ADR 0099](../ADRs/0099-codex-agent-runtime.md) (credential delivery) and [ADR 0100](../ADRs/0100-codex-sandbox-hooks.md)
 (sandbox hooks).
 
-Everything below was read at tag `rust-v0.152.1`; the rows of [Re-check on a `CODEX_VERSION` bump](#re-check-on-a-codex_version-bump) were re-verified at `rust-v0.157.0`. Two of the findings are the reason the hook
+Everything below was read at tag `rust-v0.152.1`; the rows of [Re-check on a `CODEX_VERSION` bump](#re-check-on-a-codex_version-bump) were re-verified at `rust-v0.157.0` and again at `rust-v0.159.3`. Two of the findings are the reason the hook
 adapter exists at all, because forwarding the scripts' own convention would fail **open**.
 
 One iteration, end to end:
@@ -1061,9 +1093,13 @@ flowchart TB
   `WebFetch` and `WebSearch` have no codex tool — codex does that work through the shell, so the
   `Bash` groups already cover it.
 - **Skills** come from `$CODEX_HOME/skills`, which `Bootstrap` populates. Codex also discovers a
-  repo's `.agents/skills`, and (verified live at 0.157.0) its `.codex/skills` even with the project
-  untrusted; both are covered by the host-side and in-sandbox context scans, which match `SKILL.md`
-  anywhere in the repo.
+  repo's `.agents/skills`, and (verified live at 0.157.0; discovery source unchanged through
+  0.159.3) its `.codex/skills` even with the project untrusted; both are covered by the host-side
+  and in-sandbox context scans, which match `SKILL.md` anywhere in the repo. The agent reads those
+  files through the shell, and Codex 0.157.0 truncates a single exec at 10,000 tokens (head and
+  tail), so `codexNoSubagentNote` tells it to count lines with `awk 'END { print NR }'` (`wc -l`
+  misses a last line with no trailing newline) then `sed -n` a long `SKILL.md` in at most
+  200-line ranges, one per tool call (#7831).
 - **AGENTS.md** — codex skips a project's own `AGENTS.md` while the project is untrusted
   (`codex-rs/core/src/agents_md.rs`), but always loads `$CODEX_HOME/AGENTS.md` as user
   instructions. The runner copies the repo's root `AGENTS.md` (or the injected org-level one) there
@@ -1124,6 +1160,20 @@ cannot be overridden, so it cannot follow the mid-run refresh a short-lived WIF 
   rather than being forwarded, and the script never echoes the value it rejects.
 - `supports_websockets` is left unset: custom providers default to false, which keeps codex on
   HTTP/SSE `POST /v1/responses` — the only thing the `fullsend-openai` egress profile allows.
+- **Inference gateway route (ADR 0137, #8295).** `CodexRuntime` implements
+  `GatewayRouteRuntime`. When the runner registers a gateway (`PrepareGatewayRun`, which records
+  `<block url>/v1`), Bootstrap renders a second provider, `fullsend-gateway` (`wire_api =
+  "responses"`), into the same `config.toml`. It is covered by the same whole-file runner-held
+  digest, and its `auth.command` is the embedded `gateway-token.sh`, SHA-256 pinned like
+  `openai-token.sh`. The script prints the placeholder in `$CODEX_HOME/gateway-token`, which
+  `GatewayCredentialSeed` writes from `INFERENCE_GATEWAY_API_KEY` before `.env` and the runner
+  re-seeds after each token refresh (oidc mode). For a `gateway/<model>` id, `translateCodexModel`
+  passes everything after the prefix to `--model`, and the `-c` overrides select and pin
+  `fullsend-gateway`'s `base_url` and `auth.command`. The gateway placeholder is unset after `.env`
+  along with the OpenAI variables. A `gateway/` id with no gateway registered fails before launch,
+  and `openai/` and bare ids keep the `fullsend-openai` pin. The gateway URL comes from the runner,
+  never from `.env`. `NeedsOpenAIProvider` is false for a gateway-only codex run, and the per-host
+  gateway profile admits `**/codex`.
 
 ### codex hook adapter contract
 
@@ -1131,7 +1181,10 @@ cannot be overridden, so it cannot follow the mid-run refresh a short-lived WIF 
 `$CODEX_HOME/hooks.json` from `security.HookPlan`, and uploads the embedded
 `fullsend-codex-hook.py` beside the scripts. Each plan group becomes one handler,
 `python3 <adapter> <phase> <script...>`, so the scripts still run in plan order inside one process —
-the ordering the PostToolUse chain depends on.
+the ordering the PostToolUse chain depends on. `PreToolUse` element 0 is not a plan group but the
+spawn guard, `python3 <adapter> SpawnGuard`, the policy of
+[ADR 0126](../ADRs/0126-fullsend-owned-codex-subagents.md); it is written whenever `hooks.json`
+is, even with every sandbox hook off.
 
 Matcher translation, per group:
 
@@ -1143,6 +1196,7 @@ Matcher translation, per group:
 | `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch` | *dropped, with a note* | no codex tool; the `Bash` groups cover this work |
 | `*` (`security.AllTools`) | *matcher key omitted* | an absent matcher matches every tool |
 | `PostToolUseFailure` (any tools) | *not wired* | codex has no such event and does not need one — see below |
+| *(the spawn guard, not a plan group)* | `^(multi_agent_v1\|collaboration)\|(spawn\|resume)_agent$` — a regex (a character outside `[A-Za-z0-9_\|]` makes it one) that reaches both multi-agent namespaces plus the bare V1 `spawn_agent` | `PreToolUse` element 0; admits a V1 `spawn_agent` from the root thread of a registered role, with `fork_context: false` and no `model` or `reasoning_effort`, after re-checking the files in `FULLSEND_CODEX_SPAWN_DIGESTS`; passes the parent's wait, close and send-input calls through; everything else, its own errors included, exits 2 with a reason. Every admit and deny is logged to `security/findings.jsonl` |
 
 Tokens are joined with `|` and stay within `[A-Za-z0-9_|]`, which is the character set codex treats
 as an **exact alternation** rather than a regex, so there is no anchoring question and no substring
@@ -1204,6 +1258,7 @@ as the place its expected value comes from. There are two trustworthy places —
 | hook adapter, auth script | **compile-time** — `go:embed`ed, so the digest is a literal in the run command | SHA-256, exit 97 |
 | the shared hook scripts | **compile-time** for the bytes, **runner-held** for which names — Bootstrap records the name → digest map for the set the harness enabled | SHA-256 per filename, plus an exhaustive directory check, exit 97 |
 | `config.toml`, `hooks.json` | **runner-held** — rendered per run, so Bootstrap records what it uploaded outside the sandbox and Run injects it into the launch command (`codex_integrity.go`) | whole-file SHA-256, exit 98 |
+| `agents/<role>.toml` (role files; none written yet) | **runner-held** — Bootstrap records name → digest in `RoleFiles`; Run exports it with `hooks.json`'s digest as `FULLSEND_CODEX_SPAWN_DIGESTS` | SHA-256 per filename plus an exhaustive `agents/` check, by the spawn guard before every spawn; exit 2 |
 | `fullsend-manifest.json` | none — it is a file in the same agent-writable directory | information only; never authority |
 
 The hook-script check makes codex **stricter than Claude Code and pi**, where the scripts stay
@@ -1230,6 +1285,11 @@ the codex process's environment after `.env` and before launch, and a running pr
 is not something the agent can reach, so **the adapter re-reads and re-verifies each script
 immediately before spawning it** and blocks on a mismatch. A missing or malformed map is itself a
 block, since the adapter only ever runs when the runner enabled hooks.
+
+The spawn guard closes the same window for children. Codex re-reads `hooks.json` and the role's
+file when a child starts, so Run exports their digests as `FULLSEND_CODEX_SPAWN_DIGESTS` and the
+handler re-hashes them, and lists `agents/`, before applying the policy, on its own deadline below
+the hook timeout at which codex kills a handler and lets the call through. No role, no spawn.
 
 **PATH is pinned across `.env` for the same reason the interpreter is.** The hook scripts resolve
 their tools by name — `tirith_check.py` runs a bare `tirith` — so a `.env` that prepends a directory
@@ -1376,9 +1436,12 @@ Two artefacts of the run are worth knowing about:
 | `auth.command` semantics (trimmed stdout, non-zero exit fails, no env fallback) | the whole credential path | `codex-rs/login/src/auth/external_bearer.rs` |
 | `supports_websockets` default for custom providers | a true default would take traffic off `POST /v1/responses` and break the egress profile | `codex-rs/model-provider-info/src/lib.rs` |
 | `[skills.bundled]` and skill discovery | the bundled skills are disabled by the runner-owned config; a renamed key would silently bring `skill-installer` and friends back into the agent's roster | `codex-rs/config/src/skills_config.rs` |
+| Exec output truncation (`DEFAULT_MAX_OUTPUT_TOKENS`, head+tail) | the runtime note's 200-line window is sized to stay under this cap; on bump, confirm 200 lines of a dense `SKILL.md` still fits under the new cap and that a truncated exec still emits a warning the split rule can detect | `codex-rs/core/src/unified_exec/mod.rs`, `codex-rs/core/src/tools/context.rs`, `codex-rs/utils/string/src/truncate.rs` |
 | The `plugins` feature and what it gates | `[features] plugins = false` is what stops the startup fetch of `github.com/openai/plugins.git`; a renamed key, or a sync no longer gated on it, would bring the fetch back | `codex-rs/features/src/lib.rs`, `codex-rs/core-plugins/src/manager.rs` (`maybe_start_plugin_startup_tasks_for_config`) |
-| The native binary's path inside the platform package (`vendor/<triple>/bin/codex` at 0.157.0) | the `fullsend-openai` profile names it as `**/codex`; the node ancestor still admits a renamed file, but the pin in `runtimeEgressBinaries` should follow the rename | `npm pack --dry-run "@openai/codex@<pin>-linux-x64"` |
+| The native binary's path inside the platform package (`vendor/<triple>/bin/codex` at 0.159.3) | the `fullsend-openai` profile names it as `**/codex`; the node ancestor still admits a renamed file, but the pin in `runtimeEgressBinaries` should follow the rename | `npm pack --dry-run "@openai/codex@<pin>-linux-x64"` |
 | Whether a custom provider still issues `GET /v1/models` at startup | the `fullsend-openai` egress profile denies it; if the request ever became fatal or retried, it would delay or fail every first turn | `codex-rs/models-manager/` |
+| `models_cache.json` name and location, its TTL and the version/identity checks that decide whether it is used | `buildCodexRunCommand` deletes `$CODEX_HOME/models_cache.json` before launch so every run starts from the bundled catalog; a renamed or relocated file would need the deletion to follow it | `codex-rs/models-manager/src/manager.rs` (`MODEL_CACHE_FILE`, `DEFAULT_MODEL_CACHE_TTL`, `try_load_cache`), `codex-rs/models-manager/src/cache.rs` (`load_fresh_file`) |
 | `ConfigToml` keys and the `ReasoningEffort` enum | a renamed or removed key silently changes behaviour; `--strict-config` reports it | `codex-rs/config/src/config_toml.rs`, `codex-rs/protocol/src/openai_models.rs` |
 | Project trust and `AGENTS.md` | the pinned untrusted entry must still stop codex recording its own trust level, the repo's `.codex/` layer must stay unloaded, and `$CODEX_HOME/AGENTS.md` must still load while the project is untrusted, or the bridge stops reaching the agent | `codex-rs/app-server/src/request_processors/thread_processor.rs` (trust write), `codex-rs/config/src/loader/mod.rs`, `codex-rs/core/src/agents_md.rs`, `codex-rs/codex-home/src/instructions/mod.rs` |
 | JSONL event structs, rollout line types and rollout file naming | the stream parser and transcript extraction; a rollout line type missing from `codexRolloutEnvelopes` discards the whole transcript | `codex-rs/exec/src/exec_events.rs`, `codex-rs/history/src/rollout_payload.rs` (`RolloutItemWire`), `codex-rs/thread-store/src/local/helpers.rs` |
+| The multi-agent tool names (`multi_agent_v1*`, `collaboration*`, the bare V1 `spawn_agent`), the block contract (exit 2 with non-empty stderr blocks; a timeout kills the handler and lets the call through), `agent_id` and `agent_type` in a child's payload, the spawn arguments, and what a child start rereads (`hooks.json` and the role file) | the spawn guard's matcher, pass-through set, policy, digest set and deadline rest on them; a renamed tool is denied (loud), but a payload without `agent_id`, a new model or effort argument, a changed block contract or a child that rereads another file turns a deny into a pass | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs`, `codex-rs/core/src/tools/registry.rs` (`function_hook_tool_name`), `codex-rs/hooks/src/engine/command_runner.rs` (the timeout branch), `codex-rs/core/src/agent/role.rs` (the role file, read at spawn) |

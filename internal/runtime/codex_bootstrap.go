@@ -84,6 +84,10 @@ func (r CodexRuntime) codexAuthScriptPath() string {
 	return r.ConfigDir() + "/" + codexAuthScriptFile
 }
 
+func (r CodexRuntime) codexModelsCachePath() string {
+	return r.ConfigDir() + "/" + codexModelsCacheFile
+}
+
 // codexLastMessageFile is where --output-last-message writes the agent's final
 // message, under the runner-owned config dir.
 //
@@ -147,7 +151,10 @@ func (r CodexRuntime) Bootstrap(input BootstrapInput) error {
 	if !ok || repoInput.RepoDir() == "" {
 		return fmt.Errorf("codex bootstrap: the target repository's sandbox path is required")
 	}
-	configTOML, err := renderCodexConfig(cfg, repoInput.RepoDir(), codexDeveloperInstructions(agentName, def))
+	// The gateway provider is rendered only when the runner registered an
+	// inference.gateway block for this sandbox (PrepareGatewayRun).
+	gatewayBaseURL := codexGatewayRunFor(sandboxName)
+	configTOML, err := renderCodexConfig(cfg, repoInput.RepoDir(), codexDeveloperInstructions(agentName, def), gatewayBaseURL)
 	if err != nil {
 		return err
 	}
@@ -157,8 +164,18 @@ func (r CodexRuntime) Bootstrap(input BootstrapInput) error {
 	// A runner-held digest, not one recorded in the manifest: see
 	// codex_integrity.go for why nothing inside the sandbox can hold it.
 	digests := codexRunnerHeldDigestSet{
-		ConfigTOML: codexAssetSHA256(configTOML),
-		AgentModel: def.Model,
+		ConfigTOML:     codexAssetSHA256(configTOML),
+		AgentModel:     def.Model,
+		GatewayBaseURL: gatewayBaseURL,
+	}
+	if gatewayBaseURL != "" {
+		if err := uploadBytes(sandboxName, r.codexGatewayAuthScriptPath(), codexGatewayAuthScriptSH); err != nil {
+			return fmt.Errorf("writing %s: %w", codexGatewayAuthScriptFile, err)
+		}
+		chmodCmd := "chmod 755 " + shellQuote(r.codexGatewayAuthScriptPath())
+		if err := codexExecOK(sandboxName, chmodCmd, "chmod "+codexGatewayAuthScriptFile); err != nil {
+			return err
+		}
 	}
 
 	// uploadBytes does not set a mode, and codex executes this one.
@@ -308,11 +325,28 @@ func codexDeveloperInstructions(agentName string, def *piAgentDef) string {
 // single-context path deliberately instead of recording a failed dispatch.
 // codex does have a spawn_agent tool, but fullsend wires no sub-agent roster
 // for it in v1, the same position pi was in (#6527).
+//
+// The second paragraph is the chunked-read rule for Codex's exec truncation
+// (10,000 tokens, head and tail, at 0.157.0). A single cat of a long SKILL.md
+// drops the middle with no retry (#7831). Lines are counted with awk's NR, not
+// `wc -l`: `wc -l` counts newline characters, so a file whose last line has no
+// trailing newline reports one line too few and the last range would stop
+// short of it.
 const codexNoSubagentNote = "\n## Runtime note\n\n" +
 	"This agent runs on the codex runtime (FULLSEND_RUNTIME=codex). No fullsend sub-agent " +
 	"roster is available. When a skill says to dispatch sub-agents, execute each sub-agent " +
 	"definition yourself, in the listed order, with the same context package, and treat each " +
-	"output as that sub-agent's result.\n"
+	"output as that sub-agent's result.\n\n" +
+	"When reading a SKILL.md or other instruction file, do not cat it in one call: Codex " +
+	"truncates exec output (head and tail, dropping the middle). For each file, count its " +
+	"lines with `awk 'END { print NR }' <file>` (`wc -l` misses a last line with no newline), " +
+	"then `sed -n '<start>,<end>p'` in contiguous ranges of at most 200 lines, one range per " +
+	"tool call, including a short final chunk so the last line is covered — do not round the " +
+	"line count down to a multiple of 200 (a 425-line file is three ranges: `1,200p`, " +
+	"`201,400p`, `401,425p`). Never combine files or ranges in one exec. Inspect the returned " +
+	"output for a truncation warning before advancing; if a range is truncated, split it into " +
+	"smaller contiguous windows that together still cover its start through end — never skip " +
+	"the back half — and read those windows before moving on to the next range.\n"
 
 // codexUnsupportedTools returns the Claude tool names from an agent
 // definition that have no codex tool. Unlike pi, nothing is dropped from an
@@ -406,20 +440,30 @@ var codexHarnessSecurityEnvKeys = []string{"FULLSEND_CANARY_TOKEN", "FULLSEND_TO
 // token or allowlist cannot contain it.
 const codexEnvReadSeparator = "|fullsend-env-sep|"
 
-// codexReadHarnessSecurityEnv reads the harness-supplied hook variables from
-// the workspace .env, which at Bootstrap time is still exactly what the runner
-// wrote — no agent iteration has run. Values that are unset or empty are
-// skipped: there is nothing to re-assert, and an agent that *sets* one later
-// can only cause spurious blocks, not slip past a check.
-func codexReadHarnessSecurityEnv(sandboxName string) ([]codexEnvPair, error) {
+// codexReadHarnessSecurityEnvCmd sources envFile silently, so nothing a
+// sourced file prints lands in front of the first value, and prints the
+// codexHarnessSecurityEnvKeys values joined by codexEnvReadSeparator. A failed
+// source prints nothing and exits non-zero, so a broken .env fails Bootstrap
+// instead of pinning the values as unset. Its stderr stays discarded because
+// the shell echoes the offending .env line, which can carry a token. The
+// references are double-quoted, not shellQuote'd: single quotes would print
+// the literal "${KEY:-}" text instead of expanding it.
+func codexReadHarnessSecurityEnvCmd(envFile string) string {
 	var refs []string
 	for _, key := range codexHarnessSecurityEnvKeys {
 		refs = append(refs, fmt.Sprintf("${%s:-}", key))
 	}
-	cmd := fmt.Sprintf(". %s 2>/dev/null; printf '%%s' %s",
-		shellQuote(sandbox.SandboxWorkspace+"/.env"),
-		shellQuote(strings.Join(refs, codexEnvReadSeparator)))
+	return fmt.Sprintf(`. %s >/dev/null 2>&1 && printf '%%s' "%s"`,
+		shellQuote(envFile), strings.Join(refs, codexEnvReadSeparator))
+}
 
+// codexReadHarnessSecurityEnv reads the harness-supplied hook variables from
+// the workspace .env, which at Bootstrap time is still exactly what the runner
+// wrote — no agent iteration has run. Unset values are re-asserted as empty,
+// which every hook treats as unset, so an agent that sets one in .env later
+// cannot supply an allowlist the harness left out.
+func codexReadHarnessSecurityEnv(sandboxName string) ([]codexEnvPair, error) {
+	cmd := codexReadHarnessSecurityEnvCmd(sandbox.SandboxWorkspace + "/.env")
 	stdout, stderr, exitCode, err := sandbox.Exec(sandboxName, cmd, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("reading the harness hook environment: %w", err)
@@ -436,9 +480,7 @@ func codexReadHarnessSecurityEnv(sandboxName string) ([]codexEnvPair, error) {
 	}
 	var env []codexEnvPair
 	for i, key := range codexHarnessSecurityEnvKeys {
-		if v := strings.TrimSpace(values[i]); v != "" {
-			env = append(env, codexEnvPair{key, v})
-		}
+		env = append(env, codexEnvPair{key, strings.TrimSpace(values[i])})
 	}
 	return env, nil
 }

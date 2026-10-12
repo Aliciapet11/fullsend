@@ -62,10 +62,11 @@ type preflightGitHubResult struct {
 // (the HTTPS CONNECT tunnel through the proxy) and token validity in a
 // single low-cost API call.
 //
-// Transient proxy 403s, connection-refused, and timeout failures are retried
-// with backoff (see preflightGitHubRetryDelays). Auth and config failures
-// (HTTP 401/404) fail immediately. printer, when non-nil, logs each retry so
-// self-resolving transients remain visible in the run log.
+// Transient proxy 403s, connection-refused, timeout, connection-level EOF,
+// and connection-reset failures are retried with backoff (see
+// preflightGitHubRetryDelays). Auth and config failures (HTTP 401/404) fail
+// immediately. printer, when non-nil, logs each retry so self-resolving
+// transients remain visible in the run log.
 //
 // Returns a non-nil error when the API is unreachable (proxy 403, connection
 // refused, DNS failure, etc.). Returns a nil error with Skipped=true when the
@@ -151,13 +152,23 @@ func diagnosePreflightGitHubFailure(exitCode int, err error, output string) erro
 			output)
 	}
 
+	if isPreflightConnClosed(output) {
+		return fmt.Errorf(
+			"GitHub API unreachable from sandbox (connection closed before a response):\n%s\n\n"+
+				"The connection to api.github.com was closed on every attempt. "+
+				"Check that the GitHub provider is attached and that the OpenShell gateway "+
+				"network policy allows api.github.com",
+			output)
+	}
+
 	return fmt.Errorf("GitHub API connectivity check failed (exit %d):\n%s", exitCode, output)
 }
 
 // isRetryablePreflightGitHubFailure reports whether a failed connectivity
 // check should be retried. HTTP 403 and network-level errors (connection
-// refused, timeout) are transient proxy/gateway issues. HTTP 401/404 indicate
-// real auth or config problems and must not be retried. See #6855.
+// refused, timeout, connection-level EOF, connection reset) are transient
+// proxy/gateway issues. HTTP 401/404 indicate real auth or config problems
+// and must not be retried. See #6855, #7862.
 func isRetryablePreflightGitHubFailure(exitCode int, err error, output string) bool {
 	combined := output
 	if err != nil {
@@ -183,7 +194,26 @@ func isRetryablePreflightGitHubFailure(exitCode int, err error, output string) b
 	if exitCode == 124 || strings.Contains(combined, "timed out") {
 		return true
 	}
+	// OpenShell 0.1 policy DNS can drop the first request to an unmapped
+	// host with a bare EOF or connection reset instead of a clean denial.
+	// A retry re-resolves through the map. See #7862.
+	if isPreflightConnClosed(combined) {
+		return true
+	}
 	return false
+}
+
+// preflightConnEOFPattern matches a connection-level EOF as the HTTP client
+// reports it (`Get "https://api.github.com/rate_limit": EOF`), not an
+// unrelated `unexpected EOF` from, say, a truncated config file.
+var preflightConnEOFPattern = regexp.MustCompile(`:\s*EOF\b`)
+
+// isPreflightConnClosed reports whether output shows the connection to the
+// GitHub API being closed before a response: a connection-level EOF or a
+// connection reset.
+func isPreflightConnClosed(output string) bool {
+	return preflightConnEOFPattern.MatchString(output) ||
+		strings.Contains(strings.ToLower(output), "connection reset by peer")
 }
 
 // preflightGitHubRetryReason is a short label for the retry log line.
@@ -199,6 +229,10 @@ func preflightGitHubRetryReason(exitCode int, err error, output string) string {
 		return "connection refused"
 	case exitCode == 124 || strings.Contains(combined, "timed out") || strings.Contains(combined, "Connection timed out"):
 		return "timeout"
+	case preflightConnEOFPattern.MatchString(combined):
+		return "EOF"
+	case strings.Contains(strings.ToLower(combined), "connection reset by peer"):
+		return "connection reset"
 	default:
 		return "transient network error"
 	}

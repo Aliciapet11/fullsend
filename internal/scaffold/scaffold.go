@@ -15,7 +15,7 @@ var content embed.FS
 var gitlabContent embed.FS
 
 // FullsendRepoFile returns the content of a file from the fullsend-repo scaffold.
-// The path is relative to the fullsend-repo root (e.g., ".github/workflows/triage.yml").
+// The path is relative to the fullsend-repo root (e.g., ".github/workflows/prioritize.yml").
 func FullsendRepoFile(path string) ([]byte, error) {
 	return content.ReadFile("fullsend-repo/" + path)
 }
@@ -27,10 +27,8 @@ var executableFiles = map[string]struct{}{
 	"scripts/fullsend-check-output":          {},
 	"scripts/install-precommit-tools.sh":     {},
 	"scripts/prepare-sandbox-credentials.sh": {},
-	"scripts/reconcile-repos.sh":             {},
 	"scripts/resolve-precommit-tools.py":     {},
 	"scripts/setup-prioritize.sh":            {},
-	"scripts/validate-source-repo.sh":        {},
 }
 
 // FileMode returns the Git tree mode for a scaffold file.
@@ -44,6 +42,11 @@ func FileMode(path string) string {
 // layeredDirs contain upstream defaults provided at runtime via reusable
 // workflow workspace preparation. The scaffold does not install these;
 // customization uses base: harness composition instead. See ADR 0064.
+//
+// profiles/ and providers/ are listed so they are never installed, but
+// workspace preparation does not layer them: fullsend run resolves a bare
+// built-in provider name and its profile from this embed (#7268). See
+// TestLayeredDirsMatchWorkspacePreparation.
 //
 // policies/ is absent: the scaffold ships no policy, and workspace
 // preparation's [[ -d ]] guard skips an entry with no embedded files (#6834).

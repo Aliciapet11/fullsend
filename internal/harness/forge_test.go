@@ -848,12 +848,12 @@ func TestResolveForge_HostFilesMerge(t *testing.T) {
 	h := &Harness{
 		Agent: "agents/test.md",
 		HostFiles: []HostFile{
-			{Src: "env/common.env", Dest: "/run/env/common.env"},
+			{Src: "env/common.env", Dest: "/tmp/run/env/common.env"},
 		},
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Src: "env/github/triage.env", Dest: "/run/env/forge.env"},
+					{Src: "env/github/triage.env", Dest: "/tmp/run/env/forge.env"},
 				},
 			},
 		},
@@ -862,21 +862,21 @@ func TestResolveForge_HostFilesMerge(t *testing.T) {
 	require.NoError(t, h.ResolveForge("github"))
 	require.Len(t, h.HostFiles, 2)
 	assert.Equal(t, "env/common.env", h.HostFiles[0].Src)
-	assert.Equal(t, "/run/env/common.env", h.HostFiles[0].Dest)
+	assert.Equal(t, "/tmp/run/env/common.env", h.HostFiles[0].Dest)
 	assert.Equal(t, "env/github/triage.env", h.HostFiles[1].Src)
-	assert.Equal(t, "/run/env/forge.env", h.HostFiles[1].Dest)
+	assert.Equal(t, "/tmp/run/env/forge.env", h.HostFiles[1].Dest)
 }
 
 func TestResolveForge_HostFilesOverrideSameDest(t *testing.T) {
 	h := &Harness{
 		Agent: "agents/test.md",
 		HostFiles: []HostFile{
-			{Src: "env/default.env", Dest: "/run/env/forge.env"},
+			{Src: "env/default.env", Dest: "/tmp/run/env/forge.env"},
 		},
 		Forge: map[string]*ForgeConfig{
 			"gitlab": {
 				HostFiles: []HostFile{
-					{Src: "env/gitlab/triage.env", Dest: "/run/env/forge.env"},
+					{Src: "env/gitlab/triage.env", Dest: "/tmp/run/env/forge.env"},
 				},
 			},
 		},
@@ -885,14 +885,14 @@ func TestResolveForge_HostFilesOverrideSameDest(t *testing.T) {
 	require.NoError(t, h.ResolveForge("gitlab"))
 	require.Len(t, h.HostFiles, 1)
 	assert.Equal(t, "env/gitlab/triage.env", h.HostFiles[0].Src)
-	assert.Equal(t, "/run/env/forge.env", h.HostFiles[0].Dest)
+	assert.Equal(t, "/tmp/run/env/forge.env", h.HostFiles[0].Dest)
 }
 
 func TestResolveForge_HostFilesNilInherits(t *testing.T) {
 	h := &Harness{
 		Agent: "agents/test.md",
 		HostFiles: []HostFile{
-			{Src: "env/common.env", Dest: "/run/env/common.env"},
+			{Src: "env/common.env", Dest: "/tmp/run/env/common.env"},
 		},
 		Forge: map[string]*ForgeConfig{
 			"github": {},
@@ -910,7 +910,7 @@ func TestResolveForge_HostFilesNilTopLevel(t *testing.T) {
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Src: "env/github.env", Dest: "/run/env/github.env"},
+					{Src: "env/github.env", Dest: "/tmp/run/env/github.env"},
 				},
 			},
 		},
@@ -928,7 +928,7 @@ func TestValidate_ForgeHostFileMissingSrc(t *testing.T) {
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Dest: "/run/env/forge.env"},
+					{Dest: "/tmp/run/env/forge.env"},
 				},
 			},
 		},
@@ -962,7 +962,7 @@ func TestValidate_ForgeHostFileSrcURL(t *testing.T) {
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Src: "https://evil.com/env.file", Dest: "/run/env"},
+					{Src: "https://evil.com/env.file", Dest: "/tmp/run/env"},
 				},
 			},
 		},
@@ -979,7 +979,7 @@ func TestValidate_ForgeHostFileValid(t *testing.T) {
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Src: "env/github/triage.env", Dest: "/run/env/forge.env"},
+					{Src: "env/github/triage.env", Dest: "/tmp/run/env/forge.env"},
 				},
 			},
 		},
@@ -995,7 +995,7 @@ forge:
   gitlab:
     host_files:
       - src: env/gitlab/triage.env
-        dest: /run/env/forge.env
+        dest: /tmp/run/env/forge.env
         optional: true
 `
 	h, err := parseRaw([]byte(content))
@@ -1003,7 +1003,7 @@ forge:
 	require.NotNil(t, h.Forge["gitlab"])
 	require.Len(t, h.Forge["gitlab"].HostFiles, 1)
 	assert.Equal(t, "env/gitlab/triage.env", h.Forge["gitlab"].HostFiles[0].Src)
-	assert.Equal(t, "/run/env/forge.env", h.Forge["gitlab"].HostFiles[0].Dest)
+	assert.Equal(t, "/tmp/run/env/forge.env", h.Forge["gitlab"].HostFiles[0].Dest)
 	assert.True(t, h.Forge["gitlab"].HostFiles[0].Optional)
 }
 
@@ -1670,15 +1670,6 @@ func TestBuildConfigMap_PerRepoConfig(t *testing.T) {
 	assert.Contains(t, roles, "code")
 }
 
-func TestBuildConfigMap_OrgConfig(t *testing.T) {
-	t.Parallel()
-	// Org configs don't implement PerRepoConfigReader, so the map
-	// should be nil (no per-repo fields to expose).
-	orgCfg := config.NewOrgConfig(nil, nil, nil, "", "")
-	m := BuildConfigMap(orgCfg)
-	assert.Nil(t, m)
-}
-
 func TestBuildConfigMap_AllFields(t *testing.T) {
 	t.Parallel()
 	// Test that BuildConfigMap exposes all non-sensitive per-repo config
@@ -1722,13 +1713,15 @@ func TestBuildConfigMap_AllFields(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, arr, "https://example.com/*")
 
-	// Issue creation config (set by NewPerRepoConfig with targetRepo)
+	// Issue creation config (set by NewPerRepoConfig): the default
+	// allowlist is upstream-only; the target repo is always implicitly
+	// allowed and needs no entry.
 	ci, ok := m["create_issues"].(map[string]any)
 	require.True(t, ok)
 	repos, ok := ci["allow_repos"].([]any)
 	require.True(t, ok)
-	assert.Contains(t, repos, "org/repo")
-	assert.Contains(t, repos, "fullsend-ai/fullsend")
+	assert.Equal(t, []any{"fullsend-ai/fullsend"}, repos)
+	assert.NotContains(t, repos, "org/repo")
 }
 
 func TestBuildConfigMap_ForgeAndTracker(t *testing.T) {
@@ -1864,7 +1857,7 @@ func TestValidateOverlayForgeConfig_OpenShellProfileWithHash(t *testing.T) {
 
 func TestValidateOverlayForgeConfig_HostFileMissingSrc(t *testing.T) {
 	fc := &ForgeConfig{
-		HostFiles: []HostFile{{Src: "", Dest: "/run/secrets/token"}},
+		HostFiles: []HostFile{{Src: "", Dest: "/tmp/run/secrets/token"}},
 	}
 	err := validateOverlayForgeConfig(0, fc)
 	require.Error(t, err)
@@ -1882,7 +1875,7 @@ func TestValidateOverlayForgeConfig_HostFileMissingDest(t *testing.T) {
 
 func TestValidateOverlayForgeConfig_HostFileURLSrc(t *testing.T) {
 	fc := &ForgeConfig{
-		HostFiles: []HostFile{{Src: "https://example.com/token.env", Dest: "/run/secrets/token"}},
+		HostFiles: []HostFile{{Src: "https://example.com/token.env", Dest: "/tmp/run/secrets/token"}},
 	}
 	err := validateOverlayForgeConfig(0, fc)
 	require.Error(t, err)
@@ -1891,7 +1884,7 @@ func TestValidateOverlayForgeConfig_HostFileURLSrc(t *testing.T) {
 
 func TestValidateOverlayForgeConfig_HostFileValid(t *testing.T) {
 	fc := &ForgeConfig{
-		HostFiles: []HostFile{{Src: "env/token.env", Dest: "/run/secrets/token"}},
+		HostFiles: []HostFile{{Src: "env/token.env", Dest: "/tmp/run/secrets/token"}},
 	}
 	err := validateOverlayForgeConfig(0, fc)
 	require.NoError(t, err)

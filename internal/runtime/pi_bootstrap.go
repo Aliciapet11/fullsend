@@ -81,6 +81,15 @@ type piAgentManifest struct {
 	// extension re-hashes them before every dispatch; see
 	// piAgentExtensionDigests for why the vendored ones are absent.
 	ExtensionDigests map[string]string `json:"extensionDigests,omitempty"`
+	// GatewayConfigDigest is the sha256 (hex) of the inference-gateway.json
+	// the runner rendered, set only when an inference gateway run is
+	// registered for the sandbox (SetPiGatewayRun). Children load the
+	// inference-gateway extension, which reads that file and any
+	// inference-gateway.local.json overlay from the agent-writable config
+	// dir, so the extension re-checks both before every dispatch, the way
+	// it re-checks ExtensionDigests: the launch guard (piGatewayConfigGuard)
+	// fires only before the parent starts.
+	GatewayConfigDigest string `json:"gatewayConfigDigest,omitempty"`
 	// EditRepairExtension is the edit-repair extension's -e path (see
 	// pi_edit_repair.go), empty when the children's tool set has no edit.
 	// It is kept out of Extensions on purpose: the extension registers the
@@ -286,6 +295,12 @@ func (r PiRuntime) Bootstrap(input BootstrapInput) error {
 		Extensions:        extensions,
 	}
 
+	// The runner-rendered inference-gateway.json (only when an
+	// inference.gateway block applies); Run guards its digest.
+	if err := r.piWriteGatewayConfig(sandboxName); err != nil {
+		return err
+	}
+
 	if piEditRepairEnabled(tools) {
 		if err := uploadBytes(sandboxName, cfg+"/"+piEditRepairExtensionFile, piEditRepairExtensionJS); err != nil {
 			return fmt.Errorf("installing edit-repair extension: %w", err)
@@ -316,7 +331,7 @@ func (r PiRuntime) Bootstrap(input BootstrapInput) error {
 		if err := uploadBytes(sandboxName, cfg+"/"+piAgentExtensionFile, piAgentExtensionJS); err != nil {
 			return fmt.Errorf("installing agent extension: %w", err)
 		}
-		block, err := r.piAgentManifestFor(sandboxName, def, tools, hooksEnabled, input.ModelAliases(), personas, skipped, input.AgentSubagents(), input.ParentModel())
+		block, err := r.piAgentManifestFor(sandboxName, def, tools, hooksEnabled, input.ModelAliases(), personas, skipped, input.AgentSubagents(), input.ParentModel(), input.OpenAIProviderAttached())
 		if err != nil {
 			return err
 		}
@@ -459,8 +474,9 @@ const piNoSubagentNote = "\n## Runtime note\n\n" +
 //
 // personas are the pre-discovered sub-agent personas (from discoverPersonas).
 // subagentsCfg is the merged agents[].subagents map from the config, driving
-// per-persona model overrides (#7031).
-func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools []string, hooksEnabled bool, configAliases map[string]string, personas []piPersona, skipped []piSkippedPersona, subagentsCfg map[string]*string, parentModel string) (*piAgentManifest, error) {
+// per-persona model overrides (#7031). openAIProviderAttached is whether the
+// run-scoped OpenAI provider was actually created for this run (#7981).
+func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools []string, hooksEnabled bool, configAliases map[string]string, personas []piPersona, skipped []piSkippedPersona, subagentsCfg map[string]*string, parentModel string, openAIProviderAttached bool) (*piAgentManifest, error) {
 	piBin, providerExts, err := piAgentProbe(sandboxName)
 	if err != nil {
 		return nil, err
@@ -475,7 +491,12 @@ func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools
 			}
 		}
 	}
-	exts := append([]string{}, providerExts...)
+	gw := piGatewayRunFor(sandboxName)
+	var gatewayIDs []string
+	if gw != nil {
+		gatewayIDs = gw.ModelIDs
+	}
+	exts := piAgentProviderExtensions(providerExts, gw != nil)
 	hooksExt := r.ConfigDir() + "/" + piHooksExtensionFile
 	if hooksEnabled {
 		exts = append(exts, hooksExt)
@@ -489,7 +510,7 @@ func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools
 		Extensions:       exts,
 		ExtensionDigests: piAgentExtensionDigests(hooksExt, hooksEnabled, editRepairExt, editRepair),
 		Models:           piAgentModels(def.Model, configAliases),
-		ProviderModels:   piAgentProviderModels(),
+		ProviderModels:   piAgentProviderModels(gatewayIDs),
 		Thinking:         piAgentThinking(),
 		Tools:            childTools,
 		ExploreTools:     append([]string{}, piExploreTools...),
@@ -499,6 +520,39 @@ func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools
 	}
 	if editRepair {
 		manifest.EditRepairExtension = editRepairExt
+	}
+	if gw != nil {
+		// The same digest piGatewayConfigGuard checks at launch, so the two
+		// cannot drift.
+		manifest.GatewayConfigDigest = gw.configSum()
+	}
+
+	// A pre-configured child — a subagents.<persona> override, subagents.
+	// default, or a discovered persona's own frontmatter model: — that
+	// resolves to the openai provider is repo-controlled and known before
+	// the sandbox starts, unlike a model an Agent call chooses at dispatch
+	// time. Admit it into the provider-model allowlist the same way a
+	// google-vertex/xai-vertex catalog entry is admitted, but only when the
+	// run-scoped OpenAI provider actually attached OPENAI_API_KEY to this
+	// sandbox — otherwise the credential a trusted spec implies exists
+	// would not (#7981).
+	if openAIProviderAttached {
+		if ids := piConfiguredOpenAIIDs(personas, subagentsCfg, manifest.Models); len(ids) > 0 {
+			manifest.ProviderModels[piOpenAIProvider] = ids
+		}
+	} else {
+		// Without the provider there is no managed OpenAI credential and
+		// the launch skips the OpenAI safeguards, so no model-table entry
+		// may make an openai child servable: not a models.aliases entry
+		// that maps to openai, and not "default" (the agent definition's
+		// model) when the run moved the parent off it. A parent that does
+		// run on openai has the provider attached, so this never touches
+		// it; the extension takes the parent's own spec from pi itself.
+		for alias, spec := range manifest.Models {
+			if head, _, ok := strings.Cut(spec, "/"); ok && strings.EqualFold(head, piOpenAIProvider) {
+				delete(manifest.Models, alias)
+			}
+		}
 	}
 
 	// Resolve per-persona models and the blanket subagents.default (#7031).
@@ -651,11 +705,20 @@ var piXaiVertexModels = []string{"xai/grok-4.6"}
 // pi's built-in google-vertex and the vendored xai-vertex extension. The
 // remaining credential-free provider a run can be on (openai) needs no list
 // because the extension always accepts the parent's own model spec.
-func piAgentProviderModels() map[string][]string {
-	return map[string][]string{
-		"google-vertex":     append([]string(nil), piGoogleVertexModels...),
-		piXaiVertexProvider: append([]string(nil), piXaiVertexModels...),
+//
+// gatewayIDs are the model ids of the rendered inference-gateway.json
+// (RenderPiGatewayConfig); they are listed under "gateway" only when an
+// inference.gateway block applies, so without one no gateway child is
+// admitted.
+func piAgentProviderModels(gatewayIDs []string) map[string][]string {
+	models := map[string][]string{
+		piGoogleVertexProvider: append([]string(nil), piGoogleVertexModels...),
+		piXaiVertexProvider:    append([]string(nil), piXaiVertexModels...),
 	}
+	if len(gatewayIDs) > 0 {
+		models[piGatewayProvider] = append([]string(nil), gatewayIDs...)
+	}
+	return models
 }
 
 // piAgentThinking is the children's --thinking level: the env override when
@@ -677,12 +740,15 @@ func piAgentThinking() string {
 // one line for the binary, then one per existing directory.
 func piAgentProbeCommand() string {
 	return "command -v pi; for d in " + shellQuote(piVertexExtensionPath) + " " + shellQuote(piXaiVertexExtensionPath) +
+		" " + shellQuote(piInferenceGatewayExtensionPath) +
 		`; do test -d "$d" && echo "$d"; done; true`
 }
 
-// parsePiAgentProbe reads the probe output. Only the two known extension
-// paths are accepted as extensions; a missing binary line falls back to
-// PATH lookup when the child is spawned.
+// parsePiAgentProbe reads the probe output. Only the known provider
+// extension paths are accepted as extensions; a missing binary line falls
+// back to PATH lookup when the child is spawned. The inference-gateway
+// path is reported like the others; piAgentManifestFor drops it unless an
+// inference.gateway block applies.
 func parsePiAgentProbe(stdout string) (piBin string, exts []string) {
 	piBin = piAgentProbeFallbackBin
 	binSeen := false
@@ -692,7 +758,7 @@ func parsePiAgentProbe(stdout string) (piBin string, exts []string) {
 		line = strings.TrimSpace(sanitizeOutput(line))
 		switch {
 		case line == "":
-		case line == piVertexExtensionPath || line == piXaiVertexExtensionPath:
+		case line == piVertexExtensionPath || line == piXaiVertexExtensionPath || line == piInferenceGatewayExtensionPath:
 			// When `command -v pi` printed nothing the first line is an
 			// extension path; never mistake it for the binary.
 			exts = append(exts, line)

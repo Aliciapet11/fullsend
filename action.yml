@@ -1,8 +1,8 @@
 name: Fullsend
 description: >-
-  Install fullsend-cli, create ${GITHUB_WORKSPACE}/output, invoke fullsend run with
-  --output-dir pointing at that directory, then upload it with actions/upload-artifact. Does not
-  read agent configuration from the repository; configure the job environment or CLI as needed.
+  Install fullsend-cli, create ${GITHUB_WORKSPACE}/output, invoke fullsend run with --output-dir
+  pointing at that directory, then upload it with actions/upload-artifact. The run resolves the
+  selected agent's inference provider and prepares GCP credentials only for Vertex.
 
 branding:
   icon: zap
@@ -53,6 +53,14 @@ inputs:
       callers where GITHUB_EVENT_PATH lacks the dispatched event_payload
       wrapper. Takes precedence over GITHUB_EVENT_PATH extraction.
     default: ""
+  gcp_wif_provider:
+    description: Workload Identity Federation provider resource name, used only when the selected agent resolves to Vertex inference.
+    required: false
+    default: ""
+  gcp_project_id:
+    description: GCP project ID, used only when the selected agent resolves to Vertex inference.
+    required: false
+    default: ""
 
 outputs:
   skipped:
@@ -101,14 +109,14 @@ runs:
         }
 
         # Use vendored binary if present (placed by fullsend admin install --vendor).
-        # Per-org mode stores it at bin/fullsend (in .fullsend config repo);
-        # per-repo mode stores it at .fullsend/bin/fullsend (in the target repo).
+        # Per-repo installs store it at .fullsend/bin/fullsend (in the target repo).
+        # The removed per-org mode's bin/fullsend location is not consulted.
         # GitHub Contents API does not preserve the executable bit, so check -f not -x.
         VENDORED=""
         if [[ -f "${GITHUB_WORKSPACE}/.fullsend/bin/fullsend" ]]; then
           VENDORED="${GITHUB_WORKSPACE}/.fullsend/bin/fullsend"
         elif [[ -f "${GITHUB_WORKSPACE}/bin/fullsend" ]]; then
-          VENDORED="${GITHUB_WORKSPACE}/bin/fullsend"
+          echo "::warning::Ignoring legacy per-org vendored binary bin/fullsend; per-org installation has been removed. Re-run per-repo setup with --vendor to vendor the CLI at .fullsend/bin/fullsend, or delete bin/fullsend to silence this warning."
         fi
         if [[ -n "${VENDORED}" ]]; then
           echo "Using vendored binary: ${VENDORED#"${GITHUB_WORKSPACE}/"}"
@@ -387,10 +395,14 @@ runs:
         EOF
         cat > $HOME/.config/openshell/gateway.toml << EOF
         [openshell]
-        version = 1
+        version = 2
 
         [openshell.gateway]
+        compute_driver = "podman"
+
+        [openshell.drivers.podman]
         supervisor_image = "ghcr.io/nvidia/openshell/supervisor:${OPENSHELL_VERSION}"
+        health_check_interval_secs = 10
         EOF
 
     - name: Install OpenShell CLI
@@ -423,6 +435,8 @@ runs:
         STATUS_COMMENT_ID: ${{ inputs.status-comment-id }}
         MINT_URL: ${{ inputs.mint-url }}
         PR_HEAD_SHA: ${{ inputs.pr-head-sha }}
+        FULLSEND_GCP_WIF_PROVIDER: ${{ inputs.gcp_wif_provider }}
+        FULLSEND_GCP_PROJECT_ID: ${{ inputs.gcp_project_id }}
       run: |
         set -euo pipefail
         FULLSEND_DIR="${FULLSEND_DIR:-${GITHUB_WORKSPACE}}"
@@ -459,8 +473,8 @@ runs:
     # (tool-agnostic artifact); missing telemetry/manifest skips with no file.
     # Manifest trust: prefer a local override from the PR base SHA (same
     # trusted tip reusable-* workflows check out for kill-switch config).
-    # Path prefix comes from inputs.fullsend-dir (install layout: per-repo
-    # `.fullsend/` or per-org workspace root); file bytes come from the
+    # Path prefix comes from inputs.fullsend-dir (per-repo install layout:
+    # `.fullsend/`); file bytes come from the
     # trusted ref — never from a PR-head working tree. When no trusted
     # override exists, fetch SHA-pinned agents@v0 (no --fullsend-dir).
     - name: Eval measurements
@@ -509,7 +523,7 @@ runs:
 
     - name: Upload fullsend artifacts
       if: always() && inputs.agent != '__install_only__'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: fullsend-${{ inputs.agent }}
         path: ${{ github.workspace }}/output
@@ -540,7 +554,7 @@ runs:
 
         # Resolve the correct commit SHA. Priority order:
         # 1. Explicit pr-head-sha input (per-repo workflow_call callers)
-        # 2. Extracted from .inputs.event_payload (per-org workflow_dispatch)
+        # 2. Extracted from .inputs.event_payload (workflow_dispatch payload)
         # 3. GITHUB_SHA fallback
         COMMIT_SHA=""
         if [[ -n "${PR_HEAD_SHA_INPUT}" ]]; then

@@ -62,6 +62,8 @@ type jiraClient interface {
 	UpdateComment(ctx context.Context, issueIDOrKey, commentID, body string) error
 	SetCommentProperty(ctx context.Context, issueIDOrKey, commentID, propertyKey string, value any) error
 	DeleteComment(ctx context.Context, issueIDOrKey, commentID string) error
+	GetMyself(ctx context.Context) (*jira.User, error)
+	LinkIssues(ctx context.Context, inwardIssueKey, outwardIssueKey, linkTypeName string) error
 }
 
 var _ jiraClient = (*jira.LiveClient)(nil)
@@ -87,6 +89,17 @@ func NewJiraClient(jc jiraClient, baseURL string) (*JiraClient, error) {
 	return &JiraClient{jira: jc, baseURL: trimmed}, nil
 }
 
+// AuthenticatedUser returns the account ID this client is authenticated
+// as (GET /myself), so a caller can tell its own comments from anyone
+// else's by Comment.Author.AccountID. Display names are not identities.
+func (c *JiraClient) AuthenticatedUser(ctx context.Context) (string, error) {
+	me, err := c.jira.GetMyself(ctx)
+	if err != nil {
+		return "", err
+	}
+	return me.AccountID, nil
+}
+
 // issueKey builds a Jira issue key from a project key and issue number,
 // e.g. issueKey("PROJ", 123) = "PROJ-123".
 func issueKey(project string, number int) string {
@@ -100,12 +113,18 @@ func (c *JiraClient) GetIssue(ctx context.Context, project string, number int) (
 	if err != nil {
 		return nil, wrapNotFound(err)
 	}
+	var issueType string
+	if issue.Fields.IssueType != nil {
+		issueType = issue.Fields.IssueType.Name
+	}
 	return &Issue{
-		Number: number,
-		Title:  issue.Fields.Summary,
-		Body:   Body(jira.ADFToMarkdown(issue.Fields.Description)),
-		URL:    c.baseURL + "/browse/" + key,
-		Labels: issue.Fields.Labels,
+		Number:       number,
+		Title:        issue.Fields.Summary,
+		Body:         Body(jira.ADFToMarkdown(issue.Fields.Description)),
+		URL:          c.baseURL + "/browse/" + key,
+		Labels:       issue.Fields.Labels,
+		IssueType:    issueType,
+		CustomFields: issue.Fields.CustomFields,
 	}, nil
 }
 
@@ -324,6 +343,14 @@ func (c *JiraClient) UpdateComment(ctx context.Context, project string, number i
 func (c *JiraClient) DeleteComment(ctx context.Context, project string, number int, commentID string) error {
 	key := issueKey(project, number)
 	return wrapNotFound(c.jira.DeleteComment(ctx, key, commentID))
+}
+
+// LinkIssues implements Linker. The from issue is sent as Jira's
+// inwardIssue and the to issue as its outwardIssue, so Jira records the
+// link in the link type's outward direction: for "Blocks", the from issue
+// blocks the to issue.
+func (c *JiraClient) LinkIssues(ctx context.Context, fromProject string, fromNumber int, toProject string, toNumber int, linkType string) error {
+	return wrapNotFound(c.jira.LinkIssues(ctx, issueKey(fromProject, fromNumber), issueKey(toProject, toNumber), linkType))
 }
 
 // fromJiraComment converts a jira.Comment to a tracker.Comment. HTMLURL is

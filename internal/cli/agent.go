@@ -56,8 +56,8 @@ with an integrity hash. The URL prefix is added to allowed_remote_resources
 if not already present.
 
 Examples:
-  fullsend agent add https://github.com/my-org/agents/blob/main/harness/lint.yaml --fullsend-dir .fullsend
-  fullsend agent add harness/custom-review.yaml --name my-review --fullsend-dir .fullsend`,
+  fullsend agent add https://github.com/my-org/agents/blob/main/harness/lint.yaml
+  fullsend agent add harness/custom-review.yaml --name my-review`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			printer := ui.New(os.Stdout)
@@ -72,9 +72,8 @@ Examples:
 			return runAgentAdd(cmd.Context(), args[0], name, fullsendDir, forgeClient, printer)
 		},
 	}
-	cmd.Flags().StringVar(&fullsendDir, "fullsend-dir", "", "path to the .fullsend configuration directory")
+	addFullsendDirFlag(cmd, &fullsendDir)
 	cmd.Flags().StringVar(&name, "name", "", "explicit agent name (default: derived from filename)")
-	_ = cmd.MarkFlagRequired("fullsend-dir")
 	return cmd
 }
 
@@ -90,8 +89,7 @@ func newAgentListCmd() *cobra.Command {
 			return runAgentList(fullsendDir, printer)
 		},
 	}
-	cmd.Flags().StringVar(&fullsendDir, "fullsend-dir", "", "path to the .fullsend configuration directory")
-	_ = cmd.MarkFlagRequired("fullsend-dir")
+	addFullsendDirFlag(cmd, &fullsendDir)
 	return cmd
 }
 
@@ -129,8 +127,7 @@ Local-path agents without a base: URL have nothing to pin.`,
 			return runAgentUpdate(cmd.Context(), args[0], sha, fullsendDir, forgeClient, printer)
 		},
 	}
-	cmd.Flags().StringVar(&fullsendDir, "fullsend-dir", "", "path to the .fullsend configuration directory")
-	_ = cmd.MarkFlagRequired("fullsend-dir")
+	addFullsendDirFlag(cmd, &fullsendDir)
 	return cmd
 }
 
@@ -146,8 +143,7 @@ func newAgentRemoveCmd() *cobra.Command {
 			return runAgentRemove(fullsendDir, args[0], printer)
 		},
 	}
-	cmd.Flags().StringVar(&fullsendDir, "fullsend-dir", "", "path to the .fullsend configuration directory")
-	_ = cmd.MarkFlagRequired("fullsend-dir")
+	addFullsendDirFlag(cmd, &fullsendDir)
 	return cmd
 }
 
@@ -182,12 +178,11 @@ The --subagent flag maps a persona name to a model (repeatable):
 			}, printer)
 		},
 	}
-	cmd.Flags().StringVar(&fullsendDir, "fullsend-dir", "", "path to the .fullsend configuration directory")
+	addFullsendDirFlag(cmd, &fullsendDir)
 	cmd.Flags().StringVar(&runtimeName, "runtime", "", "agent runtime for this agent (claude, pi or codex); \"\" clears it")
-	cmd.Flags().StringVar(&model, "model", "", "model for this agent (alias, model id, or provider/id on pi and codex — codex takes OpenAI ids only); \"\" clears it")
+	cmd.Flags().StringVar(&model, "model", "", "model for this agent (alias, model id, or provider/id on pi and codex — codex takes OpenAI ids and gateway/<model> only); \"\" clears it")
 	cmd.Flags().StringVar(&effort, "effort", "", "effort level for this agent (low, medium, high, xhigh, max); \"\" clears it")
 	cmd.Flags().StringArrayVar(&subagentFlags, "subagent", nil, "persona=model mapping for sub-agents (repeatable; persona= clears)")
-	_ = cmd.MarkFlagRequired("fullsend-dir")
 	return cmd
 }
 
@@ -304,6 +299,9 @@ func runAgentSet(fullsendDir, agentName string, f agentSetFlags, printer *ui.Pri
 		msg += " subagents: " + s
 	}
 	printer.StepDone(msg)
+	if f.subagentSet {
+		warnOpenAISubagentWithoutProvider(cfg, absDir, agentName, runtimeName, subagents, printer)
+	}
 	return nil
 }
 
@@ -757,6 +755,10 @@ func pinAgentURL(ctx context.Context, source string, forgeClient forge.Client, p
 
 	isGH := isGitHubURL(cleanURL)
 
+	// fallbackNote explains a fetch failure after falling back to the
+	// default branch, where the requested ref (and so the path) was lost.
+	var fallbackNote string
+
 	sha := info.Ref
 	if !commitSHAPattern.MatchString(sha) {
 		if !isGH {
@@ -766,13 +768,17 @@ func pinAgentURL(ctx context.Context, source string, forgeClient forge.Client, p
 			return "", "", fmt.Errorf("URL agents require a forge client for branch resolution")
 		}
 
-		originalRef = sha
-
 		printer.StepStart(fmt.Sprintf("Resolving %s/%s@%s", info.Owner, info.Repo, sha))
-		resolvedSHA, resolveErr := forgeClient.GetBranchRef(ctx, info.Owner, info.Repo, sha)
-		if resolveErr != nil {
+		branch, branchPath, resolvedSHA, resolveErr := resolveBranchAndPath(ctx, forgeClient, info.Owner, info.Repo, info.Ref, info.Path)
+		if resolveErr == nil {
+			originalRef = branch
+			if branch != info.Ref {
+				printer.StepInfo(fmt.Sprintf("Using branch %q", branch))
+				info.Path = branchPath
+			}
+		} else {
 			if !forge.IsNotFound(resolveErr) {
-				return "", "", fmt.Errorf("resolving ref %q: %w", sha, resolveErr)
+				return "", "", fmt.Errorf("resolving ref %q: %w", branch, resolveErr)
 			}
 			repo, repoErr := forgeClient.GetRepo(ctx, info.Owner, info.Repo)
 			if repoErr != nil {
@@ -780,6 +786,8 @@ func pinAgentURL(ctx context.Context, source string, forgeClient forge.Client, p
 			}
 			printer.StepInfo(fmt.Sprintf("Ref %q not found, falling back to default branch %q", info.Ref, repo.DefaultBranch))
 			originalRef = repo.DefaultBranch
+			fallbackNote = fmt.Sprintf("no branch matching %q was found in %s/%s, so the default branch %q was used; "+
+				"check the URL or pin it to a commit SHA", info.Ref, info.Owner, info.Repo, repo.DefaultBranch)
 			resolvedSHA, resolveErr = forgeClient.GetBranchRef(ctx, info.Owner, info.Repo, repo.DefaultBranch)
 			if resolveErr != nil {
 				return "", "", fmt.Errorf("resolving default branch: %w", resolveErr)
@@ -801,6 +809,9 @@ func pinAgentURL(ctx context.Context, source string, forgeClient forge.Client, p
 	content, err := fetch.FetchURL(ctx, pinnedURL, fetch.DefaultPolicy)
 	if err != nil {
 		printer.StepFail("Failed to fetch content")
+		if fallbackNote != "" {
+			return "", "", fmt.Errorf("fetching %s: %w (%s)", pinnedURL, err, fallbackNote)
+		}
 		return "", "", fmt.Errorf("fetching %s: %w", pinnedURL, err)
 	}
 	hash := fetch.ComputeSHA256(content)
@@ -811,6 +822,35 @@ func pinAgentURL(ctx context.Context, source string, forgeClient forge.Client, p
 	printer.StepDone("Integrity hash verified")
 
 	return pinnedURL + "#sha256=" + hash, originalRef, nil
+}
+
+// resolveBranchAndPath resolves the branch named by a forge URL to a commit
+// SHA. Branch names may contain "/", which makes URLs such as
+// .../blob/user/feature/dir/agent.yaml ambiguous: URL parsing takes only the
+// first segment ("user") as the ref. When ref is not found, the leading
+// segments of repoPath are appended to it one at a time ("user/feature", ...)
+// and probed, always leaving at least one segment as the file path. Git does
+// not allow one branch name to be a path prefix of another, so at most one
+// candidate can match.
+//
+// It returns the matched branch, the remaining path, and the resolved SHA.
+// On error, branch is the last candidate tried.
+func resolveBranchAndPath(ctx context.Context, forgeClient forge.Client, owner, repo, ref, repoPath string) (branch, path, sha string, err error) {
+	var segments []string
+	if repoPath != "" {
+		segments = strings.Split(repoPath, "/")
+	}
+	branch = ref
+	for i := 0; ; i++ {
+		sha, err = forgeClient.GetBranchRef(ctx, owner, repo, branch)
+		if err == nil {
+			return branch, strings.Join(segments[i:], "/"), sha, nil
+		}
+		if !forge.IsNotFound(err) || i >= len(segments)-1 {
+			return branch, "", "", err
+		}
+		branch += "/" + segments[i]
+	}
 }
 
 func parseAgentSourceURL(source string) (*forge.ForgeURLInfo, error) {
