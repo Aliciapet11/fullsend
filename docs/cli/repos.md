@@ -277,7 +277,7 @@ The values, validation, WIF provider derivation, and the `FULLSEND_GCP_*` secret
 | `--app-set` | Recorded on the new entry, even when it equals `github.app_set` (the repository then no longer inherits a later `github.app_set` change) | Rewrites the entry's `app_set` |
 | `--roles` (explicit) | Recorded as `config.roles` | Recorded as `config.roles` only while the repository has no `.fullsend/config.yaml` or its installation is pending; otherwise edit `config.roles` |
 | `--mint-url`, `--fullsend-ref` | Recorded when they differ from the forge section | Not recorded on an explicit entry; edit `mint_url` / `fullsend_ref`. A glob-covered repository gets an entry copied from the glob that carries the value |
-| `--vendor` | Recorded when it differs from `defaults.vendor` | Overrides the manifest for this run only |
+| `--vendor` | Recorded when it differs from `defaults.vendor` | Overrides the manifest for this run only on an explicit entry. A glob-covered repository gets an entry copied from the glob, and the value is recorded on it when it differs from `defaults.vendor` or the copied glob already declares `vendor` |
 | `--signoff` | Overrides the manifest for this run only | Overrides the manifest for this run only |
 | `--vertex-project`, `--vertex-region`, `--vertex-wif-provider`, `--openai-api-key` | Install-time credentials, never written | Install-time credentials, never written |
 

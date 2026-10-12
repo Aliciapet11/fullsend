@@ -66,7 +66,7 @@ configuration ([#7301](https://github.com/fullsend-ai/fullsend/issues/7301)).
 | `--config-hash` | Preset: `config_base.sha256` | None | Optional. `none` on an entry skips an inherited digest. |
 | `--app-set` | Manifest field: `app_set` under `github` or the entry, which sets the `FULLSEND_APP_SET` variable | `--app-set` | Recorded on every selected GitHub entry, including already tracked ones. |
 | `--fullsend-ref` | Manifest field: `fullsend_ref` under `github` or the entry | `--fullsend-ref` | Recorded only on entries the run adds or copies from a glob. Downgrading an installed ref also needs `--force`. |
-| `--vendor`, `--fullsend-binary`, `--fullsend-source` | Manifest field: `vendor` under `defaults` or the entry. Binary and source are install-time inputs | `--vendor`, `--fullsend-binary`, `--fullsend-source` | `--vendor` is recorded on entries the run adds; on tracked entries it overrides the manifest for that run only. |
+| `--vendor`, `--fullsend-binary`, `--fullsend-source` | Manifest field: `vendor` under `defaults` or the entry. Binary and source are install-time inputs | `--vendor`, `--fullsend-binary`, `--fullsend-source` | `--vendor` is recorded on entries the run adds; on an explicit tracked entry it overrides the manifest for that run only, but a glob-covered repository is carved into an explicit entry that records it (see [Flags and already tracked repositories](../../cli/repos.md#flags-and-already-tracked-repositories)). |
 | `--signoff` | Manifest field: `signoff` under `defaults`, `github` or the entry | `--signoff` | The flag overrides the manifest for that run and is never written. |
 | `--direct`, `--dry-run` | Install-time input | `--direct`, `--dry-run` | |
 | — | Managed config: `allowed_remote_resources` | None | Setup had no flag. `repos install --allowed-remote-resources` was removed, and the old sibling key is rejected. |
@@ -221,7 +221,8 @@ it. These flags still update an already tracked entry:
 | `--app-set` | Rewrites the entry's `app_set` |
 | `--roles` | Recorded as `config.roles` only while the repository has no `.fullsend/config.yaml` or its installation is pending; otherwise edit `config.roles` |
 | `--mint-url`, `--fullsend-ref` | Not recorded on an explicit entry; edit `mint_url` or `fullsend_ref`. A glob-covered repository gets an entry copied from the glob that carries the value |
-| `--vendor`, `--signoff` | Override the manifest for this run only |
+| `--vendor` | Overrides the manifest for this run only on an explicit entry. A glob-covered repository gets an entry copied from the glob, and the value is recorded on it when it differs from `defaults.vendor` or the copied glob already declares `vendor` |
+| `--signoff` | Overrides the manifest for this run only |
 | `--vertex-*`, `--openai-api-key` | Install-time credentials; never written to `repos.yaml` |
 | `--direct`, `--dry-run`, `--force`, `--concurrency` | This run only |
 
