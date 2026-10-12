@@ -132,6 +132,17 @@ func LoadWithBase(ctx context.Context, path string, opts ComposeOpts) (*Harness,
 		return nil, nil, err
 	}
 
+	// A local harness's relative skill paths are resolved against the
+	// workspace root now, so every merge below compares declared names;
+	// ResolveRelativeTo later finds them absolute. The root comes from the
+	// caller, never from the process working directory. A URL-sourced
+	// harness's skills are fetched instead, below.
+	if opts.SourceURL == "" && opts.WorkspaceRoot != "" {
+		if err := child.resolveSkillSourcesWithin(opts.WorkspaceRoot); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	if child.Base == "" {
 		// No base — resolve URL-sourced resources if the harness was
 		// fetched from a URL (ADR-0045). Config-registered agents fetched
@@ -481,6 +492,13 @@ func loadBaseChain(
 		base, err = LoadRaw(resolvedBasePath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("loading base harness %s: %w", resolvedBasePath, err)
+		}
+		// Same root as the child's skills: a local base's relative skill
+		// paths resolve against the workspace root after the merge.
+		if opts.WorkspaceRoot != "" {
+			if err := base.resolveSkillSourcesWithin(opts.WorkspaceRoot); err != nil {
+				return nil, nil, fmt.Errorf("base harness %s: %w", resolvedBasePath, err)
+			}
 		}
 
 		baseDir = filepath.Dir(absBasePath)

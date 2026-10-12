@@ -99,15 +99,13 @@ func ValidName(name string) bool {
 // When the frontmatter is missing, unreadable, or not a valid name, it
 // falls back to filepath.Base.
 //
-// Declared names are only consulted for already-resolved absolute paths
-// (cache paths, or paths that went through ResolveRelativeTo). mergeSkills
-// calls SandboxName during base composition, which runs before
-// ResolveRelativeTo for local (non-URL) harnesses — at that point a
-// relative Source still resolves against the process's current working
-// directory, not the harness tree, so reading SKILL.md there would let a
-// CWD-relative path attacker-influence which skill identity mergeSkills
-// sees. Skipping the read for non-absolute paths keeps that case on the
-// pre-existing filepath.Base behavior.
+// Declared names are only consulted for absolute paths: a relative path
+// would be read against the process's current working directory, not the
+// harness tree, so a CWD-relative SKILL.md could choose the identity
+// mergeSkills sees. LoadWithBase resolves a harness's relative skill paths
+// against the caller's workspace root (or fetches them for a URL-sourced
+// harness) before any merge, so the fallback to filepath.Base is reached
+// only for paths nothing resolved.
 func SandboxName(skillPath string) string {
 	if skillPath == "" {
 		return ""

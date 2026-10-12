@@ -132,15 +132,12 @@ The replacement's skill identity — its declared `SKILL.md` `name:` when the
 directory is on disk, otherwise its directory basename — must match the
 built-in skill's identity exactly.
 
-> **Name a local override after the built-in's declared name.** A built-in
-> skill is fetched from the upstream harness, so its path is already absolute
-> when overrides are matched and its identity is its declared `SKILL.md`
-> `name:`. A repo skill referenced by a relative path in your own `skills:`
-> list is still relative at that point, so its identity is its directory
-> basename, whatever its own `SKILL.md` declares. Name the override directory
-> after the built-in's declared `name:`, which is not always its directory
-> basename: the override for `skills/issue-labels/github` (`name:
-> issue-labels`) is a directory named `issue-labels`, not `github`.
+> **Declare the built-in's name in your override.** A built-in skill's
+> identity is its declared `SKILL.md` `name:`, which is not always its
+> directory basename: `skills/issue-labels/github` declares `issue-labels`.
+> Your override replaces it when its own `SKILL.md` declares `issue-labels`,
+> whatever its directory is called. Relative `skills:` entries are resolved
+> against the `.fullsend` directory before the match.
 
 See [Bring Your Own Agent](bring-your-own-agent.md) for the full
 composition model and config-driven registration.
