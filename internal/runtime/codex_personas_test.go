@@ -3,7 +3,10 @@ package runtime
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -324,5 +327,82 @@ func TestCodexRole_TOMLParsesWithTheThreeKeys(t *testing.T) {
 		assert.Equal(t, role.Name, doc["name"])
 		assert.Equal(t, role.Description, doc["description"])
 		assert.Equal(t, role.Instructions, doc["developer_instructions"], "%s: the body round-trips", role.Name)
+	}
+}
+
+// TestCodexCatalog reads the fixture reduced from the pinned CLI's dump and
+// pins the two questions Bootstrap asks it: is a model listed, and does
+// codex resolve it to collaboration V1. On a CODEX_VERSION bump regenerate
+// it, never edit it (the file name carries the pin):
+//
+//	codex debug models --bundled | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({"models":[{"slug":m["slug"],"multi_agent_version":m.get("multi_agent_version")} for m in d["models"]]}, sys.stdout, indent=2); print()' > testdata/codex/models-bundled-<pin>.json
+func TestCodexCatalog(t *testing.T) {
+	t.Parallel()
+	containerfile, err := os.ReadFile(filepath.Join("..", "..", "images", "sandbox", "Containerfile"))
+	require.NoError(t, err)
+	pin := regexp.MustCompile(`(?m)^ARG CODEX_VERSION=(\S+)$`).FindStringSubmatch(string(containerfile))
+	require.Len(t, pin, 2)
+	data, err := os.ReadFile("testdata/codex/models-bundled-" + pin[1] + ".json")
+	require.NoError(t, err, "the fixture is named after the pin: regenerate it for %s", pin[1])
+	catalog, err := parseCodexCatalog(data)
+	require.NoError(t, err)
+
+	assert.True(t, catalog.has("gpt-5.6-luna"))
+	assert.True(t, catalog.resolvesV1("gpt-5.6-luna"), "the floor model is the listed V1 model on 0.159.3")
+	assert.True(t, catalog.has("gpt-5.6-sol"))
+	assert.False(t, catalog.resolvesV1("gpt-5.6-sol"), "sol selects V2")
+	assert.True(t, catalog.has("gpt-5.5"))
+	assert.True(t, catalog.resolvesV1("gpt-5.5"), "an entry without a version takes V1 from the multi_agent feature")
+	assert.False(t, catalog.has("gpt-5.6-nova"))
+	assert.False(t, catalog.resolvesV1("gpt-5.6-nova"))
+	// Hidden entries count: the fixture keeps no `visibility`, so the hidden
+	// V1 entry resolves to V1 like a listed one and a hidden model is listed.
+	assert.True(t, catalog.has("codex-auto-review"))
+	assert.True(t, catalog.resolvesV1("codex-auto-review"), "a hidden entry that selects V1 resolves to V1")
+	assert.True(t, catalog.has("gpt-daybreak-blue-latest"), "a hidden model passes the membership check")
+	assert.False(t, catalog.resolvesV1("gpt-daybreak-blue-latest"), "hidden and V2")
+
+	_, err = parseCodexCatalog([]byte("not json"))
+	require.Error(t, err)
+	_, err = parseCodexCatalog([]byte(`{"models": []}`))
+	require.Error(t, err, "an empty catalog is a broken binary, not a catalog")
+}
+
+// TestCodexParentResolvesV1 is part two of the ADR 0126 gate: the parent model
+// Run will use (the run-level model, else the definition's) must translate to
+// an OpenAI id codex resolves to V1: its entry selects V1 or carries no
+// version (codex's multi_agent feature, on by default, supplies V1). A V2 or
+// unlisted parent keeps the multi-agent tools off and says why in one line.
+func TestCodexParentResolvesV1(t *testing.T) {
+	t.Parallel()
+	catalog := codexCatalog{"gpt-5.6-luna": "v1", "gpt-5.6-sol": "v2", "gpt-5.5": "", "gpt-x": "v3"}
+	tests := []struct {
+		name        string
+		parentModel string
+		agentModel  string
+		want        bool
+		wantReason  string
+	}{
+		{"definition model, V1", "", "openai/gpt-5.6-luna", true, ""},
+		{"run-level model wins", "openai/gpt-5.6-luna", "openai/gpt-5.6-sol", true, ""},
+		{"run-level V2 beats a V1 definition", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", false, `parent model "gpt-5.6-sol" selects collaboration "v2"`},
+		{"no multi-agent version (multi_agent supplies V1)", "", "gpt-5.5", true, ""},
+		{"unknown collaboration version", "", "openai/gpt-x", false, `parent model "gpt-x" selects collaboration "v3"`},
+		{"not in the catalog", "", "openai/gpt-5.6-nova", false, `parent model "gpt-5.6-nova" is not in the bundled catalog`},
+		{"gateway route, the id is asked of the catalog", "", "gateway/vendor/org/model", false, `parent model "vendor/org/model" is not in the bundled catalog`},
+		{"claude alias does not translate", "", "opus", false, "codex takes OpenAI model ids or gateway/<model> only"},
+		{"no model at all", "", "", false, "no model was named"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, reason := codexParentResolvesV1(catalog, tt.parentModel, tt.agentModel)
+			assert.Equal(t, tt.want, got)
+			if tt.want {
+				assert.Empty(t, reason)
+			} else {
+				assert.Contains(t, reason, tt.wantReason)
+			}
+		})
 	}
 }

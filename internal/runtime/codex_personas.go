@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -118,4 +119,73 @@ func codexDroppedFrontmatterKeys(frontmatter []byte) []string {
 		}
 	}
 	return keys
+}
+
+// codexCatalog is the pinned CLI's bundled model catalog reduced to what
+// Bootstrap asks of it: slug → multi_agent_version ("v1", "v2", or "" when
+// the entry sets none), read from `codex debug models --bundled`, which
+// dumps the catalog compiled into the binary and makes no request.
+type codexCatalog map[string]string
+
+// has reports whether the catalog lists the model.
+func (c codexCatalog) has(slug string) bool { _, ok := c[slug]; return ok }
+
+// resolvesV1 reports whether codex resolves the model to collaboration V1,
+// the only version whose spawn tool the guard admits (ADR 0126): the entry
+// selects V1, or carries no version and codex's multi_agent feature, on by
+// default, supplies V1.
+func (c codexCatalog) resolvesV1(slug string) bool {
+	v, ok := c[slug]
+	return ok && (v == "v1" || v == "")
+}
+
+// parseCodexCatalog decodes the dump. Unknown keys are ignored; an empty
+// model list is an error, because a binary with no catalog cannot run at all.
+// A null multi_agent_version is stored as "": encoding/json decodes null
+// into a zero string, which is the "no version" resolvesV1 counts as V1.
+func parseCodexCatalog(data []byte) (codexCatalog, error) {
+	var dump struct {
+		Models []struct {
+			Slug              string `json:"slug"`
+			MultiAgentVersion string `json:"multi_agent_version"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &dump); err != nil {
+		return nil, fmt.Errorf("decoding the model catalog: %w", err)
+	}
+	if len(dump.Models) == 0 {
+		return nil, fmt.Errorf("the model catalog lists no model")
+	}
+	catalog := make(codexCatalog, len(dump.Models))
+	for _, m := range dump.Models {
+		catalog[m.Slug] = m.MultiAgentVersion
+	}
+	return catalog, nil
+}
+
+// codexParentResolvesV1 is part two of the ADR 0126 gate. The parent is the
+// model Run will launch — EffectiveModel(parentModel, agentModel), the
+// expression Run launches with, translated by translateCodexModel — and
+// codex must resolve it to collaboration V1 (resolvesV1). When it does not,
+// a V2 or unlisted parent, the reason is returned for one stderr line and
+// Bootstrap keeps codex's multi-agent tools off: the agent runs in one
+// context, as every agent does today. A parent that does not translate is
+// reported by Run with the same error; the gate only declines here. The
+// route is Run's concern too: the catalog is asked about the id whichever
+// provider serves it, so a gateway/ parent is accepted here and declined
+// by the catalog.
+func codexParentResolvesV1(catalog codexCatalog, parentModel, agentModel string) (bool, string) {
+	model, err := translateCodexModel(EffectiveModel(parentModel, agentModel), true)
+	if err != nil {
+		return false, err.Error()
+	}
+	id := model.ID
+	switch {
+	case !catalog.has(id):
+		return false, fmt.Sprintf("parent model %q is not in the bundled catalog of the pinned codex", id)
+	case catalog.resolvesV1(id):
+		return true, ""
+	default:
+		return false, fmt.Sprintf("parent model %q selects collaboration %q", id, catalog[id])
+	}
 }

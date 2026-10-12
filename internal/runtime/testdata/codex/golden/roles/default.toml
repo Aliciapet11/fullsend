@@ -1,0 +1,7 @@
+name = "default"
+description = "Generic sub-agent for a task the parent describes in full in its message."
+developer_instructions = """
+# Sub-agent
+
+Do the task in the message you were given, and only that task. Put your findings, with file paths and line numbers where they apply, in your final message: the parent reads nothing else and owns the synthesis and the final result.
+"""

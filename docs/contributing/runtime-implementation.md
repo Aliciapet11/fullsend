@@ -449,6 +449,8 @@ The sandbox has two key directories that map to Claude Code's config levels (plu
 ├── codex-config/                    ← CODEX_HOME (codex runtime)
 │                                       Created by the sandbox image (codex will not start without it);
 │                                       populated by CodexRuntime.Bootstrap (#6920, follow-up PR)
+│   └── agents/<role>.toml              Native sub-agent roles (skill personas plus default and explore), written only
+│                                       when the ADR 0126 gate holds; runner-held digests, checked by the spawn guard (#6970)
 │
 ├── claude-config/                   ← CLAUDE_CONFIG_DIR (personal level)
 │   ├── agents/
@@ -1258,7 +1260,7 @@ as the place its expected value comes from. There are two trustworthy places —
 | hook adapter, auth script | **compile-time** — `go:embed`ed, so the digest is a literal in the run command | SHA-256, exit 97 |
 | the shared hook scripts | **compile-time** for the bytes, **runner-held** for which names — Bootstrap records the name → digest map for the set the harness enabled | SHA-256 per filename, plus an exhaustive directory check, exit 97 |
 | `config.toml`, `hooks.json` | **runner-held** — rendered per run, so Bootstrap records what it uploaded outside the sandbox and Run injects it into the launch command (`codex_integrity.go`) | whole-file SHA-256, exit 98 |
-| `agents/<role>.toml` (role files; none written yet) | **runner-held** — Bootstrap records name → digest in `RoleFiles`; Run exports it with `hooks.json`'s digest as `FULLSEND_CODEX_SPAWN_DIGESTS` | SHA-256 per filename plus an exhaustive `agents/` check, by the spawn guard before every spawn; exit 2 |
+| `agents/<role>.toml` | **runner-held** — rendered per run from the skills' `sub-agents/*.md` plus the built-in `default` and `explore`; Bootstrap records one digest per role name (`RoleFiles`) and the run command exports them as `FULLSEND_CODEX_SPAWN_DIGESTS` | SHA-256 per file name plus an exhaustive directory check by the spawn guard before every spawn: a changed, missing or extra file denies the spawn (exit 2 with a reason) |
 | `fullsend-manifest.json` | none — it is a file in the same agent-writable directory | information only; never authority |
 
 The hook-script check makes codex **stricter than Claude Code and pi**, where the scripts stay
@@ -1422,8 +1424,11 @@ Two artefacts of the run are worth knowing about:
   and local smoke runs.
 - The rollout session files are archived as transcripts but not error-classified: only the tee'd
   `exec --json` capture yields a verdict, which is what the runner's exit-code override reads.
-- Sub-agent rosters are not wired, so `review`/`retro` are unsupported; `Bootstrap` appends a runtime
-  note telling the agent to execute sub-agent definitions itself, in order, as it does for pi.
+- Sub-agent roles are generated (`agents/<role>.toml`, digest-guarded) for an agent with the `Agent`
+  tool under harness security whose parent model Codex resolves to collaboration V1 (ADR 0126), but
+  codex's multi-agent tools stay off (`[agents] enabled = false`), so `review`/`retro` are unsupported;
+  `Bootstrap` appends a runtime note telling the agent to execute sub-agent definitions itself, in
+  order, as it does for pi.
 
 ### Re-check on a `CODEX_VERSION` bump
 
@@ -1445,3 +1450,4 @@ Two artefacts of the run are worth knowing about:
 | Project trust and `AGENTS.md` | the pinned untrusted entry must still stop codex recording its own trust level, the repo's `.codex/` layer must stay unloaded, and `$CODEX_HOME/AGENTS.md` must still load while the project is untrusted, or the bridge stops reaching the agent | `codex-rs/app-server/src/request_processors/thread_processor.rs` (trust write), `codex-rs/config/src/loader/mod.rs`, `codex-rs/core/src/agents_md.rs`, `codex-rs/codex-home/src/instructions/mod.rs` |
 | JSONL event structs, rollout line types and rollout file naming | the stream parser and transcript extraction; a rollout line type missing from `codexRolloutEnvelopes` discards the whole transcript | `codex-rs/exec/src/exec_events.rs`, `codex-rs/history/src/rollout_payload.rs` (`RolloutItemWire`), `codex-rs/thread-store/src/local/helpers.rs` |
 | The multi-agent tool names (`multi_agent_v1*`, `collaboration*`, the bare V1 `spawn_agent`), the block contract (exit 2 with non-empty stderr blocks; a timeout kills the handler and lets the call through), `agent_id` and `agent_type` in a child's payload, the spawn arguments, and what a child start rereads (`hooks.json` and the role file) | the spawn guard's matcher, pass-through set, policy, digest set and deadline rest on them; a renamed tool is denied (loud), but a payload without `agent_id`, a new model or effort argument, a changed block contract or a child that rereads another file turns a deny into a pass | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs`, `codex-rs/core/src/tools/registry.rs` (`function_hook_tool_name`), `codex-rs/hooks/src/engine/command_runner.rs` (the timeout branch), `codex-rs/core/src/agent/role.rs` (the role file, read at spawn) |
+| The bundled catalog's `multi_agent_version` entries, the version codex supplies to an entry that carries none, and the floor model (`codex debug models --bundled`; at 0.159.3 `gpt-5.6-luna` is the listed model that selects `v1`, and `gpt-5.5` carries no version, which the `multi_agent` feature, on by default, resolves to V1) | part two of the delegation gate and the child-model floor rest on them: a bump that moves the floor to V2, or drops it, turns native sub-agents off for every agent; a bump that turns `multi_agent` off by default, or gives the null entry a version, changes which parents delegate; and the fixture `internal/runtime/testdata/codex/models-bundled-0.159.3.json` must be regenerated, never edited | `codex-rs/models-manager/models.json` in the bumped tag; regenerate the fixture with the one-liner in `codex_personas_test.go`'s `TestCodexCatalog` comment and run `go test ./internal/runtime/ -run 'TestCodexCatalog\|TestCodexParentResolvesV1'` |
