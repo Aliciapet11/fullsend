@@ -41,9 +41,10 @@ const (
 	// codexGatewayModelProvider is the model prefix that selects the
 	// gateway route, matched case-insensitively.
 	codexGatewayModelProvider = "gateway"
-	// codexGatewayAPIPath is appended to the block's origin to form the
-	// provider's base_url: codex posts to <base_url>/responses.
-	codexGatewayAPIPath = "/v1"
+	// codexGatewayAPIPath is appended to the block's URL (origin plus any
+	// path prefix) to form the provider's base_url: codex posts to
+	// <base_url>/responses.
+	codexGatewayAPIPath = config.GatewayAPIBasePath
 )
 
 //go:embed codex_hook/gateway-token.sh
@@ -68,21 +69,24 @@ func codexGatewayRunFor(sandboxName string) string {
 	return v.(string)
 }
 
-// codexGatewayBaseURL turns the gateway origin the runner hands over into
-// the provider's base_url. The origin is validated again here, as the
-// block was, because it is rendered into config.toml and a `-c` flag.
-func codexGatewayBaseURL(origin string) (string, error) {
-	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
-	if origin == "" {
+// codexGatewayBaseURL turns the gateway base URL the runner hands over
+// (the origin plus any path prefix) into the provider's base_url. It is
+// validated again here, as the block was, because it is rendered into
+// config.toml and a `-c` flag.
+func codexGatewayBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return "", fmt.Errorf("inference.gateway applies but no gateway base URL was resolved; refusing to start a %s/ run on codex", codexGatewayModelProvider)
 	}
-	if err := config.ValidateGatewayURL(origin); err != nil {
+	gu, err := config.ParseGatewayURL(raw)
+	if err != nil {
 		return "", err
 	}
-	if strings.ContainsAny(origin, "\"\\'` \t\r\n") {
-		return "", fmt.Errorf("inference gateway base URL %q holds a character codex's config cannot carry", origin)
+	base := gu.BaseURL()
+	if strings.ContainsAny(base, "\"\\'` \t\r\n") {
+		return "", fmt.Errorf("inference gateway base URL %q holds a character codex's config cannot carry", base)
 	}
-	return origin + codexGatewayAPIPath, nil
+	return base + codexGatewayAPIPath, nil
 }
 
 // PrepareGatewayRun implements GatewayRouteRuntime: it registers the
@@ -122,7 +126,7 @@ func (r CodexRuntime) codexGatewayAuthScriptPath() string {
 
 // gatewayAuthSeed is the POSIX sh fragment that writes the placeholder the
 // sandbox environment carries for INFERENCE_GATEWAY_API_KEY into the
-// gateway token file, atomically via rename. It runs at iteration start,
+// gateway token file through orderedSeedWrite. It runs at iteration start,
 // before the agent-writable .env is sourced, and the runner re-runs it
 // through `sandbox exec` after every token refresh. A value that is not a
 // gateway placeholder fails the run: a real token in the sandbox
@@ -130,17 +134,14 @@ func (r CodexRuntime) codexGatewayAuthScriptPath() string {
 //
 // The iteration-start seed and a refresher's re-seed can overlap, so each
 // writer uses its own temp file, named by its shell's pid, and removes it
-// if the write fails (as PiGatewayTokenSeed does).
+// if the write fails. The write goes through orderedSeedWrite (as
+// PiGatewayTokenSeed does), so a stalled seed cannot replace a newer one.
 func (r CodexRuntime) gatewayAuthSeed() string {
-	dir := shellQuote(r.ConfigDir())
-	final := shellQuote(r.codexGatewayTokenPath())
-	tmp := shellQuote(r.codexGatewayTokenPath()+".fullsend") + `.$$`
 	return `case "${` + codexGatewayCredentialEnv + `:-}" in ` + piPlaceholderPrefix + `*` + codexGatewayCredentialEnv + `) ;; *) echo 'fullsend: ` + codexGatewayCredentialEnv + ` in the sandbox is not a gateway placeholder (inference gateway provider not attached, or a real token reached the sandbox); refusing to run codex' >&2; exit 1 ;; esac` +
 		` && case "$` + codexGatewayCredentialEnv + `" in *[!A-Za-z0-9_:]*) echo 'fullsend: ` + codexGatewayCredentialEnv + ` placeholder has unexpected characters; refusing to run codex' >&2; exit 1 ;; esac` +
-		` && { command -p mkdir -p ` + dir +
-		` && printf '%s' "$` + codexGatewayCredentialEnv + `" > ` + tmp +
-		` && command -p mv -f ` + tmp + ` ` + final +
-		` || { command -p rm -f ` + tmp + `; echo 'fullsend: writing the codex inference gateway token file failed' >&2; exit 1; }; }`
+		` && ` + orderedSeedWrite(codexGatewayCredentialEnv, r.ConfigDir(), r.codexGatewayTokenPath(),
+		`printf '%s' "$`+codexGatewayCredentialEnv+`"`,
+		`fullsend: writing the codex inference gateway token file failed`, "exit 1")
 }
 
 // isCodexGatewayModel reports whether model selects the gateway route on

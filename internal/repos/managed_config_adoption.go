@@ -161,10 +161,8 @@ func nodeHasComments(n *yaml.Node) bool {
 	return false
 }
 
-// proposedManifestEntry renders the repos.yaml fields that carry every
-// top-level setting of the existing file: runtime and
-// allowed_remote_resources as their entry shorthands, everything else
-// under config.
+// proposedManifestEntry renders the repos.yaml entry that carries every
+// top-level setting of the existing file under the entry's config.
 func proposedManifestEntry(cfg ResolvedConfig, current *yaml.Node) string {
 	entry := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	entryCfg := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
@@ -174,12 +172,7 @@ func proposedManifestEntry(cfg ResolvedConfig, current *yaml.Node) string {
 		// Aliases are expanded before settings move under config: a
 		// relocated alias could otherwise precede the anchor it names.
 		key, val := expandYAMLAliases(current.Content[i]), expandYAMLAliases(current.Content[i+1])
-		switch key.Value {
-		case "runtime", "allowed_remote_resources":
-			entry.Content = append(entry.Content, key, val)
-		default:
-			entryCfg.Content = append(entryCfg.Content, key, val)
-		}
+		entryCfg.Content = append(entryCfg.Content, key, val)
 	}
 	var note string
 	if len(entryCfg.Content) > 0 {

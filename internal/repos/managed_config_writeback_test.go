@@ -75,7 +75,7 @@ func TestEnsureManagedConfigDefaults_NewEntryAndBootstrap(t *testing.T) {
 
 func TestEnsureManagedConfigDefaults_GlobCoveredGetsScopedEntry(t *testing.T) {
 	m := &Manifest{Version: 1, Defaults: testInferenceDefaults(), GitHub: &PlatformConfig{
-		Repos: []RepoEntry{{Name: "acme/*", Runtime: "pi"}},
+		Repos: []RepoEntry{{Name: "acme/*", FullsendRef: "v1.2.3"}},
 	}}
 	path := writebackManifestFile(t, m)
 	fc := newFakeClientForBatch("acme/api", "acme/web")
@@ -89,7 +89,7 @@ func TestEnsureManagedConfigDefaults_GlobCoveredGetsScopedEntry(t *testing.T) {
 	require.Len(t, m.GitHub.Repos, 2)
 	assert.False(t, m.GitHub.Repos[0].Config.IsSet(), "the glob entry is unchanged so siblings are unaffected")
 	assert.Equal(t, "acme/api", m.GitHub.Repos[1].Name)
-	assert.Equal(t, "pi", m.GitHub.Repos[1].Runtime, "the carved entry keeps the glob's settings")
+	assert.Equal(t, "v1.2.3", m.GitHub.Repos[1].FullsendRef, "the carved entry keeps the glob's settings")
 	assert.True(t, m.GitHub.Repos[1].Config.IsSet())
 }
 
@@ -219,7 +219,7 @@ func TestEnsureManagedConfigDefaults_ReadOnlyManifestSuggestsExactEdit(t *testin
 
 func TestEnsureManagedConfigDefaults_ReadOnlyGlobCoveredSuggestsFullEntry(t *testing.T) {
 	m := &Manifest{Version: 1, GitHub: &PlatformConfig{
-		Repos: []RepoEntry{{Name: "acme/*", Runtime: "pi", Inference: InferenceSettings{Auth: InferenceAuthVertexWIF}}},
+		Repos: []RepoEntry{{Name: "acme/*", FullsendRef: "v1.2.3", Inference: InferenceSettings{Auth: InferenceAuthVertexWIF}}},
 	}}
 	fc := newFakeClientForBatch("acme/api")
 
@@ -229,7 +229,7 @@ func TestEnsureManagedConfigDefaults_ReadOnlyGlobCoveredSuggestsFullEntry(t *tes
 	require.Error(t, err)
 	msg := err.Error()
 	assert.Contains(t, msg, "keep the covering glob entry")
-	for _, want := range []string{"- name: acme/api", "runtime: pi", "inference:", "auth: vertex-wif", "config:", "- fullsend-ai/fullsend"} {
+	for _, want := range []string{"- name: acme/api", "fullsend_ref: v1.2.3", "inference:", "auth: vertex-wif", "config:", "- fullsend-ai/fullsend"} {
 		assert.Contains(t, msg, want, "the suggested entry must carry the glob's settings")
 	}
 	require.Len(t, m.GitHub.Repos, 1, "a read-only manifest is not edited in memory either")

@@ -69,7 +69,6 @@ fullsend
 │   │   ├── --fullsend-ref <ref>             #   Per-repo fullsend workflow ref override
 │   │   ├── --mint-url <url>                 #   Per-repo mint URL override
 │   │   ├── --app-set <prefix>               #   GitHub App set prefix override ($FULLSEND_APP_SET); GitHub-only
-│   │   ├── --allowed-remote-resources <list> #  Per-repo allowed remote resources override
 │   │   ├── --inference-auth <method>        #   vertex-wif, openai-api-key or openai-wif (GitHub only); persisted as inference.auth on each selected manifest entry (a repo covered only by a glob gets its own copied entry); never changes defaults or forge sections
 │   │   ├── --vendor                         #   Vendor binary and content into each repo for offline CI
 │   │   ├── --signoff                        #   Signed-off-by trailer on scaffold commits; overrides manifest signoff for this run
@@ -577,12 +576,18 @@ Vendoring commit messages use title + body (upload and stale delete). `admin ins
 │  │                   │ than crashing or succeeding. Known       │
 │  │                   │ subtypes: error_max_turns (turn limit),  │
 │  │                   │ error_max_budget_usd (cost limit).       │
-│  │                   │ Unlike API/infrastructure errors (which  │
-│  │                   │ skip the post-script entirely),          │
+│  │                   │ Unlike other agent failures (which skip  │
+│  │                   │ it unless there is no validation_loop    │
+│  │                   │ and a result file parses, #8305),        │
 │  │                   │ behavioral exits still run the           │
 │  │                   │ post-script so it can report accurately  │
 │  │                   │ instead of emitting a misleading "no     │
 │  │                   │ changes needed" message. See #6877.      │
+│  │                   │                                          │
+│  │                   │ FULLSEND_AGENT_EXIT_CODE is set when a   │
+│  │                   │ run without a validation_loop runs the   │
+│  │                   │ post-script after a failed agent. See    │
+│  │                   │ #8305.                                   │
 │  └──────┬───────────┘                                           │
 │         ▼                                                       │
 │  ┌──────────────────┐                                           │

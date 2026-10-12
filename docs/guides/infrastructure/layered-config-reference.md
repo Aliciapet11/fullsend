@@ -65,13 +65,17 @@ manifest repository, including before first install. See
 [Repo Management — Configuration presets](../getting-started/repo-management.md#configuration-presets).
 
 Fleet manifests may also declare managed configuration via
-`defaults.config` and per-repository `config` ([ADR 0122](../../ADRs/0122-declarative-repo-configuration.md)).
+`defaults.config`, `github.config`, `gitlab.config`, and per-repository
+`config` ([ADR 0122](../../ADRs/0122-declarative-repo-configuration.md)),
+resolved in that order above `config_base` and code defaults; a forge
+section's `config` applies only to that forge's repositories.
 Those blocks are not `config_base` presets: `config` is a sparse overlay
 written to `.fullsend/config.yaml`, while `config_base` copies a preset
 byte-for-byte to `.fullsend/config.base.yaml`. Managed blocks use this
-same schema and the per-field merge rules below.
-`runtime` and `allowed_remote_resources` stay on the existing manifest
-shorthands and are rejected inside `config`. Managed configuration is
+same schema (every field, including `runtime` and
+`allowed_remote_resources`) and the per-field merge rules below. The former
+sibling `runtime` / `allowed_remote_resources` keys under `defaults` and
+repository entries are rejected. Managed configuration is
 not an opt-in: every repository selected from the manifest has a managed
 `config.yaml`, with or without a `config` key. Every managed file carries an
 ownership marker; a pre-existing `config.yaml` that lacks the marker requires

@@ -1,8 +1,10 @@
 ---
 # Template, not imported as-is: the runner renders it per configured gateway
 # host (renderGatewayProfile in internal/cli/run_gateway_egress.go), replacing
-# the placeholder host below and suffixing the id with a hash of the host, so
-# two gateways on one shared OpenShell gateway never share a profile id.
+# the placeholder host below, filling in the path prefix of
+# inference.gateway.url ("" for a bare origin) wherever a path is set, and
+# suffixing the id with a hash of the host and prefix, so two gateways on one
+# shared OpenShell gateway never share a profile id.
 id: fullsend-inference-gateway
 display_name: Fullsend inference gateway
 description: Inference gateway for the pi and codex runtimes (runner-seeded, run-scoped forge OIDC token)
@@ -23,7 +25,7 @@ credentials:
 endpoints:
   - host: __INFERENCE_GATEWAY_HOST__
     port: 443
-    path: /v1/**
+    path: __INFERENCE_GATEWAY_PATH_PREFIX__/v1/**
     protocol: rest
     enforcement: enforce
     # OpenShell 0.0.110+ resets any inspected request body that contains the
@@ -34,13 +36,13 @@ endpoints:
     rules:
       - allow:
           method: POST
-          path: /v1/responses
+          path: __INFERENCE_GATEWAY_PATH_PREFIX__/v1/responses
       - allow:
           method: POST
-          path: /v1/messages
+          path: __INFERENCE_GATEWAY_PATH_PREFIX__/v1/messages
       - allow:
           method: POST
-          path: /v1/chat/completions
+          path: __INFERENCE_GATEWAY_PATH_PREFIX__/v1/chat/completions
 # The binary list applies to every rule above. pi (and its
 # inference-gateway extension) calls the gateway from node; on codex the
 # npm launcher execs the native binary, so `codex` opens the connection

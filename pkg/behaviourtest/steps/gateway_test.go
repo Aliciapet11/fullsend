@@ -177,12 +177,12 @@ func TestGivenTestInferenceGatewayAPIKey(t *testing.T) {
 	t.Setenv(envInferenceGatewayURL, "https://gw.example")
 	t.Setenv(envInferenceGatewayTestKey, "")
 	w, fc := newWorld()
-	assert.ErrorIs(t, givenTestInferenceGatewayAPIKey(w), godog.ErrSkip, "no key: skip")
+	assert.ErrorIs(t, givenTestInferenceGatewayAPIKey(w, ""), godog.ErrSkip, "no key: skip")
 	assert.Empty(t, fc.CreatedSecrets, "no key: no secret")
 
 	t.Setenv(envInferenceGatewayTestKey, "test-gateway-key-value")
 	w, fc = newWorld()
-	require.NoError(t, givenTestInferenceGatewayAPIKey(w))
+	require.NoError(t, givenTestInferenceGatewayAPIKey(w, ""))
 	assert.Equal(t, []forge.SecretRecord{{Owner: "org", Repo: "repo", Name: forge.SecretInferenceGatewayAPIKey, Value: "test-gateway-key-value"}},
 		fc.CreatedSecrets, "the step sets the enrolled repo's key secret")
 	assert.True(t, w.GatewayAPIKeySecretSet)
@@ -204,9 +204,16 @@ func TestGivenTestInferenceGatewayAPIKey(t *testing.T) {
 	require.NoError(t, deleteGatewayAPIKeySecret(w), "a second cleanup is a no-op")
 	assert.Len(t, fc.DeletedSecrets, 1)
 
+	// Under a path prefix, the committed url carries it.
+	w, fc = newWorld()
+	require.NoError(t, givenTestInferenceGatewayAPIKey(w, "/e2e-prefix"))
+	doc = nil
+	require.NoError(t, yaml.Unmarshal(fc.FileContents[cfgKey], &doc))
+	assert.Equal(t, "https://gw.example/e2e-prefix", doc["inference"].(map[string]any)["gateway"].(map[string]any)["url"])
+
 	t.Setenv(envInferenceGatewayURL, "")
 	w, fc = newWorld()
-	assert.ErrorIs(t, givenTestInferenceGatewayAPIKey(w), godog.ErrSkip, "no URL: skip")
+	assert.ErrorIs(t, givenTestInferenceGatewayAPIKey(w, ""), godog.ErrSkip, "no URL: skip")
 	assert.Empty(t, fc.CreatedSecrets, "no URL: no secret")
 }
 
@@ -214,7 +221,7 @@ func TestGivenTestInferenceGatewayAPIKey_RequiresGitHub(t *testing.T) {
 	t.Setenv(envInferenceGatewayURL, "https://gw.example")
 	t.Setenv(envInferenceGatewayTestKey, "test-gateway-key-value")
 	w := &world.World{Org: "org", RepoName: "repo", SCM: &fakeCleanupSCM{fileContent: []byte("runtime: dummy\n")}}
-	assert.ErrorContains(t, givenTestInferenceGatewayAPIKey(w), "requires GitHub SCM driver")
+	assert.ErrorContains(t, givenTestInferenceGatewayAPIKey(w, ""), "requires GitHub SCM driver")
 	assert.False(t, w.GatewayAPIKeySecretSet)
 }
 

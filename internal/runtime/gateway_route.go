@@ -52,7 +52,9 @@ type GatewayRun struct {
 	// ModelsFile is the committed models_file's bytes, read from the same
 	// ref as config.yaml; nil when the block has no models_file.
 	ModelsFile []byte
-	// BaseURL is the gateway origin the runtime's client calls.
+	// BaseURL is the gateway URL the runtime's client calls: the origin
+	// plus the url's path prefix, if any (config.GatewayURL.BaseURL), with
+	// no trailing slash. The client adds /v1/... under it.
 	BaseURL string
 }
 

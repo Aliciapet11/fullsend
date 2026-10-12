@@ -15,8 +15,8 @@ import (
 
 // Claude Code on the inference gateway route (ADR 0137, #8294). A
 // gateway/<model> model selects the route when an inference.gateway block
-// applies: the runner points Claude Code at the gateway origin
-// (ANTHROPIC_BASE_URL), hands it the run-scoped provider's placeholder as
+// applies: the runner points Claude Code at the gateway's base URL, the
+// origin plus any path prefix (ANTHROPIC_BASE_URL), hands it the run-scoped provider's placeholder as
 // the credential and passes <model> to --model. Claude Code needs no model
 // list, so the block's models and models_file are not read. Without a
 // registration (PrepareGatewayRun) nothing here applies and Claude Code
@@ -102,7 +102,8 @@ var claudeGatewayEnvUnset = []string{
 
 // claudeGatewayRun is the per-run gateway setup PrepareGatewayRun records.
 type claudeGatewayRun struct {
-	// baseURL is the gateway origin exported as ANTHROPIC_BASE_URL.
+	// baseURL is the gateway base URL (origin plus any path prefix)
+	// exported as ANTHROPIC_BASE_URL; Claude Code adds /v1/messages.
 	baseURL string
 	// apiKey is the block's api-key mode; false is oidc.
 	apiKey bool
@@ -225,7 +226,7 @@ func claudeGatewayModel(runModel, agentModel string, configAliases map[string]st
 }
 
 // PrepareGatewayRun implements GatewayRouteRuntime: it records the gateway
-// origin and auth mode for the sandbox. Claude Code needs no model list.
+// base URL and auth mode for the sandbox. Claude Code needs no model list.
 func (r ClaudeRuntime) PrepareGatewayRun(sandboxName string, run GatewayRun) error {
 	base := strings.TrimSpace(run.BaseURL)
 	if base == "" {

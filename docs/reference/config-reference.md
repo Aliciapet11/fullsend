@@ -3,8 +3,10 @@
 Complete reference for all fields available in `.fullsend/config.yaml`. For
 how these fields resolve through layered configuration, see
 [Layered Config Reference](../guides/infrastructure/layered-config-reference.md).
-Fleet manifests can declare the same managed-configuration schema as
-`defaults.config` / per-repository `config` in `repos.yaml` (this is not
+Fleet manifests can declare the same managed-configuration schema (every
+field below, including `runtime` and `allowed_remote_resources`) as
+`defaults.config`, `github.config`, `gitlab.config`, or per-repository
+`config` in `repos.yaml` (this is not
 `config_base`, which is the configuration-preset path written to
 `.fullsend/config.base.yaml`); see
 [Repo Management — Managed configuration](../guides/getting-started/repo-management.md#managed-configuration).
@@ -89,7 +91,7 @@ inference:
     identity_provider_id: ""         # OpenAI WIF identity provider ID
     service_account_id: ""           # OpenAI WIF service account ID
   gateway:                           # Inference gateway credential route (ADR 0137)
-    url: ""                          # Gateway origin, e.g. https://gateway.example.com (no path, port 443 only; plain http only for a loopback test host)
+    url: ""                          # Gateway URL, e.g. https://gateway.example.com or https://gateway.example.com/team-a (optional path prefix, no trailing /v1, port 443 only; plain http only for a loopback test host)
     audience: ""                     # OIDC audience the runner requests for the gateway (oidc mode)
     auth: ""                         # Credential mode: oidc (default) or api-key (ADR 0138)
     models: {}                       # Inline model list: id -> {api, compat, contextWindow, maxTokens}
@@ -323,11 +325,23 @@ independently through the layered config system (an overlay can override
   On Claude Code the runner exports `url` as `ANTHROPIC_BASE_URL` and passes
   the id after `gateway/` to `--model`; the model list is not used
   ([details](../runtimes/claude.md#inference-gateway-route)). Fields:
-  - `url` — the gateway origin, for example `https://gateway.example.com`.
-    Must be `https` (plain `http` only for a loopback test host), with no
-    credentials, query or fragment, no path other than `/`, and no port
-    other than 443: the runner adds the `/v1/...` model API paths itself,
-    and the egress profile allows the gateway host on port 443 only.
+  - `url` — the gateway origin, for example `https://gateway.example.com`,
+    optionally followed by the path prefix the gateway serves its API
+    under, for example `https://gateway.example.com/team-a` for a gateway
+    behind a shared ingress. Must be `https` (plain `http` only for a
+    loopback test host), with no credentials, query or fragment, and no
+    port other than 443: the runner adds the `/v1/...` model API paths
+    itself, and the egress profile allows the gateway host on port 443
+    only. A path prefix must be a clean absolute path: no empty (`//`),
+    `.` or `..` segment, no percent-encoding, only letters, digits, `-`,
+    `.`, `_` and `~` in each segment, and no trailing `/v1` (write
+    `https://gateway.example.com/team-a`, not `.../team-a/v1`). A trailing
+    `/` is ignored. The prefix applies everywhere the runner builds a model
+    API path: each runtime calls `<url>/v1/...`, the egress profile binds
+    the credential to `<prefix>/v1/**` only (never the whole host) and
+    allows only the model API paths under it, and
+    [`fullsend inference gateway status`](../cli/inference.md#inference-gateway-status)
+    probes `<url>/v1/models`. A bare origin works as before.
     The run route accepts a gateway on a private address, but
     [`fullsend inference gateway status`](../cli/inference.md#inference-gateway-status)
     refuses loopback, private and other internal addresses, so it cannot
@@ -399,7 +413,7 @@ independently through the layered config system (an overlay can override
   --inference-gateway-*` writes it and changes only the keys you pass, so
   a repository can add its models under a `url` and `audience` inherited
   from `config.base.yaml`. For a walkthrough, see
-  [Inference gateway with GitHub OIDC (WIF)](../guides/getting-started/getting-inference.md#inference-gateway-with-github-oidc-wif).
+  [Using an inference gateway](../guides/user/inference-gateway.md).
 
 For setup instructions, see
 [Getting Inference](../guides/getting-started/getting-inference.md).

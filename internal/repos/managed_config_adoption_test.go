@@ -464,7 +464,9 @@ func TestProposedManifestEntry_ExpandsAliasesBeforeRelocation(t *testing.T) {
 	var parsed []map[string]any
 	require.NoError(t, yaml.Unmarshal([]byte(got), &parsed))
 	require.Len(t, parsed, 1)
-	assert.Equal(t, "pi", parsed[0]["runtime"])
-	_, hasConfig := parsed[0]["config"]
-	assert.True(t, hasConfig)
+	cfg, hasConfig := parsed[0]["config"].(map[string]any)
+	require.True(t, hasConfig)
+	assert.Equal(t, "pi", cfg["runtime"], "runtime moves under config like every other setting")
+	_, siblingRuntime := parsed[0]["runtime"]
+	assert.False(t, siblingRuntime, "no sibling runtime key is suggested")
 }

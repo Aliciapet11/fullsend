@@ -30,10 +30,10 @@ const (
 	// gatewayProbeBodyLimit bounds how much of the gateway's model list is
 	// read; a larger reply cannot confirm authentication.
 	gatewayProbeBodyLimit = 1 << 20
-	// gatewayProbePath is the endpoint the probe calls: the OpenAI-style
-	// model list, which a gateway answers per caller without running
-	// inference.
-	gatewayProbePath = "/v1/models"
+	// gatewayProbePath is the endpoint the probe calls under the gateway
+	// URL (its path prefix included): the OpenAI-style model list, which a
+	// gateway answers per caller without running inference.
+	gatewayProbePath = config.GatewayAPIBasePath + "/models"
 	// gatewayProbeMaxListed caps how many authorised model ids are printed.
 	gatewayProbeMaxListed = 20
 )
@@ -103,7 +103,8 @@ its value) and stops at the config checks.
 
 When run inside a GitHub Actions job with id-token: write, fetches one
 OIDC assertion for the configured audience, reports its expiry and
-lifetime, and lists the gateway's models with it (GET /v1/models),
+lifetime, and lists the gateway's models with it (GET <url>/v1/models,
+under the url's path prefix when it has one),
 reporting the HTTP status and the model ids the gateway authorises for
 the repository. The assertion is never printed.
 Outside Actions, says so and stops at the config checks.`,
@@ -283,7 +284,11 @@ func runInferenceGatewayStatus(ctx context.Context, printer *ui.Printer, repo, f
 	printer.KeyValue("expires_in", assertion.ExpiresAt.Sub(deps.now()).Round(time.Second).String())
 	printer.Blank()
 
-	endpoint := strings.TrimRight(g.URL, "/") + gatewayProbePath
+	gu, err := config.ParseGatewayURL(g.URL)
+	if err != nil {
+		return err
+	}
+	endpoint := gu.BaseURL() + gatewayProbePath
 	printer.StepStart("Sending one authenticated request to " + endpoint)
 	status, body, err := probeGateway(ctx, deps.httpClient, endpoint, assertion.Value)
 	if err != nil {
@@ -330,11 +335,11 @@ func runInferenceGatewayStatus(ctx context.Context, printer *ui.Printer, repo, f
 // base URL the runner exports and the header the credential travels in,
 // Authorization: Bearer in both auth modes.
 func printClaudeGatewayRoute(printer *ui.Printer, g config.InferenceGatewayConfig) {
-	u, err := url.Parse(g.URL)
+	gu, err := config.ParseGatewayURL(g.URL)
 	if err != nil {
 		return
 	}
-	printer.StepInfo("claude runtime: gateway/<model> runs Claude Code against ANTHROPIC_BASE_URL=" + u.Scheme + "://" + u.Host + " as <model> (the model list is not used)")
+	printer.StepInfo("claude runtime: gateway/<model> runs Claude Code against ANTHROPIC_BASE_URL=" + gu.BaseURL() + " as <model> (the model list is not used)")
 	if g.IsAPIKey() {
 		printer.StepInfo("claude runtime: credential is an ANTHROPIC_AUTH_TOKEN placeholder, sent as Authorization: Bearer")
 		return

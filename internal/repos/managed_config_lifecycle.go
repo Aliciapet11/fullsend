@@ -149,7 +149,7 @@ func checkEstablishedOverlayGate(ctx context.Context, resolved ResolvedConfig, d
 	}
 	if overlayNeedsAdoption(found, existing) {
 		return fmt.Errorf("%s/%s: %s exists without the managed-configuration ownership marker; adoption required (ADR-0122): "+
-			"put every existing setting you want to keep into repos.yaml (config for ordinary fields; runtime and allowed_remote_resources for those fields) "+
+			"put every existing setting you want to keep into the repository's config in repos.yaml "+
 			"or accept its removal, then remove or replace the file; nothing was written\n%s",
 			resolved.Owner, resolved.Repo, preset.OverlayPath, adoptionGuidance(ctx, resolved, existing, desired))
 	}

@@ -260,7 +260,15 @@ durable [agentgateway](https://github.com/agentgateway/agentgateway) v1.6.0
 instance on Cloud Run in the E2E GCP project. The gateway accepts GitHub
 Actions OIDC tokens from the pool repositories only.
 `hack/setup-e2e-inference-gateway.sh` creates it, or adopts an existing one
-with the same names, and keeps it in sync. The scenarios are gated on
+with the same names, and keeps it in sync. The gateway also answers under
+the path prefix `/e2e-prefix` (`PATH_PREFIX` in the script, #8303): a
+`path-prefix` route with no policies of its own strips the prefix and hands
+the request back to the same listener, so the prefixed URL gets the same
+authentication, authorization and rate limits as the bare origin. The
+api-key scenario uses the prefixed URL; the oidc scenarios use the bare
+origin. The route went live from the #8303 pull request before it merged,
+so until then a run of the script from `main` shows the `routes:` block as
+a frozen-path difference. The scenarios are gated on
 `@requires:capability:` tags.
 [Wiring it into the behaviour tests](#wiring-it-into-the-behaviour-tests)
 lists the capabilities CI declares and how to run the rest.
@@ -563,6 +571,16 @@ The generated config (print it with `--print-config`):
   | `gpt-oss-120b` (`--with-vertex` only) | The pool, plus the real key when `REAL_KEY_HASH` is set and `REAL_KEY_MODEL=gpt-oss-120b` | The Vertex AI model-as-a-service model `openai/gpt-oss-120b-maas`, location `global`, as the runtime service account. It serves Responses clients such as Codex on `/v1/responses`, which the gateway translates to Chat Completions. Gemini 3 tool loops through Responses translation aren't supported on the test gateway, and the Claude models take no Responses requests. The gateway drops assistant messages that have neither content nor tool calls from requests to this model, because its chat template rejects them: a test-gateway requirement, not something fullsend needs from every gateway. |
   | `echo` | The pool, plus the echo key when `ECHO_KEY_HASH` is set | A header-echo listener in the same container. The gateway sends it the stub key. Its answer reports whether that key, and not the caller's credential, arrived, so the custody check can assert it. |
   | `echo-denied` | Only `fullsend-e2e-gateway-outside/not-a-pool-repo`, which is outside the pool | The same echo listener. A behaviour test calls it from a pool repository and expects 403. |
+- turns off agentgateway's admin, stats and readiness listeners
+  (`adminAddr`, `statsAddr` and `readinessAddr` set to `"off"`), which would
+  otherwise bind ports 15000, 15020 and 15021. Nothing uses them: Cloud
+  Run's startup probe is its default TCP check on port 8080, and nothing
+  scrapes metrics.
+- writes one access log line per request to Cloud Run Logging. The line
+  carries `jwt.sub`, the GitHub OIDC subject, which names the calling
+  repository and its ref or event, alongside `src.addr`, the method, host,
+  path, status and duration. It records no header values and no request or
+  response bodies.
 
 ### Wiring it into the behaviour tests
 

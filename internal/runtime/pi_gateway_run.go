@@ -236,7 +236,9 @@ const (
 //
 // The iteration-start seed and a refresher's re-seed can overlap (only
 // the latter holds the sandbox lock), so each writer uses its own temp
-// file, named by its shell's pid, and removes it if the write fails.
+// file, named by its shell's pid, and removes it if the write fails. The
+// write goes through orderedSeedWrite, so an iteration-start seed that
+// stalls cannot replace a newer placeholder a re-seed already wrote.
 func PiGatewayTokenSeed(configDir string) string {
 	return gatewayTokenSeed(configDir)
 }
@@ -252,17 +254,13 @@ func gatewayPlaceholderCheck() string {
 }
 
 // gatewayTokenSeed is the runtime-neutral body of PiGatewayTokenSeed: the
-// placeholder check, then the atomic write of the placeholder into
+// placeholder check, then the ordered write of the placeholder into
 // configDir/inference-gateway.token.
 func gatewayTokenSeed(configDir string) string {
-	dir := shellQuote(configDir)
-	final := shellQuote(configDir + "/" + piInferenceGatewayTokenFile)
-	tmp := shellQuote(configDir+"/"+piInferenceGatewayTokenFile+".fullsend") + `.$$`
 	return gatewayPlaceholderCheck() +
-		` && { command -p mkdir -p ` + dir +
-		` && printf '%s' "$` + piGatewayCredentialEnv + `" > ` + tmp +
-		` && command -p mv -f ` + tmp + ` ` + final +
-		` || { command -p rm -f ` + tmp + `; echo 'fullsend: writing the inference gateway token file failed' >&2; ` + piSeedExit + `; }; }`
+		` && ` + orderedSeedWrite(piGatewayCredentialEnv, configDir, configDir+"/"+piInferenceGatewayTokenFile,
+		`printf '%s' "$`+piGatewayCredentialEnv+`"`,
+		`fullsend: writing the inference gateway token file failed`, piSeedExit)
 }
 
 // PrepareGatewayRun implements GatewayRouteRuntime: it renders the

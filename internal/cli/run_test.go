@@ -4552,8 +4552,8 @@ func TestIterationTimedOutUnlessBehavioral(t *testing.T) {
 	// With the behavioral exit not counted as a timeout, the run ends
 	// without a terminal error, so the post-script (guarded on runErr) runs.
 	timedOut := iterationTimedOutUnlessBehavioral(2, late, timeout, "error_max_turns")
-	assert.NoError(t, runTerminalError(false, false, timedOut, 1, late, timeout))
-	assert.NoError(t, runTerminalError(true, true, timedOut, 1, late, timeout))
+	assert.NoError(t, runTerminalError(false, false, timedOut, 2, "error_max_turns", 1, late, timeout))
+	assert.NoError(t, runTerminalError(true, true, timedOut, 2, "error_max_turns", 1, late, timeout))
 }
 
 // TestIterationEnvSourceLine pins the last line of .env: sourcing an absent
@@ -4649,7 +4649,9 @@ func TestTimeoutNoRetryMessage(t *testing.T) {
 
 // TestRunTerminalError covers the retry contract of #7042: a killed
 // iteration ends the run with the timeout error, a valid result still wins,
-// and an early exit with invalid output stays a validation failure.
+// and an early exit with invalid output stays a validation failure. Without
+// a loop a failed agent fails the run (#8305), except for a behavioral limit
+// exit, which keeps the post-script reachable (#6877).
 func TestRunTerminalError(t *testing.T) {
 	t.Parallel()
 	const timeout = 20 * time.Minute
@@ -4657,21 +4659,31 @@ func TestRunTerminalError(t *testing.T) {
 		name            string
 		hasLoop, passed bool
 		timedOut        bool
+		exitCode        int
+		exitReason      string
 		runCount        int
 		elapsed         time.Duration
 		wantErrMsg      string // empty = no error
 	}{
-		{name: "loop, killed at budget, nothing valid", hasLoop: true, timedOut: true, runCount: 1, elapsed: timeout, wantErrMsg: "agent timed out after 20m0s without completing (timeout: 20m0s)"},
-		{name: "loop, killed at budget, output validated", hasLoop: true, passed: true, timedOut: true, runCount: 1, elapsed: timeout},
-		{name: "loop, early exit with invalid output", hasLoop: true, runCount: 2, elapsed: 3 * time.Minute, wantErrMsg: "validation failed after 2 iteration(s)"},
+		{name: "loop, killed at budget, nothing valid", hasLoop: true, timedOut: true, exitCode: -1, runCount: 1, elapsed: timeout, wantErrMsg: "agent timed out after 20m0s without completing (timeout: 20m0s)"},
+		{name: "loop, killed at budget, output validated", hasLoop: true, passed: true, timedOut: true, exitCode: -1, runCount: 1, elapsed: timeout},
+		{name: "loop, early exit with invalid output", hasLoop: true, exitCode: 1, runCount: 2, elapsed: 3 * time.Minute, wantErrMsg: "validation failed after 2 iteration(s)"},
 		{name: "loop, validation passed", hasLoop: true, passed: true, runCount: 1, elapsed: 3 * time.Minute},
-		{name: "no loop, killed at budget", timedOut: true, runCount: 1, elapsed: 19 * time.Minute, wantErrMsg: "agent timed out after 19m0s without completing (timeout: 20m0s)"},
+		{name: "loop, validation passed after non-zero exit", hasLoop: true, passed: true, exitCode: 1, runCount: 1, elapsed: 3 * time.Minute},
+		{name: "no loop, killed at budget", timedOut: true, exitCode: 1, runCount: 1, elapsed: 19 * time.Minute, wantErrMsg: "agent timed out after 19m0s without completing (timeout: 20m0s)"},
 		{name: "no loop, exited in time", runCount: 1, elapsed: 3 * time.Minute},
+		{name: "no loop, non-zero exit", exitCode: 1, runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code 1"},
+		{name: "no loop, non-zero exit with other code", exitCode: 2, runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code 2"},
+		{name: "no loop, killed exit before the budget", exitCode: -1, runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code -1"},
+		{name: "no loop, non-behavioral transcript reason", exitCode: 1, exitReason: "error_unknown", runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code 1"},
+		{name: "no loop, turn limit", exitCode: 1, exitReason: "error_max_turns", runCount: 1, elapsed: 3 * time.Minute},
+		{name: "no loop, budget limit", exitCode: 1, exitReason: "error_max_budget_usd", runCount: 1, elapsed: 3 * time.Minute},
+		{name: "no loop, killed exit with behavioral reason", exitCode: -1, exitReason: "error_max_turns", runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code -1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := runTerminalError(tc.hasLoop, tc.passed, tc.timedOut, tc.runCount, tc.elapsed, timeout)
+			err := runTerminalError(tc.hasLoop, tc.passed, tc.timedOut, tc.exitCode, tc.exitReason, tc.runCount, tc.elapsed, timeout)
 			if tc.wantErrMsg == "" {
 				assert.NoError(t, err)
 				return
@@ -4679,6 +4691,93 @@ func TestRunTerminalError(t *testing.T) {
 			require.EqualError(t, err, tc.wantErrMsg)
 		})
 	}
+}
+
+// TestPostScriptGate pins #8305: without a loop a failed agent still gets its
+// post-script when it left a result file that parses, and the run error stays.
+// With a loop the gate is unchanged (ADR 0022).
+func TestPostScriptGate(t *testing.T) {
+	t.Parallel()
+	writeResult := func(t *testing.T, name, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+		return dir
+	}
+	noLoop := &harness.Harness{}
+	withLoop := &harness.Harness{ValidationLoop: &harness.ValidationLoop{Script: "validate.sh"}}
+	agentFailed := runTerminalError(false, false, false, 1, "", 1, time.Minute, time.Hour)
+
+	t.Run("no loop, failed agent, valid result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", `{"status":"error"}`))
+		assert.True(t, got.run)
+		assert.Equal(t, 1, got.agentExitCode)
+		assert.Contains(t, got.message, "the run still fails")
+		require.EqualError(t, agentFailed, "agent failed with exit code 1")
+	})
+	t.Run("no loop, transcript error recorded as exit 1, valid result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, true, agentFailed, writeResult(t, "agent-result.json", `{}`))
+		assert.True(t, got.run)
+	})
+	t.Run("no loop, failed agent, FULLSEND_OUTPUT_FILE names the result", func(t *testing.T) {
+		t.Parallel()
+		h := &harness.Harness{RunnerEnv: map[string]string{"FULLSEND_OUTPUT_FILE": "code-result.json"}}
+		got := postScriptGate(h, false, false, agentFailed, writeResult(t, "code-result.json", `{"ok":true}`))
+		assert.True(t, got.run)
+	})
+	t.Run("no loop, failed agent, no result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, agentFailed, t.TempDir())
+		assert.False(t, got.run)
+		assert.Contains(t, got.message, "left no result file that parses")
+	})
+	t.Run("no loop, failed agent, result does not parse", func(t *testing.T) {
+		t.Parallel()
+		for _, content := range []string{"not json", "[1,2]", "null"} {
+			got := postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", content))
+			assert.False(t, got.run, content)
+		}
+	})
+	t.Run("no loop, result over the size cap", func(t *testing.T) {
+		t.Parallel()
+		big := `{"pad":"` + strings.Repeat("x", agentResultMaxBytes) + `"}`
+		assert.False(t, postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", big)).run)
+	})
+	t.Run("no loop, FULLSEND_OUTPUT_FILE with a path is refused", func(t *testing.T) {
+		t.Parallel()
+		dir := writeResult(t, "agent-result.json", `{}`)
+		h := &harness.Harness{RunnerEnv: map[string]string{"FULLSEND_OUTPUT_FILE": "../" + filepath.Base(dir) + "/agent-result.json"}}
+		assert.False(t, postScriptGate(h, false, false, agentFailed, dir).run)
+	})
+	t.Run("no loop, successful agent", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, nil, t.TempDir())
+		assert.True(t, got.run)
+		assert.Zero(t, got.agentExitCode)
+	})
+	t.Run("no loop, other run error", func(t *testing.T) {
+		t.Parallel()
+		timedOut := runTerminalError(false, false, true, -1, "", 1, time.Hour, time.Hour)
+		got := postScriptGate(noLoop, false, false, timedOut, writeResult(t, "agent-result.json", `{}`))
+		assert.False(t, got.run)
+	})
+	t.Run("loop, validation passed", func(t *testing.T) {
+		t.Parallel()
+		assert.True(t, postScriptGate(withLoop, true, false, nil, t.TempDir()).run)
+	})
+	t.Run("loop, validation failed with a result present", func(t *testing.T) {
+		t.Parallel()
+		runErr := runTerminalError(true, false, false, 1, "", 2, time.Minute, time.Hour)
+		got := postScriptGate(withLoop, false, false, runErr, writeResult(t, "agent-result.json", `{}`))
+		assert.False(t, got.run)
+		assert.Equal(t, "Skipping post-script: validation did not pass", got.message)
+	})
+	t.Run("loop, validation passed but transcript error", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, postScriptGate(withLoop, true, true, nil, t.TempDir()).run)
+	})
 }
 
 func TestShouldStartFetchService_AllowRuntimeFetch(t *testing.T) {

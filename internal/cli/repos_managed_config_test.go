@@ -190,6 +190,50 @@ func TestRunRepos_ManagedConfigPublicContract(t *testing.T) {
 	}
 }
 
+// TestRunRepos_LayeredConfigRuntimeAndAllowlist covers #8330: runtime and
+// allowed_remote_resources declared in defaults.config and github.config
+// render into the managed file, and dry run, live install and status agree.
+func TestRunRepos_LayeredConfigRuntimeAndAllowlist(t *testing.T) {
+	const manifestYAML = `version: 1
+defaults:
+  config:
+    runtime: pi
+github:
+  mint_url: https://mint.example.com
+  fullsend_ref: v1.0.0
+  inference:
+    auth: vertex-wif
+  config:
+    allowed_remote_resources:
+      - https://github-layer.example.com/
+  repos:
+    - name: acme/api
+      config:
+        kill_switch: true
+`
+	manifestPath := writeTestManifest(t, manifestYAML)
+	fc := newInstallFakeClient("acme/api")
+
+	dry := githubManagedInstallOpts(manifestPath, fc)
+	dry.dryRun = true
+	require.NoError(t, runReposInstall(context.Background(), dry))
+	assert.Empty(t, fc.FileContents[overlayPath("acme/api")], "dry-run must not create managed configuration")
+
+	require.NoError(t, runReposInstall(context.Background(), githubManagedInstallOpts(manifestPath, fc)))
+	overlay := string(fc.FileContents[overlayPath("acme/api")])
+	assert.True(t, strings.HasPrefix(overlay, managedConfigMarker), "ownership marker missing:\n%s", overlay)
+	for _, want := range []string{"runtime: pi", "- https://github-layer.example.com/", "kill_switch: true"} {
+		assert.Contains(t, overlay, want)
+	}
+	assert.NotContains(t, overlay, "raw.githubusercontent.com", "code defaults are not materialized")
+
+	result, err := statusJSON(t, manifestPath, fc)
+	require.NoError(t, err)
+	if d, found := overlayDrift(t, result, "acme/api"); found {
+		t.Fatalf("status reported managed-configuration drift immediately after install: %+v", d)
+	}
+}
+
 func TestRunReposInstall_ManagedConfigFreshInstallDryRun(t *testing.T) {
 	manifestPath := writeTestManifest(t, githubManagedManifestYAML)
 	fc := newInstallFakeClient("acme/api")
@@ -215,7 +259,7 @@ func TestRunReposInstall_NoConfigKeyWritesSparseManagedOverlay(t *testing.T) {
 	reloaded, err := repos.LoadManifest(context.Background(), manifestPath)
 	require.NoError(t, err)
 	require.True(t, reloaded.GitHub.Repos[0].Config.IsSet(), "the default must be persisted on the entry")
-	body, ok, err := reloaded.RenderManagedConfig(reloaded.GitHub.Repos[0])
+	body, ok, err := reloaded.RenderManagedConfig(repos.ForgeGitHub, reloaded.GitHub.Repos[0])
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, string(overlay), managedConfigMarker+string(body), "manifest and overlay must agree")
@@ -341,38 +385,39 @@ func TestRunReposStatus_NoConfigKeyMarkerlessOverlayRequiresAdoption(t *testing.
 	assert.Contains(t, d.Expected, "adoption required")
 }
 
-func TestRunReposInstall_ForbiddenShorthandInConfig(t *testing.T) {
+// TestRunReposInstall_RemovedSiblingAndUnknownConfigFields covers #8330:
+// the former sibling runtime / allowed_remote_resources keys and unknown
+// config fields fail install and status with the replacement path.
+func TestRunReposInstall_RemovedSiblingAndUnknownConfigFields(t *testing.T) {
 	tests := []struct {
 		name    string
 		yaml    string
 		wantErr string
 	}{
 		{
-			name: "runtime inside defaults.config",
+			name: "defaults.runtime sibling",
 			yaml: `version: 1
 defaults:
-  config:
-    runtime: pi
+  runtime: pi
 github:
   mint_url: https://mint.example.com
   fullsend_ref: v1.0.0
   repos:
     - name: acme/api
 `,
-			wantErr: "runtime is not allowed inside config",
+			wantErr: "defaults.runtime is no longer supported; move it to defaults.config.runtime",
 		},
 		{
-			name: "allowed_remote_resources inside repo config",
+			name: "repository allowed_remote_resources sibling",
 			yaml: `version: 1
 github:
   mint_url: https://mint.example.com
   fullsend_ref: v1.0.0
   repos:
     - name: acme/api
-      config:
-        allowed_remote_resources: []
+      allowed_remote_resources: []
 `,
-			wantErr: "allowed_remote_resources is not allowed inside config",
+			wantErr: "github.repos[acme/api].allowed_remote_resources is no longer supported; move it to github.repos[acme/api].config.allowed_remote_resources",
 		},
 		{
 			name: "unknown field",

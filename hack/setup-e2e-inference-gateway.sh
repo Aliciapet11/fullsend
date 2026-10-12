@@ -150,6 +150,12 @@ BUSY_STATUSES=(queued in_progress waiting requested pending)
 # The endpoints the post-deploy check calls on every served model, and the
 # bearer it sends as a wrong API key.
 CHECK_ENDPOINTS=(/v1/chat/completions /v1/messages /v1/responses)
+# PATH_PREFIX serves the same gateway under a path prefix too (#8303): the
+# path-prefix route turns ${PATH_PREFIX}/v1/ into /v1/ and hands the request
+# back to this listener, so the prefixed URL gets exactly the same checks as
+# the bare origin. Matching through /v1/ keeps it to one hop: a repeated
+# prefix does not match again.
+PATH_PREFIX=/e2e-prefix
 WRONG_KEY="wrong-key-for-the-post-deploy-check"
 
 # --- Arguments --------------------------------------------------------------
@@ -357,6 +363,11 @@ api_key_policy() {
 # The echo listener is a header-echo upstream inside the same container (Cloud
 # Run only routes to port 8080). Its answer reports whether the gateway's own
 # stub key, rather than the caller's credential, reached the upstream.
+#
+# The config block turns off agentgateway's admin, stats and readiness
+# listeners, which otherwise bind 15000, 15020 and 15021. Nothing uses them:
+# Cloud Run's startup probe is its default TCP check on 8080. "off" is quoted
+# so that YAML 1.1 parsers do not read it as a boolean.
 render_config() {
   local pool m
   pool=$(pool_cel)
@@ -365,6 +376,10 @@ render_config() {
   cat <<EOF
 # fullsend-e2e-gateway (fullsend#8285): agentgateway ${AGW_VERSION}, llm mode, GitHub Actions OIDC
 # $(( ${#POOL_ORGS[@]} * ${#POOL_REPOS[@]} )) allowed repositories (${#POOL_ORGS[@]} orgs x ${#POOL_REPOS[@]} repos)
+config:
+  adminAddr: "off"
+  statsAddr: "off"
+  readinessAddr: "off"
 binds:
 - port: ${ECHO_PORT}
   listeners:
@@ -386,6 +401,15 @@ binds:
             "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})
 gateways:
   default: { port: ${GATEWAY_PORT}, bindAddress: 0.0.0.0 }
+routes:
+- name: path-prefix
+  gateways: [default]
+  matches:
+  - path: { pathPrefix: ${PATH_PREFIX}/v1/ }
+  policies:
+    urlRewrite: { path: { prefix: /v1/ } }
+  backends:
+  - host: 127.0.0.1:${GATEWAY_PORT}
 llm:
   gateways: [default]
   discovery: disabled
@@ -1234,7 +1258,7 @@ post_failed=0
 # request_body prints a minimal request for an endpoint and model.
 request_body() {
   case "$1" in
-    /v1/responses) jq -nc --arg m "$2" '{model: $m, max_output_tokens: 16, input: "ping"}' ;;
+    */v1/responses) jq -nc --arg m "$2" '{model: $m, max_output_tokens: 16, input: "ping"}' ;;
     *) jq -nc --arg m "$2" '{model: $m, max_tokens: 1, messages: [{role: "user", content: "ping"}]}' ;;
   esac
 }
@@ -1290,6 +1314,11 @@ elif (( ${#CHANGES[@]} > service_changes_before )) && [[ "${DRY_RUN}" != "true" 
     done
   done
   check_call "wrong key" 401 /v1/chat/completions echo -H "authorization: Bearer ${WRONG_KEY}"
+  for endpoint in "${CHECK_ENDPOINTS[@]}"; do
+    check_call "no credential, path prefix" "${anon_status}" "${PATH_PREFIX}${endpoint}" echo
+  done
+  check_call "wrong key, path prefix" 401 "${PATH_PREFIX}/v1/chat/completions" echo -H "authorization: Bearer ${WRONG_KEY}"
+  check_call "no credential, repeated prefix" "${anon_status}" "${PATH_PREFIX}${PATH_PREFIX}/v1/chat/completions" echo
   echo
 fi
 
@@ -1310,6 +1339,9 @@ if [[ -n "${URL}" ]]; then
   echo
   echo "    E2E_INFERENCE_GATEWAY_URL=${URL}"
   echo "    E2E_INFERENCE_GATEWAY_AUDIENCE=${AUDIENCE}"
+  echo
+  echo "    The same gateway also answers under ${URL}${PATH_PREFIX}"
+  echo "    (the path-prefix behaviour test appends ${PATH_PREFIX} itself)."
   echo
   echo "    A positive check needs a GitHub Actions OIDC token for a pool"
   echo "    repository; the inference-gateway behaviour test covers it."

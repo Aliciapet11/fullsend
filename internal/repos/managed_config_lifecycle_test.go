@@ -1151,8 +1151,7 @@ func TestConvergeManagedConfigFiles_SafetyGateRejectsImplicitAllowlistWiden(t *t
 
 func TestConvergeManagedConfigFiles_SafetyGateAllowsExplicitAllowlist(t *testing.T) {
 	m := newConvergeManifest("acme/api")
-	m.GitHub.Repos[0].AllowedRemoteResources = []string{"https://github.com/"}
-	m.GitHub.Repos[0].Config = mustManagedConfig(t, "{}")
+	m.GitHub.Repos[0].Config = mustManagedConfig(t, "allowed_remote_resources:\n  - https://github.com/\n")
 	desired := mustDesiredManaged(t, m, "acme", "api")
 
 	fc := forge.NewFakeClient()
