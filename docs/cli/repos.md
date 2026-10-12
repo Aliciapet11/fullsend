@@ -274,7 +274,7 @@ The values, validation, WIF provider derivation, and the `FULLSEND_GCP_*` secret
 | Flag | Repository added by this run | Repository already tracked |
 |------|------------------------------|----------------------------|
 | `--inference-auth` | Pinned on the new entry | Rewrites the entry's `inference.auth` (a glob-covered repository gets its own entry copied from the glob) |
-| `--app-set` | Recorded when it differs from `github.app_set` | Rewrites the entry's `app_set` |
+| `--app-set` | Recorded on the new entry, even when it equals `github.app_set` (the repository then no longer inherits a later `github.app_set` change) | Rewrites the entry's `app_set` |
 | `--roles` (explicit) | Recorded as `config.roles` | Recorded as `config.roles` only while the repository has no `.fullsend/config.yaml` or its installation is pending; otherwise edit `config.roles` |
 | `--mint-url`, `--fullsend-ref` | Recorded when they differ from the forge section | Not recorded on an explicit entry; edit `mint_url` / `fullsend_ref`. A glob-covered repository gets an entry copied from the glob that carries the value |
 | `--vendor` | Recorded when it differs from `defaults.vendor` | Overrides the manifest for this run only |

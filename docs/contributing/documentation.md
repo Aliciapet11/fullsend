@@ -74,7 +74,7 @@ The `admin` command group's `uninstall`/`analyze`/`enable`/`disable` subcommands
 | Category | Files |
 |----------|-------|
 | CLI reference | `docs/cli/github.md` |
-| Guides | `docs/guides/getting-started/configuring-github.md`, `docs/guides/getting-started/operations.md`, `docs/guides/dev/cli-internals.md`, `docs/guides/dev/e2e-testing.md` |
+| Guides | `docs/guides/getting-started/configuring-github.md`, `docs/guides/getting-started/operations.md`, `docs/guides/getting-started/migrating-from-github-setup.md`, `docs/guides/dev/cli-internals.md`, `docs/guides/dev/e2e-testing.md` |
 | ADRs | `docs/ADRs/0057-repos-management.md` |
 | Go source | `internal/cli/github.go` |
 
@@ -100,7 +100,7 @@ The `admin` command group's `uninstall`/`analyze`/`enable`/`disable` subcommands
 | Category | Files |
 |----------|-------|
 | CLI reference | `docs/cli/repos.md` |
-| Guides | `docs/guides/getting-started/operations.md`, `docs/guides/getting-started/repo-management.md`, `docs/guides/getting-started/getting-inference.md`, `docs/guides/getting-started/configuring-gitlab.md`, `docs/guides/dev/cli-internals.md`, `docs/guides/infrastructure/layered-config-reference.md` |
+| Guides | `docs/guides/getting-started/operations.md`, `docs/guides/getting-started/repo-management.md`, `docs/guides/getting-started/migrating-from-github-setup.md`, `docs/guides/getting-started/getting-inference.md`, `docs/guides/getting-started/configuring-gitlab.md`, `docs/guides/dev/cli-internals.md`, `docs/guides/infrastructure/layered-config-reference.md` |
 | ADRs | `docs/ADRs/0057-repos-management.md`, `docs/ADRs/0074-repos-command-consolidation.md`, `docs/ADRs/0122-declarative-repo-configuration.md` |
 | Go source | `internal/cli/repos.go`, `internal/cli/repos_gitlab.go` |
 
