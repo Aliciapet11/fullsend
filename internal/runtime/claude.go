@@ -384,12 +384,20 @@ func skillDestNames(skillDirs []string) []nameEntry {
 	return out
 }
 
-// uploadHarnessSkills copies each skill directory into skillsRoot/<sandboxName>.
-// Destination identity is skill.SandboxName (declared SKILL.md name, else
-// basename) so nested forge skills that share a leaf directory upload to
-// distinct destinations. Collisions fail before any upload.
+// uploadHarnessSkills copies each skill directory into
+// skillsRoot/<skill.SandboxName(dir)>. Destination identity is
+// skill.SandboxName (declared SKILL.md name, else basename) so nested forge
+// skills that share a leaf directory upload to distinct destinations.
+// Every destination name must be a single sandbox-safe path segment
+// (skill.ValidName) and collisions fail, both before any upload.
 func uploadHarnessSkills(sandboxName, skillsRoot string, skillDirs []string) error {
-	if err := duplicateNameError("skill", skillDestNames(skillDirs)); err != nil {
+	entries := skillDestNames(skillDirs)
+	for _, e := range entries {
+		if !skill.ValidName(e.name) {
+			return fmt.Errorf("skill path %q resolves to invalid sandbox name %q", e.path, e.name)
+		}
+	}
+	if err := duplicateNameError("skill", entries); err != nil {
 		return err
 	}
 	for _, skillPath := range skillDirs {

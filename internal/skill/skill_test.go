@@ -424,18 +424,7 @@ func TestSandboxName_NonAbsolutePathSkipsDeclaredName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	oldwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if chErr := os.Chdir(oldwd); chErr != nil {
-			t.Fatal(chErr)
-		}
-	}()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(dir)
 
 	if got := SandboxName(rel); got != "github" {
 		t.Errorf("relative path: SandboxName() = %q, want %q (declared name must not be consulted for relative paths)", got, "github")

@@ -150,7 +150,10 @@ composition model and config-driven registration.
 > present, not just the directory basename. If an existing built-in or
 > custom skill's declared `name:` differs from its directory name, its
 > sandbox path and override-matching behavior change starting with this
-> release.
+> release. Also, entries in a single harness's `skills:` list no longer
+> replace each other when they share an identity (previously the later one
+> won); only a child entry replacing a base entry overrides, and any
+> remaining duplicate destination now fails at bootstrap.
 
 ### Built-in skills
 

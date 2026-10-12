@@ -259,6 +259,31 @@ func TestCodexRuntimeBootstrap_NestedForgeSkillsShareBasename(t *testing.T) {
 	assert.NotContains(t, log, r.ConfigDir()+"/skills/github")
 }
 
+func TestCodexRuntimeBootstrap_RejectsInvalidSkillDestinationName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path func(root string) string
+	}{
+		{"dotdot", func(root string) string { return root + "/sub/.." }},
+		{"dot", func(root string) string { return root + "/sub/." }},
+		{"control-char", func(root string) string { return root + "/bad\x01name" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "openshell.log")
+			fakeOpenshellCodex(t, logPath, t.TempDir(), "codex-cli 0.152.1")
+
+			err := CodexRuntime{}.Bootstrap(bootstrapInput{
+				sandboxName: "sb",
+				agentPath:   writeAgentFile(t, codexTestAgentDef),
+				agentName:   "triage",
+				skillDirs:   []string{tc.path(t.TempDir())},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid sandbox name")
+		})
+	}
+}
+
 func TestCodexRuntimeBootstrap_PreflightFailureIsReportedEarly(t *testing.T) {
 	binDir := t.TempDir()
 	script := `#!/bin/sh

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path"
@@ -2280,8 +2281,10 @@ func urlIndexPut(workspaceRoot, rawURL, hash string) error {
 // distinct identities once SKILL.md is readable, and even before that they
 // do not collapse against each other: only a *base* entry is an override
 // target. True destination collisions fail at bootstrap via
-// duplicateDestinationNameError rather than silently dropping a skill
-// (#7830).
+// uploadHarnessSkills (duplicateNameError) rather than silently dropping a
+// skill (#7830). When a child replaces a base entry whose directory
+// basename differs (i.e. the match came from the declared SKILL.md name),
+// the replacement is logged so it is not silent.
 func mergeSkills(base, child []SkillEntry) []SkillEntry {
 	baseIndex := make(map[string]int, len(base))
 	result := make([]SkillEntry, 0, len(base)+len(child))
@@ -2299,6 +2302,10 @@ func mergeSkills(base, child []SkillEntry) []SkillEntry {
 	for _, s := range child {
 		name := skill.SandboxName(s.Source)
 		if idx, exists := baseIndex[name]; exists {
+			if filepath.Base(result[idx].Source) != filepath.Base(s.Source) {
+				log.Printf("harness: skill %q (%s) replaces base skill at %s: both declare the skill name %q",
+					s.Source, filepath.Base(s.Source), result[idx].Source, name)
+			}
 			merged := SkillEntry{
 				Source:    s.Source,
 				Overrides: mergeOverrides(result[idx].Overrides, s.Overrides),

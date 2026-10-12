@@ -216,7 +216,8 @@ func TestResolveForge_GitlabNestedForgeSkillsShareBasename(t *testing.T) {
 // declaring the same name — mergeSkills has no way to distinguish that
 // from an intentional override (the same #5408 child-replaces-base
 // mechanism this test exercises is by design; only the identity source
-// changed). There is no error or log for this case today.
+// changed). mergeSkills logs the replacement so it is not silent, but does
+// not reject it.
 func TestResolveForge_ForgeSkillDeclaredNameOverridesUnrelatedTopLevelSkill(t *testing.T) {
 	dir := t.TempDir()
 
@@ -240,7 +241,7 @@ func TestResolveForge_ForgeSkillDeclaredNameOverridesUnrelatedTopLevelSkill(t *t
 
 	require.NoError(t, h.ResolveForge("github"))
 	// The unrelated directory silently replaced the top-level skill slot
-	// because both declare the same SKILL.md name — no error, no log.
+	// because both declare the same SKILL.md name — logged, not an error.
 	assert.Equal(t, []string{unrelated}, SkillSources(h.Skills))
 }
 

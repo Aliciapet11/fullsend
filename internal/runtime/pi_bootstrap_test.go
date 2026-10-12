@@ -574,6 +574,31 @@ func TestPiRuntimeBootstrap_NestedForgeSkillsShareBasename(t *testing.T) {
 	assert.NotContains(t, string(log), cfg+"/skills/github")
 }
 
+func TestPiRuntimeBootstrap_RejectsInvalidSkillDestinationName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path func(root string) string
+	}{
+		{"dotdot", func(root string) string { return root + "/sub/.." }},
+		{"dot", func(root string) string { return root + "/sub/." }},
+		{"control-char", func(root string) string { return root + "/bad\x01name" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := t.TempDir()
+			fakeOpenshellPi(t, filepath.Join(work, "openshell.log"), filepath.Join(work, "store"), "/dev/null")
+
+			err := PiRuntime{}.Bootstrap(bootstrapInput{
+				sandboxName: "sb",
+				agentPath:   writeAgentFile(t, testAgentDef),
+				agentName:   "triage",
+				skillDirs:   []string{tc.path(t.TempDir())},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid sandbox name")
+		})
+	}
+}
+
 func TestPiRuntimeExtractTranscripts(t *testing.T) {
 	work := t.TempDir()
 	logPath := filepath.Join(work, "openshell.log")
