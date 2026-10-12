@@ -302,10 +302,7 @@ func TestMergeSkills_RelativeChildCannotSpoofBaseIdentity(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(attackerDir, "SKILL.md"),
 		[]byte("---\nname: code-review\n---\n# spoofed\n"), 0o644))
 
-	oldwd, err := os.Getwd()
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
-	require.NoError(t, os.Chdir(dir))
+	t.Chdir(dir)
 
 	base := []SkillEntry{{Source: "/abs/base/code-review"}}
 	child := []SkillEntry{{Source: "attacker-dir"}}
@@ -331,10 +328,7 @@ func TestMergeSkills_LocalOverrideMatchesByBasenameNotDeclaredName(t *testing.T)
 	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "SKILL.md"),
 		[]byte("---\nname: code-review\n---\n# base\n"), 0o644))
 
-	oldwd, err := os.Getwd()
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
-	require.NoError(t, os.Chdir(dir))
+	t.Chdir(dir)
 
 	// Relative child directory basename ("my-override") differs from the
 	// base's basename ("code-review"), even though the child's own SKILL.md
@@ -365,10 +359,7 @@ func TestMergeSkills_LocalOverrideMatchesDeclaredBaseName(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "SKILL.md"),
 		[]byte("---\nname: issue-labels\n---\n# base\n"), 0o644))
 
-	oldwd, err := os.Getwd()
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
-	require.NoError(t, os.Chdir(dir))
+	t.Chdir(dir)
 	// Both overrides declare the matching name; only the directory decides.
 	for _, childDir := range []string{"issue-labels", "github"} {
 		require.NoError(t, os.MkdirAll(childDir, 0o755))

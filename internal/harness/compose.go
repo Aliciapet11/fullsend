@@ -2303,7 +2303,7 @@ func mergeSkills(base, child []SkillEntry) []SkillEntry {
 		name := skill.SandboxName(s.Source)
 		if idx, exists := baseIndex[name]; exists {
 			if filepath.Base(result[idx].Source) != filepath.Base(s.Source) {
-				log.Printf("harness: skill %q (%s) replaces base skill at %s: both declare the skill name %q",
+				log.Printf("harness: skill %q (%q) replaces base skill at %q: both declare the skill name %q",
 					s.Source, filepath.Base(s.Source), result[idx].Source, name)
 			}
 			merged := SkillEntry{
