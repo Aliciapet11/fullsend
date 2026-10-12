@@ -540,6 +540,8 @@ This matters most for forensics. When investigating a security incident, the fir
 
 Issue [#1685](https://github.com/fullsend-ai/fullsend/issues/1685) explores using gitsign for agent-generated commits. Audit log integrity is a prerequisite concern: if the log of what the agent did during the run cannot be trusted, signing the resulting commit provides provenance for the output but not accountability for the process. Both are needed, and hash-chained audit logs are a simpler first step that does not require external signing infrastructure.
 
+Install-time scaffold commits created on an operator's behalf are signed by the forge where it is configured to sign (decided in [ADR 0140](../ADRs/0140-sign-github-scaffold-commits-via-createcommitonbranch.md)); that signature attests that the forge created the commit for the account, not that the operator's own key did, and it does not cover agent-generated commits.
+
 ### Open questions
 
 - Should hash chaining use a seed derived from the run's trace ID, or a global chain that spans runs? Per-run chains are simpler but cannot detect deletion of entire runs.

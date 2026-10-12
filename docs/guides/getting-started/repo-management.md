@@ -591,6 +591,18 @@ fullsend repos set defaults.signoff true
 fullsend repos install -f repos.yaml
 ```
 
+Scaffold commits are also [signed](../../glossary.md#signed-commit),
+independently of the DCO trailer. On GitHub the install asks GitHub to
+create each commit on your behalf, so GitHub signs it, it shows as
+**Verified**, and it passes rulesets that require signed commits —
+whichever token type you use. The exception is a vendored install
+(`vendor: true`): its binary is uploaded through an API that GitHub does
+not sign for user tokens, so it cannot target a repository that requires
+signed commits. On GitLab the commit is signed only where web-based
+commit signing is set up: the group or project setting on GitLab.com,
+the instance's signing key on Self-Managed and Dedicated. See
+[Signed commits](../../cli/repos.md#signed-commits) for details.
+
 #### GitLab trigger-only service account
 
 For GitLab repos, install also converges a dedicated trigger-only service
