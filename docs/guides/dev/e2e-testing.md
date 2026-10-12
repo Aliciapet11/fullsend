@@ -169,7 +169,7 @@ Each pool org must be provisioned before e2e can use it:
 1. Org exists with `botsend` as owner
 2. `test-repo` and `e2e-lock` repos (lock created at runtime)
 3. Test actor permissions granted (see [Test actor permissions](#test-actor-permissions) below)
-4. All role apps installed, including `fullsend-ai-e2e` with **Repository → Variables: Read and write** (`actions_variables`) and **Organization → Variables: Read and write** (`organization_actions_variables`)
+4. The six `fullsend-test-*` role apps are installed for the test mint. The production `fullsend-ai-e2e` app is also installed with **Repository → Variables: Read and write** (`actions_variables`) and **Organization → Variables: Read and write** (`organization_actions_variables`); there is no test replacement for the `e2e` role.
 5. `FULLSEND_FOREIGN_E2E_REPOS` includes `fullsend-ai/fullsend` with org-wide visibility (`visibility: all`)
 6. Mint enrolled: requesting repository `fullsend-ai/fullsend` in `PER_REPO_WIF_REPOS` (or public mode), `e2e` in `ROLE_APP_IDS`, e2e app PEM enrolled. The pool org is a foreign target, so its access is governed by the `FULLSEND_FOREIGN_E2E_REPOS` grant and App installation above rather than by requesting-repository enrollment
 
@@ -720,6 +720,17 @@ and test mints, including the Cloudflare Worker mint BT chain. There is **no
 `e2e` test app**. The `fix` role shares the coder test app and PEM (same as
 production).
 
+Pool organizations intentionally do not keep the production agent apps
+installed as baseline test infrastructure. The test mint uses the isolated
+`fullsend-test-*` identities, which limits the blast radius of test credentials
+and prevents ordinary behaviour runs from acting as production agents. The
+suite still has both credential paths available: the public mint backed by the
+production `fullsend-ai-*` apps and the per-test mint backed by the
+`fullsend-test-*` apps. Tests that need to emulate a third-party agent can use
+the production identities explicitly through the public mint path; those
+identities remain available for that purpose without being permanently trusted
+by every test organization.
+
 > **Warning:** Do **not** enroll these apps on the production community mint.
 > They are strictly for test infrastructure.
 
@@ -740,8 +751,13 @@ The `fix` role reuses the coder app (`fullsend-test-coder`) and
 
 ### Installation targets
 
-All six apps are installed with access to **all repositories** on
+All six test apps are installed with access to **all repositories** on
 `halfsend-01` through `halfsend-12` and on `halfsend` (used by the STAGE driver).
+The production `fullsend-ai-e2e` app is installed on the same organizations for
+cross-org suite control and minting. The other production agent apps are not
+required for the normal behaviour or playback suites and are intentionally not
+installed there; a scenario that needs a production identity must arrange that
+installation explicitly.
 
 ### App permission scopes
 
