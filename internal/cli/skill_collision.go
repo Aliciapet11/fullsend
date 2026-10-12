@@ -30,11 +30,14 @@ func warnRepoSkillCollisions(repoDir string, harnessSkillDirs []string, printer 
 	}
 
 	for _, entry := range entries {
-		name := entry.Name()
-		if _, collision := harnessSkills[name]; !collision {
+		repoSkillDir := filepath.Join(projectSkillsDir, entry.Name())
+		if !isReadableSkillMarker(repoSkillDir) {
 			continue
 		}
-		if !isReadableSkillMarker(filepath.Join(projectSkillsDir, name)) {
+		// The same identity as the harness side: the declared SKILL.md name,
+		// since repoDir is absolute.
+		name := skill.SandboxName(repoSkillDir)
+		if _, collision := harnessSkills[name]; !collision {
 			continue
 		}
 		printer.StepWarn(fmt.Sprintf(

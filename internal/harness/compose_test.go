@@ -321,7 +321,7 @@ func TestMergeSkills_RelativeChildCannotSpoofBaseIdentity(t *testing.T) {
 // skill does NOT override it when the directory basenames differ — declared
 // names are only consulted for absolute paths (skill.SandboxName). Only a
 // matching directory basename lets a local override take effect. See the
-// "Local overrides must match by directory name" note in
+// "Name a local override after the built-in's declared name" note in
 // docs/guides/user/customizing-with-skills.md and the skills row in
 // docs/contributing/harness-fields.md.
 func TestMergeSkills_LocalOverrideMatchesByBasenameNotDeclaredName(t *testing.T) {
@@ -353,6 +353,34 @@ func TestMergeSkills_LocalOverrideMatchesByBasenameNotDeclaredName(t *testing.T)
 	)
 	require.Len(t, got, 2, "declared-name match alone must not override when the child path is still relative")
 	assert.Equal(t, []string{baseDir, childDir}, SkillSources(got))
+}
+
+// A fetched base is matched by its declared name and a relative local
+// override by its directory basename, so the override directory takes the
+// base's declared name, which for a nested forge skill is not its basename.
+func TestMergeSkills_LocalOverrideMatchesDeclaredBaseName(t *testing.T) {
+	dir := t.TempDir()
+	baseDir := filepath.Join(dir, "cache", "issue-labels", "github")
+	require.NoError(t, os.MkdirAll(baseDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "SKILL.md"),
+		[]byte("---\nname: issue-labels\n---\n# base\n"), 0o644))
+
+	oldwd, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
+	require.NoError(t, os.Chdir(dir))
+	// Both overrides declare the matching name; only the directory decides.
+	for _, childDir := range []string{"issue-labels", "github"} {
+		require.NoError(t, os.MkdirAll(childDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(childDir, "SKILL.md"),
+			[]byte("---\nname: issue-labels\n---\n# child\n"), 0o644))
+	}
+
+	got := mergeSkills([]SkillEntry{{Source: baseDir}}, []SkillEntry{{Source: "issue-labels"}})
+	assert.Equal(t, []string{"issue-labels"}, SkillSources(got), "the base's declared name overrides it")
+
+	got = mergeSkills([]SkillEntry{{Source: baseDir}}, []SkillEntry{{Source: "github"}})
+	assert.Equal(t, []string{baseDir, "github"}, SkillSources(got), "the base's basename does not")
 }
 
 func TestLoadWithBase_LocalBase_PrivilegeLevelsMerge(t *testing.T) {
