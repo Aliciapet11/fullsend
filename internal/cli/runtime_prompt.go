@@ -23,6 +23,7 @@ const defaultRuntimeChoice = "claude"
 // returns the default so setup never blocks. Enter or EOF keep the default.
 // The choice is written to `runtime:` in .fullsend/config.yaml — the same
 // key `fullsend github setup --runtime` and a per-run `--runtime` override.
+// A repository managed through repos.yaml sets it as config.runtime there.
 func promptRuntime(printer *ui.Printer, in io.Reader, interactive bool) (string, error) {
 	if !interactive {
 		return "", nil
@@ -35,6 +36,7 @@ func promptRuntime(printer *ui.Printer, in io.Reader, interactive bool) (string,
 	printer.StepInfo("  [codex]  Codex — experimental; OpenAI models, or gateway/<model> through an inference gateway. Recommended: keep review and retro on claude")
 	printer.StepInfo("  Keep the default unless you are taking part in a pilot. Change later with `runtime:`")
 	printer.StepInfo("  in .fullsend/config.yaml or `fullsend github setup --runtime`; see docs/runtimes.md.")
+	printer.StepInfo("  Once the repo is in repos.yaml, set `config.runtime` there and run `fullsend repos install`.")
 	printer.Blank()
 
 	reader := bufio.NewReader(in)

@@ -12,3 +12,7 @@ set up Fullsend. These are intended to be read in a certain order:
 2. [Choose an agent runtime](choosing-a-runtime.md)
 3. [Configuring GitHub](configuring-github.md) or [Configuring GitLab](configuring-gitlab.md)
 4. [Repo Management](repo-management.md)
+
+A repository already configured with `fullsend github setup` can be moved
+to `repos.yaml` management; see
+[Moving from `github setup` to `repos install`](migrating-from-github-setup.md).

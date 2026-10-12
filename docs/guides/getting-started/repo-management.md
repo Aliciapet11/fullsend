@@ -13,7 +13,9 @@ version upgrades across multiple repos, GitHub orgs, and GitLab groups.
 fullsend across an organization. For a single repository, GitHub owners
 should use `fullsend github setup` (see [Configuring GitHub](configuring-github.md));
 GitLab project owners should use `fullsend repos install --forge gitlab`
-(see [Configuring GitLab](configuring-gitlab.md)).
+(see [Configuring GitLab](configuring-gitlab.md)). To move a repository
+configured with `github setup` into `repos.yaml`, see
+[Moving from `github setup` to `repos install`](migrating-from-github-setup.md).
 
 ## Prerequisites
 
@@ -213,9 +215,9 @@ that adds `inference.auth`.
 
 ### Configuration presets
 
-`repos.yaml` can declare a configuration preset so fleet installs
-reproduce `github setup --config`. The preset is a local file or HTTPS
-URL written byte-for-byte as `.fullsend/config.base.yaml`.
+`repos.yaml` can declare a configuration preset (the manifest equivalent
+of `github setup --config`). The preset is a local file or HTTPS URL
+written byte-for-byte as `.fullsend/config.base.yaml`.
 `.fullsend/config.yaml` remains the repository-local overlay and is not
 merged with the preset.
 
@@ -238,7 +240,8 @@ github:
 ```
 
 `config_base.sha256` is optional. When set, it must be a 64-character SHA-256
-hex digest of the fetched content, matching `github setup --config-hash`.
+hex digest of the fetched content (the manifest equivalent of
+`github setup --config-hash`).
 A per-repo `config_base.source` override still inherits
 `defaults.config_base.sha256` unless you set `config_base.sha256` on that
 entry (`none` skips validation). A hash mismatch or invalid source fails
@@ -674,7 +677,10 @@ such as `runtime` and `allowed_remote_resources` have no install flag:
 declare them in the entry's `config` (see
 [Managed configuration](#managed-configuration)). The
 `--vertex-region` flag is install-time only and is not stored in the
-manifest.
+manifest. For a repository that is already in the manifest, only
+`--inference-auth`, `--app-set` and, on a first or pending install,
+`--roles` change its entry; edit `repos.yaml` for everything else (see
+[Flags and already tracked repositories](../../cli/repos.md#flags-and-already-tracked-repositories)).
 
 ### Removing repos
 
@@ -865,6 +871,7 @@ commands.
 ## See also
 
 - [Configuring GitLab](configuring-gitlab.md) — GitLab-specific getting-started guide
+- [Moving from `github setup` to `repos install`](migrating-from-github-setup.md) — conversion table and migration steps
 - [Operations](operations.md) — Day-2 per-repo administration and standalone commands
 - [CLI Reference: fullsend repos](../../cli/repos.md) — Full flag and subcommand reference
 - [Mint administration](../infrastructure/mint-administration.md) — Token mint deployment and management

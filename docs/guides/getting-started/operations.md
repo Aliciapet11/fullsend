@@ -88,7 +88,7 @@ region there remains an alternative.
 
 ### Per-repo configuration in `repos.yaml`
 
-For repositories managed through `repos.yaml` (every GitLab install, and GitHub fleets), `.fullsend/config.yaml` is managed: change per-repo config values — including `runtime` and `allowed_remote_resources` — in `defaults.config`, `github.config`, `gitlab.config`, or the repository entry's `config`, then run `fullsend repos install`. `repos install` has no `--runtime` or `--allowed-remote-resources` flag, and `repos set-default` does not write config fields. The former sibling keys (`defaults.runtime`, `defaults.allowed_remote_resources`, and their repository-entry equivalents) are rejected with the replacement path. See [Repo Management — Managed configuration](repo-management.md#managed-configuration).
+For repositories managed through `repos.yaml` (every GitLab install, and GitHub fleets), `.fullsend/config.yaml` is managed: change per-repo config values — including `runtime` and `allowed_remote_resources` — in `defaults.config`, `github.config`, `gitlab.config`, or the repository entry's `config`, then run `fullsend repos install`. `repos install` has no `--runtime` or `--allowed-remote-resources` flag, and `repos set-default` does not write config fields. The former sibling keys (`defaults.runtime`, `defaults.allowed_remote_resources`, and their repository-entry equivalents) are rejected with the replacement path. See [Repo Management — Managed configuration](repo-management.md#managed-configuration). To move a repository configured with `github setup` into `repos.yaml`, including the conversion of each setup flag, see [Moving from `github setup` to `repos install`](migrating-from-github-setup.md).
 
 ## Syncing workflow templates
 
@@ -100,7 +100,7 @@ fullsend github setup "$OWNER/$REPO" \
   --inference-wif-provider "<WIF_PROVIDER>"
 ```
 
-For manifest-managed installations (including GitLab repos), use `repos install` to converge all repos (including workflow ref upgrades):
+For manifest-managed installations (including GitLab repos), use `repos install` to converge all repos (including workflow ref upgrades). Do not re-run `github setup` on a repository listed in `repos.yaml`: with a config flag it rewrites `.fullsend/config.yaml` without the ownership marker, and the next `repos install` stops until the file is adopted again.
 
 ```bash
 fullsend repos install -f repos.yaml

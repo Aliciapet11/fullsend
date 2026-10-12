@@ -46,6 +46,16 @@ layer. Remove the key from `.fullsend/config.yaml` to inherit again. Omitted fla
 flags (`--dry-run`, `--direct`, `--vendor`, …) do not pin or warn. A `config.yaml` that no longer
 parses fails the re-run rather than being regenerated.
 
+**Moving to `repos install`.** Once a repository is listed in `repos.yaml`, its
+`.fullsend/config.yaml` is managed from the manifest. Stop re-running `github setup` on it: a
+config flag re-serializes the file without its ownership marker, and the next `repos install`
+stops until the file is adopted. Many setup flags have no `repos install` equivalent:
+`--runtime`, `--openai-*`, `--inference-gateway-*`, `--inference-provider`, `--config` and
+`--config-hash` become `repos.yaml` entries. `--agents`, `--inference-project`,
+`--inference-region` and `--inference-wif-provider` are renamed `--roles`, `--vertex-project`,
+`--vertex-region` and `--vertex-wif-provider`. See [Moving from `github setup` to `repos install`](../guides/getting-started/migrating-from-github-setup.md)
+for the full conversion table and the migration steps.
+
 ### Flags
 
 | Flag | Default | Description |
@@ -107,4 +117,5 @@ fullsend github set <owner/repo> <key> <value>
 
 - [Configuring GitHub for fullsend](../guides/getting-started/configuring-github.md) — getting started guide
 - [Advanced setup](../guides/infrastructure/advanced-setup.md) — non-standard installation paths and setup flags
+- [Moving from `github setup` to `repos install`](../guides/getting-started/migrating-from-github-setup.md) — conversion table and migration steps
 - [Operations](../guides/getting-started/operations.md) — day-2 administration (configuration updates, workflow syncing, uninstall)

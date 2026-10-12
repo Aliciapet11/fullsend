@@ -116,6 +116,7 @@ func TestValidateClaudeGatewayModels(t *testing.T) {
 	assert.ErrorContains(t, validateClaudeGatewayModels([]string{"gateway/"}, oidc, true), "names no gateway model")
 	assert.ErrorContains(t, validateClaudeGatewayModels([]string{"gateway/ "}, oidc, true), "names no gateway model")
 	assert.ErrorContains(t, validateClaudeGatewayModels([]string{"gateway/m"}, config.InferenceGatewayConfig{}, false), "need an inference.gateway block")
+	assert.ErrorContains(t, validateClaudeGatewayModels([]string{"gateway/m"}, config.InferenceGatewayConfig{}, false), "under config.inference.gateway there")
 	assert.ErrorContains(t, validateClaudeGatewayModels([]string{"gateway/m"}, oidc, false), "auth: api-key for a local run")
 	assert.ErrorContains(t, validateClaudeGatewayModels([]string{"gateway/m"}, apiKey, false), "block that applies")
 }

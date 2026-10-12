@@ -412,7 +412,10 @@ independently through the layered config system (an overlay can override
   runner-variable override for this block. `fullsend github setup
   --inference-gateway-*` writes it and changes only the keys you pass, so
   a repository can add its models under a `url` and `audience` inherited
-  from `config.base.yaml`. For a walkthrough, see
+  from `config.base.yaml`. For a manifest-managed repository, declare the
+  block as `config.inference.gateway` in `repos.yaml` instead (see
+  [Moving from `github setup` to `repos install`](../guides/getting-started/migrating-from-github-setup.md#conversion-table)).
+  For a walkthrough, see
   [Using an inference gateway](../guides/user/inference-gateway.md).
 
 For setup instructions, see

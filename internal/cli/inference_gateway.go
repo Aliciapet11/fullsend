@@ -79,7 +79,9 @@ func newInferenceGatewayCmd() *cobra.Command {
 		Long: `Commands for the self-hosted inference gateway (inference.gateway,
 ADR 0137): an OpenAI/Anthropic-compatible gateway that validates the
 job's GitHub OIDC token directly. Configure it with
-'fullsend github setup --inference-gateway-*'.`,
+'fullsend github setup --inference-gateway-*', or, for a repository
+managed in repos.yaml, under config.inference.gateway there followed by
+'fullsend repos install'.`,
 	}
 	cmd.AddCommand(newInferenceGatewayStatusCmd())
 	return cmd
@@ -216,6 +218,7 @@ func runInferenceGatewayStatus(ctx context.Context, printer *ui.Printer, repo, f
 	if g.IsZero() {
 		printer.StepFail("No inference.gateway block configured")
 		printer.StepInfo("Configure it with 'fullsend github setup --inference-gateway-url <url> --inference-gateway-audience <aud>'")
+		printer.StepInfo("For a repository managed in repos.yaml, set config.inference.gateway there and run 'fullsend repos install'")
 		return fmt.Errorf("no inference.gateway block configured for %s", repo)
 	}
 	if missing := g.Missing(); len(missing) > 0 {

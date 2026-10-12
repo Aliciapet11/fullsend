@@ -419,7 +419,8 @@ fullsend repos install acme/api --forge github --inference-auth openai-wif
   into the repository's `repos.yaml` entry, then remove or replace the file (see
   [Repo Management — Managed configuration](../getting-started/repo-management.md#managed-configuration)).
   An existing `.fullsend/config.base.yaml` likewise blocks install unless a `config_base` preset
-  is declared for the repository.
+  is declared for the repository. The step-by-step procedure is in
+  [Moving from `github setup` to `repos install`](../getting-started/migrating-from-github-setup.md).
 - Switching from `openai-api-key` keeps `FULLSEND_OPENAI_API_KEY` until a complete identifier set is
   on the default branch. If the identifiers arrive in an unmerged initialization pull request, merge
   it and re-run `repos install` to remove the key.

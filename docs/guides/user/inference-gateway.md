@@ -278,6 +278,7 @@ A repository with no block fails the check:
 
   ✗ No inference.gateway block configured
     Configure it with 'fullsend github setup --inference-gateway-url <url> --inference-gateway-audience <aud>'
+    For a repository managed in repos.yaml, set config.inference.gateway there and run 'fullsend repos install'
 Error: no inference.gateway block configured for example-org/example-repo
 ```
 
@@ -305,7 +306,7 @@ For pi, the harness-plugin path for local runs is in
 
 | You see | Cause | Action |
 |---|---|---|
-| `inference.gateway is partial: missing audience (the oidc mode needs url and audience)`, or from `status`: `inference.gateway is partially configured: missing audience` | The block, after its layers merge, lacks `url`, or lacks `audience` in the `oidc` mode. | Set the missing field with `fullsend github setup --inference-gateway-url` or `--inference-gateway-audience`, or remove the block. |
+| `inference.gateway is partial: missing audience (the oidc mode needs url and audience)`, or from `status`: `inference.gateway is partially configured: missing audience` | The block, after its layers merge, lacks `url`, or lacks `audience` in the `oidc` mode. | Set the missing field with `fullsend github setup --inference-gateway-url` or `--inference-gateway-audience` (for a repository managed in `repos.yaml`, under `config.inference.gateway` there), or remove the block. |
 | `pi gateway/ models need a model list: set inference.gateway.models or inference.gateway.models_file (pi runs offline and cannot discover gateway models)` | An agent uses a `gateway/` model, and the block has no model list. | List the models with `--inference-gateway-model id=api` or `--inference-gateway-models-file`. |
 | `inference.gateway.auth is "api-key" but FULLSEND_INFERENCE_GATEWAY_API_KEY is not set; set it as a forge secret (or in the local environment)` | The block is in the `api-key` mode and the run has no key. | Set the repository secret as shown in [Choosing `auth`](#choosing-auth), or export the variable for a local run. |
 | From `status`: `Gateway refused the assertion (HTTP 401)` or `(HTTP 403)`; in a run, the model call fails with the gateway's `401` or `403` | The gateway did not accept the credential: a different audience, a repository not on its allowed list, or a revoked key. | Check the audience and allowed repositories with the operator. The gateway's exact error text and its fixes are in the operator guide's [troubleshooting table](../infrastructure/inference-gateway-operator.md#troubleshooting). |

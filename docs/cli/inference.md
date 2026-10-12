@@ -123,7 +123,7 @@ fullsend inference openai request <owner/repo>[,<owner/repo>…] \
 
 ### `inference openai import`
 
-Takes the administrator's reply and writes `inference.openai` into `.fullsend/config.yaml` through the same setters as `fullsend github setup --openai-*`. All three identifiers must be present — a partial trio is refused, and the config is validated before it is written. The write is local: commit `.fullsend/config.yaml` afterwards, since fullsend reads the base branch for pull-request events.
+Takes the administrator's reply and writes `inference.openai` into `.fullsend/config.yaml` through the same setters as `fullsend github setup --openai-*`. All three identifiers must be present — a partial trio is refused, and the config is validated before it is written. The write is local: commit `.fullsend/config.yaml` afterwards, since fullsend reads the base branch for pull-request events. For a repository managed through `repos.yaml`, whose `.fullsend/config.yaml` is managed, do not commit the imported file: declare the three identifiers as `config.inference.openai` in its `repos.yaml` entry and run `fullsend repos install` (see [Moving from `github setup` to `repos install`](../guides/getting-started/migrating-from-github-setup.md#conversion-table)).
 
 The reply file may be either the bare reply object or the whole document `request --format json` produced with its `reply` section filled in — an administrator can edit and return the same file. When it names service accounts for several repositories, pass `--repo <owner/repo>` to choose one, or `--service-account-id` to give the value outright.
 

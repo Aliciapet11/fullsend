@@ -156,7 +156,7 @@ func validateClaudeGatewayModels(models []string, block config.InferenceGatewayC
 	}
 	switch {
 	case block.IsZero():
-		return errors.New("gateway/ models on the claude runtime need an inference.gateway block in .fullsend/config.yaml; configure one with 'fullsend github setup --inference-gateway-url ...'")
+		return errors.New("gateway/ models on the claude runtime need an inference.gateway block in .fullsend/config.yaml; configure one with 'fullsend github setup --inference-gateway-url ...', or, for a repository managed in repos.yaml, under config.inference.gateway there")
 	case !block.IsAPIKey():
 		return errors.New("gateway/ models on the claude runtime need the inference.gateway block to apply, and the oidc mode applies only on a run with a forge OIDC endpoint (a GitHub Actions job with id-token: write); use auth: api-key for a local run")
 	}

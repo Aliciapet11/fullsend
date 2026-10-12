@@ -39,6 +39,8 @@ func TestPromptRuntime(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 			if tc.interactive {
 				assert.Contains(t, out.String(), "Agent Runtime")
+				assert.Contains(t, out.String(), "set `config.runtime` there and run `fullsend repos install`",
+					"the prompt must name the repos.yaml path for manifest-managed repos")
 				// Every runtime the prompt accepts must also be offered: a
 				// choice that validates but is not listed is invisible.
 				for _, name := range userRuntimeChoices() {

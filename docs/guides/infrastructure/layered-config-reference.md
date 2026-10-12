@@ -256,7 +256,8 @@ unset (`""`) falls through to parent, then to code default
   runner variables, when any is set, replace the resolved block entirely.
 - **`inference.gateway.{url,audience,auth}`**: the inference gateway
   credential route (ADR 0137), written by `fullsend github setup
-  --inference-gateway-*`. `auth` selects the credential mode, `oidc` (the
+  --inference-gateway-*`, or from `config.inference.gateway` in
+  `repos.yaml` for a manifest-managed repository. `auth` selects the credential mode, `oidc` (the
   default) or `api-key` (ADR 0138). In the `oidc` mode the runner owns the
   route when the resolved block is complete and the run has a forge OIDC
   endpoint. In the `api-key` mode it owns the route on every run, local

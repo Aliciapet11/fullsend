@@ -249,6 +249,10 @@ export default defineConfig({
             { text: "Configuring GitHub", link: "/guides/getting-started/configuring-github" },
             { text: "Configuring GitLab", link: "/guides/getting-started/configuring-gitlab" },
             { text: "Repo Management", link: "/guides/getting-started/repo-management" },
+            {
+              text: "Moving from github setup",
+              link: "/guides/getting-started/migrating-from-github-setup",
+            },
             { text: "Operations", link: "/guides/getting-started/operations" },
           ],
         },

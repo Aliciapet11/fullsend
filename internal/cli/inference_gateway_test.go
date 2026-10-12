@@ -106,6 +106,7 @@ func TestInferenceGatewayStatus_NotConfigured(t *testing.T) {
 	out, err := runGatewayStatusForTest(t, dir, f)
 	require.Error(t, err)
 	assert.Contains(t, out, "No inference.gateway block configured")
+	assert.Contains(t, out, "set config.inference.gateway there and run 'fullsend repos install'")
 	assert.Empty(t, f.fetched)
 }
 

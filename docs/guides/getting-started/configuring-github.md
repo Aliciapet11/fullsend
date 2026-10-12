@@ -129,7 +129,7 @@ committing. `--config` is only valid for per-repo mode.
 
 This is where the agent runtime is selected: on a terminal, `fullsend github setup` asks once (press Enter to keep `claude`, the stable default); `--runtime` sets it explicitly. `pi` and `codex` are experimental and meant for opt-in pilots — see [Choose a Runtime](choosing-a-runtime.md) for what the runtimes are and how to change the selection after setup.
 
-To apply the same preset across many repositories, declare `defaults.config_base` (and optionally `defaults.config_base.sha256`) in `repos.yaml` and run `fullsend repos install`. See [Repo Management — Configuration presets](repo-management.md#configuration-presets).
+To apply the same preset across many repositories, declare `defaults.config_base` (and optionally `defaults.config_base.sha256`) in `repos.yaml` and run `fullsend repos install`. See [Repo Management — Configuration presets](repo-management.md#configuration-presets). `repos install` has no `--config`, `--config-hash` or `--runtime` flag; to move a repository set up with these flags, see [Moving from `github setup` to `repos install`](migrating-from-github-setup.md).
 
 ## Testing Fullsend
 
@@ -141,6 +141,8 @@ Actions tab to see the Fullsend workflow in action. In some minutes the
 
 * Read [Repo Management](repo-management.md) to learn how to install and manage Fullsend across
 many repositories, including sharing configuration presets between them.
+* Read [Moving from `github setup` to `repos install`](migrating-from-github-setup.md) when you move this
+repository into `repos.yaml`.
 * Read the [Agents](../../agents/README.md) section to learn about the default agents Fullsend
 ships with.
 * Explore other sections of this documentation for more information.

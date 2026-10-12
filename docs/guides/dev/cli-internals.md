@@ -65,9 +65,9 @@ fullsend
 │   │   ├── --vertex-wif-provider <path>     #   Full WIF provider resource name (uses verbatim; skips per-repo derivation)
 │   │   ├── --openai-api-key <key>           #   FULLSEND_OPENAI_API_KEY for openai-api-key repos (CLI-only; never in repos.yaml)
 │   │   ├── --forge <type>                   #   Forge type for new repos (github or gitlab)
-│   │   ├── --vertex-region <region>         #   Per-repo GCP inference region override
-│   │   ├── --fullsend-ref <ref>             #   Per-repo fullsend workflow ref override
-│   │   ├── --mint-url <url>                 #   Per-repo mint URL override
+│   │   ├── --vertex-region <region>         #   GCP inference region (install-time only; not stored in repos.yaml)
+│   │   ├── --fullsend-ref <ref>             #   Per-repo workflow ref override (recorded on added or glob-copied entries)
+│   │   ├── --mint-url <url>                 #   Per-repo mint URL override (recorded on added or glob-copied entries)
 │   │   ├── --app-set <prefix>               #   GitHub App set prefix override ($FULLSEND_APP_SET); GitHub-only
 │   │   ├── --inference-auth <method>        #   vertex-wif, openai-api-key or openai-wif (GitHub only); persisted as inference.auth on each selected manifest entry (a repo covered only by a glob gets its own copied entry); never changes defaults or forge sections
 │   │   ├── --vendor                         #   Vendor binary and content into each repo for offline CI
