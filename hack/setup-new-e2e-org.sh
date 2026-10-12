@@ -15,6 +15,7 @@ set -euo pipefail
 TEST_APP_SET="fullsend-test"
 TEST_ROLES=(fullsend triage coder review retro prioritize)
 E2E_APP_SET="fullsend-ai"
+MINT_ROLES=(fullsend triage coder review retro prioritize e2e)
 BOT_USER="botsend"
 TEST_WRITE_USER="fstest-write"
 TEST_TRIAGE_USER="fstest-triage"
@@ -439,7 +440,7 @@ else
     # Check ROLE_APP_IDS
     role_app_ids=$(echo "${mint_env}" | jq -r '.ROLE_APP_IDS // ""')
     missing_roles=()
-    for role in "${ROLES[@]}"; do
+    for role in "${MINT_ROLES[@]}"; do
       # ROLE_APP_IDS uses role-only keys; org/role keys are legacy and ignored
       # by the mint during the migration window.
       key="${role}"

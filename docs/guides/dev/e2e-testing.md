@@ -828,7 +828,8 @@ cover both Workers. Do not put the new value into site-deploy
 URL:
 
 ```bash
-# For each app slug in the inventory table above:
+# Install the six fullsend-test-* apps from the inventory table above, plus
+# the production fullsend-ai-e2e app required for cross-org suite control:
 # https://github.com/apps/<slug>/installations/new
 # Select the target pool org and grant access to "All repositories".
 ```
