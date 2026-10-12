@@ -1247,35 +1247,7 @@ jobs:
           TRIGGER_SOURCE: ${{ needs.route.outputs.trigger_source }}
           ORG_NAME: ${{ github.repository_owner }}
           FULLSEND_APP_SET: ${{ vars.FULLSEND_APP_SET || 'fullsend-ai' }}
-        run: |
-          REVIEW_FILE="${GITHUB_WORKSPACE}/review-body.txt"
-          REVIEW_BOT="${ORG_NAME}-review[bot]"
-          SHARED_REVIEW_BOT="fullsend-ai-review[bot]"
-          CUSTOM_REVIEW_BOT=""
-          if [[ -n "${FULLSEND_APP_SET:-}" ]]; then
-            CUSTOM_REVIEW_BOT="${FULLSEND_APP_SET}-review[bot]"
-          fi
-          gh api "repos/${SOURCE_REPO}/pulls/${PR_NUM}/reviews" \
-            | jq -r --arg review_bot "${REVIEW_BOT}" \
-              --arg shared_bot "${SHARED_REVIEW_BOT}" \
-              --arg custom_bot "${CUSTOM_REVIEW_BOT}" \
-              '[.[] | select(.state == "CHANGES_REQUESTED" and
-                (.user.login == $review_bot or .user.login == $shared_bot or
-                 ($custom_bot != "" and .user.login == $custom_bot)))]
-                | last | .body // ""' \
-            > "${REVIEW_FILE}" 2>/dev/null || echo "" > "${REVIEW_FILE}"
-          BYTE_COUNT="$(wc -c < "${REVIEW_FILE}")"
-          echo "Pre-fetched review body: ${BYTE_COUNT} bytes"
-          MAX_REVIEW_BYTES=1048576
-          if [[ "${BYTE_COUNT}" -gt "${MAX_REVIEW_BYTES}" ]]; then
-            echo "::error::Review body is ${BYTE_COUNT} bytes (max: ${MAX_REVIEW_BYTES})"
-            exit 1
-          fi
-          if [[ "${TRIGGER_SOURCE}" =~ \[bot\]$ && "${BYTE_COUNT}" -le 1 ]]; then
-            echo "::error::Bot-triggered run but review body is empty — nothing to fix"
-            exit 1
-          fi
-          echo "review_file=${REVIEW_FILE}" >> "${GITHUB_OUTPUT}"
+        run: bash .defaults/.github/scripts/pre-fetch-review-body.sh
 
       - name: Setup agent environment
         env:
