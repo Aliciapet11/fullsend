@@ -362,6 +362,11 @@ Fork scenarios require the pool org to have:
 - **Permission to create forks** of the leased enrolled base (`test-repo-NN`) under the same org. The `Given a fork` step creates `{leased}-fork` idempotently when missing.
 - **The same installation token** must have write access to both the base repo and the fork repo within the org, since the e2e bot commits to the fork and opens cross-fork PRs.
 
+Scenarios that fork as a human-like test actor (`owned by the outsider`) additionally require:
+
+- **The actor can fork the leased base into its own account.** The base is public, so a user with no collaborator access can fork it.
+- **The actor's PAT can create, write to, and delete repositories in its own account**, because the actor commits to its fork, opens the PR, and `CleanupScenario` deletes the fork as that actor. A classic PAT needs the `public_repo` and `delete_repo` scopes.
+
 ### Fork lifecycle
 
 | Resource | Lifecycle | Cleanup |
@@ -371,6 +376,8 @@ Fork scenarios require the pool org to have:
 | Fork PRs | Per-scenario | Closed by `CleanupScenario` |
 
 Fork repos are **ephemeral**: created when the `Given a fork` step runs and deleted by `CleanupScenario` after the scenario completes. Fork PRs are opened against the base repo (not the fork). `CleanupScenario` closes them via `CloseIssue` on the base repo, deletes the head branch on the fork repo, and then deletes the fork repo itself. Do **not** mint-enroll fork names — forks are PR sources only; mint stays on the enrolled base.
+
+A fork **owned by a test actor** lives in that actor's own account, not the pool org. The forge names it, by default after the base repo (for example `fstest-outsider/test-repo-07`), and adds a numeric suffix when the actor already has a repo with that name. The logical fork name in Gherkin is not used. `World.ForkSCM` records the actor's driver, and fork-side operations go through it: branch creation, commits, and the branch and repo deletes in `CleanupScenario`. The e2e installation token has no access to a personal account. The pool's repo ensurer only deletes leftover `{name}-fork` repos inside the org, so a fork whose cleanup failed stays in the actor's account until someone deletes it.
 
 ### Background step usage
 
@@ -384,6 +391,11 @@ Background:
 
 The `Given a fork` step remaps the logical name as above and is idempotent for that actual fork repo. Each scenario then creates its own branch and PR within the fork.
 
+Two fork steps take an optional actor suffix. The actor is one of `write actor`, `triage actor`, or `outsider`, the same names the actor steps use (see [Test actor account permission scope](#test-actor-account-permission-scope)). Without the suffix, both steps act as the e2e identity:
+
+- **`a fork "<name>" of the enrolled test repository owned by the <actor>`** forks the leased base into the actor's own account. See [Fork lifecycle](#fork-lifecycle).
+- **`a fork pull request is opened by the <actor>`** prepares the head branch through the fork owner's driver and opens the PR as the actor. The actor is then both the PR author and the sender of the `opened` event.
+
 ### Fork PR behaviour contract
 
 The `fork-dispatch.feature` file defines the canonical fork-PR behaviour contract for `harness-dispatch`. Each CEL port PR ([#2896](https://github.com/fullsend-ai/fullsend/issues/2896)–[#2901](https://github.com/fullsend-ai/fullsend/issues/2901)) should follow this contract when adding fork-PR rows to the agent's harness behaviour feature file.
@@ -395,12 +407,16 @@ The `fork-dispatch.feature` file defines the canonical fork-PR behaviour contrac
 | Disabled harness (`enabled: false`) on fork event | Empty matrix, exit 0 | Disabled harness in positive scenario; assert agent did not run |
 | Fork PR `synchronize` + label dispatches harness | Harness dispatched exactly 1 time; workflow completes | Separate scenario with sync commit + label |
 | CEL `is_fork` exclusion (`!event.state.change_proposal.is_fork`) | Empty matrix, exit 0 | Harness with `is_fork` guard in positive scenario; assert agent did not run |
+| Fork PR matches CEL `trigger` on `pull_request_target`; unauthorized actor ([ADR 0054](../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)) | Empty matrix, exit 0 — no agent run | `platform/trigger-auth.feature`. The outsider opens a PR from its own fork; assert the agent did not run and was dispatched exactly 0 times, then a label as the positive control |
 
 **Kill switch vs disabled harness:** These are distinct mechanisms. The **kill switch** (`kill_switch: true` in `config.yaml`) is a global emergency stop that blocks *all* harness dispatch for the repo — tested in its own scenario because no positive harness can run alongside it. A **disabled harness** (`enabled: false` per agent entry) only prevents that single agent from running — tested as a piggyback negative assertion in the positive-path scenario.
 
 **Consolidation pattern:** To conserve parallel execution slots, add negative-path harnesses (disabled agent, CEL exclusion) alongside the positive-path harness in a single scenario rather than creating separate scenarios. The positive harness wait acts as the settle window for negative assertions (piggyback pattern — see `negativeSettleDuration` in `dispatch.go`). The kill switch scenario cannot be consolidated because it blocks all harnesses.
 
-**Unauthorized-actor denial** ([ADR 0054](../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)) for fork PRs is tracked separately in [#5613](https://github.com/fullsend-ai/fullsend/issues/5613) and is not part of this contract.
+**Unauthorized-actor denial:** The row lives in `e2e/behaviour/features/platform/trigger-auth.feature`, the home for platform trigger authorization scenarios, rather than in `fork-dispatch.feature`. The shared dispatch gate (`harnessdispatch.IsAuthorized`) authorizes label-added events without a write role. So the denial can only be exercised through a transition that needs one: the PR `opened` event, sent by the outsider when it opens the PR from its own fork. The harness trigger matches both `opened` and a label, and the scenario orders its steps as follows:
+
+1. The denial assertions (`agent did not run`, then `dispatched exactly 0 times`) run before the label is added. `harness-run` uses a `cancel-in-progress` concurrency group per agent and PR, and the dispatch count excludes cancelled jobs. A leaked `opened` dispatch that the label run cancelled would therefore not be counted.
+2. The label, added afterwards by the e2e identity, must dispatch. This positive control shows that the harness is registered and its trigger matches the PR, so the denial cannot pass just because the harness never loaded.
 
 ### Dispatch step reference
 
@@ -612,6 +628,8 @@ suiteRunner := godog.TestSuite{
 **`scm.Driver.GetFileContentAtRef` addition (breaking change):** The `scm.Driver` interface now includes `GetFileContentAtRef(ctx, owner, repo, path, ref string) ([]byte, error)`, retrieving a file's content at a specific ref (commit SHA, branch, or tag) rather than `GetFileContent`'s implicit default-branch/HEAD read. The dummy-playback suite's "the published repository matches fixture" step uses it to verify, file by file, that a stage actually published the expected content at a pinned commit. The GitHub and GitLab reference implementations pass through to the existing `forge.Client` method of the same name. This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
 
 **`scm.Driver.ListPullRequestCommits` addition (breaking change):** The `scm.Driver` interface now includes `ListPullRequestCommits(ctx, owner, repo, number) ([]string, error)`, returning the commit SHAs on a pull request, oldest first. The dummy-playback suite uses the first entry as the code stage's published commit: review and fix only append commits to the branch, so unlike the head branch's live tip, that commit cannot be displaced by a later stage that races ahead. The GitHub and GitLab reference implementations pass through to the new `forge.Client.ListPullRequestCommits` method (GitHub caps results at 250 commits). This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
+
+**`scm.Driver.CreateUserFork` addition (breaking change):** The `scm.Driver` interface now includes `CreateUserFork(ctx, owner, repo string) (forkOwner, forkRepo string, err error)`, which forks a repository into the authenticated user's own account, the way an outside contributor does. The forge picks the fork's name. The `owned by the <actor>` fork step uses it. The GitHub and GitLab reference implementations pass through to the existing `forge.Client.CreateFork` method. This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
 
 **`ci.RunLister` optional interface:** `ListRecentRuns(ctx, owner, repo string, limit int) ([]forge.WorkflowRun, error)` lists a repository's most recent workflow runs across all workflows. Failure log collection uses it to find runs that no step resolved. It is a separate interface, not a `ci.Driver` method, so external `ci.Driver` implementations keep compiling. Without it, failed scenarios still get a failure summary but only the run a step resolved has its logs collected. The GitHub Actions and GitLab CI reference drivers implement it.
 
