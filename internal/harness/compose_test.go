@@ -7489,6 +7489,94 @@ skills:
 	assert.FileExists(t, filepath.Join(h.Skills[0].Source, "meta-prompt.md"))
 }
 
+// A URL-sourced child's nested skill whose directory basename differs from
+// its declared SKILL.md name must replace the base skill with that declared
+// name. The child's skill paths have to be resolved against SourceURL before
+// the merge so mergeSkills can read the declared identity (#7830).
+func TestLoadWithBase_SourceURL_WithBase_NestedSkillOverrideByDeclaredName(t *testing.T) {
+	baseAgentContent := []byte("# base agent definition")
+
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+
+	// Base skill: directory basename "github", declared name "issue-labels".
+	cacheHashDir, err := fetch.CachePath(cacheDir, strings.Repeat("d", 64))
+	require.NoError(t, err)
+	baseSkillDir := filepath.Join(cacheHashDir, "github")
+	require.NoError(t, os.MkdirAll(baseSkillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseSkillDir, "SKILL.md"),
+		[]byte("---\nname: issue-labels\n---\n# Base Skill\n"), 0o644))
+
+	baseContent := []byte(fmt.Sprintf(`
+agent: agents/base.md
+role: review
+model: opus
+skills:
+  - %s
+`, baseSkillDir))
+	baseHash := computeHash(baseContent)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/base.yaml":
+			w.Write(baseContent)
+		case "/agents/base.md":
+			w.Write(baseAgentContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	policy := fetch.NewTestPolicy(
+		server.Client().Transport.(*http.Transport).TLSClientConfig,
+		[]string{"127.0.0.1"},
+		[]string{server.Listener.Addr().String()[len("127.0.0.1:"):]},
+	)
+
+	baseURL := server.URL + "/base.yaml#sha256=" + baseHash
+
+	// Run from a directory with a decoy skills/issue-labels/github so a
+	// regression that reads the child's relative path against the CWD would
+	// not accidentally pass.
+	t.Chdir(dir)
+
+	childHarness := fmt.Sprintf(`
+base: %s
+role: review
+skills:
+  - skills/issue-labels/github
+`, baseURL)
+
+	path := writeTestHarness(t, dir, "review.yaml", childHarness)
+	sourceURL := "https://raw.githubusercontent.com/org/agents/abc123/harness/review.yaml"
+
+	fetcher := fakeTreeFetcher(map[string][]byte{
+		"SKILL.md": []byte("---\nname: issue-labels\n---\n# Child Skill\n"),
+	})
+
+	allowlist := []string{
+		server.URL + "/",
+		"https://raw.githubusercontent.com/org/agents/",
+	}
+
+	h, _, err := LoadWithBase(context.Background(), path, ComposeOpts{
+		WorkspaceRoot:      cacheDir,
+		FetchPolicy:        policy,
+		OrgAllowlist:       allowlist,
+		SourceURL:          sourceURL,
+		TreeFetcher:        fetcher,
+		allowSelfAllowlist: true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, h.Skills, 1, "child skill sharing the base's declared name should replace it, not sit alongside it")
+	assert.NotEqual(t, baseSkillDir, h.Skills[0].Source)
+	content, err := os.ReadFile(filepath.Join(h.Skills[0].Source, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "# Child Skill")
+}
+
 func TestLoadWithBase_SourceURL_WithBase_ScriptResolutionError(t *testing.T) {
 	// When a URL-sourced harness has a base: field and the child declares
 	// its own pre_script, the post-composition resolveBaseScripts call
@@ -7612,7 +7700,9 @@ skills:
 		allowSelfAllowlist: true,
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "resolving URL-sourced resources after base composition")
+	// Child skills are now resolved before the merge (#7830), so the error
+	// surfaces from the pre-merge resolution.
+	assert.Contains(t, err.Error(), "resolving URL-sourced resources before base composition")
 }
 
 func TestLoadWithBase_SourceURL_WithBase_HostFilesResolutionError(t *testing.T) {

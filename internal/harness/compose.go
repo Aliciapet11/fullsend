@@ -218,6 +218,20 @@ func LoadWithBase(ctx context.Context, path string, opts ComposeOpts) (*Harness,
 		return nil, nil, fmt.Errorf("loading base chain: %w", err)
 	}
 
+	// A URL-sourced child's relative skill paths must be resolved before the
+	// merge: mergeSkills keys entries by skill.SandboxName, which reads the
+	// declared SKILL.md name only for resolved (on-disk) paths. Left relative,
+	// a child skill such as skills/issue-labels/github is keyed by basename
+	// and fails to replace a base skill that declares name: issue-labels
+	// (#7830). The post-merge resolution below skips already-resolved paths.
+	if opts.SourceURL != "" {
+		childSkillDeps, err := resolveBaseResources(ctx, child, opts.SourceURL, allowlist, opts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolving URL-sourced resources before base composition: %w", err)
+		}
+		deps = append(deps, childSkillDeps...)
+	}
+
 	// Merge base into child (child overrides base)
 	mergeBaseIntoChild(base, child)
 
