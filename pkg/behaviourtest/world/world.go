@@ -63,6 +63,11 @@ type World struct {
 	ForkRepo     string
 	ForkPRNumber int
 	ForkPRBranch string
+	// ForkSCM is the driver of the test actor that owns the fork, set
+	// when the fork was created "owned by the <actor>". Fork-side
+	// operations (branch, commits, cleanup) go through it. Nil means
+	// the fork belongs to the e2e identity behind SCM.
+	ForkSCM scm.Driver
 
 	// URL harness hosting repo — set by URL dispatch step definitions.
 	URLHarnessRepoOwner string
