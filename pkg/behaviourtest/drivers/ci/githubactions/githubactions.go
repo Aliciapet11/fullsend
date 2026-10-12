@@ -1612,7 +1612,8 @@ func (d *Driver) settleHarnessDispatchCount(ctx context.Context, owner, repo, ag
 // for the harness runs created after the trigger time to settle, and
 // requires each run that was not cancelled to show an affirmative
 // empty-matrix decision: the run completed, its Harness dispatch job
-// succeeded, and no "Harness run (<agent>)" matrix job was expanded. A
+// succeeded, and the matrix job was skipped without expanding into any
+// "Harness run (<agent>)" job. A
 // run whose dispatch job failed (for example on an event or
 // authorization error) fails the wait immediately, and so does a run
 // that scheduled any agent. Absent runs are waited for rather than
@@ -1659,7 +1660,10 @@ func (d *Driver) emptyMatrixPollOnce(ctx context.Context, remaining time.Duratio
 	ctx, cancel := context.WithTimeout(ctx, remaining)
 	defer cancel()
 
-	runs, err := d.listHarnessRunsAfter(ctx, owner, repo, after)
+	// Every non-cancelled run since the trigger time must be checked, so
+	// use the paginated listing: the single-page listing could drop an
+	// earlier violating run once more than ten newer runs exist.
+	runs, err := d.listHarnessRunsAfterPaginated(ctx, owner, repo, after)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1678,13 +1682,15 @@ func (d *Driver) emptyMatrixPollOnce(ctx context.Context, remaining time.Duratio
 		if err != nil {
 			return nil, false, fmt.Errorf("list jobs for run %d: %w", r.ID, err)
 		}
-		var dispatch *forge.WorkflowJob
+		var dispatch, placeholder *forge.WorkflowJob
 		for j := range jobs {
 			job := jobs[j]
 			if strings.HasSuffix(job.Name, harnessDispatchJobSuffix) {
 				dispatch = &jobs[j]
 			}
-			if strings.Contains(job.Name, harnessJobNameMarker) && !strings.HasSuffix(job.Name, harnessJobPlaceholder) {
+			if strings.HasSuffix(job.Name, harnessJobPlaceholder) {
+				placeholder = &jobs[j]
+			} else if strings.Contains(job.Name, harnessJobNameMarker) {
 				return nil, true, fmt.Errorf("expected an empty harness matrix, but job %q was scheduled in workflow run %d", job.Name, r.ID)
 			}
 		}
@@ -1697,6 +1703,17 @@ func (d *Driver) emptyMatrixPollOnce(ctx context.Context, remaining time.Duratio
 			pending++
 		case dispatch.Conclusion != "success":
 			return nil, true, fmt.Errorf("expected the %q job to succeed with an empty matrix, but it concluded %s in workflow run %d; see the run logs", dispatch.Name, dispatch.Conclusion, r.ID)
+		case placeholder == nil:
+			// The unexpanded matrix job is the evidence of an empty
+			// matrix; without it nothing was demonstrated. The job
+			// listing can lag, so keep polling.
+			pending++
+		case placeholder.Status != "completed":
+			pending++
+		case placeholder.Conclusion != "skipped":
+			// A cancelled, failed, or timed-out matrix job that never
+			// expanded is not an empty-matrix decision.
+			return nil, true, fmt.Errorf("expected the %q job to be skipped with an empty matrix, but it concluded %s without expanding in workflow run %d; see the run logs", placeholder.Name, placeholder.Conclusion, r.ID)
 		case settled == nil:
 			settled = &runs[i]
 		}
