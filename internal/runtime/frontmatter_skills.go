@@ -159,7 +159,7 @@ func injectFrontmatterSkills(data []byte, skillDirs []string) ([]byte, error) {
 		}
 		name := skill.SandboxName(d)
 		if !skill.ValidName(name) {
-			return nil, fmt.Errorf("invalid skill name %q from %q: must match [a-zA-Z0-9._-]+ and not be %q or %q", name, d, ".", "..")
+			return nil, fmt.Errorf("invalid skill name %q from %q: must match [a-zA-Z0-9._-]+ and not start with a dot", name, d)
 		}
 		if seen[name] {
 			continue

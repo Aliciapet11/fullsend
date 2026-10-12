@@ -329,6 +329,7 @@ func TestValidName(t *testing.T) {
 		{"..", false},
 		{"foo/bar", false},
 		{"foo bar", false},
+		{".review", false},
 		{"github", true},
 	}
 	for _, tt := range tests {
@@ -392,6 +393,19 @@ func TestSandboxName(t *testing.T) {
 	if got := SandboxName(badYAML); got != "broken" {
 		t.Errorf("malformed frontmatter: SandboxName() = %q, want %q", got, "broken")
 	}
+
+	// A dot-prefixed declared name would upload to a directory skill
+	// discovery skips; the directory name is used instead.
+	dotName := filepath.Join(dir, "review")
+	if err := os.MkdirAll(dotName, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dotName, "SKILL.md"), []byte("---\nname: .review\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := SandboxName(dotName); got != "review" {
+		t.Errorf("dot-prefixed declared name: SandboxName() = %q, want %q", got, "review")
+	}
 }
 
 // TestSandboxName_EmptyPath guards against SandboxName("") probing the
@@ -404,15 +418,14 @@ func TestSandboxName_EmptyPath(t *testing.T) {
 	}
 }
 
-// TestSandboxName_NonAbsolutePathSkipsDeclaredName is a regression test for
-// a merge-time identity spoof: mergeSkills (internal/harness/compose.go)
-// calls SandboxName during base composition, which runs before
-// ResolveRelativeTo for local (non-URL) harnesses. At that point a relative
-// Source path resolves against the process's current working directory,
-// not the harness tree. A CWD-relative SKILL.md declaring a name that
-// matches a top-level/base skill must not be able to hijack that skill's
-// merge identity — SandboxName must fall back to filepath.Base for any
-// non-absolute path instead of reading SKILL.md at all.
+// TestSandboxName_NonAbsolutePathSkipsDeclaredName guards the merge-time
+// identity spoof: a relative Source path reads against the process's
+// current working directory, not the harness tree, so a CWD-relative
+// SKILL.md declaring a base skill's name must not hijack that skill's
+// merge identity. SandboxName falls back to filepath.Base for any
+// non-absolute path instead of reading SKILL.md at all; LoadWithBase
+// resolves a harness's skill paths against the caller's root before the
+// merge.
 func TestSandboxName_NonAbsolutePathSkipsDeclaredName(t *testing.T) {
 	dir := t.TempDir()
 	rel := filepath.Join("issue-labels", "github")

@@ -80,9 +80,10 @@ func findClosingDelimiter(rest []byte) ([]byte, bool) {
 }
 
 // ValidName reports whether name is a single sandbox-safe path segment:
-// alphanumeric, hyphen, underscore, or dot, and not "." or "..".
+// alphanumeric, hyphen, underscore, or dot, not starting with a dot (a
+// dot-prefixed directory is hidden from skill discovery).
 func ValidName(name string) bool {
-	if name == "" || name == "." || name == ".." {
+	if name == "" || name[0] == '.' {
 		return false
 	}
 	for _, c := range name {
