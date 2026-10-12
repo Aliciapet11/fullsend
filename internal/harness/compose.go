@@ -218,6 +218,20 @@ func LoadWithBase(ctx context.Context, path string, opts ComposeOpts) (*Harness,
 		return nil, nil, fmt.Errorf("loading base chain: %w", err)
 	}
 
+	// A URL-sourced child's relative skill paths are resolved before the
+	// merge so mergeSkills reads their declared names: left relative, a child
+	// skills/issue-labels/github is keyed by its basename and cannot replace a
+	// base skill that declares name: issue-labels (#7830). Only the skill list
+	// moves; agent, policy and the rest resolve after the merge as before.
+	// resolveBaseResources rewrites the entries in place.
+	if opts.SourceURL != "" {
+		skillDeps, err := resolveBaseResources(ctx, &Harness{Skills: child.Skills}, opts.SourceURL, allowlist, opts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolving URL-sourced skills before base composition: %w", err)
+		}
+		deps = append(deps, skillDeps...)
+	}
+
 	// Merge base into child (child overrides base)
 	mergeBaseIntoChild(base, child)
 

@@ -7489,6 +7489,98 @@ skills:
 	assert.FileExists(t, filepath.Join(h.Skills[0].Source, "meta-prompt.md"))
 }
 
+// A URL-sourced child's nested skill whose directory basename differs from
+// its declared SKILL.md name replaces the base skill with that declared name:
+// the child's skill paths are resolved against SourceURL before the merge, so
+// mergeSkills reads the declared identity (#7830).
+func TestLoadWithBase_SourceURL_WithBase_NestedSkillOverrideByDeclaredName(t *testing.T) {
+	baseAgentContent := []byte("# base agent definition")
+
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+
+	// Base skill: directory basename "github", declared name "issue-labels".
+	cacheHashDir, err := fetch.CachePath(cacheDir, strings.Repeat("d", 64))
+	require.NoError(t, err)
+	baseSkillDir := filepath.Join(cacheHashDir, "github")
+	require.NoError(t, os.MkdirAll(baseSkillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseSkillDir, "SKILL.md"),
+		[]byte("---\nname: issue-labels\n---\n# Base Skill\n"), 0o644))
+
+	baseContent := []byte(fmt.Sprintf(`
+agent: agents/base.md
+role: review
+model: opus
+skills:
+  - %s
+`, baseSkillDir))
+	baseHash := computeHash(baseContent)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/base.yaml":
+			w.Write(baseContent)
+		case "/agents/base.md":
+			w.Write(baseAgentContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	policy := fetch.NewTestPolicy(
+		server.Client().Transport.(*http.Transport).TLSClientConfig,
+		[]string{"127.0.0.1"},
+		[]string{server.Listener.Addr().String()[len("127.0.0.1:"):]},
+	)
+
+	baseURL := server.URL + "/base.yaml#sha256=" + baseHash
+
+	// A decoy at the child's relative path in the working directory declares
+	// another name: a regression that read the path against the CWD would
+	// key the child "decoy" and leave the base skill in place.
+	decoyDir := filepath.Join(dir, "skills", "issue-labels", "github")
+	require.NoError(t, os.MkdirAll(decoyDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(decoyDir, "SKILL.md"),
+		[]byte("---\nname: decoy\n---\n# Decoy\n"), 0o644))
+	t.Chdir(dir)
+
+	childHarness := fmt.Sprintf(`
+base: %s
+role: review
+skills:
+  - skills/issue-labels/github
+`, baseURL)
+
+	path := writeTestHarness(t, dir, "review.yaml", childHarness)
+	sourceURL := "https://raw.githubusercontent.com/org/agents/abc123/harness/review.yaml"
+
+	fetcher := fakeTreeFetcher(map[string][]byte{
+		"SKILL.md": []byte("---\nname: issue-labels\n---\n# Child Skill\n"),
+	})
+
+	allowlist := []string{
+		server.URL + "/",
+		"https://raw.githubusercontent.com/org/agents/",
+	}
+
+	h, _, err := LoadWithBase(context.Background(), path, ComposeOpts{
+		WorkspaceRoot:      cacheDir,
+		FetchPolicy:        policy,
+		OrgAllowlist:       allowlist,
+		SourceURL:          sourceURL,
+		TreeFetcher:        fetcher,
+		allowSelfAllowlist: true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, h.Skills, 1, "the child skill declaring the base's name replaces it")
+	assert.NotEqual(t, baseSkillDir, h.Skills[0].Source)
+	content, err := os.ReadFile(filepath.Join(h.Skills[0].Source, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "# Child Skill")
+}
+
 func TestLoadWithBase_SourceURL_WithBase_ScriptResolutionError(t *testing.T) {
 	// When a URL-sourced harness has a base: field and the child declares
 	// its own pre_script, the post-composition resolveBaseScripts call
@@ -7554,9 +7646,8 @@ pre_script: scripts/pre.sh
 
 func TestLoadWithBase_SourceURL_WithBase_ResourceResolutionError(t *testing.T) {
 	// When a URL-sourced harness has a base: field and the child declares
-	// its own skills, the post-composition resolveBaseResources call must
-	// propagate errors. The child declares no scripts (so resolveBaseScripts
-	// succeeds on the merged harness), but the child's skill path cannot be
+	// its own skills, the pre-merge skill resolution must propagate errors.
+	// The child declares no scripts, but the child's skill path cannot be
 	// resolved because the SourceURL is not in the allowlist.
 
 	baseAgentContent := []byte("# base agent definition")
@@ -7612,7 +7703,7 @@ skills:
 		allowSelfAllowlist: true,
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "resolving URL-sourced resources after base composition")
+	assert.Contains(t, err.Error(), "resolving URL-sourced skills before base composition")
 }
 
 func TestLoadWithBase_SourceURL_WithBase_HostFilesResolutionError(t *testing.T) {
