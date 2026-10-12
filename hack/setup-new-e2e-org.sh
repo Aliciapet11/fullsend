@@ -12,8 +12,9 @@
 
 set -euo pipefail
 
-APP_SET="fullsend-ai"
-ROLES=(fullsend triage coder review retro prioritize e2e)
+TEST_APP_SET="fullsend-test"
+TEST_ROLES=(fullsend triage coder review retro prioritize)
+E2E_APP_SET="fullsend-ai"
 BOT_USER="botsend"
 TEST_WRITE_USER="fstest-write"
 TEST_TRIAGE_USER="fstest-triage"
@@ -344,11 +345,11 @@ echo "==> Checking app installations..."
 org_id=$(gh api "/orgs/${ORG}" --jq '.id')
 installed_apps=$(gh api "/orgs/${ORG}/installations" --jq '.installations[].app_slug' 2>/dev/null || echo "")
 
-for role in "${ROLES[@]}"; do
-  slug="${APP_SET}-${role}"
+ensure_app_installation() {
+  local slug="$1"
   if echo "${installed_apps}" | grep -qx "${slug}"; then
     echo "    OK: ${slug} is installed"
-    continue
+    return
   fi
 
   url="https://github.com/apps/${slug}/installations/new/permissions?target_id=${org_id}&target_type=Organization"
@@ -371,7 +372,12 @@ for role in "${ROLES[@]}"; do
     fi
     echo "    OK: ${slug} is now installed"
   fi
+}
+
+for role in "${TEST_ROLES[@]}"; do
+  ensure_app_installation "${TEST_APP_SET}-${role}"
 done
+ensure_app_installation "${E2E_APP_SET}-e2e"
 
 # --- 4b. cross-org mint authorization for CI ---
 echo
