@@ -198,8 +198,8 @@ func codeownersOwners(content, relPath string) []string {
 // under-privileged owner likewise assigns no code owner at all, which a
 // syntactic guard cannot detect locally (GitHub surfaces it via the
 // code-owners-errors API); exact-list matching at least flags it on
-// every edit. The sibling entries (experiments,
-// eval/.agent-eval-harness) are intentional and are not asserted on here.
+// every edit. The sibling experiments entry is intentional and is not
+// asserted on here.
 func TestRepoCodeownersRetainsOwnerForGitmodules(t *testing.T) {
 	content, loc := repoCodeowners(t)
 
