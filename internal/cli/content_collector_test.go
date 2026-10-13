@@ -317,6 +317,45 @@ func TestContentCollector_ArgumentsWithTrailingInputAreDropped(t *testing.T) {
 	assert.False(t, res.Truncated)
 }
 
+func TestContentCollector_AStringTheNormalizerStrippedIsScannedAsWritten(t *testing.T) {
+	// The normalizer strips a terminal escape sequence before the patterns
+	// run, and a colour code ends at the next letter: ESC [ g eats the g
+	// of ghp_, and a title code's payload is text no pattern sees. Every
+	// Level 3 string goes through redactText, so the rule lives there: a
+	// string the normalizer stripped something from is scanned as written
+	// too, and masked whole when that pass finds a secret the stripping
+	// hid. A coloured result with no secret, or with one the normalized
+	// pass also finds, keeps its text.
+	token := "ghp_" + strings.Repeat("r", 36)
+	for name, tc := range map[string]struct {
+		result, want string
+		found        int
+	}{
+		"a colour code that eats a token's first letter": {"\x1b[" + token, `"response":"***"`, 2},
+		"a token inside a title code":                    {"ok \x1b]" + token + "\x07", `"response":"***"`, 2},
+		"a coloured line with no secret":                 {"\x1b[31mok\x1b[0m", `"response":"ok"`, 1},
+		"a coloured line with a token both passes see":   {"\x1b[31m" + token + "\x1b[0m", `"response":"ghp_..."`, 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newContentCollector(4096)
+			c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: "Bash"})
+			c.Handle(agentruntime.ToolResultEvent{ID: "toolu_01", Result: tc.result})
+
+			res := c.Result("stop")
+			assert.Contains(t, res.OutputMessages, tc.want)
+			assert.NotContains(t, res.OutputMessages, token[4:])
+			assert.Len(t, res.Findings, tc.found, "the normalizer once, and the secret once")
+		})
+	}
+
+	// The same rule covers a call's name on the record.
+	c := newContentCollector(4096)
+	c.Handle(agentruntime.ToolUseEvent{ID: "toolu_02", Name: "\x1b[" + token})
+	res := c.Result("stop")
+	assert.Contains(t, res.OutputMessages, `"name":"***"`)
+	assert.NotContains(t, res.OutputMessages, token[4:])
+}
+
 func TestContentCollector_NamelessCallCarriesNoArgumentsAndNoCharge(t *testing.T) {
 	// The schema requires a name on a tool_call part. A nameless call is
 	// refused; its arguments must not survive alone, nor charge a part

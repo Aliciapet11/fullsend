@@ -748,6 +748,25 @@ func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text s
 	}
 	text = replaceEnv(runnerEnv, text, findings)
 	scanned := pipeline.Scan(text)
+	if slices.ContainsFunc(scanned.Findings, stripped) {
+		// The normalizer strips a terminal escape sequence before the
+		// patterns run, and a colour code ends at the next letter — so the
+		// stripping can take a token's first letter and leave a body no
+		// pattern matches — and a title code's payload is text no pattern
+		// sees. So the text is scanned as written too; a secret only that
+		// pass finds was hidden by the stripping, and the string is masked
+		// whole: nothing cut from it can be trusted. The normalizer's
+		// findings stay; the patterns' come from the pass that saw them all.
+		if raw := rawPatterns.Scan(text); patternFindings(raw.Findings) > patternFindings(scanned.Findings) {
+			for _, f := range scanned.Findings {
+				if f.Scanner == "unicode_normalizer" {
+					*findings = append(*findings, f)
+				}
+			}
+			*findings = append(*findings, raw.Findings...)
+			return "***"
+		}
+	}
 	*findings = append(*findings, scanned.Findings...)
 	if scanned.Sanitized != "" {
 		return replaceEnv(runnerEnv, scanned.Sanitized, findings)
@@ -756,6 +775,22 @@ func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text s
 		return ""
 	}
 	return text
+}
+
+// rawPatterns is the secret redactor alone, for the pass over text as the
+// stream wrote it (redactText).
+var rawPatterns = security.NewPipeline(security.NewSecretRedactor())
+
+// patternFindings counts the findings the patterns made, as opposed to
+// the normalizer's.
+func patternFindings(fs []security.Finding) int {
+	n := 0
+	for _, f := range fs {
+		if f.Scanner != "unicode_normalizer" {
+			n++
+		}
+	}
+	return n
 }
 
 // recordedArguments names the members of a tool call's arguments that

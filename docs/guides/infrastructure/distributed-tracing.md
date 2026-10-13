@@ -154,14 +154,15 @@ which sees the runtime's stream, not its API requests.
 
 **Redaction and size:** every part passes through security redaction
 (runner environment values, Unicode normalization, secret masking, then
-runner environment values again) before reaching the span.
+runner environment values again; a string the normalizer stripped an
+escape sequence from is also scanned as written, and masked whole when
+that finds a secret the stripping hid) before reaching the span.
 Content is bounded at 256 KiB per iteration — each tool result at 8 KiB,
-each call's arguments at 8 KiB, and at four times that as written, before
-they are decoded —
+each call's arguments at 8 KiB —
 kept as an ordered suffix; overflow drops the oldest content first. Those
 bounds count raw bytes, except that arguments count as the
 re-encoded JSON described above, against their own bound and against the
-total (as redacted text when they were dropped before they were decoded). That encoding writes `<`, `>` and `&` as six bytes each, so
+total (as redacted text when a member was dropped by name or the arguments were not one JSON object). That encoding writes `<`, `>` and `&` as six bytes each, so
 arguments dense in those characters reach their bound at about a sixth of
 that size on the stream. The exported JSON string is bounded as well, at
 255,000 bytes, because encoding adds 8–10% at these bounds on real runs
@@ -331,7 +332,7 @@ The `agent` span's provider identity reflects only the parent run's serving endp
 | `gen_ai.input.messages` | `agent` | Level 3 only, on a retry iteration that carries validation feedback: the prompt the runner composed, as a JSON string (see Content capture) |
 | `gen_ai.output.messages` | `agent` | Level 3 only: the iteration's conversation content as a JSON string (see Content capture) |
 | `fullsend.content.truncated` | `agent` | Level 3 only: present (`true`) when the size budget cut or dropped content, a tool call lost its arguments, or a kept tool result is a parser-side fragment or an oversized line's empty stand-in (`fullsend.truncated` on the part; no byte count for the last two) |
-| `fullsend.content.dropped_bytes` | `agent` | Level 3 only: exact part bytes removed by the size budget — content, ids, dropped arguments (counted as re-encoded JSON — on a key collision, without each member a later key (in sorted key order, not stream order) replaced — or as redacted text when they were not a JSON value), and the fixed footprint of an errored-empty or oversized stand-in part — otherwise in raw bytes, whichever bound made the cut; the bytes of a skipped oversized line were never decoded and are not counted |
+| `fullsend.content.dropped_bytes` | `agent` | Level 3 only: exact part bytes removed by the size budget — content, ids, dropped arguments (counted as re-encoded JSON when the bound drops them, or as redacted text when a member was dropped by name or the arguments were not one JSON object), and the fixed footprint of an errored-empty or oversized stand-in part — otherwise in raw bytes, whichever bound made the cut; the bytes of a skipped oversized line were never decoded and are not counted |
 | `fullsend.content.redactions` | `agent` | Level 3 only: number of security findings raised while redacting content at assembly, the input message included (and findings from parts the size budget later dropped) |
 | `fullsend.tool.unmatched` | `execute_tool` | Present (`true`) when a result arrived for a call the stream never reported; the span has near-zero duration |
 | `fullsend.tool.result_oversized` | `execute_tool` | Present (`true`) when the result's stream line exceeded the parser's 1 MiB bound: the call was answered but nothing of the result was decoded, so the span has no status and no `error.type` |

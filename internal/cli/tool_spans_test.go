@@ -408,6 +408,29 @@ func TestToolSpanTracker_NameGoesThroughTheOutputSanitizer(t *testing.T) {
 	assert.NotContains(t, toolSpanAttrs(spans[3]), attribute.Key("gen_ai.tool.name"))
 }
 
+func TestToolSpanTracker_ANameTheNormalizerStrippedIsScannedAsWritten(t *testing.T) {
+	// A colour code ends at the next letter, so stripping ESC [ g takes the
+	// g of ghp_ and leaves a body no pattern matches, and a title code's
+	// payload is text no pattern sees. The name is scanned as written too
+	// (redactText) and masked whole. The token is not in the runner env,
+	// so only the pattern scan could have caught it.
+	token := "ghp_" + strings.Repeat("r", 36)
+	tr, rec, _ := toolSpanFixture(t)
+	for id, name := range map[string]string{
+		"toolu_15": "\x1b[" + token,
+		"toolu_16": "Bash\x1b]" + token + "\x07",
+	} {
+		tr.Handle(agentruntime.ToolUseEvent{ID: id, Name: name})
+		tr.Handle(agentruntime.ToolResultEvent{ID: id})
+	}
+	spans := endedToolSpans(rec)
+	require.Len(t, spans, 2)
+	for _, s := range spans {
+		assert.NotContains(t, s.Name, token[4:])
+		assert.Equal(t, "***", toolSpanAttrs(s)["gen_ai.tool.name"].AsString())
+	}
+}
+
 func TestRecordToolSpanOverflow_MarksAgentSpanOnlyWhenDropped(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))

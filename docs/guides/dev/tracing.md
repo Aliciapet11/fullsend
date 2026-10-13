@@ -231,7 +231,11 @@ codex emit none of them,
 required result field is `response`), redacts every
 part — `security.OutputPipeline()`, with `replaceEnvSecrets` for the values
 of sensitive runner env keys and of `providerOnlyKeys`, in one pass, on both
-sides of it (`redactText`) — at assembly (redaction runs
+sides of it (`redactText`; a string the normalizer stripped an escape
+sequence or tag characters from is scanned as written too, and masked
+`***` whole when that pass finds a secret the stripping hid — a colour
+code ends at the next letter, so it can take a token's first letter, and
+a title code's payload is text no pattern sees) — at assembly (redaction runs
 before the size budget — truncating first could split a secret past
 recognition), enforces a 256 KiB ordered-suffix budget (the ending survives — the
 final answer is what consumers judge) plus an 8 KiB per-tool-result
