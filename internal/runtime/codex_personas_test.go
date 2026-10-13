@@ -86,8 +86,9 @@ func TestDiscoverPersonas_CarriesDescriptionAndBody(t *testing.T) {
 
 // The role shape the pinned CLI reads: three keys, each a basic string
 // (multi-line when the value holds a newline, as config.toml's
-// developer_instructions), nothing else. No model line, and no dropped
-// frontmatter turned into text (#6970).
+// developer_instructions), nothing else. No model line in this PR (ADR 0126's
+// per-persona model arrives with delegation, #6970), and no dropped
+// frontmatter turned into text.
 func TestCodexRole_TOML(t *testing.T) {
 	t.Parallel()
 
@@ -108,7 +109,7 @@ func TestCodexRole_TOMLEscapesTheBody(t *testing.T) {
 	got := string(codexRole{Name: "x", Description: `say "hi"`, Instructions: "line\n\"\"\"\\end"}.toml())
 	assert.Equal(t, "name = \"x\"\ndescription = \"say \\\"hi\\\"\"\ndeveloper_instructions = \"\"\"\nline\n\\\"\\\"\\\"\\\\end\"\"\"\n", got,
 		"a persona body is arbitrary markdown; codexTOMLString keeps it inside one basic string, multi-line when it holds a newline")
-	assert.NotContains(t, got, "model", "a role never carries a model line")
+	assert.NotContains(t, got, "model", "no model line in this PR: ADR 0126's per-persona model arrives with delegation (#6970)")
 }
 
 func codexRoleNames(roles []codexRole) []string {
@@ -171,8 +172,8 @@ func TestCodexRoles_DiscoverySkipIsAWarning(t *testing.T) {
 	out := captureStderr(t, func() { roles = codexRoles([]string{skill}, "review") })
 
 	assert.Equal(t, []string{"default", "explore"}, codexRoleNames(roles))
-	assert.Contains(t, out, fmt.Sprintf("Warning: persona %q skipped: name is reserved", skill+"/sub-agents/default.md"))
-	assert.Contains(t, out, fmt.Sprintf("Warning: persona %q skipped: name must be lowercase alphanumeric", skill+"/sub-agents/Bad.md"))
+	assert.Contains(t, out, fmt.Sprintf("Warning: persona %q skipped: name is reserved", filepath.Join(skill, "sub-agents", "default.md")))
+	assert.Contains(t, out, fmt.Sprintf("Warning: persona %q skipped: name must be lowercase alphanumeric", filepath.Join(skill, "sub-agents", "Bad.md")))
 }
 
 // One row per rule a persona can break on Codex. Every row is a warning,

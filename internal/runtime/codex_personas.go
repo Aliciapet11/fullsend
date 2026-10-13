@@ -35,8 +35,9 @@ type codexRole struct {
 var codexReservedRoleNames = []string{"enabled", "explorer", "worker"}
 
 // toml renders the role file: name, description and developer_instructions,
-// each through codexTOMLString, nothing else. No model line: the run-level
-// default applies to every child (#6970).
+// each through codexTOMLString, nothing else. No model line in this PR: ADR
+// 0126's per-persona model arrives with the PR of #6970 that makes delegation
+// reachable; default and explore never carry one.
 func (role codexRole) toml() []byte {
 	return []byte("name = " + codexTOMLString(role.Name) + "\n" +
 		"description = " + codexTOMLString(role.Description) + "\n" +
