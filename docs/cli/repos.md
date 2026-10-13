@@ -732,23 +732,29 @@ lifecycle diagnostic lines for roles needing attention (`expiring`,
 revoked role credentials are reported as `gitlab-role:<name>` drift.
 Status also appends built-in
 Poller/Analyst/Coder and registered-role readiness checks (secret presence,
-capability contract, and job-to-identity mapping). When token inventory is
-available, expired, revoked, or unverified role credentials also downgrade
-readiness; the base status path has no inventory and does not apply that
-lifecycle refinement. An enrolled administrator-supplied credential is also
-authenticated, and its owner's effective Developer access is rechecked, whether
-or not the inventory lists it; a revoked or expired one is reported as
-unhealthy rather than checked for owner access. When token inventory cannot be listed, status clears role
-readiness and reports `gitlab-token-inventory` drift instead of leaving roles
-ready on an unverified inventory. A present shared
+capability contract, and job-to-identity mapping). These checks run in two
+stages. The initial status check reads only the role credential state and
+does not list the project access token inventory, so it cannot see credential
+lifecycle. A later lifecycle check then lists the project access token
+inventory for each GitLab repo. When the inventory is listed, expired,
+revoked, or unverified role credentials downgrade readiness. An enrolled
+administrator-supplied credential is also authenticated, and its owner's
+effective Developer access is rechecked, whether or not the inventory lists
+it; a revoked or expired one is reported as unhealthy rather than checked for
+owner access. The lifecycle check fails closed: when token inventory cannot be
+listed, status clears role readiness and reports `gitlab-token-inventory`
+drift instead of leaving roles ready on an unverified inventory. A present shared
 `FULLSEND_FORGE_TOKEN` is not treated as a substitute for a missing
 built-in role. Registered roles with no agent mapping are also reported as
 not ready. These checks do not retire the shared
 token. Status also reports `protected-ref-pipeline` drift when the poller
-cannot create pipelines on the protected default branch (Developer merge/push
-is absent and the Poller's identity — its project service account, project
-access token user, or a supplied Poller credential's owner — is not in
-`allowed_to_merge` / `allowed_to_push`).
+cannot create pipelines on the protected default branch. Every active Poller
+identity needs pipeline access on that branch: the project service account,
+the project access token user (`fullsend-poller`), and the owner of an
+administrator-supplied Poller credential. When Developer merge/push is absent,
+each of those identities must be listed individually in `allowed_to_merge` /
+`allowed_to_push`. A grant for one identity does not cover another, so drift
+is reported when any active Poller identity is missing.
 For the service-account diagnostics, see
 [GitLab project service-account lifecycle § Service-account status](#service-account-status).
 
