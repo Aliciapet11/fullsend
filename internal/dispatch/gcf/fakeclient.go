@@ -43,6 +43,12 @@ type fakeGCFClient struct {
 	// Captured env vars from the last CreateFunction or UpdateFunction call.
 	lastCreateFunctionEnvVars map[string]string
 
+	// keepRevisionInfoSourceHash, when true, makes GetServiceRevisionInfo
+	// return explicit revision info exactly as configured instead of stamping
+	// the deployed source hash on it (see withDeployedSourceHash), so tests
+	// can simulate a competing update superseding the deploy.
+	keepRevisionInfoSourceHash bool
+
 	// Captured env vars from the last UpdateServiceEnvVars call.
 	lastUpdateServiceEnvVars map[string]string
 
@@ -363,6 +369,41 @@ func (f *fakeGCFClient) GetServiceServingEnvVars(ctx context.Context, p, r, s st
 	f.calls = calls
 	return envVars, err
 }
+
+// withDeployedSourceHash returns info with the service template's
+// FULLSEND_SOURCE_HASH set to the hash of the last source passed to
+// CreateFunction/UpdateFunction, as the latest revision would carry after a
+// real source deploy. Reads taken before any deploy, and templates the test
+// did not populate, are returned unchanged. The input is never mutated.
+func (f *fakeGCFClient) withDeployedSourceHash(info *ServiceRevisionInfo) *ServiceRevisionInfo {
+	hash := f.lastCreateFunctionEnvVars["FULLSEND_SOURCE_HASH"]
+	if hash == "" || info == nil || f.keepRevisionInfoSourceHash {
+		return info
+	}
+	cp := *info
+	// Templates the test populated carry the hash; otherwise the check falls
+	// back to the traffic-serving env, so carry it there.
+	switch {
+	case info.TemplateEnvVars != nil:
+		cp.TemplateEnvVars = overlayEnv(info.TemplateEnvVars, "FULLSEND_SOURCE_HASH", hash)
+	case info.TrafficEnvVars != nil:
+		cp.TrafficEnvVars = overlayEnv(info.TrafficEnvVars, "FULLSEND_SOURCE_HASH", hash)
+	default:
+		return info
+	}
+	return &cp
+}
+
+// overlayEnv returns a copy of env with key set to value.
+func overlayEnv(env map[string]string, key, value string) map[string]string {
+	out := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		out[k] = v
+	}
+	out[key] = value
+	return out
+}
+
 func (f *fakeGCFClient) GetServiceRevisionInfo(_ context.Context, _, _, _ string) (*ServiceRevisionInfo, error) {
 	f.calls = append(f.calls, "GetServiceRevisionInfo")
 	if err := f.errs["GetServiceRevisionInfo"]; err != nil {
@@ -371,10 +412,10 @@ func (f *fakeGCFClient) GetServiceRevisionInfo(_ context.Context, _, _, _ string
 	if len(f.revisionInfoSequence) > 0 {
 		next := f.revisionInfoSequence[0]
 		f.revisionInfoSequence = f.revisionInfoSequence[1:]
-		return next, nil
+		return f.withDeployedSourceHash(next), nil
 	}
 	if f.revisionInfo != nil {
-		return f.revisionInfo, nil
+		return f.withDeployedSourceHash(f.revisionInfo), nil
 	}
 	// By default the serving revision carries the function's env (serving
 	// matches Cloud Functions metadata), plus a project-number marker so the
@@ -384,6 +425,11 @@ func (f *fakeGCFClient) GetServiceRevisionInfo(_ context.Context, _, _, _ string
 		for k, v := range f.functionInfo.EnvVars {
 			trafficEnv[k] = v
 		}
+	}
+	// A source deploy through the fake makes the serving revision carry the
+	// deployed source hash, as a real deploy followed by a pin would.
+	if hash := f.lastCreateFunctionEnvVars["FULLSEND_SOURCE_HASH"]; hash != "" {
+		trafficEnv["FULLSEND_SOURCE_HASH"] = hash
 	}
 	return &ServiceRevisionInfo{
 		TrafficRevisionShort:   "fullsend-mint-00001-abc",

@@ -113,7 +113,7 @@ fullsend mint deploy --project="$GCP_PROJECT"
 
 The binary includes an embedded copy of the mint Cloud Function source, so it works standalone without needing the repository checked out. If you are developing or testing changes to the mint source, run the CLI from a local clone — the `--source-dir` flag (default `internal/mint/`) uses your local copy when the path exists, falling back to the embedded source when it does not. The mint consists of two modules: `internal/mint/` (the entry point) and `internal/mintcore/` (shared verification and token exchange logic). The provisioner bundles `mintcore` automatically from the sibling directory.
 
-The deploy command automatically detects when the deployed function is up-to-date (same source hash) and skips code redeployment, only updating WIF infrastructure and configuration. After a source deploy — and on a hash-skip when traffic is still pinned to an older revision — it pins Cloud Run traffic to the latest created revision (once it is ready) so a previous `gcloud run services update-traffic --to-revisions` rollback cannot leave the new revision at 0%, and so a split such as 60%/40% does not leave old code serving. The pin happens before org and per-repo registration, and it preserves the serving revision's `ALLOWED_ROLES` restrictions. If reconciliation fails — including when its revision was created but the conditional traffic pin was rejected because the service changed meanwhile — re-run `mint deploy` rather than shifting traffic manually, because that can restore access that was revoked.
+The deploy command automatically detects when the deployed function is up-to-date (same source hash) and skips code redeployment, only updating WIF infrastructure and configuration. After a source deploy — and on a hash-skip when traffic is still pinned to an older revision — it pins Cloud Run traffic to the latest created revision (once it is ready) so a previous `gcloud run services update-traffic --to-revisions` rollback cannot leave the new revision at 0%, and so a split such as 60%/40% does not leave old code serving. The pin happens before any per-repo registration, and it preserves the serving revision's `ALLOWED_ROLES` restrictions. If reconciliation fails — including when its revision was created but the conditional traffic pin was rejected because the service changed meanwhile — re-run `mint deploy` rather than shifting traffic manually, because that can restore access that was revoked.
 
 ### Public mint deployment
 
@@ -378,12 +378,12 @@ Mints that older CLI versions deployed or enrolled orgs in can still hold org-le
      --remove-env-vars=ALLOWED_ORGS
    ```
 
-   This creates a new revision. The mint uses REVISION-pinned traffic, so the new revision does not serve requests until you route traffic to it:
+   This creates a new revision and prints its name. The mint uses REVISION-pinned traffic, so the new revision does not serve requests until you route traffic to it. Pin that specific revision rather than using `--to-latest`:
 
    ```bash
    gcloud run services update-traffic fullsend-mint \
      --project="$GCP_PROJECT" --region="$MINT_REGION" \
-     --to-latest
+     --to-revisions="$NEW_REVISION=100"
    ```
 
    Then run `fullsend mint status --mint-url= --project="$GCP_PROJECT"` and confirm that the template and the traffic revision match. See [Template/traffic revision divergence](#templatetraffic-revision-divergence). The next `fullsend mint enroll` for a new repository pins traffic to a specific revision again.

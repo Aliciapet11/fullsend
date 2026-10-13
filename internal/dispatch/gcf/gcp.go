@@ -154,6 +154,23 @@ type ServiceRevisionInfo struct {
 	RoutingUnsettled bool
 }
 
+// TargetRevisionShort returns the short name of the most recently created
+// revision, mirroring how GetServiceRevisionInfo derives TemplateMatchesTraffic:
+// prefer LatestCreatedRevisionShort (it reflects a just-finished deploy
+// immediately), falling back to the template's own revision field, then to
+// LatestReadyRevisionShort (which can lag behind both until Cloud Run finishes
+// bringing a new revision up). It is the revision a traffic pin moves to.
+func (i *ServiceRevisionInfo) TargetRevisionShort() string {
+	target := i.LatestCreatedRevisionShort
+	if target == "" {
+		target = shortRevisionName(i.TemplateRevision)
+	}
+	if target == "" {
+		target = i.LatestReadyRevisionShort
+	}
+	return target
+}
+
 // RevisionSummary is a brief snapshot of a Cloud Run revision.
 type RevisionSummary struct {
 	Name       string // short name, e.g. "fullsend-mint-00114-fm9"

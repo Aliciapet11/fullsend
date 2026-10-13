@@ -4967,7 +4967,7 @@ func TestProvisioner_Provision_SameHash_PinsTrafficWhenDiverged(t *testing.T) {
 		// sides so reconciliation finds nothing to change and this test can
 		// isolate the direct-pin behavior it's named for.
 		TrafficEnvVars:  map[string]string{"ALLOWED_ORGS": "test-org", "ROLE_APP_IDS": `{"coder":"12345"}`},
-		TemplateEnvVars: map[string]string{"ALLOWED_ORGS": "test-org", "ROLE_APP_IDS": `{"coder":"12345"}`},
+		TemplateEnvVars: map[string]string{"ALLOWED_ORGS": "test-org", "ROLE_APP_IDS": `{"coder":"12345"}`, "FULLSEND_SOURCE_HASH": srcHash},
 	}
 
 	p := newTestProvisioner(Config{
@@ -5077,7 +5077,8 @@ func TestProvisioner_Provision_SameHash_PreservesOrgOnlyOnTrafficRevision(t *tes
 			"ALLOWED_ORGS": "legacy-org,test-org",
 		},
 		TemplateEnvVars: map[string]string{
-			"ALLOWED_ORGS": "test-org",
+			"ALLOWED_ORGS":         "test-org",
+			"FULLSEND_SOURCE_HASH": srcHash,
 		},
 	}
 

@@ -808,6 +808,11 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 	// regardless.
 	needsDeploy := true
 	var earlySourceZip []byte
+	// forceRedeploy re-runs the source deploy even though the cached source
+	// hash matches (the live revision was superseded); secretsPrepared records
+	// that prepareRoleSecrets already ran on the hash-skip path.
+	forceRedeploy := false
+	secretsPrepared := false
 
 	if existing != nil && existing.URI != "" {
 		if existing.State != "ACTIVE" && p.cfg.DeployMode == DeploySkip {
@@ -842,11 +847,29 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 				// A matching source hash can still leave traffic pinned to an
 				// older revision from a previous deploy. Re-pin before reuse.
 				// existing is non-nil here, so this is never a first deploy.
-				if err := p.ensureTrafficOnLatestRevision(ctx, false); err != nil {
-					return nil, err
+				//
+				// With a bundled source (auto mode) the Cloud Functions metadata
+				// hash matching does not prove the live Cloud Run revision
+				// carries this source: a concurrent template PATCH computed from
+				// a stale read can supersede it. Verify the revision's source
+				// hash and, when it was superseded, redeploy the source below (a
+				// plain retry would see the same cached hash and fail again).
+				expectedHash := ""
+				if earlySourceZip != nil {
+					expectedHash = sha256Hex(earlySourceZip)
 				}
-				p.cfg.MintURL = existing.URI
-				return p.provisionExistingMint(ctx, true)
+				trafficErr := p.ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx, false, nil, expectedHash)
+				switch {
+				case trafficErr == nil:
+					p.cfg.MintURL = existing.URI
+					return p.provisionExistingMint(ctx, true)
+				case errors.Is(trafficErr, errSourceSuperseded):
+					log.Printf("Cloud Run revision does not carry the deployed source hash; redeploying source")
+					forceRedeploy = true
+					secretsPrepared = true
+				default:
+					return nil, trafficErr
+				}
 			}
 		}
 	}
@@ -861,8 +884,10 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 
 	// Step 5: Store new agent PEMs once per role and verify secrets exist for
 	// roles without PEMs (re-install).
-	if err := p.prepareRoleSecrets(ctx); err != nil {
-		return nil, err
+	if !secretsPrepared {
+		if err := p.prepareRoleSecrets(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 6: Build env vars and deploy Cloud Function.
@@ -934,7 +959,7 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 		if existing == nil || existing.URI == "" {
 			return nil, fmt.Errorf("function %s deployed but not found or has no URI", functionName)
 		}
-	} else if p.needsCodeDeploy(existing, sourceHash) {
+	} else if forceRedeploy || p.needsCodeDeploy(existing, sourceHash) {
 		// Code changed: start from existing env vars (preserves
 		// PER_REPO_WIF_REPOS, ROLE_APP_IDS, etc.), then override
 		// infrastructure keys with current config values.
@@ -1033,7 +1058,7 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 	// template and traffic as matching and return early. Pinning first also
 	// means /health (waitForReady, below) observes the revision that will
 	// actually serve public traffic.
-	if err := p.ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx, isFirstDeploy, seedServing); err != nil {
+	if err := p.ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx, isFirstDeploy, seedServing, sourceHash); err != nil {
 		return nil, err
 	}
 
@@ -1861,7 +1886,35 @@ func (p *Provisioner) GetServiceRevisionInfo(ctx context.Context) (*ServiceRevis
 // env can't be read reliably, the pin is refused rather than proceeding on
 // unverified data.
 func (p *Provisioner) ensureTrafficOnLatestRevision(ctx context.Context, isFirstDeploy bool) error {
-	return p.ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx, isFirstDeploy, nil)
+	return p.ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx, isFirstDeploy, nil, "")
+}
+
+// errSourceSuperseded marks a reconciliation failure where the latest Cloud
+// Run revision does not carry the source this deploy built (or expects), for
+// example because a concurrent update PATCHed an older template over it.
+var errSourceSuperseded = errors.New("latest Cloud Run revision does not carry this deploy's source")
+
+// checkDeploySourceIdentity verifies that the latest Cloud Run revision
+// carries expectedSourceHash. Traffic matching the latest revision does not
+// prove that: a concurrent template PATCH computed from a stale read creates a
+// newer revision with the old source hash that then matches traffic once
+// pinned. The service template's env is what the latest created revision
+// carries, so it is preferred; the traffic-serving env is used when the
+// template env was not reported. An empty expectedSourceHash disables the
+// check (no source identity is known, for example --skip-mint-deploy).
+func checkDeploySourceIdentity(info *ServiceRevisionInfo, expectedSourceHash string) error {
+	if expectedSourceHash == "" || info == nil {
+		return nil
+	}
+	observed := info.TemplateEnvVars
+	if observed == nil {
+		observed = info.TrafficEnvVars
+	}
+	if observed["FULLSEND_SOURCE_HASH"] != expectedSourceHash {
+		return fmt.Errorf("%w: a competing update appears to have superseded the deploy; %s",
+			errSourceSuperseded, retryDeployAdvice)
+	}
+	return nil
 }
 
 // ensureTrafficOnLatestRevisionAfterSourceDeploy is ensureTrafficOnLatestRevision
@@ -1871,7 +1924,12 @@ func (p *Provisioner) ensureTrafficOnLatestRevision(ctx context.Context, isFirst
 // missing from the freshly read serving revision was revoked while the source
 // was building; reconciliation would otherwise re-add it from this run's
 // configured roles, so the deploy is refused instead.
-func (p *Provisioner) ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx context.Context, isFirstDeploy bool, seedServing *ServiceRevisionInfo) error {
+//
+// expectedSourceHash is the source hash this deploy built (or, on the
+// hash-skip path, expects to be live). The latest revision must carry it
+// before traffic matching or pinning is accepted; a mismatch returns an error
+// wrapping errSourceSuperseded. Empty disables the check.
+func (p *Provisioner) ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx context.Context, isFirstDeploy bool, seedServing *ServiceRevisionInfo, expectedSourceHash string) error {
 	info, err := p.gcpAPI.GetServiceRevisionInfo(ctx, p.cfg.ProjectID, p.cfg.Region, functionName)
 	if err != nil {
 		return fmt.Errorf("checking Cloud Run traffic after deploy: %w; %s", err, retryDeployAdvice)
@@ -1891,6 +1949,9 @@ func (p *Provisioner) ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx context
 		return fmt.Errorf("Cloud Run routing has not settled (observed traffic does not yet reflect the service's accepted configuration); refusing to treat the deploy as complete on an unverified snapshot; wait for the service to finish reconciling and then %s",
 			retryDeployAdvice)
 	}
+	if err := checkDeploySourceIdentity(info, expectedSourceHash); err != nil {
+		return err
+	}
 	if info.TemplateMatchesTraffic {
 		return nil
 	}
@@ -1900,7 +1961,7 @@ func (p *Provisioner) ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx context
 	// LatestReadyRevisionShort can lag until that revision becomes Ready.
 	// Falling back to LatestReadyRevisionShort keeps this safe when the API
 	// didn't report a created/template revision at all.
-	target := pinTargetRevision(info)
+	target := info.TargetRevisionShort()
 
 	// The observed serving revision (and so the authorization snapshot taken
 	// from it) is only trustworthy when routing has settled: an accepted but
@@ -1942,7 +2003,7 @@ func (p *Provisioner) ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx context
 			// Keep the post-wait snapshot: a concurrent admin change during
 			// the wait must be rejected rather than overwritten, and a
 			// superseded target must not be pinned.
-			if freshTarget := pinTargetRevision(fresh); freshTarget != target {
+			if freshTarget := fresh.TargetRevisionShort(); freshTarget != target {
 				return fmt.Errorf("latest Cloud Run revision changed from %s to %s while waiting for it to become ready; refusing to pin a superseded revision; %s",
 					target, freshTarget, retryDeployAdvice)
 			}
@@ -2191,7 +2252,7 @@ const trafficAllocTypeRevision = "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION"
 // never reach logs or error strings. Empty names are allowed: callers handle
 // "unknown" explicitly.
 func checkRevisionNames(info *ServiceRevisionInfo) error {
-	for _, name := range []string{pinTargetRevision(info), info.TrafficRevisionShort} {
+	for _, name := range []string{info.TargetRevisionShort(), info.TrafficRevisionShort} {
 		if name != "" && !revisionShortNamePattern.MatchString(name) {
 			return fmt.Errorf("Cloud Run reported a malformed revision name; refusing to continue; %s", retryDeployAdvice)
 		}
@@ -2224,7 +2285,7 @@ func (p *Provisioner) reverifyPinAfterWait(seed, pre, fresh *ServiceRevisionInfo
 		return fmt.Errorf("Cloud Run routing has not settled after waiting for revision %s; refusing to pin on an unverified snapshot; %s",
 			target, retryDeployAdvice)
 	}
-	if freshTarget := pinTargetRevision(fresh); freshTarget != target {
+	if freshTarget := fresh.TargetRevisionShort(); freshTarget != target {
 		return fmt.Errorf("latest Cloud Run revision changed from %s to %s while waiting for it to become ready; refusing to pin a superseded revision; %s",
 			target, freshTarget, retryDeployAdvice)
 	}
@@ -2301,20 +2362,6 @@ func (p *Provisioner) waitForRevisionReady(ctx context.Context, targetShort stri
 		case <-delay(3 * time.Second):
 		}
 	}
-}
-
-// pinTargetRevision derives the revision a traffic pin should move to from
-// info: the latest created revision, falling back to the template revision and
-// then the latest-ready revision (see ensureTrafficOnLatestRevision).
-func pinTargetRevision(info *ServiceRevisionInfo) string {
-	target := info.LatestCreatedRevisionShort
-	if target == "" {
-		target = shortRevisionName(info.TemplateRevision)
-	}
-	if target == "" {
-		target = info.LatestReadyRevisionShort
-	}
-	return target
 }
 
 // accumulativeEnvKeys lists CSV-formatted allow-list env vars that are
@@ -2537,12 +2584,16 @@ func setOrDeleteEnv(env map[string]string, key, val string) {
 // unparsable target value is reported as different so the serving value
 // replaces it.
 func customRolePermissionsEqual(target, serving string) (bool, error) {
+	var servingParsed map[string]map[string]map[string]string
+	if serving != "" {
+		parsed, err := mintcore.ParseCustomRolePermissions(serving)
+		if err != nil {
+			return false, fmt.Errorf("parsing traffic-serving CUSTOM_ROLE_PERMISSIONS: %w", err)
+		}
+		servingParsed = parsed
+	}
 	if target == "" || serving == "" {
 		return target == serving, nil
-	}
-	servingParsed, err := mintcore.ParseCustomRolePermissions(serving)
-	if err != nil {
-		return false, fmt.Errorf("parsing traffic-serving CUSTOM_ROLE_PERMISSIONS: %w", err)
 	}
 	targetParsed, err := mintcore.ParseCustomRolePermissions(target)
 	if err != nil {

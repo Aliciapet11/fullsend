@@ -76,14 +76,17 @@ func TestProvisioner_Provision_CodeChanged_ReconcilesBeforeRegistration(t *testi
 	// Reconciliation ran first, against the serving revision's allow-list.
 	assert.Equal(t, "test-org/app", reconcile["PER_REPO_WIF_REPOS"])
 	assert.JSONEq(t, `{"coder":"12345"}`, reconcile["ROLE_APP_IDS"])
-	assert.Equal(t, "new-template-hash", reconcile["FULLSEND_SOURCE_HASH"])
+	// The fake stamps the deployed source's hash on the latest template.
+	deployedHash := fake.lastCreateFunctionEnvVars["FULLSEND_SOURCE_HASH"]
+	require.NotEmpty(t, deployedHash)
+	assert.Equal(t, deployedHash, reconcile["FULLSEND_SOURCE_HASH"])
 
 	// Registration then patched the reconciled revision: the new repo is
 	// added, and the newly configured role ID and deployment metadata survive.
 	assert.Equal(t, "test-org/app,new-org/app", register["PER_REPO_WIF_REPOS"])
 	assert.JSONEq(t, `{"coder":"12345"}`, register["ROLE_APP_IDS"],
 		"newly configured role IDs must survive the registration patch")
-	assert.Equal(t, "new-template-hash", register["FULLSEND_SOURCE_HASH"],
+	assert.Equal(t, deployedHash, register["FULLSEND_SOURCE_HASH"],
 		"deployment metadata must survive the registration patch")
 	assert.Equal(t, "coder", register["ALLOWED_ROLES"])
 }
@@ -142,7 +145,7 @@ func TestProvisioner_Provision_SameHash_PinsWhenTrafficSplit(t *testing.T) {
 			"ALLOWED_WORKFLOW_FILES": "*",
 		},
 	}
-	env := map[string]string{"ALLOWED_ORGS": "test-org", "ROLE_APP_IDS": `{"coder":"12345"}`, "ALLOWED_ROLES": "coder"}
+	env := map[string]string{"ALLOWED_ORGS": "test-org", "ROLE_APP_IDS": `{"coder":"12345"}`, "ALLOWED_ROLES": "coder", "FULLSEND_SOURCE_HASH": sha256Hex(sourceZip)}
 	fake.revisionInfo = &ServiceRevisionInfo{
 		TrafficRevisionShort:       "fullsend-mint-00115-qp5",
 		TrafficPercent:             60,
@@ -1124,4 +1127,141 @@ func TestEnsureTrafficOnLatestRevision_MalformedRevisionNamesAreRejected(t *test
 			assert.NotContains(t, fake.calls, "PinServiceTrafficIfMatch")
 		})
 	}
+}
+
+// A competing update (for example an enrollment patch computed from a template
+// read taken before the source build finished) can land an older template
+// after the build. The resulting latest revision matches traffic once pinned
+// but does not carry this deploy's source, so the deploy must fail.
+func TestProvisioner_Provision_CodeChanged_OldTemplatePatchAfterBuildIsRefused(t *testing.T) {
+	fake := newFakeGCFClient()
+	fake.keepRevisionInfoSourceHash = true
+	fake.functionInfo = &FunctionInfo{
+		Name:  "projects/my-project/locations/us-central1/functions/fullsend-mint",
+		State: "ACTIVE",
+		URI:   "https://fullsend-mint-abc123.run.app",
+		EnvVars: map[string]string{
+			"GCP_PROJECT_NUMBER":   "123456789",
+			"ALLOWED_ROLES":        "coder",
+			"ROLE_APP_IDS":         `{"coder":"12345"}`,
+			"FULLSEND_SOURCE_HASH": "old-hash-that-wont-match",
+		},
+	}
+	oldEnv := map[string]string{
+		"ALLOWED_ROLES":        "coder",
+		"ROLE_APP_IDS":         `{"coder":"12345"}`,
+		"FULLSEND_SOURCE_HASH": "old-hash-that-wont-match",
+	}
+	fake.revisionInfo = &ServiceRevisionInfo{
+		TrafficRevisionShort:       "fullsend-mint-00115-qp5",
+		TrafficPercent:             100,
+		TrafficAllocType:           trafficAllocTypeRevision,
+		LatestCreatedRevisionShort: "fullsend-mint-00115-qp5",
+		LatestReadyRevisionShort:   "fullsend-mint-00115-qp5",
+		TemplateMatchesTraffic:     true,
+		TrafficEnvVars:             oldEnv,
+		TemplateEnvVars:            oldEnv,
+	}
+	p := newTestProvisioner(Config{
+		ProjectID:         "my-project",
+		GitHubOrgs:        []string{"test-org"},
+		AgentPEMs:         singleRolePEMs(),
+		AgentAppIDs:       singleRoleAppIDs(),
+		FunctionSourceDir: fakeFunctionSourceDir(t),
+	}, fake)
+
+	_, err := p.Provision(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSourceSuperseded)
+	assert.Contains(t, err.Error(), retryDeployAdvice)
+	assert.Contains(t, fake.calls, "UpdateFunction")
+	assert.NotContains(t, fake.calls, "PinServiceTraffic")
+}
+
+// A matching cached source hash does not prove the live revision carries that
+// source. When the live template carries a different hash, the hash-skip path
+// redeploys the source (a plain retry would otherwise fail identically).
+func TestProvisioner_Provision_SameHash_SupersededTemplateForcesRedeploy(t *testing.T) {
+	srcDir := fakeFunctionSourceDir(t)
+	sourceZip, err := bundleFunctionSource(srcDir, "", "", StatusGitHubAuth{})
+	require.NoError(t, err)
+
+	fake := newFakeGCFClient()
+	fake.functionInfo = &FunctionInfo{
+		Name:  "projects/my-project/locations/us-central1/functions/fullsend-mint",
+		State: "ACTIVE",
+		URI:   "https://fullsend-mint-abc123.run.app",
+		EnvVars: map[string]string{
+			"GCP_PROJECT_NUMBER":     "123456789",
+			"ALLOWED_ROLES":          "coder",
+			"ROLE_APP_IDS":           `{"coder":"12345"}`,
+			"FULLSEND_SOURCE_HASH":   sha256Hex(sourceZip),
+			"ALLOWED_WORKFLOW_FILES": "*",
+		},
+	}
+	env := map[string]string{
+		"ALLOWED_ROLES":        "coder",
+		"ROLE_APP_IDS":         `{"coder":"12345"}`,
+		"FULLSEND_SOURCE_HASH": "superseded-older-hash",
+	}
+	fake.revisionInfo = &ServiceRevisionInfo{
+		TrafficRevisionShort:       "fullsend-mint-00115-qp5",
+		TrafficPercent:             100,
+		TrafficAllocType:           trafficAllocTypeRevision,
+		LatestCreatedRevisionShort: "fullsend-mint-00115-qp5",
+		LatestReadyRevisionShort:   "fullsend-mint-00115-qp5",
+		TemplateMatchesTraffic:     true,
+		TrafficEnvVars:             env,
+		TemplateEnvVars:            env,
+	}
+	p := newTestProvisioner(Config{
+		ProjectID:         "my-project",
+		GitHubOrgs:        []string{"test-org"},
+		AgentPEMs:         singleRolePEMs(),
+		AgentAppIDs:       singleRoleAppIDs(),
+		FunctionSourceDir: srcDir,
+	}, fake)
+
+	_, err = p.Provision(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, fake.calls, "UpdateFunction", "superseded live source must be redeployed")
+	assert.Equal(t, sha256Hex(sourceZip), fake.lastCreateFunctionEnvVars["FULLSEND_SOURCE_HASH"])
+}
+
+func TestCheckDeploySourceIdentity(t *testing.T) {
+	assert.NoError(t, checkDeploySourceIdentity(nil, "h"))
+	assert.NoError(t, checkDeploySourceIdentity(&ServiceRevisionInfo{}, ""), "empty expectation disables the check")
+	tmpl := &ServiceRevisionInfo{
+		TemplateEnvVars: map[string]string{"FULLSEND_SOURCE_HASH": "h"},
+		TrafficEnvVars:  map[string]string{"FULLSEND_SOURCE_HASH": "other"},
+	}
+	assert.NoError(t, checkDeploySourceIdentity(tmpl, "h"), "template env wins over traffic env")
+	assert.ErrorIs(t, checkDeploySourceIdentity(tmpl, "other"), errSourceSuperseded)
+	trafficOnly := &ServiceRevisionInfo{TrafficEnvVars: map[string]string{"FULLSEND_SOURCE_HASH": "h"}}
+	assert.NoError(t, checkDeploySourceIdentity(trafficOnly, "h"))
+	assert.ErrorIs(t, checkDeploySourceIdentity(&ServiceRevisionInfo{}, "h"), errSourceSuperseded)
+}
+
+func TestServiceRevisionInfo_TargetRevisionShort(t *testing.T) {
+	assert.Equal(t, "rev-created", (&ServiceRevisionInfo{
+		LatestCreatedRevisionShort: "rev-created",
+		TemplateRevision:           "projects/p/locations/r/services/s/revisions/rev-template",
+		LatestReadyRevisionShort:   "rev-ready",
+	}).TargetRevisionShort())
+	assert.Equal(t, "rev-template", (&ServiceRevisionInfo{
+		TemplateRevision:         "projects/p/locations/r/services/s/revisions/rev-template",
+		LatestReadyRevisionShort: "rev-ready",
+	}).TargetRevisionShort())
+	assert.Equal(t, "rev-ready", (&ServiceRevisionInfo{LatestReadyRevisionShort: "rev-ready"}).TargetRevisionShort())
+	assert.Empty(t, (&ServiceRevisionInfo{}).TargetRevisionShort())
+}
+
+func TestCustomRolePermissionsEqual_MalformedServingWithEmptyTarget(t *testing.T) {
+	_, err := customRolePermissionsEqual("", "{not json")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "traffic-serving CUSTOM_ROLE_PERMISSIONS")
+
+	equal, err := customRolePermissionsEqual("", "")
+	require.NoError(t, err)
+	assert.True(t, equal)
 }

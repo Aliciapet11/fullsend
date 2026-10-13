@@ -1589,23 +1589,6 @@ Required IAM roles on the mint project (--project mode only):
 	return cmd
 }
 
-// latestCreatedOrTemplateRevisionShort returns the short name of the most
-// recently created revision, mirroring how gcf.GetServiceRevisionInfo
-// derives TemplateMatchesTraffic: prefer LatestCreatedRevisionShort (it
-// reflects a just-finished deploy immediately), falling back to the
-// template's own revision field, then to LatestReadyRevisionShort (which can
-// lag behind both until Cloud Run finishes bringing a new revision up).
-func latestCreatedOrTemplateRevisionShort(revInfo *gcf.ServiceRevisionInfo) string {
-	if revInfo.LatestCreatedRevisionShort != "" {
-		return revInfo.LatestCreatedRevisionShort
-	}
-	if revInfo.TemplateRevision != "" {
-		parts := strings.Split(revInfo.TemplateRevision, "/")
-		return parts[len(parts)-1]
-	}
-	return revInfo.LatestReadyRevisionShort
-}
-
 // terminalSafe replaces control and other non-printable characters (including
 // ANSI escape introducers and newlines) in an externally sourced value with
 // '?', so values read from the GCP project or the mint API can never inject
@@ -1709,7 +1692,7 @@ func runMintStatus(ctx context.Context, printer *ui.Printer, project, region, or
 			printer.Blank()
 			printer.StepWarn("Traffic-serving revision could not be determined")
 			printer.StepInfo("Unable to confirm which revision is currently serving traffic.")
-		} else if latestKnown := latestCreatedOrTemplateRevisionShort(revInfo); latestKnown != "" && latestKnown != revInfo.TrafficRevisionShort {
+		} else if latestKnown := revInfo.TargetRevisionShort(); latestKnown != "" && latestKnown != revInfo.TrafficRevisionShort {
 			// Show a divergence warning. A source deploy can create a newer
 			// revision while traffic remains pinned to an older one. Prefer
 			// the latest *created* revision (falling back to the template's
