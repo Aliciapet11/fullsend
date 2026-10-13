@@ -31,6 +31,27 @@ func TestFakeClient_ListPullRequestCommits(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestFakeClient_ListPullRequestReviewThreads(t *testing.T) {
+	page := ReviewThreadPage{
+		Threads:   []ReviewThread{{ID: "thread-1", IsResolved: true, Path: "main.go"}},
+		Truncated: true,
+	}
+	f := NewFakeClient()
+	f.PRReviewThreads = map[string]ReviewThreadPage{"o/r/7": page}
+
+	got, err := f.ListPullRequestReviewThreads(context.Background(), "o", "r", 7)
+	require.NoError(t, err)
+	assert.Equal(t, page, got)
+
+	got, err = f.ListPullRequestReviewThreads(context.Background(), "o", "r", 8)
+	require.NoError(t, err)
+	assert.Empty(t, got.Threads)
+
+	f.Errors["ListPullRequestReviewThreads"] = errors.New("boom")
+	_, err = f.ListPullRequestReviewThreads(context.Background(), "o", "r", 7)
+	require.Error(t, err)
+}
+
 func TestFakeClient_ListOrgRepos(t *testing.T) {
 	ctx := context.Background()
 	fc := &FakeClient{
@@ -119,6 +140,15 @@ func TestFakeClient_CreateFile(t *testing.T) {
 	assert.Equal(t, "initial commit", rec.Message)
 	assert.Equal(t, content, rec.Content)
 	assert.Empty(t, rec.Branch)
+}
+
+func TestFakeClient_DeleteProjectServiceAccount(t *testing.T) {
+	fc := NewFakeClient()
+	require.NoError(t, fc.DeleteProjectServiceAccount(context.Background(), "g", "p", 77))
+	assert.Equal(t, []int{77}, fc.DeletedProjectServiceAccounts)
+	fc.Errors["DeleteProjectServiceAccount"] = errors.New("refused")
+	require.Error(t, fc.DeleteProjectServiceAccount(context.Background(), "g", "p", 88))
+	assert.Equal(t, []int{77}, fc.DeletedProjectServiceAccounts)
 }
 
 func TestFakeClient_CreateFileOnBranch(t *testing.T) {
@@ -767,6 +797,7 @@ func TestFakeClient_ErrorInjection(t *testing.T) {
 		name string
 		call func(fc *FakeClient) error
 	}{
+		{"GetRepoVariableInfo", func(fc *FakeClient) error { _, _, err := fc.GetRepoVariableInfo(ctx, "o", "r", "n"); return err }},
 		{"ListOrgRepos", func(fc *FakeClient) error { _, err := fc.ListOrgRepos(ctx, "org", false); return err }},
 		{"CreateRepo", func(fc *FakeClient) error { _, err := fc.CreateRepo(ctx, "o", "r", "d", false); return err }},
 		{"DeleteRepo", func(fc *FakeClient) error { return fc.DeleteRepo(ctx, "o", "r") }},
@@ -835,6 +866,10 @@ func TestFakeClient_ErrorInjection(t *testing.T) {
 		}},
 		{"GetOrgVariable", func(fc *FakeClient) error { _, _, err := fc.GetOrgVariable(ctx, "o", "n"); return err }},
 		{"ListOrgVariables", func(fc *FakeClient) error { _, err := fc.ListOrgVariables(ctx, "o"); return err }},
+		{"ListInheritedRepoVariables", func(fc *FakeClient) error {
+			_, err := fc.ListInheritedRepoVariables(ctx, "o", "r")
+			return err
+		}},
 		{"ListInstanceVariables", func(fc *FakeClient) error { _, err := fc.ListInstanceVariables(ctx); return err }},
 		{"IsInstallationToken", func(fc *FakeClient) error { _, err := fc.IsInstallationToken(ctx); return err }},
 		{"DeleteOrgVariable", func(fc *FakeClient) error {
@@ -1976,6 +2011,45 @@ func TestFakeClient_GetProtectedBranch(t *testing.T) {
 	assert.Equal(t, 40, rule2.MergeAccessLevels[0].AccessLevel, "returned rule must be a copy")
 }
 
+func TestFakeClient_RevokeProtectedBranchMergeUserEntry(t *testing.T) {
+	ctx := context.Background()
+	fc := NewFakeClient()
+	fc.ProtectedBranchRules["org/repo/main"] = &ProtectedBranchRule{
+		Name:              "main",
+		MergeAccessLevels: []ProtectedBranchAccess{{AccessLevel: 40}, {ID: 5, UserID: 99}},
+	}
+	require.NoError(t, fc.GrantProtectedBranchMergeUser(ctx, "org", "repo", "main", 7))
+	rule, err := fc.GetProtectedBranch(ctx, "org", "repo", "main")
+	require.NoError(t, err)
+	require.Len(t, rule.MergeAccessLevels, 3)
+	added := rule.MergeAccessLevels[2]
+	assert.Equal(t, 7, added.UserID)
+	assert.Positive(t, added.ID, "a granted entry carries its entry ID")
+
+	// An entry for a different user is refused and left in place.
+	err = fc.RevokeProtectedBranchMergeUserEntry(ctx, "org", "repo", "main", added.ID, 99)
+	require.Error(t, err)
+	rule, _ = fc.GetProtectedBranch(ctx, "org", "repo", "main")
+	assert.Len(t, rule.MergeAccessLevels, 3)
+
+	// Invalid identifiers are rejected.
+	require.Error(t, fc.RevokeProtectedBranchMergeUserEntry(ctx, "org", "repo", "main", 0, 7))
+	require.Error(t, fc.RevokeProtectedBranchMergeUserEntry(ctx, "org", "repo", "main", added.ID, 0))
+
+	// Only the exact entry is removed; the other user's entry survives.
+	require.NoError(t, fc.RevokeProtectedBranchMergeUserEntry(ctx, "org", "repo", "main", added.ID, 7))
+	rule, _ = fc.GetProtectedBranch(ctx, "org", "repo", "main")
+	assert.Equal(t, []ProtectedBranchAccess{{AccessLevel: 40}, {ID: 5, UserID: 99}}, rule.MergeAccessLevels)
+
+	// Removing an entry that is already gone, or on an unknown rule, succeeds.
+	require.NoError(t, fc.RevokeProtectedBranchMergeUserEntry(ctx, "org", "repo", "main", added.ID, 7))
+	require.NoError(t, fc.RevokeProtectedBranchMergeUserEntry(ctx, "org", "repo", "other", 1, 7))
+
+	fc.Errors["RevokeProtectedBranchMergeUserEntry"] = fmt.Errorf("denied")
+	require.Error(t, fc.RevokeProtectedBranchMergeUserEntry(ctx, "org", "repo", "main", 5, 99))
+	assert.Len(t, fc.RevokedProtectedBranchMergeEntries, 7, "every call is recorded")
+}
+
 func TestFakeClient_GrantProtectedBranchMergeUser(t *testing.T) {
 	ctx := context.Background()
 	fc := NewFakeClient()
@@ -2541,4 +2615,75 @@ func TestFakeClient_ForceCommitFileToBranch_ConcurrentLastWriteWins(t *testing.T
 	sha, err := fc.GetBranchRef(ctx, "o", "r", "state")
 	require.NoError(t, err)
 	assert.NotEmpty(t, sha)
+}
+
+func TestFakeClient_GetRepoVariableInfo(t *testing.T) {
+	f := NewFakeClient()
+	ctx := context.Background()
+	f.VariableFileTypes["acme/api/IDENTIFIER"] = true
+	v, exists, err := f.GetRepoVariableInfo(ctx, "acme", "api", "IDENTIFIER")
+	require.NoError(t, err)
+	assert.False(t, exists)
+	assert.Equal(t, RepoVariable{}, v)
+	f.VariableValues["acme/api/IDENTIFIER"] = "contents"
+	f.VariableFileTypes["acme/api/IDENTIFIER"] = true
+	v, exists, err = f.GetRepoVariableInfo(ctx, "acme", "api", "IDENTIFIER")
+	require.NoError(t, err)
+	assert.True(t, exists)
+	assert.Equal(t, RepoVariable{Value: "contents", FileType: true}, v)
+	f.Errors["GetRepoVariableInfo"] = errors.New("read failed")
+	v, exists, err = f.GetRepoVariableInfo(ctx, "acme", "api", "IDENTIFIER")
+	require.ErrorContains(t, err, "read failed")
+	assert.False(t, exists)
+	assert.Equal(t, RepoVariable{}, v)
+}
+
+func TestFakeClient_VariableFileTypeLifecycle(t *testing.T) {
+	for _, remove := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deleteBeforeRewrite=%t", remove), func(t *testing.T) {
+			f := NewFakeClient()
+			ctx := context.Background()
+			variablePath := "acme/api/IDENTIFIER"
+			f.VariableValues[variablePath] = "old contents"
+			f.VariableFileTypes[variablePath] = true
+			if remove {
+				require.NoError(t, f.DeleteRepoVariable(ctx, "acme", "api", "IDENTIFIER"))
+				assert.NotContains(t, f.VariableFileTypes, variablePath)
+				_, exists, err := f.GetRepoVariableInfo(ctx, "acme", "api", "IDENTIFIER")
+				require.NoError(t, err)
+				assert.False(t, exists)
+			}
+			require.NoError(t, f.CreateOrUpdateRepoVariable(ctx, "acme", "api", "IDENTIFIER", "new value"))
+			value, exists, err := f.GetRepoVariableInfo(ctx, "acme", "api", "IDENTIFIER")
+			require.NoError(t, err)
+			assert.True(t, exists)
+			assert.Equal(t, RepoVariable{Value: "new value"}, value)
+		})
+	}
+}
+
+func TestFakeClient_ProjectLease(t *testing.T) {
+	ctx := context.Background()
+	f := NewFakeClient()
+
+	ok, err := f.AcquireProjectLease(ctx, "o", "r", "L", "a")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	ok, err = f.AcquireProjectLease(ctx, "o", "r", "L", "b")
+	require.NoError(t, err)
+	assert.False(t, ok, "a held lease cannot be taken again")
+
+	require.NoError(t, f.ReleaseProjectLease(ctx, "o", "r", "L", "b"))
+	ok, _ = f.AcquireProjectLease(ctx, "o", "r", "L", "b")
+	assert.False(t, ok, "another holder's release leaves the lease in place")
+
+	require.NoError(t, f.ReleaseProjectLease(ctx, "o", "r", "L", "a"))
+	ok, _ = f.AcquireProjectLease(ctx, "o", "r", "L", "b")
+	assert.True(t, ok)
+
+	f.Errors["AcquireProjectLease"] = errors.New("boom")
+	_, err = f.AcquireProjectLease(ctx, "o", "r", "M", "a")
+	require.Error(t, err)
+	f.Errors["ReleaseProjectLease"] = errors.New("boom")
+	require.Error(t, f.ReleaseProjectLease(ctx, "o", "r", "L", "b"))
 }

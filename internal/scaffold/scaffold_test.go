@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -98,6 +99,7 @@ func TestShimPerRepoTemplateContent(t *testing.T) {
 	assert.NotContains(t, s, "install_mode")
 	assert.Contains(t, s, "FULLSEND_GCP_PROJECT_ID: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}")
 	assert.Contains(t, s, "FULLSEND_OPENAI_API_KEY: ${{ secrets.FULLSEND_OPENAI_API_KEY }}")
+	assert.Contains(t, s, "FULLSEND_INFERENCE_GATEWAY_API_KEY: ${{ secrets.FULLSEND_INFERENCE_GATEWAY_API_KEY }}")
 	// Per-role concurrency lives in reusable-dispatch.yml, not a monolithic shim group (#2452).
 	assert.NotContains(t, s, "fullsend-dispatch-${{")
 	assert.NotRegexp(t, `(?m)^\s+concurrency:`, s)
@@ -203,6 +205,9 @@ func TestShimStopFixAuthorizationRuntime(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
 
 	extractRun := func(t *testing.T, tmpl string) string {
 		t.Helper()
@@ -225,17 +230,19 @@ func TestShimStopFixAuthorizationRuntime(t *testing.T) {
 	}
 
 	// runScenario runs the script with a stub gh that logs its invocations and
-	// returns the given role (or fails when role == "FAIL"). It returns the
-	// combined output and whether the label mutation (`gh pr edit`) ran.
-	runScenario := func(t *testing.T, script, commentUser, issueUser, role string) (string, bool) {
+	// applies the script's --jq expression to the given permission response
+	// (or fails when response == "FAIL"). It returns the combined output and
+	// whether the label mutation (`gh pr edit`) ran.
+	runScenario := func(t *testing.T, script, commentUser, issueUser, response string) (string, bool) {
 		t.Helper()
 		dir := t.TempDir()
 		logPath := filepath.Join(dir, "gh.log")
 		stub := "#!/usr/bin/env bash\n" +
 			"echo \"$@\" >> \"$GH_STUB_LOG\"\n" +
 			"if [[ \"$1\" == \"api\" ]]; then\n" +
-			"  if [[ \"$GH_STUB_ROLE\" == \"FAIL\" ]]; then echo 'simulated api failure' >&2; exit 1; fi\n" +
-			"  echo \"$GH_STUB_ROLE\"; exit 0\n" +
+			"  if [[ \"$GH_STUB_RESPONSE\" == \"FAIL\" ]]; then echo 'simulated api failure' >&2; exit 1; fi\n" +
+			"  [[ \"$3\" == \"--jq\" ]] || exit 1\n" +
+			"  jq -r \"$4\" <<<\"$GH_STUB_RESPONSE\"; exit\n" +
 			"fi\n" +
 			"exit 0\n"
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "gh"), []byte(stub), 0o755))
@@ -246,7 +253,7 @@ func TestShimStopFixAuthorizationRuntime(t *testing.T) {
 		cmd.Env = append(os.Environ(),
 			"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
 			"GH_STUB_LOG="+logPath,
-			"GH_STUB_ROLE="+role,
+			"GH_STUB_RESPONSE="+response,
 			"COMMENT_USER_LOGIN="+commentUser,
 			"ISSUE_USER_LOGIN="+issueUser,
 			"REPO=octo/repo",
@@ -270,18 +277,35 @@ func TestShimStopFixAuthorizationRuntime(t *testing.T) {
 			t.Run("pr author escape hatch", func(t *testing.T) {
 				// Author with only read access can still stop on their own PR,
 				// and the permission API is never consulted.
-				out, labeled := runScenario(t, script, "alice", "alice", "read")
+				out, labeled := runScenario(t, script, "alice", "alice", `{"role_name":"read"}`)
 				assert.True(t, labeled, "PR author must be able to stop the fix agent")
 				assert.NotContains(t, out, "api repos/", "author hatch must skip the permission API")
 			})
 
 			t.Run("write collaborator authorized", func(t *testing.T) {
-				_, labeled := runScenario(t, script, "bob", "alice", "write")
+				_, labeled := runScenario(t, script, "bob", "alice", `{"role_name":"write"}`)
 				assert.True(t, labeled, "write-access collaborator must be authorized")
 			})
 
+			t.Run("custom role with maintain flags authorized", func(t *testing.T) {
+				_, labeled := runScenario(t, script, "bob", "alice",
+					`{"permission":"write","user":{"login":"custom-role-maintainer","type":"User","permissions":{"admin":false,"maintain":true,"push":true,"triage":true,"pull":true},"role_name":"Repo Maintainer"},"role_name":"Repo Maintainer"}`)
+				assert.True(t, labeled, "custom role with effective maintain must be authorized")
+			})
+
+			t.Run("custom role with triage flags denied", func(t *testing.T) {
+				_, labeled := runScenario(t, script, "bob", "alice",
+					`{"permission":"read","role_name":"Helper","user":{"permissions":{"triage":true,"pull":true}}}`)
+				assert.False(t, labeled, "stop-fix requires write; effective triage must be denied")
+			})
+
+			t.Run("custom role without effective permission denied", func(t *testing.T) {
+				_, labeled := runScenario(t, script, "bob", "alice", `{"role_name":"Mystery"}`)
+				assert.False(t, labeled, "custom role with no effective permission must be denied")
+			})
+
 			t.Run("read collaborator denied", func(t *testing.T) {
-				out, labeled := runScenario(t, script, "bob", "alice", "read")
+				out, labeled := runScenario(t, script, "bob", "alice", `{"role_name":"read"}`)
 				assert.False(t, labeled, "read-only collaborator must be denied")
 				assert.Contains(t, out, "not authorized")
 			})
@@ -292,6 +316,58 @@ func TestShimStopFixAuthorizationRuntime(t *testing.T) {
 				assert.Contains(t, out, "Permission API call failed",
 					"API failure must emit a diagnostic warning")
 			})
+		})
+	}
+}
+
+// TestCollaboratorPermissionJQ checks that reusable-dispatch.yml and the
+// stop-fix shims share one --jq role resolution and that it maps custom roles
+// to their effective base role (#7834).
+func TestCollaboratorPermissionJQ(t *testing.T) {
+	jqExpr := regexp.MustCompile(`(?s)/permission" \\\s*--jq '(.*?)' 2>`)
+	extract := func(t *testing.T, content []byte) string {
+		t.Helper()
+		m := jqExpr.FindSubmatch(content)
+		require.NotNil(t, m, "collaborator permission --jq expression not found")
+		return strings.Join(strings.Fields(string(m[1])), " ")
+	}
+
+	dispatch, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "reusable-dispatch.yml"))
+	require.NoError(t, err)
+	shim, err := FullsendRepoFile("templates/shim-per-repo.yaml")
+	require.NoError(t, err)
+	expr := extract(t, dispatch)
+	require.Equal(t, expr, extract(t, shim), "dispatch and stop-fix shim must resolve roles identically")
+	managed, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "fullsend.yaml"))
+	require.NoError(t, err)
+	require.Equal(t, expr, extract(t, managed), "this repo's managed shim must match the template")
+
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+
+	cases := []struct{ name, response, want string }{
+		{"built-in role", `{"permission":"read","role_name":"triage"}`, "triage"},
+		{"custom maintain", `{"permission":"write","user":{"login":"custom-role-maintainer","type":"User","permissions":{"admin":false,"maintain":true,"push":true,"triage":true,"pull":true},"role_name":"Repo Maintainer"},"role_name":"Repo Maintainer"}`, "maintain"},
+		{"custom triage", `{"permission":"read","role_name":"Helper","user":{"permissions":{"triage":true,"pull":true}}}`, "triage"},
+		{"custom legacy write", `{"permission":"write","role_name":"Dev"}`, "write"},
+		{"custom legacy read stays read", `{"permission":"read","role_name":"Helper"}`, "read"},
+		{"custom non-boolean flag ignores legacy", `{"permission":"write","role_name":"Dev","user":{"permissions":{"push":"true"}}}`, "none"},
+		{"custom all flags false ignores legacy", `{"permission":"write","role_name":"Dev","user":{"permissions":{"admin":false,"maintain":false,"push":false,"triage":false,"pull":false}}}`, "none"},
+		{"custom null flags use legacy", `{"permission":"write","role_name":"Dev","user":{"permissions":null}}`, "write"},
+		{"custom empty flags ignore legacy", `{"permission":"write","role_name":"Dev","user":{"permissions":{}}}`, "none"},
+		{"custom non-object flags ignore legacy", `{"permission":"write","role_name":"Dev","user":{"permissions":[]}}`, "none"},
+		{"missing role_name", `{"permission":"write","user":{"permissions":{"push":true,"pull":true}}}`, "none"},
+		{"non-string role_name", `{"permission":"write","role_name":7}`, "none"},
+		{"custom no signals", `{"role_name":"Mystery"}`, "none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("jq", "-r", expr)
+			cmd.Stdin = strings.NewReader(tc.response)
+			out, err := cmd.Output()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, strings.TrimSpace(string(out)))
 		})
 	}
 }
@@ -482,6 +558,7 @@ func TestPrioritizeWorkflowContent(t *testing.T) {
 	assert.Contains(t, s, "FULLSEND_GCP_WIF_PROVIDER: ${{ secrets.FULLSEND_GCP_WIF_PROVIDER }}")
 	assert.Contains(t, s, "FULLSEND_GCP_PROJECT_ID: ${{ secrets.FULLSEND_GCP_PROJECT_ID }}")
 	assert.Contains(t, s, "FULLSEND_OPENAI_API_KEY: ${{ secrets.FULLSEND_OPENAI_API_KEY }}")
+	assert.Contains(t, s, "FULLSEND_INFERENCE_GATEWAY_API_KEY: ${{ secrets.FULLSEND_INFERENCE_GATEWAY_API_KEY }}")
 	assert.Contains(t, s, "concurrency:")
 	assert.Contains(t, s, "fullsend-prioritize-")
 	assert.Contains(t, s, "cancel-in-progress: true")

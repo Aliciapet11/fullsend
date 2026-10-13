@@ -71,10 +71,10 @@ fullsend mint deploy --project "$GCP_PROJECT"
 
 See [Mint service administration](mint-administration.md) for deployment details, PEM management, and role configuration.
 
-**2. Enroll the org or repo in the mint** (GCP Admin):
+**2. Enroll the repo in the mint** (GCP Admin):
 
 ```bash
-fullsend mint enroll "$ORG_NAME" --project "$GCP_PROJECT"
+fullsend mint enroll "$ORG_NAME/$REPO_NAME" --project "$GCP_PROJECT"
 ```
 
 **3. Provision WIF for inference** (GCP Admin):

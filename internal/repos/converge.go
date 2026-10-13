@@ -107,6 +107,15 @@ type ConvergeConfig struct {
 	// `repos install --vendor` take effect without modifying the
 	// manifest. When nil, the per-repo resolved Vendor field is used.
 	VendorOverride *bool
+
+	// ReadVendoredWorkflow, when non-nil, returns the content of a reusable
+	// workflow (for example .github/workflows/reusable-prioritize.yml) that
+	// a vendored install copies from the resolved vendor source, or an error
+	// matching forge.ErrNotFound when the source lacks it. It lets the
+	// openai-wif readiness check validate the workflows actually installed
+	// rather than those at a remote ref. When nil, vendored installs are
+	// checked against the remote ref like any other.
+	ReadVendoredWorkflow func(path string) ([]byte, error)
 }
 
 // ComponentAction describes an action taken (or planned) on a single
@@ -292,9 +301,10 @@ func hasComponent(components []ComponentStatus, name string) bool {
 	return false
 }
 
-// secretsPresent returns true when every inference secret for auth is present.
+// secretsPresent returns true when every required inference secret for
+// auth is present (always true for openai-wif, which requires none).
 func secretsPresent(components []ComponentStatus, auth string) bool {
-	for _, name := range inferenceSecretsForAuth(auth) {
+	for _, name := range requiredInferenceSecretsForAuth(auth) {
 		if !hasComponent(components, "secret:"+name) {
 			return false
 		}
@@ -327,10 +337,11 @@ func openAIKeyDefect(p forge.SecretProtection) string {
 	return ""
 }
 
-// missingSecretNames returns the inference secrets for auth that are absent.
+// missingSecretNames returns the required inference secrets for auth that
+// are absent.
 func missingSecretNames(components []ComponentStatus, auth string) []string {
 	var missing []string
-	for _, name := range inferenceSecretsForAuth(auth) {
+	for _, name := range requiredInferenceSecretsForAuth(auth) {
 		if !hasComponent(components, "secret:"+name) {
 			missing = append(missing, name)
 		}
@@ -345,7 +356,8 @@ var gitlabMaskableRe = regexp.MustCompile(`^[A-Za-z0-9_+=/@:.~-]{8,}$`)
 
 // inferenceInputsSupplied reports whether this run supplied credential
 // inputs for auth: --vertex-project for vertex-wif, --openai-api-key
-// for openai-api-key.
+// for openai-api-key. For openai-wif, --vertex-project supplies the
+// optional GCP pair used by Vertex sub-agents.
 func inferenceInputsSupplied(cfg ConvergeConfig, auth string) bool {
 	if auth == InferenceAuthOpenAIAPIKey {
 		return cfg.OpenAIAPIKey != ""
@@ -426,12 +438,31 @@ func githubLegacyOpenAIConsumers(ctx context.Context, resolved ResolvedConfig, c
 }
 
 // selectedCredentialContractLive reports whether the default branch already
-// carries a consumer of the selected method's credential. Only openai-api-key
-// needs it: GitLab's agent job script maps FULLSEND_OPENAI_API_KEY, and on
-// GitHub every installed consumer (the shim workflow and each per-repo thin
-// caller) must forward that secret. A consumer that predates either would
-// leave the job without credentials once the old secrets are deleted.
+// carries a consumer of the selected method's credential. openai-wif needs
+// a complete set of OpenAI WIF identifiers live on the default branch and,
+// on GitHub, installed reusable workflows that forward them.
+// openai-api-key needs a consumer: GitLab's agent job script maps
+// FULLSEND_OPENAI_API_KEY, and on GitHub every installed consumer (the shim
+// workflow and each per-repo thin caller) must forward that secret. A
+// consumer that predates either would leave the job without credentials once
+// the old secrets are deleted.
 func selectedCredentialContractLive(ctx context.Context, resolved ResolvedConfig, client forge.Client) (bool, error) {
+	if resolved.InferenceAuth == InferenceAuthOpenAIWIF {
+		// The replacement route is usable only once a complete identifier
+		// set is live on the default branch: configuration still in an
+		// unmerged pull request does not count.
+		ids, err := liveOpenAIWIFIdentifiers(ctx, client, resolved.Owner, resolved.Repo)
+		if err != nil || !ids.complete() {
+			return false, err
+		}
+		// Complete identifiers are only consumed by installed workflows
+		// that forward them.
+		gcp, err := liveGCPSecrets(ctx, client, resolved.Owner, resolved.Repo)
+		if err != nil {
+			return false, err
+		}
+		return installedOpenAIWIFWorkflowsForward(ctx, resolved, client, gcp)
+	}
 	if resolved.InferenceAuth != InferenceAuthOpenAIAPIKey {
 		return true, nil
 	}
@@ -487,8 +518,9 @@ func (i obsoleteInferenceItem) component() string {
 // carry a job script that consumes the selected credential even when
 // nothing was delivered; until then the obsolete items are kept (a later
 // run retries once the change is merged). Pass nil when nothing was
-// delivered.
-func removeObsoleteInferenceSecrets(ctx context.Context, resolved ResolvedConfig, dryRun bool, scaffoldFiles []forge.TreeFile, progress ProgressFunc) []ComponentAction {
+// delivered. deliveryPending keeps dry-run cleanup conservative when planned
+// changes have not yet been delivered, including action-only collectors.
+func removeObsoleteInferenceSecrets(ctx context.Context, resolved ResolvedConfig, dryRun bool, deliveryPending bool, scaffoldFiles []forge.TreeFile, progress ProgressFunc) []ComponentAction {
 	repoFullName := resolved.Owner + "/" + resolved.Repo
 	client := resolved.ForgeConfig.Client
 	var items []obsoleteInferenceItem
@@ -498,9 +530,14 @@ func removeObsoleteInferenceSecrets(ctx context.Context, resolved ResolvedConfig
 	for _, name := range obsoleteInferenceVariables(resolved.InferenceAuth) {
 		items = append(items, obsoleteInferenceItem{name: name, variable: true})
 	}
+	keepVerb := "kept"
+	if dryRun {
+		keepVerb = "would keep"
+	}
 	var actions []ComponentAction
 	readinessChecked := false
 	ready := true
+	var unverifiedScopes []string
 	for _, item := range items {
 		name := item.name
 		var exists bool
@@ -521,6 +558,55 @@ func removeObsoleteInferenceSecrets(ctx context.Context, resolved ResolvedConfig
 		if !exists {
 			continue
 		}
+		if !readinessChecked {
+			readinessChecked = true
+			var readyErr error
+			if dryRun && deliveryPending {
+				ready = false
+			} else {
+				ready, readyErr = scaffoldFilesOnDefaultBranch(ctx, client, resolved.Owner, resolved.Repo, scaffoldFiles)
+			}
+			if readyErr == nil && ready {
+				// Delivering no files proves nothing: an established
+				// installation may already run a script that cannot read
+				// the selected credential.
+				ready, readyErr = selectedCredentialContractLive(ctx, resolved, client)
+			}
+			if readyErr == nil && ready && resolved.InferenceAuth == InferenceAuthOpenAIAPIKey {
+				// Inherited OpenAI WIF identifiers that cannot be read
+				// would override the API key at runtime, so the effective
+				// auth route is unverified: keep the old credentials.
+				unverifiedScopes, readyErr = unverifiedOpenAIWIFScopes(ctx, client, resolved.Owner, resolved.Repo)
+				ready = len(unverifiedScopes) == 0
+			}
+			if readyErr != nil {
+				ready = false
+				actions = append(actions, ComponentAction{
+					Component: item.component(),
+					Action:    "error",
+					Detail:    fmt.Sprintf("%s obsolete %s: could not verify the replacement configuration on the default branch: %v", keepVerb, name, readyErr),
+				})
+				continue
+			}
+		}
+		if len(unverifiedScopes) > 0 {
+			actions = append(actions, ComponentAction{
+				Component: item.component(),
+				Action:    "none",
+				Detail: fmt.Sprintf("%s obsolete %s: inherited variables could not be read (%s), so OpenAI WIF identifiers that would override the API key cannot be ruled out; delete it manually once verified",
+					keepVerb, name, strings.Join(unverifiedScopes, ", ")),
+			})
+			continue
+		}
+		if !ready {
+			actions = append(actions, ComponentAction{
+				Component: item.component(),
+				Action:    "none",
+				Detail:    fmt.Sprintf("%s obsolete %s: the replacement configuration is not yet on the default branch; re-run after the scaffold change is merged", keepVerb, name),
+			})
+			progress(repoFullName, "sync", fmt.Sprintf("Keeping obsolete %s %s until the scaffold change is merged", item.kind(), name))
+			continue
+		}
 		if dryRun {
 			actions = append(actions, ComponentAction{
 				Component: item.component(),
@@ -528,35 +614,6 @@ func removeObsoleteInferenceSecrets(ctx context.Context, resolved ResolvedConfig
 				Detail:    fmt.Sprintf("would delete obsolete %s (inference.auth is %s)", name, resolved.InferenceAuth),
 			})
 			progress(repoFullName, "dry-run", fmt.Sprintf("Would delete obsolete %s %s", item.kind(), name))
-			continue
-		}
-		if !readinessChecked {
-			readinessChecked = true
-			var readyErr error
-			ready, readyErr = scaffoldFilesOnDefaultBranch(ctx, client, resolved.Owner, resolved.Repo, scaffoldFiles)
-			if readyErr == nil && ready {
-				// Delivering no files proves nothing: an established
-				// installation may already run a script that cannot read
-				// the selected credential.
-				ready, readyErr = selectedCredentialContractLive(ctx, resolved, client)
-			}
-			if readyErr != nil {
-				ready = false
-				actions = append(actions, ComponentAction{
-					Component: item.component(),
-					Action:    "error",
-					Detail:    fmt.Sprintf("kept obsolete %s: could not verify the replacement configuration on the default branch: %v", name, readyErr),
-				})
-				continue
-			}
-		}
-		if !ready {
-			actions = append(actions, ComponentAction{
-				Component: item.component(),
-				Action:    "none",
-				Detail:    fmt.Sprintf("kept obsolete %s: the replacement configuration is not yet on the default branch; re-run after the scaffold change is merged", name),
-			})
-			progress(repoFullName, "sync", fmt.Sprintf("Keeping obsolete %s %s until the scaffold change is merged", item.kind(), name))
 			continue
 		}
 		if item.variable {
@@ -593,10 +650,11 @@ func shouldWarnRemotePreset(source, hash string, warned map[string]bool) bool {
 // anyComponentPresent returns true when at least one probed component exists.
 // Used by status to report a repo as installed once any fullsend resource
 // has been written, including variables or secrets created before the
-// initialization MR merges.
+// initialization MR merges. Identifier readiness describes user-owned or
+// inherited configuration and is not evidence of a Fullsend installation.
 func anyComponentPresent(components []ComponentStatus) bool {
 	for _, c := range components {
-		if c.Present {
+		if c.Present && c.Name != openAIWIFComponent {
 			return true
 		}
 	}
@@ -620,6 +678,41 @@ func gitlabSchedulesPresent(components []ComponentStatus) bool {
 // is actually installed rather than mid-install.
 func workflowPresent(components []ComponentStatus) bool {
 	return hasComponent(components, "workflow")
+}
+
+// pristineInstallation reports whether the repository has no established
+// Fullsend installation: either no component at all, or the credential-only
+// state of a pending initialization. Install writes variables and secrets
+// before it delivers the shim workflow and both configuration files through
+// the initialization PR/MR, so a retry after a failure at any point in that
+// sequence (a variable or secret write, branch creation, or the PR/MR itself)
+// sees only credentials and no workflow. On GitLab the CLI additionally
+// creates the pipeline schedules right after the initialization MR opens,
+// before it merges, so those are pending-install resources too: they run
+// nothing without the shim workflow and scaffold. That state is derived from
+// the probed components alone, so it does not depend on the scaffold branch,
+// which is shared with uninstall and can be stale: the retry exemption
+// applies only when every present component is a variable, secret or
+// pipeline schedule and the shim workflow is absent. Any other component
+// (thin callers, scaffold files or auxiliary scripts) is evidence of a live
+// or partially delivered installation and keeps the safety gate. Readiness
+// diagnostics about user-owned or inherited OpenAI identifiers are not
+// installation evidence and are ignored. Nothing executes from these
+// resources alone, so there is no effective configuration to relax.
+// FreshInstall additionally requires both layer files to be absent
+// (pristineFirstInstall), so a repository with any committed configuration
+// also keeps the gate.
+func pristineInstallation(components []ComponentStatus) bool {
+	for _, c := range components {
+		if !c.Present || c.Name == openAIWIFComponent || c.Name == openAIWIFResidualComponent {
+			continue
+		}
+		if !strings.HasPrefix(c.Name, "var:") && !strings.HasPrefix(c.Name, "secret:") &&
+			scheduleSpecByComponent(c.Name) == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // Converge processes every repo in the manifest through a single
@@ -911,7 +1004,9 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 		switch d.resolved.InferenceAuth {
 		case InferenceAuthOpenAIAPIKey:
 			usesOpenAI = true
-		case InferenceAuthVertexWIF:
+		case InferenceAuthVertexWIF, InferenceAuthOpenAIWIF:
+			// openai-wif consumes the optional GCP pair for Vertex
+			// sub-agents of an OpenAI parent.
 			usesVertex = true
 		}
 	}
@@ -919,7 +1014,7 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 		return nil, fmt.Errorf("--openai-api-key was supplied but no selected repository uses inference.auth %s", InferenceAuthOpenAIAPIKey)
 	}
 	if cfg.InferenceProject != "" && !usesVertex {
-		return nil, fmt.Errorf("--vertex-project was supplied but no selected repository uses inference.auth %s", InferenceAuthVertexWIF)
+		return nil, fmt.Errorf("--vertex-project was supplied but no selected repository uses inference.auth %s or %s", InferenceAuthVertexWIF, InferenceAuthOpenAIWIF)
 	}
 
 	// Phase 2: parallel convergence — apply needed actions.
@@ -959,6 +1054,15 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 			continue
 		}
 
+		// A repository with no Fullsend component at all, or only the
+		// credentials of a pending initialization whose shim workflow has not
+		// merged, has no established installation; with neither configuration
+		// file present it is pristine, and the layered safety gate has no
+		// existing configuration to protect. Install, dry run and status
+		// share this predicate (pristineInstallation), so a retry of the same
+		// pending initialization is judged like its first run.
+		d.resolved.FreshInstall = pristineInstallation(d.components)
+
 		// Load declared presets before any writes so a hash mismatch or
 		// invalid source fails the repo without applying changes.
 		if d.resolved.Config != "" {
@@ -972,10 +1076,33 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 				continue
 			}
 			d.preset = data
+			d.resolved.ProposedBase = data
 			if shouldWarnRemotePreset(d.resolved.Config, d.resolved.ConfigHash, warnedRemote) {
 				progress(d.repo.Owner+"/"+d.repo.Repo, "preset",
 					"Remote preset fetched without config_base.sha256; content integrity is not verified")
 			}
+		}
+		// With no resolved preset the desired base layer is no file at
+		// all: stop before any writes rather than silently keeping an
+		// existing .fullsend/config.base.yaml outside management (#8218).
+		if baseErr := checkUndeclaredBase(ctx, d.resolved); baseErr != nil {
+			result.Results[i] = ConvergeResult{
+				Owner: d.repo.Owner,
+				Repo:  d.repo.Repo,
+				Error: baseErr,
+			}
+			continue
+		}
+		// A declared preset must not replace an invalid base, or relax the
+		// effective configuration without an explicit declaration. Both
+		// layers are checked before any variable, secret or file write.
+		if baseErr := checkDeclaredBase(ctx, d.resolved, d.preset); baseErr != nil {
+			result.Results[i] = ConvergeResult{
+				Owner: d.repo.Owner,
+				Repo:  d.repo.Repo,
+				Error: baseErr,
+			}
+			continue
 		}
 
 		// Render the managed configuration before any writes so a
@@ -991,6 +1118,56 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 				continue
 			}
 			d.managedConfig = body
+			// An installed repository is also gated on its overlay before
+			// any variable, secret or schedule write: those run ahead of
+			// the scaffold phase that plans the overlay, so the gate there
+			// would fire only after they had changed the repository. A
+			// fresh install is gated before Install in its own path.
+			if workflowPresent(d.components) {
+				if gateErr := checkEstablishedOverlayGate(ctx, d.resolved, body); gateErr != nil {
+					result.Results[i] = ConvergeResult{
+						Owner: d.repo.Owner,
+						Repo:  d.repo.Repo,
+						Error: gateErr,
+					}
+					continue
+				}
+			}
+		}
+
+		// The openai-api-key route is unreachable while WIF identifiers
+		// stay active, because the runtime prefers WIF. Reject before
+		// writes; the identifiers are user-owned and never auto-deleted.
+		if d.resolved.InferenceAuth == InferenceAuthOpenAIAPIKey {
+			if residualErr := checkNoResidualOpenAIWIF(ctx, d); residualErr != nil {
+				result.Results[i] = ConvergeResult{
+					Owner: d.repo.Owner,
+					Repo:  d.repo.Repo,
+					Error: residualErr,
+				}
+				continue
+			}
+		}
+
+		// openai-wif needs a complete identifier set from the sources the
+		// runtime reads: repository variables, else the configuration that
+		// will actually be in effect after this run (the managed config
+		// only when adoption and the safety gate let it be written, the
+		// preset, else what is already committed). Reject a missing or
+		// partial set before writes.
+		if d.resolved.InferenceAuth == InferenceAuthOpenAIWIF {
+			ids, idsErr := effectiveOpenAIWIFIdentifiers(ctx, d)
+			if idsErr == nil && !ids.complete() {
+				idsErr = fmt.Errorf("%s/%s uses inference.auth %s: %s", d.repo.Owner, d.repo.Repo, InferenceAuthOpenAIWIF, ids.problem())
+			}
+			if idsErr != nil {
+				result.Results[i] = ConvergeResult{
+					Owner: d.repo.Owner,
+					Repo:  d.repo.Repo,
+					Error: idsErr,
+				}
+				continue
+			}
 		}
 
 		// Validate this repo's inference credentials before any writes:
@@ -1127,6 +1304,36 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 	return result, nil
 }
 
+// blockedFreshInstall reports a fresh install that stopped before any forge
+// write because the existing .fullsend/config.yaml needs adoption
+// (ADR-0122) or the layered safety gate rejected the managed configuration.
+// The repository is left untouched, so it is not Installed, and the block
+// is an error: the install did not happen and the operator must act.
+func blockedFreshInstall(cr ConvergeResult, repoFullName string, adoptionRequired bool, rejected *ComponentAction, dryRun bool, progress ProgressFunc) ConvergeResult {
+	stage := "install"
+	if dryRun {
+		stage = "dry-run"
+	}
+	if adoptionRequired {
+		detail := fmt.Sprintf("%s exists without the managed-configuration ownership marker; adoption required before this repository can be installed (ADR-0122); nothing was written", preset.OverlayPath)
+		if rejected != nil && rejected.Action == ActionSafetyRejected {
+			detail = detail + "; " + rejected.Detail
+		}
+		cr.Actions = append(cr.Actions, ComponentAction{
+			Component: preset.OverlayPath,
+			Action:    ActionAdoptionRequired,
+			Detail:    detail,
+		})
+		progress(repoFullName, stage, detail)
+		cr.Error = errors.New(detail)
+		return cr
+	}
+	cr.Actions = append(cr.Actions, *rejected)
+	progress(repoFullName, stage, rejected.Detail)
+	cr.Error = errors.New(rejected.Detail)
+	return cr
+}
+
 // convergeRepo processes a single repo through the convergence pipeline.
 // It determines what action each component needs and applies only the
 // necessary changes.
@@ -1194,6 +1401,17 @@ func convergeRepo(ctx context.Context,
 			}
 		}
 	}
+	// A release build supplies the target when an OpenAI WIF manifest is
+	// unpinned, including migration from an existing github setup install.
+	if auth == InferenceAuthOpenAIWIF && resolved.FullsendRef == "" && cfg.UpstreamRef != "" {
+		resolved.FullsendRef = cfg.UpstreamRef
+		d.resolved = resolved
+	}
+	vendoredWIFSource, contractErr := checkOpenAIWIFContract(ctx, d, cfg, refResolver)
+	if contractErr != nil {
+		cr.Error = contractErr
+		return cr
+	}
 	// Treat the repo as new until the workflow file is on the default
 	// branch. Variables and secrets are written before the scaffold
 	// commit (see Install), so anyComponentPresent is true while an
@@ -1237,22 +1455,48 @@ func convergeRepo(ctx context.Context,
 		// check is repeated for this path.
 		var configAdoptionRequired bool
 		var configSafetyRejected *ComponentAction
+		var existingUnmanagedConfig []byte
 		if resolved.ConfigManaged {
-			existing, readErr := resolved.ForgeConfig.Client.GetFileContent(ctx, rr.Owner, rr.Repo, preset.OverlayPath)
-			if readErr != nil && !forge.IsNotFound(readErr) {
+			existing, found, readErr := readExistingFile(ctx, resolved.ForgeConfig.Client, rr.Owner, rr.Repo, preset.OverlayPath)
+			if readErr != nil {
 				cr.Error = fmt.Errorf("reading existing %s: %w", preset.OverlayPath, readErr)
 				return cr
 			}
-			if forge.IsNotFound(readErr) {
-				existing = nil
+			// Validate every found overlay, marked or not, as the
+			// established-path gate, status and preflight do: the safety
+			// comparison does not check decoded values such as runtime.
+			if found {
+				if valErr := validateExistingOverlay(existing); valErr != nil {
+					cr.Error = fmt.Errorf("convergence errors: %w", valErr)
+					return cr
+				}
 			}
-			configAdoptionRequired = len(existing) > 0 && !hasManagedConfigMarker(existing)
-			configSafetyRejected = checkManagedConfigSafetyGate(ctx, resolved, existing)
+			configAdoptionRequired = overlayNeedsAdoption(found, existing)
+			configSafetyRejected = managedSafetyRejectedAction(ctx, resolved)
+		} else if auth == InferenceAuthOpenAIWIF {
+			// Readiness above may have been satisfied by identifiers in an
+			// unmanaged config.yaml already on the default branch. The
+			// generated installer overlay would replace it and drop them,
+			// so deliver the existing file unchanged.
+			existing, readErr := readOptionalFile(ctx, resolved.ForgeConfig.Client, rr.Owner, rr.Repo, preset.OverlayPath)
+			if readErr != nil {
+				cr.Error = readErr
+				return cr
+			}
+			if len(existing) > 0 {
+				existingUnmanagedConfig = existing
+			}
 		}
-		// Obsolete inference credentials must outlive a blocked
-		// replacement configuration: the old runtime/model configuration
-		// stays active until the adoption or safety rejection is resolved.
-		configBlocked := configAdoptionRequired || configSafetyRejected != nil
+		// A blocked fresh install stops here, before Install or any other
+		// forge write (variables, secrets, scaffold files, the PR/MR), in a
+		// dry run and a live run alike. Writing the credentials and
+		// scaffold without the configuration they depend on would leave a
+		// half-installed repository, and the previous runtime/model
+		// configuration stays active until the adoption or safety
+		// rejection is resolved.
+		if configAdoptionRequired || configSafetyRejected != nil {
+			return blockedFreshInstall(cr, repoFullName, configAdoptionRequired, configSafetyRejected, cfg.DryRun, progress)
+		}
 
 		// Resolve the target ref and scaffold inputs before branching on
 		// DryRun, not after: a dry run must run the same pin-resolution,
@@ -1305,11 +1549,11 @@ func convergeRepo(ctx context.Context,
 			// Supplied inputs replace every secret of the selected
 			// method; without inputs the existing secrets are reused
 			// (validation already required them to be present).
-			ReuseSecrets:                  !d.credsSupplied,
-			VendorBinary:                  vendor,
-			Preset:                        d.preset,
-			ManagedConfig:                 d.managedConfig,
-			ManagedConfigAdoptionRequired: configAdoptionRequired || configSafetyRejected != nil,
+			ReuseSecrets:   !d.credsSupplied,
+			VendorBinary:   vendor,
+			Preset:         d.preset,
+			ManagedConfig:  d.managedConfig,
+			ExistingConfig: existingUnmanagedConfig,
 		}
 		if d.credsSupplied {
 			if auth == InferenceAuthOpenAIAPIKey {
@@ -1359,22 +1603,18 @@ func convergeRepo(ctx context.Context,
 				Detail:    "Would install (new)",
 			})
 			cr.Actions = append(cr.Actions, plannedInferenceSecretActions(d, progress)...)
-			// The previous credentials stay while the replacement
-			// configuration is blocked on adoption or a safety rejection.
-			if !configBlocked {
-				dryCleanup := removeObsoleteInferenceSecrets(ctx, resolved, true, nil, progress)
-				cr.Actions = append(cr.Actions, dryCleanup...)
-				// A lookup failure means the removals cannot be determined, so
-				// the preview must not be reported as successful.
-				var dryCleanupErrors []string
-				for _, a := range dryCleanup {
-					if a.Action == "error" {
-						dryCleanupErrors = append(dryCleanupErrors, a.Detail)
-					}
+			dryCleanup := removeObsoleteInferenceSecrets(ctx, resolved, true, true, nil, progress)
+			cr.Actions = append(cr.Actions, dryCleanup...)
+			// A lookup failure means the removals cannot be determined, so
+			// the preview must not be reported as successful.
+			var dryCleanupErrors []string
+			for _, a := range dryCleanup {
+				if a.Action == "error" {
+					dryCleanupErrors = append(dryCleanupErrors, a.Detail)
 				}
-				if len(dryCleanupErrors) > 0 {
-					cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(dryCleanupErrors, "; "))
-				}
+			}
+			if len(dryCleanupErrors) > 0 {
+				cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(dryCleanupErrors, "; "))
 			}
 			if len(d.preset) > 0 {
 				cr.Actions = append(cr.Actions, ComponentAction{
@@ -1384,28 +1624,11 @@ func convergeRepo(ctx context.Context,
 				})
 			}
 			if d.resolved.ConfigManaged {
-				if configAdoptionRequired {
-					detail := fmt.Sprintf("%s exists without the managed-configuration ownership marker; adoption required before it can be written (ADR-0122)", preset.OverlayPath)
-					if configSafetyRejected != nil && configSafetyRejected.Action == ActionSafetyRejected {
-						detail = detail + "; " + configSafetyRejected.Detail
-					}
-					cr.Actions = append(cr.Actions, ComponentAction{
-						Component: preset.OverlayPath,
-						Action:    ActionAdoptionRequired,
-						Detail:    detail,
-					})
-					progress(repoFullName, "dry-run", detail)
-				} else if configSafetyRejected != nil {
-					cr.Actions = append(cr.Actions, *configSafetyRejected)
-					progress(repoFullName, "dry-run", configSafetyRejected.Detail)
-					cr.Error = fmt.Errorf("%s", configSafetyRejected.Detail)
-				} else {
-					cr.Actions = append(cr.Actions, ComponentAction{
-						Component: preset.OverlayPath,
-						Action:    "add",
-						Detail:    "would write managed configuration as " + preset.OverlayPath,
-					})
-				}
+				cr.Actions = append(cr.Actions, ComponentAction{
+					Component: preset.OverlayPath,
+					Action:    "add",
+					Detail:    "would write managed configuration as " + preset.OverlayPath,
+				})
 			}
 			progress(repoFullName, "dry-run", "Would install (new)")
 			return cr
@@ -1433,229 +1656,28 @@ func convergeRepo(ctx context.Context,
 		// This runs on every successful install, including a retry after an
 		// earlier run wrote the credentials but failed to complete setup or
 		// to delete the obsolete secrets.
-		if !configBlocked {
-			cleanup := removeObsoleteInferenceSecrets(ctx, resolved, false, installResult.ScaffoldFiles, progress)
-			cr.Actions = append(cr.Actions, cleanup...)
-			var cleanupErrors []string
-			for _, a := range cleanup {
-				if a.Action == "error" {
-					cleanupErrors = append(cleanupErrors, a.Detail)
-				}
-			}
-			if len(cleanupErrors) > 0 {
-				cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(cleanupErrors, "; "))
+		cleanup := removeObsoleteInferenceSecrets(ctx, resolved, false, false, installResult.ScaffoldFiles, progress)
+		cr.Actions = append(cr.Actions, cleanup...)
+		var cleanupErrors []string
+		for _, a := range cleanup {
+			if a.Action == "error" {
+				cleanupErrors = append(cleanupErrors, a.Detail)
 			}
 		}
-		if configAdoptionRequired {
-			detail := fmt.Sprintf("%s exists without the managed-configuration ownership marker; adoption required before it can be converged automatically (ADR-0122)", preset.OverlayPath)
-			if configSafetyRejected != nil && configSafetyRejected.Action == ActionSafetyRejected {
-				detail = detail + "; " + configSafetyRejected.Detail
-			}
-			cr.Actions = append(cr.Actions, ComponentAction{
-				Component: preset.OverlayPath,
-				Action:    ActionAdoptionRequired,
-				Detail:    detail,
-			})
-			progress(repoFullName, "install", detail)
-		} else if configSafetyRejected != nil {
-			cr.Actions = append(cr.Actions, *configSafetyRejected)
-			progress(repoFullName, "install", configSafetyRejected.Detail)
-			cr.Error = fmt.Errorf("%s", configSafetyRejected.Detail)
+		if len(cleanupErrors) > 0 {
+			cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(cleanupErrors, "; "))
 		}
 		return cr
 	}
 
 	// Case 2: Workflow is on the default branch — converge component by component.
 
-	// 2a: Check for variable drift.
-	varActions := convergeVariables(ctx, resolved, d.components, cfg.DryRun, progress)
-	cr.Actions = append(cr.Actions, varActions...)
-
-	// 2a-ii: GitLab retired poll-state CI/CD vars. Migrate leftover
-	// values into poll-state branches, then delete the vars. Known-
-	// retired: CheckOrphanVars will not warn about them.
-	if resolved.Forge == ForgeGitLab {
-		retireActions := retireGitLabLegacyVars(ctx, resolved.ForgeConfig.Client,
-			resolved.Owner, resolved.Repo, cfg.DryRun, progress)
-		cr.Actions = append(cr.Actions, retireActions...)
-	}
-
-	// 2b: Converge secrets (existence-only — values cannot be read back).
-	secretActions := convergeSecrets(ctx, d, wifProvider, cfg, progress)
-	cr.Actions = append(cr.Actions, secretActions...)
-
-	// 2c: Converge pipeline schedules (GitLab only).
-	if resolved.Forge == ForgeGitLab {
-		schedActions := convergeSchedules(ctx, resolved, d.components, cfg.DryRun, cfg.ReactivateSchedules, progress)
-		cr.Actions = append(cr.Actions, schedActions...)
-	}
-
-	// Bail out before scaffold commit if variable, secret, or schedule writes failed.
-	var earlyErrors []string
-	for _, a := range cr.Actions {
-		if a.Action == "error" {
-			earlyErrors = append(earlyErrors, a.Detail)
-		}
-	}
-	if len(earlyErrors) > 0 {
-		cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(earlyErrors, "; "))
+	allScaffoldFiles, scaffoldActions, orderedActions, phaseErr := convergeEstablishedPhases(ctx, d, wifProvider, cfg, refResolver, progress, vendoredWIFSource)
+	cr.Actions = append(cr.Actions, orderedActions...)
+	cr.Error = phaseErr
+	if cr.Error != nil {
 		return cr
 	}
-
-	// 2d: Collect all scaffold file changes (ref upgrade + missing
-	// components + content drift) and commit as a single atomic
-	// operation.
-	var allScaffoldFiles []forge.TreeFile
-
-	refFiles, refActions := convergeRefFiles(ctx, resolved, cfg, refResolver, progress)
-	cr.Actions = append(cr.Actions, refActions...)
-
-	// Bail out before scaffold commit if ref operations failed.
-	var refErrors []string
-	for _, a := range refActions {
-		if a.Action == "error" {
-			refErrors = append(refErrors, a.Detail)
-		}
-	}
-	if len(refErrors) > 0 {
-		cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(refErrors, "; "))
-		return cr
-	}
-
-	// A ref upgrade only rewrites the shim's version marker. When the
-	// installed GitHub shim cannot forward FULLSEND_OPENAI_API_KEY, queueing
-	// that marker-only rewrite would also exclude the shim from content-drift
-	// repair and deliver a shim that still cannot use the selected credential.
-	// Leave the shim to content-drift repair, which renders the full template
-	// at the target ref.
-	refFiles, legacyErr := withoutLegacyOpenAIConsumer(ctx, resolved, refFiles)
-	if legacyErr != nil {
-		cr.Error = legacyErr
-		return cr
-	}
-	allScaffoldFiles = append(allScaffoldFiles, refFiles...)
-
-	// 2d-i: Migrate obsolete GitLab root .gitlab-ci.yml entries
-	// (workflow rules from #7322, the empty dispatch stage from #7337).
-	// This is independent of ref drift — it must run even when the
-	// workflow ref is already current, since the root file is only
-	// otherwise touched by the install (fresh install) and uninstall
-	// (teardown) paths.
-	// Track paths already queued so missing-component repair and
-	// content-drift detection skip duplicates. GitLab rejects two
-	// create actions for the same path in one commit (#7645).
-	refFileSet := make(map[string]bool, len(refFiles))
-	for _, f := range refFiles {
-		refFileSet[f.Path] = true
-	}
-
-	scaffoldNeedsRepair := false
-	for _, c := range d.components {
-		if !c.Match && (c.Name == "workflow" || strings.HasPrefix(c.Name, "thin-caller:") || strings.HasPrefix(c.Name, "scaffold:")) {
-			scaffoldNeedsRepair = true
-			break
-		}
-	}
-	if scaffoldNeedsRepair {
-		repairFiles, repairActions := convergeScaffoldFiles(ctx, d, resolved, cfg, refResolver, progress)
-		cr.Actions = append(cr.Actions, repairActions...)
-
-		var repairErrors []string
-		for _, a := range repairActions {
-			if a.Action == "error" {
-				repairErrors = append(repairErrors, a.Detail)
-			}
-		}
-		if len(repairErrors) > 0 {
-			cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(repairErrors, "; "))
-			return cr
-		}
-		for _, f := range repairFiles {
-			if refFileSet[f.Path] {
-				continue
-			}
-			allScaffoldFiles = append(allScaffoldFiles, f)
-			refFileSet[f.Path] = true
-		}
-	}
-
-	// 2d-ii: Content drift — detect scaffold files that exist but
-	// whose content differs from the current template (e.g., template
-	// structure changed between releases while the ref stayed the
-	// same). This is the gap that caused #6576: converge only checked
-	// presence, not content, so stale-but-present files were skipped.
-	contentDriftFiles, contentDriftActions := convergeContentDriftFiles(
-		ctx, resolved, cfg, refResolver, refFileSet,
-		DriftConfig{
-			InferenceRegion:   cfg.InferenceRegion,
-			ReviewAppClientID: d.reviewClientID,
-			AgentRunnerTags:   gitlabAgentRunnerTags(cfg.Manifest),
-			ControlRunnerTags: gitlabControlRunnerTags(cfg.Manifest),
-		},
-		progress,
-	)
-	cr.Actions = append(cr.Actions, contentDriftActions...)
-
-	var contentErrors []string
-	for _, a := range contentDriftActions {
-		if a.Action == "error" {
-			contentErrors = append(contentErrors, a.Detail)
-		}
-	}
-	if len(contentErrors) > 0 {
-		cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(contentErrors, "; "))
-		return cr
-	}
-	allScaffoldFiles = append(allScaffoldFiles, contentDriftFiles...)
-
-	// Root input migration uses the wrapper that will actually be committed,
-	// including ref upgrades, repairs and remote pinned templates.
-	rootCIFiles, rootCIActions := convergeGitLabRootCIFiles(ctx, resolved, cfg, progress, allScaffoldFiles)
-	cr.Actions = append(cr.Actions, rootCIActions...)
-	for _, action := range rootCIActions {
-		if action.Action == "error" {
-			cr.Error = fmt.Errorf("convergence errors: %s", action.Detail)
-			return cr
-		}
-	}
-	allScaffoldFiles = append(allScaffoldFiles, rootCIFiles...)
-
-	// 2d-iii: Configuration preset — replace .fullsend/config.base.yaml
-	// wholesale when a preset is declared and the installed bytes differ.
-	// No declared preset is a no-op so an existing base file is preserved
-	// without comparison. Managed-configuration handling is independent
-	// (2d-iv).
-	presetFiles, presetActions := convergePresetFiles(ctx, resolved, d.preset, cfg.DryRun, progress)
-	cr.Actions = append(cr.Actions, presetActions...)
-	var presetErrors []string
-	for _, a := range presetActions {
-		if a.Action == "error" {
-			presetErrors = append(presetErrors, a.Detail)
-		}
-	}
-	if len(presetErrors) > 0 {
-		cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(presetErrors, "; "))
-		return cr
-	}
-	allScaffoldFiles = append(allScaffoldFiles, presetFiles...)
-
-	// 2d-iv: Managed configuration — replace .fullsend/config.yaml
-	// wholesale when the repository is config-managed and the installed
-	// bytes differ. Unmanaged repositories leave the file untouched.
-	configFiles, configActions := convergeManagedConfigFiles(ctx, resolved, d.managedConfig, cfg.DryRun, progress)
-	cr.Actions = append(cr.Actions, configActions...)
-	var configErrors []string
-	for _, a := range configActions {
-		switch a.Action {
-		case "error", ActionSafetyRejected:
-			configErrors = append(configErrors, a.Detail)
-		}
-	}
-	if len(configErrors) > 0 {
-		cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(configErrors, "; "))
-		return cr
-	}
-	allScaffoldFiles = append(allScaffoldFiles, configFiles...)
 
 	// 2e: Commit all scaffold file changes in one atomic commit.
 	// Variable/secret writes above are not rolled back on commit failure;
@@ -1710,7 +1732,7 @@ func convergeRepo(ctx context.Context,
 		if !cfg.DryRun {
 			delivered = allScaffoldFiles
 		}
-		cr.Actions = append(cr.Actions, removeObsoleteInferenceSecrets(ctx, resolved, cfg.DryRun, delivered, progress)...)
+		cr.Actions = append(cr.Actions, removeObsoleteInferenceSecrets(ctx, resolved, cfg.DryRun, scaffoldDeliveryPlanned(allScaffoldFiles, scaffoldActions, cfg.DryRun), delivered, progress)...)
 	}
 
 	// Determine result state.
@@ -1879,19 +1901,85 @@ func checkEstablishedOpenAICredentialContract(ctx context.Context, resolved Reso
 		resolved.Forge, InferenceAuthOpenAIAPIKey, consumers, forge.SecretOpenAIAPIKey)
 }
 
+// scaffoldDeliveryPlanned reports whether a scaffold commit is, or in a dry
+// run would be, pending. A live run answers from the collected files. A dry
+// run returns planned changes as actions, not files, for some collectors
+// (repair, preset, managed configuration), so any action that plans work
+// counts; this keeps a dry run in step with the real run it previews.
+func scaffoldDeliveryPlanned(files []forge.TreeFile, actions []ComponentAction, dryRun bool) bool {
+	if len(files) > 0 {
+		return true
+	}
+	if !dryRun {
+		return false
+	}
+	for _, a := range actions {
+		switch a.Action {
+		case "none", "orphan", "error", ActionAdoptionRequired, ActionSafetyRejected:
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// githubIncompatibleOpenAIWIFCallers inspects every installed GitHub inference
+// credential consumer: the shim workflow and each per-repo thin caller. It
+// reports whether the shim is missing or structurally cannot serve openai-wif
+// (it does not parse, has no reusable-workflow job, or a calling job denies
+// id-token: write, which the callee cannot raise), and lists the installed thin
+// callers that cannot. A ref upgrade does not change caller permissions, so
+// only the caller itself is inspected here. A thin caller that is not
+// installed is not a consumer.
+func githubIncompatibleOpenAIWIFCallers(ctx context.Context, resolved ResolvedConfig, client forge.Client) (bool, []string, error) {
+	content, _, err := readWorkflowContent(ctx, client, resolved.Owner, resolved.Repo, resolved.ForgeConfig)
+	if err != nil {
+		return false, nil, fmt.Errorf("reading %s: %w", githubOpenAIConsumerPath, err)
+	}
+	shimBad := content == nil || !callerGrantsIDToken(content)
+	var badCallers []string
+	for _, path := range scaffold.PerRepoThinCallerPaths() {
+		callerContent, err := client.GetFileContent(ctx, resolved.Owner, resolved.Repo, path)
+		if err != nil {
+			if forge.IsNotFound(err) {
+				continue
+			}
+			return false, nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+		if !callerGrantsIDToken(callerContent) {
+			badCallers = append(badCallers, path)
+		}
+	}
+	return shimBad, badCallers, nil
+}
+
 // withoutLegacyOpenAIConsumer drops the marker-only ref rewrite of every
-// installed GitHub inference credential consumer from files when
-// inference.auth is openai-api-key and that consumer does not yet reference
-// FULLSEND_OPENAI_API_KEY: the shim workflow and each per-repo thin caller
-// such as prioritize.yml. Each consumer is checked independently. A dropped
-// consumer is then repaired in full by convergeContentDriftFiles, so the first
-// delivered copy forwards the key. GitLab ref upgrades already rewrite the
-// consumer wholesale, so its files are returned unchanged.
+// installed GitHub inference credential consumer from files when that
+// consumer cannot yet use the selected credential: with openai-api-key, one
+// that does not reference FULLSEND_OPENAI_API_KEY; with openai-wif, one whose
+// calling job cannot obtain an OIDC token. The consumers are the shim
+// workflow and each per-repo thin caller such as prioritize.yml, each checked
+// independently. A dropped consumer is then repaired in full by
+// convergeContentDriftFiles, so the first delivered copy serves the selected
+// route. GitLab ref upgrades already rewrite the consumer wholesale, so its
+// files are returned unchanged.
 func withoutLegacyOpenAIConsumer(ctx context.Context, resolved ResolvedConfig, files []forge.TreeFile) ([]forge.TreeFile, error) {
-	if len(files) == 0 || resolved.InferenceAuth != InferenceAuthOpenAIAPIKey || resolved.Forge == ForgeGitLab {
+	if len(files) == 0 || resolved.Forge == ForgeGitLab {
 		return files, nil
 	}
-	shimLegacy, legacyCallers, err := githubLegacyOpenAIConsumers(ctx, resolved, resolved.ForgeConfig.Client)
+	var (
+		shimLegacy    bool
+		legacyCallers []string
+		err           error
+	)
+	switch resolved.InferenceAuth {
+	case InferenceAuthOpenAIAPIKey:
+		shimLegacy, legacyCallers, err = githubLegacyOpenAIConsumers(ctx, resolved, resolved.ForgeConfig.Client)
+	case InferenceAuthOpenAIWIF:
+		shimLegacy, legacyCallers, err = githubIncompatibleOpenAIWIFCallers(ctx, resolved, resolved.ForgeConfig.Client)
+	default:
+		return files, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3455,4 +3543,236 @@ func defaultRoles(roles []string) []string {
 		return config.PerRepoDefaultRoles()
 	}
 	return roles
+}
+
+// convergeRepoCredentials applies variable, credential, and schedule changes.
+func convergeRepoCredentials(ctx context.Context, d convergeDiscovery, wifProvider string, cfg ConvergeConfig, progress ProgressFunc) ([]ComponentAction, error) {
+	var actions []ComponentAction
+	resolved := d.resolved
+	// 2a: Check for variable drift.
+	varActions := convergeVariables(ctx, resolved, d.components, cfg.DryRun, progress)
+	actions = append(actions, varActions...)
+
+	// 2a-ii: GitLab retired poll-state CI/CD vars. Migrate leftover
+	// values into poll-state branches, then delete the vars. Known-
+	// retired: CheckOrphanVars will not warn about them.
+	if resolved.Forge == ForgeGitLab {
+		retireActions := retireGitLabLegacyVars(ctx, resolved.ForgeConfig.Client,
+			resolved.Owner, resolved.Repo, cfg.DryRun, progress)
+		actions = append(actions, retireActions...)
+	}
+
+	// 2b: Converge secrets (existence-only — values cannot be read back).
+	secretActions := convergeSecrets(ctx, d, wifProvider, cfg, progress)
+	actions = append(actions, secretActions...)
+
+	// 2c: Converge pipeline schedules (GitLab only).
+	if resolved.Forge == ForgeGitLab {
+		schedActions := convergeSchedules(ctx, resolved, d.components, cfg.DryRun, cfg.ReactivateSchedules, progress)
+		actions = append(actions, schedActions...)
+	}
+
+	// Bail out before scaffold commit if variable, secret, or schedule writes failed.
+	var earlyErrors []string
+	for _, a := range actions {
+		if a.Action == "error" {
+			earlyErrors = append(earlyErrors, a.Detail)
+		}
+	}
+	if len(earlyErrors) > 0 {
+		return actions, fmt.Errorf("convergence errors: %s", strings.Join(earlyErrors, "; "))
+	}
+	return actions, nil
+}
+
+// collectConvergeScaffoldFiles plans atomic scaffold and configuration delivery.
+// It returns the planned files and actions without writing credentials.
+func collectConvergeScaffoldFiles(ctx context.Context, d convergeDiscovery, cfg ConvergeConfig, refResolver *RefResolver, progress ProgressFunc) ([]forge.TreeFile, []ComponentAction, error) {
+	var actions []ComponentAction
+	resolved := d.resolved
+	var allScaffoldFiles []forge.TreeFile
+	refFiles, refActions := convergeRefFiles(ctx, resolved, cfg, refResolver, progress)
+	actions = append(actions, refActions...)
+
+	// Bail out before scaffold commit if ref operations failed.
+	var refErrors []string
+	for _, a := range refActions {
+		if a.Action == "error" {
+			refErrors = append(refErrors, a.Detail)
+		}
+	}
+	if len(refErrors) > 0 {
+		return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", strings.Join(refErrors, "; "))
+	}
+
+	// A ref upgrade only rewrites the shim's version marker. When the
+	// installed GitHub shim cannot forward FULLSEND_OPENAI_API_KEY, queueing
+	// that marker-only rewrite would also exclude the shim from content-drift
+	// repair and deliver a shim that still cannot use the selected credential.
+	// Leave the shim to content-drift repair, which renders the full template
+	// at the target ref.
+	refFiles, legacyErr := withoutLegacyOpenAIConsumer(ctx, resolved, refFiles)
+	if legacyErr != nil {
+		return allScaffoldFiles, actions, legacyErr
+	}
+	allScaffoldFiles = append(allScaffoldFiles, refFiles...)
+
+	// 2d-i: Migrate obsolete GitLab root .gitlab-ci.yml entries
+	// (workflow rules from #7322, the empty dispatch stage from #7337).
+	// This is independent of ref drift — it must run even when the
+	// workflow ref is already current, since the root file is only
+	// otherwise touched by the install (fresh install) and uninstall
+	// (teardown) paths.
+	// Track paths already queued so missing-component repair and
+	// content-drift detection skip duplicates. GitLab rejects two
+	// create actions for the same path in one commit (#7645).
+	refFileSet := make(map[string]bool, len(refFiles))
+	for _, f := range refFiles {
+		refFileSet[f.Path] = true
+	}
+
+	scaffoldNeedsRepair := false
+	for _, c := range d.components {
+		if !c.Match && (c.Name == "workflow" || strings.HasPrefix(c.Name, "thin-caller:") || strings.HasPrefix(c.Name, "scaffold:")) {
+			scaffoldNeedsRepair = true
+			break
+		}
+	}
+	if scaffoldNeedsRepair {
+		repairFiles, repairActions := convergeScaffoldFiles(ctx, d, resolved, cfg, refResolver, progress)
+		actions = append(actions, repairActions...)
+
+		var repairErrors []string
+		for _, a := range repairActions {
+			if a.Action == "error" {
+				repairErrors = append(repairErrors, a.Detail)
+			}
+		}
+		if len(repairErrors) > 0 {
+			return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", strings.Join(repairErrors, "; "))
+		}
+		for _, f := range repairFiles {
+			if refFileSet[f.Path] {
+				continue
+			}
+			allScaffoldFiles = append(allScaffoldFiles, f)
+			refFileSet[f.Path] = true
+		}
+	}
+
+	// 2d-ii: Content drift — detect scaffold files that exist but
+	// whose content differs from the current template (e.g., template
+	// structure changed between releases while the ref stayed the
+	// same). This is the gap that caused #6576: converge only checked
+	// presence, not content, so stale-but-present files were skipped.
+	contentDriftFiles, contentDriftActions := convergeContentDriftFiles(
+		ctx, resolved, cfg, refResolver, refFileSet,
+		DriftConfig{
+			InferenceRegion:   cfg.InferenceRegion,
+			ReviewAppClientID: d.reviewClientID,
+			AgentRunnerTags:   gitlabAgentRunnerTags(cfg.Manifest),
+			ControlRunnerTags: gitlabControlRunnerTags(cfg.Manifest),
+		},
+		progress,
+	)
+	actions = append(actions, contentDriftActions...)
+
+	var contentErrors []string
+	for _, a := range contentDriftActions {
+		if a.Action == "error" {
+			contentErrors = append(contentErrors, a.Detail)
+		}
+	}
+	if len(contentErrors) > 0 {
+		return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", strings.Join(contentErrors, "; "))
+	}
+	allScaffoldFiles = append(allScaffoldFiles, contentDriftFiles...)
+
+	// Root input migration uses the wrapper that will actually be committed,
+	// including ref upgrades, repairs and remote pinned templates.
+	rootCIFiles, rootCIActions := convergeGitLabRootCIFiles(ctx, resolved, cfg, progress, allScaffoldFiles)
+	actions = append(actions, rootCIActions...)
+	for _, action := range rootCIActions {
+		if action.Action == "error" {
+			return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", action.Detail)
+		}
+	}
+	allScaffoldFiles = append(allScaffoldFiles, rootCIFiles...)
+
+	// 2d-iii: Configuration preset — replace .fullsend/config.base.yaml
+	// wholesale when a preset is declared and the installed bytes differ.
+	// With no declared preset the desired state is no base file; an
+	// existing one was already rejected by the pre-write check
+	// (checkUndeclaredBase), so this is a no-op. Managed-configuration
+	// handling is independent (2d-iv).
+	presetFiles, presetActions := convergePresetFiles(ctx, resolved, d.preset, cfg.DryRun, progress)
+	actions = append(actions, presetActions...)
+	var presetErrors []string
+	for _, a := range presetActions {
+		if a.Action == "error" {
+			presetErrors = append(presetErrors, a.Detail)
+		}
+	}
+	if len(presetErrors) > 0 {
+		return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", strings.Join(presetErrors, "; "))
+	}
+	allScaffoldFiles = append(allScaffoldFiles, presetFiles...)
+
+	// 2d-iv: Managed configuration — replace .fullsend/config.yaml
+	// wholesale when the repository is config-managed and the installed
+	// bytes differ. Unmanaged repositories leave the file untouched.
+	configFiles, configActions := convergeManagedConfigFiles(ctx, resolved, d.managedConfig, cfg.DryRun, progress)
+	actions = append(actions, configActions...)
+	var configErrors []string
+	for _, a := range configActions {
+		switch a.Action {
+		case "error", ActionSafetyRejected:
+			configErrors = append(configErrors, a.Detail)
+		}
+	}
+	if len(configErrors) > 0 {
+		return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", strings.Join(configErrors, "; "))
+	}
+	allScaffoldFiles = append(allScaffoldFiles, configFiles...)
+	return allScaffoldFiles, actions, nil
+}
+
+// convergeEstablishedPhases collects scaffold changes once, preserving the
+// credential-before-planning order except where vendored WIF preflight must
+// establish usable delivery before any credential can change.
+func convergeEstablishedPhases(ctx context.Context, d convergeDiscovery, wifProvider string, cfg ConvergeConfig, refResolver *RefResolver, progress ProgressFunc, vendoredWIFSource bool) ([]forge.TreeFile, []ComponentAction, []ComponentAction, error) {
+	var orderedActions []ComponentAction
+	resolved := d.resolved
+	if !vendoredWIFSource {
+		actions, err := convergeRepoCredentials(ctx, d, wifProvider, cfg, progress)
+		orderedActions = append(orderedActions, actions...)
+		if err != nil {
+			return nil, nil, orderedActions, err
+		}
+	}
+	files, scaffoldActions, err := collectConvergeScaffoldFiles(ctx, d, cfg, refResolver, progress)
+	orderedActions = append(orderedActions, scaffoldActions...)
+	if err != nil {
+		return files, scaffoldActions, orderedActions, err
+	}
+	if vendoredWIFSource && !scaffoldDeliveryPlanned(files, scaffoldActions, cfg.DryRun) {
+		ok, err := installedOpenAIWIFWorkflowsForward(ctx, resolved, resolved.ForgeConfig.Client, plannedGCPSecrets(d.components, cfg))
+		if err != nil {
+			return files, scaffoldActions, orderedActions, err
+		}
+		if !ok {
+			err = fmt.Errorf("the installed reusable workflows do not support inference.auth %s: they must forward %s to the agent without requiring GCP secrets the repository will not have, "+
+				"and no scaffold commit is pending to replace them with the vendored copies; "+
+				"upgrade the scaffold so the vendored workflows are redelivered (existing credentials were left unchanged)",
+				InferenceAuthOpenAIWIF, strings.Join(openAIWIFVariables, ", "))
+			return files, scaffoldActions, orderedActions, err
+		}
+	}
+
+	if vendoredWIFSource {
+		actions, err := convergeRepoCredentials(ctx, d, wifProvider, cfg, progress)
+		orderedActions = append(orderedActions, actions...)
+		return files, scaffoldActions, orderedActions, err
+	}
+	return files, scaffoldActions, orderedActions, nil
 }
