@@ -353,6 +353,16 @@ func (c *JiraClient) LinkIssues(ctx context.Context, fromProject string, fromNum
 	return wrapNotFound(c.jira.LinkIssues(ctx, issueKey(fromProject, fromNumber), issueKey(toProject, toNumber), linkType))
 }
 
+// MoveIssue implements Mover. Jira Cloud has no synchronous per-issue
+// move: relocating an issue means submitting an asynchronous bulk-move
+// task, polling it to a terminal state, and resolving the new issue key,
+// with field mappings to negotiate whenever the destination project's
+// issue types, workflow, or mandatory fields differ from the source's.
+// None of that is implemented yet, so this reports ErrNotSupported.
+func (c *JiraClient) MoveIssue(_ context.Context, sourceProject string, number int, targetProject string) (*MoveResult, error) {
+	return nil, fmt.Errorf("move %s to project %s: %w", issueKey(sourceProject, number), targetProject, ErrNotSupported)
+}
+
 // fromJiraComment converts a jira.Comment to a tracker.Comment. HTMLURL is
 // deliberately left empty: Jira's comment permalink format isn't confirmed
 // against real Jira Cloud behavior, so rather than guess at a URL shape
