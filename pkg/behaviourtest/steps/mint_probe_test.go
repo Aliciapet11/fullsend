@@ -53,6 +53,11 @@ type fakeMintProbeSCM struct {
 	existing     map[string]bool // repos present before the scenario (stale leftovers)
 	deletedRepos []string
 	deleteErr    error
+
+	deleteLag   int            // lookups that still see a repo after it is deleted
+	deleting    map[string]int // repo → remaining lagging lookups
+	reservedFor int            // CreateRepo calls that report already-exists (nil) without creating
+	createCalls int
 }
 
 func newFakeMintProbeSCM() *fakeMintProbeSCM {
@@ -60,8 +65,14 @@ func newFakeMintProbeSCM() *fakeMintProbeSCM {
 }
 
 func (f *fakeMintProbeSCM) CreateRepo(_ context.Context, _, name, _ string) error {
+	f.createCalls++
 	if f.createErr != nil {
 		return f.createErr
+	}
+	if f.reservedFor > 0 {
+		// The GitHub driver swallows already-exists: success, nothing created.
+		f.reservedFor--
+		return nil
 	}
 	f.createdRepos = append(f.createdRepos, name)
 	return nil
@@ -73,6 +84,12 @@ func (f *fakeMintProbeSCM) DeleteRepo(_ context.Context, _, repo string) error {
 	}
 	f.deletedRepos = append(f.deletedRepos, repo)
 	delete(f.existing, repo)
+	if f.deleteLag > 0 {
+		if f.deleting == nil {
+			f.deleting = map[string]int{}
+		}
+		f.deleting[repo] = f.deleteLag
+	}
 	return nil
 }
 
@@ -94,6 +111,10 @@ func (f *fakeMintProbeSCM) GetFileContent(_ context.Context, _, repo, path strin
 }
 
 func (f *fakeMintProbeSCM) GetDefaultBranch(_ context.Context, _, repo string) (string, error) {
+	if n := f.deleting[repo]; n > 0 {
+		f.deleting[repo] = n - 1
+		return "main", nil
+	}
 	if !f.existing[repo] && !slices.Contains(f.createdRepos, repo) {
 		return "", fmt.Errorf("getting default branch: %w", forge.ErrNotFound)
 	}
@@ -162,8 +183,11 @@ func fastMintProbePolls(t *testing.T) {
 	t.Helper()
 	appear, complete, poll, attempts, delay := mintProbeAppearTimeout, mintProbeCompleteTimeout, mintProbePollInterval, mintProbeArtifactAttempts, mintProbeArtifactDelay
 	mintProbeAppearTimeout, mintProbeCompleteTimeout, mintProbePollInterval, mintProbeArtifactAttempts, mintProbeArtifactDelay = 50*time.Millisecond, 50*time.Millisecond, time.Millisecond, 2, time.Millisecond
+	repoDelay := mintProbeRepoRetryDelay
+	mintProbeRepoRetryDelay = time.Millisecond
 	t.Cleanup(func() {
 		mintProbeAppearTimeout, mintProbeCompleteTimeout, mintProbePollInterval, mintProbeArtifactAttempts, mintProbeArtifactDelay = appear, complete, poll, attempts, delay
+		mintProbeRepoRetryDelay = repoDelay
 	})
 }
 
@@ -654,6 +678,52 @@ func TestGivenMintProbe_StaleHostRepo(t *testing.T) {
 	assert.Empty(t, scmDriver.publicRepos)
 	assert.Empty(t, scmDriver.createdRepos)
 	assert.Empty(t, w.MintProbe.CreatedRepos)
+}
+
+func TestGivenMintProbe_SlowStaleDeletion(t *testing.T) {
+	fastMintProbePolls(t)
+
+	// Deletion takes a few lookups to propagate and the name stays
+	// reserved for the first creates: the step waits for the 404, then
+	// retries the create until the new repository is visible.
+	scmDriver := newFakeMintProbeSCM()
+	scmDriver.existing = map[string]bool{"test-repo-07-mint-host": true}
+	scmDriver.deleteLag = 2
+	scmDriver.reservedFor = 2
+	w := mintProbeTestWorld(scmDriver, nil)
+	require.NoError(t, givenMintProbe(context.Background(), w, "github", "approved"))
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, scmDriver.deletedRepos)
+	assert.Equal(t, 3, scmDriver.createCalls, "create is retried while the name is reserved")
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, scmDriver.createdRepos)
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, w.MintProbe.CreatedRepos)
+	assert.Contains(t, scmDriver.commits, "test-repo-07-mint-host:.github/workflows/mint-probe.yml")
+
+	// A repository that never stops being visible fails before any create.
+	scmDriver = newFakeMintProbeSCM()
+	scmDriver.existing = map[string]bool{"test-repo-07-mint-host": true}
+	scmDriver.deleteLag = 1000
+	w = mintProbeTestWorld(scmDriver, nil)
+	assert.ErrorContains(t, givenMintProbe(context.Background(), w, "github", "approved"), "still visible")
+	assert.Zero(t, scmDriver.createCalls)
+	assert.Empty(t, scmDriver.publicRepos)
+
+	// A name that stays reserved never becomes visible: bounded failure.
+	scmDriver = newFakeMintProbeSCM()
+	scmDriver.reservedFor = 1000
+	w = mintProbeTestWorld(scmDriver, nil)
+	assert.ErrorContains(t, givenMintProbe(context.Background(), w, "github", "approved"), "not visible")
+	assert.Equal(t, mintProbeRepoMaxAttempts, scmDriver.createCalls)
+	assert.Empty(t, scmDriver.publicRepos)
+	assert.Empty(t, w.MintProbe.CreatedRepos)
+
+	// Cancellation interrupts the wait.
+	scmDriver = newFakeMintProbeSCM()
+	scmDriver.existing = map[string]bool{"test-repo-07-mint-host": true}
+	scmDriver.deleteLag = 1000
+	w = mintProbeTestWorld(scmDriver, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.ErrorIs(t, givenMintProbe(ctx, w, "github", "approved"), context.Canceled)
 }
 
 func TestGivenMintProbe_Errors(t *testing.T) {

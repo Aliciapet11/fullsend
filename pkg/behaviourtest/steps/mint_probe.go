@@ -234,11 +234,17 @@ func createMintProbeHost(ctx context.Context, w *world.World, p *world.MintProbe
 		if err := w.SCM.DeleteRepo(ctx, w.Org, host); err != nil && !forge.IsNotFound(err) {
 			return fmt.Errorf("mint probe: deleting stale host repository %s/%s: %w", w.Org, host, err)
 		}
+		// GitHub keeps serving, and can keep reserving, a deleted repo's
+		// name for a while, so wait for the deletion to propagate before
+		// creating the replacement.
+		if err := awaitMintProbeHostGone(ctx, w, host); err != nil {
+			return err
+		}
 	} else if !forge.IsNotFound(err) {
 		return fmt.Errorf("mint probe: checking for an existing host repository %s/%s: %w", w.Org, host, err)
 	}
-	if err := w.SCM.CreateRepo(ctx, w.Org, host, "behaviour test: mint probe workflow host"); err != nil {
-		return fmt.Errorf("mint probe: creating host repository %s/%s: %w", w.Org, host, err)
+	if err := createMintProbeHostRepo(ctx, w, host); err != nil {
+		return err
 	}
 	p.CreatedRepos = append(p.CreatedRepos, host)
 	// Another repository can call a reusable workflow only when the
@@ -254,6 +260,76 @@ func createMintProbeHost(ctx context.Context, w *world.World, p *world.MintProbe
 		return fmt.Errorf("mint probe: %w", err)
 	}
 	return nil
+}
+
+// mintProbeRepoMaxAttempts and mintProbeRepoRetryDelay bound the
+// propagation waits around host repository deletion and creation (the
+// delay doubles each attempt). Overridden in tests to avoid slow loops.
+var (
+	mintProbeRepoMaxAttempts = 5
+	mintProbeRepoRetryDelay  = time.Second
+)
+
+// sleepMintProbe waits for d or until ctx is cancelled.
+func sleepMintProbe(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// awaitMintProbeHostGone polls until the deleted host repository returns
+// not-found, so the replacement is created against a free name. It fails
+// when the repository is still visible after the bounded backoff, since
+// creating then would run against a repository that is still being deleted.
+func awaitMintProbeHostGone(ctx context.Context, w *world.World, host string) error {
+	delay := mintProbeRepoRetryDelay
+	for attempt := 1; attempt <= mintProbeRepoMaxAttempts; attempt++ {
+		_, err := w.SCM.GetDefaultBranch(ctx, w.Org, host)
+		if forge.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("mint probe: checking deletion of host repository %s/%s: %w", w.Org, host, err)
+		}
+		if attempt < mintProbeRepoMaxAttempts {
+			if err := sleepMintProbe(ctx, delay); err != nil {
+				return fmt.Errorf("mint probe: waiting for host repository %s/%s to be deleted: %w", w.Org, host, err)
+			}
+			delay *= 2
+		}
+	}
+	return fmt.Errorf("mint probe: stale host repository %s/%s still visible after %d attempts to delete it", w.Org, host, mintProbeRepoMaxAttempts)
+}
+
+// createMintProbeHostRepo creates the host repository and waits until it
+// is visible. The GitHub SCM driver reports success when GitHub says the
+// name already exists, which is what a name still reserved after a delete
+// looks like, so a create that does not become visible is retried with
+// bounded, context-aware backoff.
+func createMintProbeHostRepo(ctx context.Context, w *world.World, host string) error {
+	delay := mintProbeRepoRetryDelay
+	for attempt := 1; attempt <= mintProbeRepoMaxAttempts; attempt++ {
+		if err := w.SCM.CreateRepo(ctx, w.Org, host, "behaviour test: mint probe workflow host"); err != nil {
+			return fmt.Errorf("mint probe: creating host repository %s/%s: %w", w.Org, host, err)
+		}
+		_, err := w.SCM.GetDefaultBranch(ctx, w.Org, host)
+		if err == nil {
+			return nil
+		}
+		if !forge.IsNotFound(err) {
+			return fmt.Errorf("mint probe: checking new host repository %s/%s: %w", w.Org, host, err)
+		}
+		if attempt < mintProbeRepoMaxAttempts {
+			if err := sleepMintProbe(ctx, delay); err != nil {
+				return fmt.Errorf("mint probe: waiting for host repository %s/%s to appear: %w", w.Org, host, err)
+			}
+			delay *= 2
+		}
+	}
+	return fmt.Errorf("mint probe: host repository %s/%s not visible after %d create attempts", w.Org, host, mintProbeRepoMaxAttempts)
 }
 
 // whenMintProbeRequests pushes the shim, waits for its run and reads the
