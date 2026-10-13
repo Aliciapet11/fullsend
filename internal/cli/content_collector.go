@@ -741,33 +741,27 @@ func (c *contentCollector) redact(text string, findings *[]security.Finding) str
 // assignment, an auth header, a secret-named field or a connection string,
 // or by its own prefix — is masked by that pattern, which shows what its
 // mask shows; and a value the normalizer itself rewrites is matched only as
-// the env has it. An empty result with findings means fully redacted.
+// the env has it. An empty result with findings means fully redacted. A
+// string the normalizer stripped an escape sequence or tag characters
+// from (stripped) is masked *** whole.
 func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text string, findings *[]security.Finding) string {
 	if text == "" {
 		return text
 	}
 	text = replaceEnv(runnerEnv, text, findings)
 	scanned := pipeline.Scan(text)
+	*findings = append(*findings, scanned.Findings...)
 	if slices.ContainsFunc(scanned.Findings, stripped) {
 		// The normalizer strips a terminal escape sequence before the
 		// patterns run, and a colour code ends at the next letter — so the
 		// stripping can take a token's first letter and leave a body no
 		// pattern matches — and a title code's payload is text no pattern
-		// sees. So the text is scanned as written too; a secret only that
-		// pass finds was hidden by the stripping, and the string is masked
-		// whole: nothing cut from it can be trusted. The normalizer's
-		// findings stay; the patterns' come from the pass that saw them all.
-		if raw := rawPatterns.Scan(text); patternFindings(raw.Findings) > patternFindings(scanned.Findings) {
-			for _, f := range scanned.Findings {
-				if f.Scanner == "unicode_normalizer" {
-					*findings = append(*findings, f)
-				}
-			}
-			*findings = append(*findings, raw.Findings...)
-			return "***"
-		}
+		// sees. Nothing cut from such a string can be trusted, so it is
+		// masked whole. No scan of the text as written can stand in: the
+		// redactor reports one finding for repeated matches, and a value
+		// the normalizer joins can hide one it cut.
+		return "***"
 	}
-	*findings = append(*findings, scanned.Findings...)
 	if scanned.Sanitized != "" {
 		return replaceEnv(runnerEnv, scanned.Sanitized, findings)
 	}
@@ -775,22 +769,6 @@ func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text s
 		return ""
 	}
 	return text
-}
-
-// rawPatterns is the secret redactor alone, for the pass over text as the
-// stream wrote it (redactText).
-var rawPatterns = security.NewPipeline(security.NewSecretRedactor())
-
-// patternFindings counts the findings the patterns made, as opposed to
-// the normalizer's.
-func patternFindings(fs []security.Finding) int {
-	n := 0
-	for _, f := range fs {
-		if f.Scanner != "unicode_normalizer" {
-			n++
-		}
-	}
-	return n
 }
 
 // recordedArguments names the members of a tool call's arguments that
@@ -857,7 +835,7 @@ func (c *contentCollector) toolArguments(args string) (json.RawMessage, bool) {
 		switch t := obj[k].(type) {
 		case string:
 			if recordedArguments[k] {
-				out[k] = c.scanLeaf(t)
+				out[k] = c.redact(t, &c.findings)
 				continue
 			}
 			c.evicted += len(c.redact(t, &c.findings))
@@ -866,7 +844,7 @@ func (c *contentCollector) toolArguments(args string) (json.RawMessage, bool) {
 			c.evicted += len(c.redact(string(enc), &c.findings))
 		case json.Number:
 			if recordedArguments[k] {
-				if r := c.scanLeaf(string(t)); r != string(t) {
+				if r := c.redact(string(t), &c.findings); r != string(t) {
 					out[k] = r // the mask, as the string it is
 				} else {
 					out[k] = t
@@ -927,19 +905,6 @@ func revealing(f security.Finding) bool {
 // letter of a token with it, since a CSI sequence ends at a letter.
 func stripped(f security.Finding) bool {
 	return f.Scanner == "unicode_normalizer" && (f.Name == "ansi_escape" || f.Name == "osc_escape" || f.Name == "tag_char")
-}
-
-// scanLeaf redacts one string of the arguments: through the pipeline,
-// which masks in place, and masked whole when the normalizer stripped an
-// escape sequence or tag characters from it (stripped), since what is
-// left can be most of a token.
-func (c *contentCollector) scanLeaf(s string) string {
-	mark := len(c.findings)
-	r := c.redact(s, &c.findings)
-	if slices.ContainsFunc(c.findings[mark:], stripped) {
-		return "***"
-	}
-	return r
 }
 
 // replaceEnv is redactText's literal pass, with one finding for each key

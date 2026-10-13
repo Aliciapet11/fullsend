@@ -378,8 +378,9 @@ func TestToolSpanTracker_NameGoesThroughTheOutputSanitizer(t *testing.T) {
 	// Unicode normalization (escapes, NUL, zero-width and bidi overrides)
 	// and then secret redaction — not the secret pass alone.
 	tr, rec, _ := toolSpanFixture(t)
+	// (A name with a terminal escape sequence is masked whole instead:
+	// TestToolSpanTracker_ANameTheNormalizerStrippedIsMaskedWhole.)
 	cases := map[string]string{
-		"toolu_11": "Bash\x1b[31mred\x1b[0m",
 		"toolu_12": "Bash\u200b\u202eevil",
 		"toolu_13": "Bash\x00nul",
 	}
@@ -388,10 +389,10 @@ func TestToolSpanTracker_NameGoesThroughTheOutputSanitizer(t *testing.T) {
 		tr.Handle(agentruntime.ToolResultEvent{ID: id})
 	}
 	spans := endedToolSpans(rec)
-	require.Len(t, spans, 3)
+	require.Len(t, spans, 2)
 	for _, s := range spans {
 		name := toolSpanAttrs(s)["gen_ai.tool.name"].AsString()
-		for _, bad := range []string{"\x1b", "\u200b", "\u202e", "\x00"} {
+		for _, bad := range []string{"\u200b", "\u202e", "\x00"} {
 			assert.NotContains(t, name, bad, "attribute must be normalized")
 			assert.NotContains(t, s.Name, bad, "span name must be normalized")
 		}
@@ -403,28 +404,30 @@ func TestToolSpanTracker_NameGoesThroughTheOutputSanitizer(t *testing.T) {
 	tr.Handle(agentruntime.ToolUseEvent{ID: "toolu_14", Name: "\u200b\u202e"})
 	tr.Handle(agentruntime.ToolResultEvent{ID: "toolu_14"})
 	spans = endedToolSpans(rec)
-	require.Len(t, spans, 4)
-	assert.Equal(t, "execute_tool", spans[3].Name)
-	assert.NotContains(t, toolSpanAttrs(spans[3]), attribute.Key("gen_ai.tool.name"))
+	require.Len(t, spans, 3)
+	assert.Equal(t, "execute_tool", spans[2].Name)
+	assert.NotContains(t, toolSpanAttrs(spans[2]), attribute.Key("gen_ai.tool.name"))
 }
 
-func TestToolSpanTracker_ANameTheNormalizerStrippedIsScannedAsWritten(t *testing.T) {
+func TestToolSpanTracker_ANameTheNormalizerStrippedIsMaskedWhole(t *testing.T) {
 	// A colour code ends at the next letter, so stripping ESC [ g takes the
 	// g of ghp_ and leaves a body no pattern matches, and a title code's
-	// payload is text no pattern sees. The name is scanned as written too
-	// (redactText) and masked whole. The token is not in the runner env,
-	// so only the pattern scan could have caught it.
+	// payload is text no pattern sees. Such a name is masked whole
+	// (redactText), with no scan of the text as written to second-guess it.
+	// The token is not in the runner env, so only a pattern could have
+	// caught it.
 	token := "ghp_" + strings.Repeat("r", 36)
 	tr, rec, _ := toolSpanFixture(t)
 	for id, name := range map[string]string{
 		"toolu_15": "\x1b[" + token,
 		"toolu_16": "Bash\x1b]" + token + "\x07",
+		"toolu_17": "\x1b[" + token + " " + token, // one finding either way: no count can tell
 	} {
 		tr.Handle(agentruntime.ToolUseEvent{ID: id, Name: name})
 		tr.Handle(agentruntime.ToolResultEvent{ID: id})
 	}
 	spans := endedToolSpans(rec)
-	require.Len(t, spans, 2)
+	require.Len(t, spans, 3)
 	for _, s := range spans {
 		assert.NotContains(t, s.Name, token[4:])
 		assert.Equal(t, "***", toolSpanAttrs(s)["gen_ai.tool.name"].AsString())

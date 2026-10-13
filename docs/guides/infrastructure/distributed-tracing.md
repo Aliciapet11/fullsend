@@ -155,8 +155,7 @@ which sees the runtime's stream, not its API requests.
 **Redaction and size:** every part passes through security redaction
 (runner environment values, Unicode normalization, secret masking, then
 runner environment values again; a string the normalizer stripped an
-escape sequence from is also scanned as written, and masked whole when
-that finds a secret the stripping hid) before reaching the span.
+escape sequence from is masked whole) before reaching the span.
 Content is bounded at 256 KiB per iteration — each tool result at 8 KiB,
 each call's arguments at 8 KiB —
 kept as an ordered suffix; overflow drops the oldest content first. Those
