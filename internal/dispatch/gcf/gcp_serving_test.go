@@ -3,6 +3,7 @@ package gcf
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -221,5 +222,22 @@ func TestLiveGCFClient_GetServiceRevisionInfo_RoutingUnsettled(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.unsetled, info.RoutingUnsettled)
 		})
+	}
+}
+
+// A 404 from Cloud Run is a positive "service does not exist" and is
+// distinguishable from other read failures, which must not be.
+func TestLiveGCFClient_GetServiceRevisionInfo_NotFoundIsSentinel(t *testing.T) {
+	for status, wantSentinel := range map[int]bool{
+		http.StatusNotFound:            true,
+		http.StatusInternalServerError: false,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+		_, err := newTestClient(srv).GetServiceRevisionInfo(context.Background(), "proj", "us-central1", "my-svc")
+		srv.Close()
+		require.Error(t, err)
+		assert.Equal(t, wantSentinel, errors.Is(err, ErrServiceNotFound), "status %d", status)
 	}
 }

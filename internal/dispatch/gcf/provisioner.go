@@ -2044,10 +2044,13 @@ func (p *Provisioner) ensureTrafficOnLatestRevisionAfterSourceDeploy(ctx context
 // seedDeployEnvFromServing reconciles the environment about to be deployed
 // with the currently serving Cloud Run revision (the source of truth for
 // registrations and authorization policy) before UpdateFunction runs. It
-// returns deployEnv unchanged only when the function is not ACTIVE and so has
-// no serving revision to read, and refuses the deploy when, on an ACTIVE
-// function, the serving state is unsettled, has no resolvable traffic
-// revision, or cannot be read reliably.
+// returns deployEnv unchanged only when the function is not ACTIVE and Cloud
+// Run positively shows there is no previous serving revision to protect: the
+// backing service does not exist, or it exists but has never produced a ready
+// revision. A non-ACTIVE Cloud Functions state alone proves nothing about the
+// backing service, so in every other case, whatever the function state, the
+// deploy is refused when the serving state cannot be read, is unsettled, has
+// no resolvable traffic revision, or cannot be read reliably.
 //
 // The returned *ServiceRevisionInfo is the verified serving snapshot the
 // environment was seeded from (nil when there was nothing to verify); callers
@@ -2056,7 +2059,8 @@ func (p *Provisioner) seedDeployEnvFromServing(ctx context.Context, existing *Fu
 	active := existing != nil && existing.State == "ACTIVE"
 	info, err := p.gcpAPI.GetServiceRevisionInfo(ctx, p.cfg.ProjectID, p.cfg.Region, functionName)
 	if err != nil {
-		if !active {
+		if !active && errors.Is(err, ErrServiceNotFound) {
+			// Positively no backing service: nothing previously served.
 			return deployEnv, nil, nil
 		}
 		return nil, nil, fmt.Errorf("reading the serving Cloud Run revision before deploying source: %w; %s", err, retryDeployAdvice)
@@ -2067,14 +2071,18 @@ func (p *Provisioner) seedDeployEnvFromServing(ctx context.Context, existing *Fu
 			retryDeployAdvice)
 	}
 	if info == nil || info.TrafficRevisionShort == "" {
-		if active {
-			// An ACTIVE function has a serving revision. With no resolvable
-			// one, the stale Cloud Functions env cannot be verified, and under
-			// LATEST allocation the new revision could serve it immediately.
-			return nil, nil, fmt.Errorf("Cloud Run reports no resolvable serving revision for an existing function; refusing to deploy source on an unverified serving state; %s",
-				retryDeployAdvice)
+		if !active && info != nil && info.LatestReadyRevisionShort == "" {
+			// The service exists but has never produced a ready revision, so
+			// there is no previous serving revision whose grants could be
+			// served stale.
+			return deployEnv, nil, nil
 		}
-		return deployEnv, nil, nil
+		// The service may have a serving revision that cannot be resolved (an
+		// ACTIVE function always has one). The stale Cloud Functions env cannot
+		// be verified, and under LATEST allocation the new revision could serve
+		// it immediately.
+		return nil, nil, fmt.Errorf("Cloud Run reports no resolvable serving revision for an existing function; refusing to deploy source on an unverified serving state; %s",
+			retryDeployAdvice)
 	}
 	if err := checkRevisionNames(info); err != nil {
 		return nil, nil, err
@@ -2095,9 +2103,11 @@ func (p *Provisioner) seedDeployEnvFromServing(ctx context.Context, existing *Fu
 // at seed time but is absent from the freshly read serving ROLE_APP_IDS. That
 // means a concurrent RemoveRoleFromMint revoked it during the source build;
 // reconcileTargetEnvVars re-applies configured roles on top of the serving
-// map, so without this check it would restore the revoked role. A role that
-// was not registered at seed time is a genuinely new registration and is not
-// affected. It is a no-op when there is no seed snapshot or either role map
+// map, so without this check it would restore the revoked role. It likewise
+// refuses when such a role is still registered but with a different app ID,
+// since the same re-application would overwrite a concurrently rotated ID. A
+// role that was not registered at seed time is a genuinely new registration
+// and is not affected. It is a no-op when there is no seed snapshot or either role map
 // cannot be parsed (reconciliation reports unreadable data itself).
 func (p *Provisioner) checkNoRoleRevokedSinceSeed(seed, fresh *ServiceRevisionInfo) error {
 	if seed == nil || fresh == nil || len(p.cfg.AgentAppIDs) == 0 {
@@ -2111,20 +2121,28 @@ func (p *Provisioner) checkNoRoleRevokedSinceSeed(seed, fresh *ServiceRevisionIn
 	if !ok {
 		return nil
 	}
-	var revoked []string
+	var revoked, replaced []string
 	for role := range mintcore.RoleOnlyAppIDs(p.cfg.AgentAppIDs) {
-		_, atSeed := seedRoles[role]
-		_, now := freshRoles[role]
-		if atSeed && !now {
+		seedID, atSeed := seedRoles[role]
+		freshID, now := freshRoles[role]
+		switch {
+		case atSeed && !now:
 			revoked = append(revoked, role)
+		case atSeed && now && seedID != freshID:
+			replaced = append(replaced, role)
 		}
 	}
-	if len(revoked) == 0 {
-		return nil
+	if len(revoked) > 0 {
+		sort.Strings(revoked)
+		return fmt.Errorf("role(s) %s were registered on the serving revision when the source deploy started but are no longer registered; they appear to have been revoked while the source was building, so refusing to re-add them from this deploy's configuration; %s",
+			strings.Join(revoked, ", "), retryDeployAdvice)
 	}
-	sort.Strings(revoked)
-	return fmt.Errorf("role(s) %s were registered on the serving revision when the source deploy started but are no longer registered; they appear to have been revoked while the source was building, so refusing to re-add them from this deploy's configuration; %s",
-		strings.Join(revoked, ", "), retryDeployAdvice)
+	if len(replaced) > 0 {
+		sort.Strings(replaced)
+		return fmt.Errorf("role(s) %s were registered on the serving revision when the source deploy started but now have a different app ID; they appear to have been replaced while the source was building, so refusing to overwrite them from this deploy's configuration; %s",
+			strings.Join(replaced, ", "), retryDeployAdvice)
+	}
+	return nil
 }
 
 // servingRoleOnlyAppIDs parses ROLE_APP_IDS from a serving env and returns its

@@ -34,6 +34,10 @@ var secretVersionPattern = regexp.MustCompile(`^projects/[0-9]+/secrets/[a-zA-Z0
 // ErrSecretNotFound is returned when a Secret Manager secret does not exist.
 var ErrSecretNotFound = errors.New("secret not found")
 
+// ErrServiceNotFound is wrapped by GetServiceRevisionInfo when Cloud Run
+// positively reports (HTTP 404) that the backing service does not exist.
+var ErrServiceNotFound = errors.New("cloud run service not found")
+
 // OIDCProviderConfig holds configuration for a WIF OIDC provider.
 type OIDCProviderConfig struct {
 	IssuerURI          string
@@ -2041,6 +2045,9 @@ func (c *LiveGCFClient) GetServiceRevisionInfo(ctx context.Context, projectID, r
 
 	if getResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(getResp.Body, 1<<20))
+		if getResp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("unexpected status %d getting Cloud Run service: %s: %w", getResp.StatusCode, gcp.ExtractErrorMessage(body), ErrServiceNotFound)
+		}
 		return nil, fmt.Errorf("unexpected status %d getting Cloud Run service: %s", getResp.StatusCode, gcp.ExtractErrorMessage(body))
 	}
 
