@@ -25,6 +25,7 @@ func fakeOpenshellOpenCode(t *testing.T, logPath, storeDir string) {
 	script := `#!/bin/sh
 echo "$@" >> '` + logPath + `'
 if [ "$2" = "upload" ]; then
+  case "$5" in /tmp/fs-upload-*/) cp -- "$4" "$5/"; exit $? ;; esac
   cp "$4" '` + storeDir + `'/"$(printf '%s' "$5" | tr '/' '_')"
   exit 0
 fi
