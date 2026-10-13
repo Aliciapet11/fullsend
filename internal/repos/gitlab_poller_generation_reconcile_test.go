@@ -78,6 +78,44 @@ func TestReconcilePollerElevation_QuarantinedReplacementIsDemotedAndStaysQuarant
 	assert.Equal(t, PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: quarantined}, generationState(t, c), "only an operator clears a quarantine")
 }
 
+// A pending replacement that was never demoted by its own handoff (it is not a
+// managed account until cutover) is restored by an ordinary install when its
+// membership drifted above Developer, and its recovery state is kept.
+func TestReconcilePollerElevation_PendingReplacementAboveDeveloperIsRestored(t *testing.T) {
+	for _, phase := range []PollerGenerationPhase{PollerPhaseAccountRecorded, PollerPhaseVerified} {
+		t.Run(string(phase), func(t *testing.T) {
+			c := newWebhookFake()
+			h := newHandoffTriggerOwner(c)
+			c.ProjectMemberAccess[cutoverNewUID] = forge.GitLabAccessLevelMaintainer
+			pending := &PendingPollerGeneration{UserID: cutoverNewUID, Phase: phase}
+			if phase == PollerPhaseVerified {
+				pending.TriggerAttempted, pending.TriggerID = true, 3
+			}
+			seedGenerationState(t, c, PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: pending})
+
+			_, err := reconcilePollerElevation(context.Background(), c, h, webhookTestOwner, webhookTestRepo)
+			require.NoError(t, err)
+			assert.Equal(t, forge.GitLabAccessLevelDeveloper, c.ProjectMemberAccess[cutoverNewUID])
+			assert.Empty(t, h.contained, "a restorable replacement keeps its credentials")
+			assert.Equal(t, PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: pending}, generationState(t, c), "the recovery state is kept")
+		})
+	}
+}
+
+func TestReconcilePollerElevation_PendingReplacementUnrestorableIsContained(t *testing.T) {
+	c := newWebhookFake()
+	h := newHandoffTriggerOwner(c)
+	h.restoreErrs = 10
+	c.ProjectMemberAccess[cutoverNewUID] = forge.GitLabAccessLevelMaintainer
+	pending := &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseVerified, TriggerAttempted: true, TriggerID: 3}
+	seedGenerationState(t, c, PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: pending})
+
+	_, err := reconcilePollerElevation(context.Background(), c, h, webhookTestOwner, webhookTestRepo)
+	require.Error(t, err)
+	assert.Equal(t, []int64{cutoverNewUID}, h.contained)
+	assert.Equal(t, PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: pending}, generationState(t, c), "the recovery state is kept")
+}
+
 func TestReconcilePollerElevation_NoGenerationStateChangesNothing(t *testing.T) {
 	c := newWebhookFake()
 	h := newHandoffTriggerOwner(c)

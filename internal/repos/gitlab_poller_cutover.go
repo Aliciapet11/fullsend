@@ -322,7 +322,10 @@ func unfinishedPollerCutoverDetail(ctx context.Context, client forge.Client, to 
 // never revoked before its owner is demoted. A quarantined generation is
 // demoted and its credentials revoked as well, and stays quarantined: when
 // that cannot be verified the error is returned and the quarantine obligations
-// are retained. A trigger owner without handoff support, or a project without
+// are retained. A recorded or verified generation has its membership
+// reconciled and leftover bootstrap credentials revoked, and its credentials
+// are contained when Developer access cannot be verified; its published
+// runtime credential is otherwise kept. A trigger owner without handoff support, or a project without
 // a pending generation, changes nothing.
 func reconcilePendingPollerGeneration(ctx context.Context, client forge.Client, to GitLabTriggerOwner, owner, repo string) (GitLabWebhookResult, error) {
 	h, ok := to.(GitLabPollerHandoff)
@@ -348,6 +351,18 @@ func reconcilePendingPollerGeneration(ctx context.Context, client forge.Client, 
 		if demoteErr := g.demote(p.UserID); demoteErr != nil {
 			return GitLabWebhookResult{Action: "deferred"}, fmt.Errorf("the quarantined replacement GitLab Poller generation (user ID %d) could not be verified at Developer access without credentials; it stays quarantined: %w", p.UserID, demoteErr)
 		}
+	case PollerPhaseAccountRecorded, PollerPhaseVerified:
+		// These phases are not unconditionally demoted: a verified generation
+		// may own a legitimately published runtime credential, so only its
+		// membership and leftover bootstrap credentials are reconciled. A
+		// membership that cannot be returned to Developer fails closed by
+		// containing the account's credentials, and the pending document is
+		// kept as the recovery state. The managed Poller reconciliation has
+		// already handled this account when it is the selected Poller.
+		if uid, idErr := to.PollerUserID(ctx, owner, repo); idErr == nil && uid == p.UserID {
+			return GitLabWebhookResult{}, nil
+		}
+		return reconcileOnePoller(ctx, client, to, owner, repo, p.UserID)
 	}
 	return GitLabWebhookResult{}, nil
 }

@@ -519,9 +519,12 @@ identity whose runtime credential was distributed is unsafe, because GitLab has
 no drain barrier for requests accepted before revocation. Install:
 
 1. Creates the replacement Poller service account at Developer and records
-   its ID in `FULLSEND_GITLAB_POLLER_GENERATIONS` before acting. A protected
-   default branch that only lists individual users gets the same merge grant
-   for the replacement account that provisioning gives every Poller.
+   its ID in `FULLSEND_GITLAB_POLLER_GENERATIONS` before acting. Creating the
+   replacement account never changes branch protection. Fullsend checks
+   default-branch pipeline access read-only and defers the handoff before
+   elevation when the existing policy (for example a protected default branch
+   that only lists individual users) excludes the replacement Poller; it never
+   writes a merge grant for the replacement account.
 2. Creates an installer-only bootstrap personal access token for the
    replacement account. The bootstrap token is never stored in a CI/CD
    variable, log, or agent environment.
