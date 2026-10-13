@@ -1,0 +1,165 @@
+# Behaviour-test mint probe (pkg/behaviourtest/steps/mint_probe.go).
+#
+# The mint probe steps commit this reusable workflow to a temporary host
+# repository in the pool org and delete that repository during scenario
+# cleanup. A shim workflow on a temporary branch of the leased test
+# repository calls it, so the OIDC token carries the host repository in
+# job_workflow_ref and the leased repository in repository.
+#
+# The job requests one token from the mint with the GitHub Actions OIDC
+# token and uploads a compact result. It never writes either token
+# anywhere: a minted token is masked and revoked straight away, and only
+# its reported scope is kept. The job exits 0 whatever the mint answers;
+# the suite classifies the uploaded result, so a missing result (for
+# example a failed upload) fails the run instead of passing silently.
+name: mint-probe
+
+on:
+  workflow_call:
+    inputs:
+      mint_url:
+        description: Mint base URL (the caller's FULLSEND_MINT_URL variable)
+        required: true
+        type: string
+      role:
+        required: true
+        type: string
+      level:
+        required: true
+        type: string
+      repos_json:
+        description: JSON array sent as the mint request's repos
+        required: true
+        type: string
+      artifact_name:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 10
+    steps:
+      - name: Request a token from the mint
+        env:
+          MINT_URL: ${{ inputs.mint_url }}
+          ROLE: ${{ inputs.role }}
+          LEVEL: ${{ inputs.level }}
+          REPOS_JSON: ${{ inputs.repos_json }}
+        run: |
+          set -uo pipefail
+          out=mint-probe-result.json
+          claims='{}'
+          scope='{}'
+          repos='[]'
+          if jq -e 'type == "array" and all(.[]; type == "string")' <<<"${REPOS_JSON}" >/dev/null 2>&1; then
+            repos="$(jq -c . <<<"${REPOS_JSON}")"
+          fi
+
+          # emit OUTCOME ERROR HTTP_STATUS MESSAGE writes the result file.
+          emit() {
+            jq -n \
+              --arg outcome "$1" --arg error "$2" --arg status "$3" --arg message "${4:0:300}" \
+              --arg role "${ROLE}" --arg level "${LEVEL}" --argjson repos "${repos}" \
+              --argjson claims "${claims}" --argjson scope "${scope}" \
+              '{outcome: $outcome, role: $role, level: $level, repos: $repos}
+               + (if $error == "" then {} else {error: $error} end)
+               + (if $status == "" then {} else {http_status: ($status | tonumber)} end)
+               + (if $message == "" then {} else {message: $message} end)
+               + $claims + $scope' >"${out}"
+            cat "${out}"
+          }
+
+          if [[ -z "${MINT_URL}" ]]; then
+            emit error config "" "FULLSEND_MINT_URL is not set on the calling repository"
+            exit 0
+          fi
+          if [[ "${repos}" == '[]' ]]; then
+            emit error config "" "repos_json is not a non-empty JSON array of strings"
+            exit 0
+          fi
+
+          if ! oidc_response="$(curl -sS --fail --retry 3 --retry-delay 2 --retry-all-errors \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=fullsend-mint")"; then
+            emit error oidc "" "requesting the GitHub Actions OIDC token failed"
+            exit 0
+          fi
+          oidc_token="$(jq -r '.value // empty' <<<"${oidc_response}" 2>/dev/null || true)"
+          if [[ -z "${oidc_token}" || "${oidc_token}" == *[[:space:]]* || "${oidc_token}" == *'::'* ]]; then
+            emit error oidc "" "the OIDC token response held no usable token"
+            exit 0
+          fi
+          echo "::add-mask::${oidc_token}"
+
+          # The claims are not secret; keep the two the mint authorizes on.
+          payload="$(cut -d. -f2 <<<"${oidc_token}" | tr '_-' '/+')"
+          case $(( ${#payload} % 4 )) in
+            2) payload="${payload}==" ;;
+            3) payload="${payload}=" ;;
+          esac
+          claims="$(base64 -d <<<"${payload}" 2>/dev/null \
+            | jq -c '{repository: (.repository // ""), job_workflow_ref: (.job_workflow_ref // "")}' 2>/dev/null)" || claims='{}'
+          [[ -n "${claims}" ]] || claims='{}'
+
+          body="$(jq -nc --arg role "${ROLE}" --arg level "${LEVEL}" --argjson repos "${repos}" \
+            '{role: $role, level: $level, repos: $repos}')"
+          if ! status="$(curl -sS --retry 2 --retry-delay 2 -o mint-response.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H "Content-Type: application/json" \
+            -d "${body}" \
+            "${MINT_URL%/}/v1/token")"; then
+            emit error transport "" "the mint request did not complete"
+            exit 0
+          fi
+          message="$(jq -r '.error // empty' mint-response.json 2>/dev/null || true)"
+
+          case "${status}" in
+            200)
+              token="$(jq -r '.token // empty' mint-response.json 2>/dev/null || true)"
+              if [[ -z "${token}" || "${token}" == *[[:space:]]* || "${token}" == *'::'* ]]; then
+                emit error response "${status}" "the mint answered 200 without a usable token"
+                rm -f mint-response.json
+                exit 0
+              fi
+              echo "::add-mask::${token}"
+              if ! scope="$(jq -c '{
+                  repository_selection: (.repository_selection // ""),
+                  granted_repos: (.granted_repos // []),
+                  granted_permissions: (.granted_permissions // {})
+                }' mint-response.json 2>/dev/null)"; then
+                scope='{}'
+                emit error response "${status}" "the mint answered 200 with an unreadable scope"
+              else
+                emit minted "" "${status}" ""
+              fi
+              rm -f mint-response.json
+              # Revoke the token now: the probe only needs its reported scope.
+              curl -sS -o /dev/null -X DELETE \
+                -H "Authorization: Bearer ${token}" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/installation/token || true
+              ;;
+            401 | 403)
+              emit denied "" "${status}" "${message}"
+              ;;
+            *)
+              emit error http "${status}" "${message}"
+              ;;
+          esac
+          rm -f mint-response.json
+          exit 0
+
+      - name: Upload the probe result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: mint-probe-result.json
+          if-no-files-found: error
+          retention-days: 1
