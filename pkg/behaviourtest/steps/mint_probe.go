@@ -140,6 +140,10 @@ var mintProbeScopeDenials = []string{
 	"per-repo mint requires repos to be exactly the requesting repository",
 }
 
+// mintProbeAuthFailedMessage is the mint's 401 body for both a workflow-host
+// denial and an OIDC verification failure (handler.go in internal/mintcore).
+const mintProbeAuthFailedMessage = "authentication failed"
+
 // mintProbeRoleRe and mintProbeLevelRe bound the values interpolated into
 // the shim workflow.
 var (
@@ -217,6 +221,17 @@ func createMintProbeHost(ctx context.Context, w *world.World, p *world.MintProbe
 	if host == w.RepoName {
 		return fmt.Errorf("mint probe: host repository %q must differ from the leased repository", host)
 	}
+	// The GitHub SCM driver's CreateRepo succeeds for a repository that
+	// already exists, so a leftover from an earlier run would otherwise be
+	// adopted as scenario-owned. Delete a leftover first, so only a repo
+	// this run created is recorded for cleanup.
+	if _, err := w.SCM.GetDefaultBranch(ctx, w.Org, host); err == nil {
+		if err := w.SCM.DeleteRepo(ctx, w.Org, host); err != nil && !forge.IsNotFound(err) {
+			return fmt.Errorf("mint probe: deleting stale host repository %s/%s: %w", w.Org, host, err)
+		}
+	} else if !forge.IsNotFound(err) {
+		return fmt.Errorf("mint probe: checking for an existing host repository %s/%s: %w", w.Org, host, err)
+	}
 	if err := w.SCM.CreateRepo(ctx, w.Org, host, "behaviour test: mint probe workflow host"); err != nil {
 		return fmt.Errorf("mint probe: creating host repository %s/%s: %w", w.Org, host, err)
 	}
@@ -269,12 +284,12 @@ func whenMintProbeRequests(ctx context.Context, w *world.World, role, level, rep
 
 	approvedRef, err := w.SCM.GetDefaultBranch(ctx, w.Org, p.ApprovedHostRepo)
 	if err != nil {
-		return fmt.Errorf("mint probe: %w", err)
+		return fmt.Errorf("mint probe: resolving default branch for %s/%s: %w", w.Org, p.ApprovedHostRepo, err)
 	}
 	subjectRef := approvedRef
 	if p.SubjectHostRepo != p.ApprovedHostRepo {
 		if subjectRef, err = w.SCM.GetDefaultBranch(ctx, w.Org, p.SubjectHostRepo); err != nil {
-			return fmt.Errorf("mint probe: %w", err)
+			return fmt.Errorf("mint probe: resolving default branch for %s/%s: %w", w.Org, p.SubjectHostRepo, err)
 		}
 	}
 	shim, err := renderMintProbeShim(mintProbeShimSpec{
@@ -576,8 +591,12 @@ func classifyMintProbeResult(res *world.MintProbeResult) mintProbeVerdict {
 		switch {
 		case res.HTTPStatus == 403 && slices.Contains(mintProbeScopeDenials, res.Message):
 			return mintProbeVerdict{outcome: mintProbeOutcomeScopeDenied, detail: detail}
-		case res.HTTPStatus == 401:
+		case res.HTTPStatus == 401 && res.Message == mintProbeAuthFailedMessage:
 			return mintProbeVerdict{outcome: mintProbeOutcomeHostDenied, detail: detail}
+		case res.HTTPStatus == 401:
+			// Not the mint's canonical body: an intermediary or an
+			// unexpected failure, which must not satisfy a host denial.
+			return mintProbeVerdict{infra: "unexpected-401", detail: detail}
 		default:
 			return mintProbeVerdict{outcome: "other-denied", detail: detail}
 		}
@@ -587,7 +606,7 @@ func classifyMintProbeResult(res *world.MintProbeResult) mintProbeVerdict {
 			detail = fmt.Sprintf("HTTP %d: %s", res.HTTPStatus, res.Message)
 		}
 		switch res.Error {
-		case "config", "oidc", "transport", "response":
+		case "config", "oidc", "transport", "response", "revoke":
 			return mintProbeVerdict{infra: res.Error, detail: detail}
 		case "http":
 			return mintProbeVerdict{infra: "server", detail: detail}

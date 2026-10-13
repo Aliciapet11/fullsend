@@ -3,13 +3,16 @@ package steps
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +41,10 @@ type fakeMintProbeSCM struct {
 	branches     []string
 	branchFiles  map[string][]byte // "branch:path" → content
 	createErr    error
+
+	existing     map[string]bool // repos present before the scenario (stale leftovers)
+	deletedRepos []string
+	deleteErr    error
 }
 
 func newFakeMintProbeSCM() *fakeMintProbeSCM {
@@ -49,6 +56,15 @@ func (f *fakeMintProbeSCM) CreateRepo(_ context.Context, _, name, _ string) erro
 		return f.createErr
 	}
 	f.createdRepos = append(f.createdRepos, name)
+	return nil
+}
+
+func (f *fakeMintProbeSCM) DeleteRepo(_ context.Context, _, repo string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deletedRepos = append(f.deletedRepos, repo)
+	delete(f.existing, repo)
 	return nil
 }
 
@@ -69,7 +85,10 @@ func (f *fakeMintProbeSCM) GetFileContent(_ context.Context, _, repo, path strin
 	return nil, forge.ErrNotFound
 }
 
-func (f *fakeMintProbeSCM) GetDefaultBranch(context.Context, string, string) (string, error) {
+func (f *fakeMintProbeSCM) GetDefaultBranch(_ context.Context, _, repo string) (string, error) {
+	if !f.existing[repo] && !slices.Contains(f.createdRepos, repo) {
+		return "", fmt.Errorf("getting default branch: %w", forge.ErrNotFound)
+	}
 	return "main", nil
 }
 
@@ -409,6 +428,9 @@ func TestClassifyMintProbeResult(t *testing.T) {
 		{"other repo", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 403, Message: "per-repo mint requires repos to be exactly the requesting repository"}, mintProbeOutcomeScopeDenied, ""},
 		{"role not allowed", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 403, Message: "role not allowed"}, "other-denied", ""},
 		{"host", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401, Message: "authentication failed"}, mintProbeOutcomeHostDenied, ""},
+		{"empty 401", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401}, "", "unexpected-401"},
+		{"non-mint 401", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401, Message: "Bad credentials"}, "", "unexpected-401"},
+		{"revoke", &world.MintProbeResult{Outcome: "error", Error: "revoke", HTTPStatus: 200}, "", "revoke"},
 		{"oidc", &world.MintProbeResult{Outcome: "error", Error: "oidc"}, "", "oidc"},
 		{"transport", &world.MintProbeResult{Outcome: "error", Error: "transport"}, "", "transport"},
 		{"config", &world.MintProbeResult{Outcome: "error", Error: "config"}, "", "config"},
@@ -500,6 +522,13 @@ func TestThenMintProbeOutcome(t *testing.T) {
 			subject: &world.MintProbeResult{Outcome: "error", Error: "http", HTTPStatus: 503, Repository: "halfsend-03/test-repo-07",
 				JobWorkflowRef: "halfsend-03/" + approved + "/.github/workflows/mint-probe.yml@refs/heads/main"},
 			expected: "scope-denied", wantErr: "infrastructure failure (server)"},
+		{name: "an empty-message 401 cannot satisfy a host denial", arrangement: "unapproved", control: control(),
+			subject: deniedResult(401, "", unapproved), expected: "host-denied", wantErr: "infrastructure failure (unexpected-401)"},
+		{name: "a non-mint 401 cannot satisfy a host denial", arrangement: "unapproved", control: control(),
+			subject: deniedResult(401, "Bad credentials", unapproved), expected: "host-denied", wantErr: "infrastructure failure (unexpected-401)"},
+		{name: "a failed revocation cannot satisfy minted", arrangement: "approved", control: control(),
+			subject:  &world.MintProbeResult{Outcome: "error", Error: "revoke", HTTPStatus: 200, Message: "revoking the minted installation token failed"},
+			expected: "minted", wantErr: "infrastructure failure (revoke)"},
 		{name: "a 401 without a minted control is not a host denial", arrangement: "unapproved",
 			control: deniedResult(401, "authentication failed", approved),
 			subject: deniedResult(401, "authentication failed", unapproved), expected: "host-denied", wantErr: "mint probe control"},
@@ -582,6 +611,29 @@ func TestGivenMintProbe_CreatesHosts(t *testing.T) {
 	assert.Equal(t, []string{"test-repo-07-mint-host", "test-repo-07-mint-unapproved"}, scmDriver.createdRepos)
 	assert.Equal(t, "test-repo-07-mint-unapproved", w.MintProbe.SubjectHostRepo)
 	assert.Contains(t, scmDriver.commits, "test-repo-07-mint-unapproved:.github/workflows/mint-probe.yml")
+}
+
+func TestGivenMintProbe_StaleHostRepo(t *testing.T) {
+	// A leftover host repository is deleted and recreated, so the scenario
+	// owns only a repository this run created.
+	scmDriver := newFakeMintProbeSCM()
+	scmDriver.existing = map[string]bool{"test-repo-07-mint-host": true}
+	w := mintProbeTestWorld(scmDriver, nil)
+	require.NoError(t, givenMintProbe(context.Background(), w, "github", "approved"))
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, scmDriver.deletedRepos)
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, scmDriver.createdRepos)
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, w.MintProbe.CreatedRepos)
+
+	// A leftover that cannot be deleted fails before it is made public,
+	// modified or recorded for cleanup.
+	scmDriver = newFakeMintProbeSCM()
+	scmDriver.existing = map[string]bool{"test-repo-07-mint-host": true}
+	scmDriver.deleteErr = errors.New("forbidden")
+	w = mintProbeTestWorld(scmDriver, nil)
+	assert.ErrorContains(t, givenMintProbe(context.Background(), w, "github", "approved"), "deleting stale host repository")
+	assert.Empty(t, scmDriver.publicRepos)
+	assert.Empty(t, scmDriver.createdRepos)
+	assert.Empty(t, w.MintProbe.CreatedRepos)
 }
 
 func TestGivenMintProbe_Errors(t *testing.T) {
@@ -711,4 +763,172 @@ func TestCleanupScenario_DeletesMintProbeHosts(t *testing.T) {
 	assert.Equal(t, deletedRepoRecord{owner: "org", repo: "test-repo-07-mint-unapproved"}, scmDriver.deletedRepos[1])
 	require.Len(t, scmDriver.deletedBranches, 1)
 	assert.Equal(t, "behaviour/mint-probe-0a1b2c3d", scmDriver.deletedBranches[0].branch)
+}
+
+// --- probe workflow script ---
+
+// fakeCurlScript stands in for curl in the probe workflow script: it answers
+// the OIDC, mint and revocation requests from FAKE_* variables and logs each
+// revocation attempt to FAKE_LOG.
+const fakeCurlScript = `#!/usr/bin/env bash
+url="${@: -1}"
+out=''
+prev=''
+for a in "$@"; do
+  if [[ "$prev" == -o ]]; then out="$a"; fi
+  prev="$a"
+done
+case "$url" in
+  *audience=*)
+    printf '%s' "${FAKE_OIDC_RESPONSE}"
+    ;;
+  */v1/token)
+    printf '%s' "${FAKE_MINT_BODY}" >"$out"
+    printf '%s' "${FAKE_MINT_STATUS}"
+    ;;
+  */installation/token)
+    echo revoke >>"${FAKE_LOG}"
+    case "${FAKE_REVOKE}" in
+      ok) printf 204 ;;
+      http-error) printf 403 ;;
+      transport) exit 7 ;;
+    esac
+    ;;
+esac
+`
+
+type probeScriptRun struct {
+	oidcToken  string // value of the OIDC response; "" uses a well-formed JWT
+	mintStatus string
+	mintBody   string
+	revoke     string // ok, http-error or transport
+}
+
+// runMintProbeScript runs the probe workflow's script with fake curl and
+// sleep, and returns the parsed result, the number of revocation attempts
+// and the script's output.
+func runMintProbeScript(t *testing.T, tc probeScriptRun) (*world.MintProbeResult, int, string) {
+	t.Helper()
+	var reusable struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	require.NoError(t, yaml.Unmarshal(mintProbeWorkflow, &reusable))
+	script := reusable.Jobs["probe"].Steps[0].Run
+	require.NotEmpty(t, script)
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	require.NoError(t, os.Mkdir(bin, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "curl"), []byte(fakeCurlScript), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	scriptPath := filepath.Join(dir, "step.sh")
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o600))
+
+	oidc := tc.oidcToken
+	if oidc == "" {
+		claims := `{"repository":"o/r","job_workflow_ref":"o/h/.github/workflows/mint-probe.yml@refs/heads/main"}`
+		oidc = "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".c2ln"
+	}
+	oidcResponse, err := json.Marshal(map[string]string{"value": oidc})
+	require.NoError(t, err)
+
+	logPath := filepath.Join(dir, "calls.log")
+	cmd := exec.Command("bash", "--noprofile", "--norc", "-e", scriptPath)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"MINT_URL=https://mint.test",
+		"ROLE=triage", "LEVEL=read", `REPOS_JSON=["r"]`,
+		"ACTIONS_ID_TOKEN_REQUEST_TOKEN=request-token",
+		"ACTIONS_ID_TOKEN_REQUEST_URL=https://tokens.test/?api=1",
+		"FAKE_OIDC_RESPONSE="+string(oidcResponse),
+		"FAKE_MINT_STATUS="+tc.mintStatus,
+		"FAKE_MINT_BODY="+tc.mintBody,
+		"FAKE_REVOKE="+tc.revoke,
+		"FAKE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+
+	data, err := os.ReadFile(filepath.Join(dir, mintProbeResultFile))
+	require.NoError(t, err, string(output))
+	res, err := parseMintProbeResult(data)
+	require.NoError(t, err)
+
+	revokes := 0
+	if log, err := os.ReadFile(logPath); err == nil {
+		revokes = strings.Count(string(log), "revoke")
+	}
+	return res, revokes, string(output)
+}
+
+const probeMintedBody = `{"token":"ghs_abc123","repository_selection":"selected","granted_repos":["o/r"],"granted_permissions":{"contents":"read"}}`
+
+func TestMintProbeWorkflowScript_Revocation(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed")
+	}
+
+	t.Run("minted and revoked", func(t *testing.T) {
+		res, revokes, out := runMintProbeScript(t, probeScriptRun{mintStatus: "200", mintBody: probeMintedBody, revoke: "ok"})
+		assert.Equal(t, "minted", res.Outcome)
+		assert.Equal(t, []string{"o/r"}, res.GrantedRepos)
+		assert.Equal(t, 1, revokes)
+		for _, line := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(line, "::add-mask::") {
+				assert.NotContains(t, line, "ghs_abc123", "the minted token is only ever printed to be masked")
+			}
+		}
+	})
+	for name, mode := range map[string]string{"HTTP error": "http-error", "transport failure": "transport"} {
+		t.Run("revocation "+name+" is not a minted result", func(t *testing.T) {
+			res, revokes, _ := runMintProbeScript(t, probeScriptRun{mintStatus: "200", mintBody: probeMintedBody, revoke: mode})
+			assert.Equal(t, "error", res.Outcome)
+			assert.Equal(t, "revoke", res.Error)
+			assert.Empty(t, res.GrantedRepos, "an unrevoked token's scope is not reported")
+			assert.Equal(t, 6, revokes, "three bounded attempts, then three more from the exit trap")
+			assert.Equal(t, "revoke", classifyMintProbeResult(res).infra)
+		})
+	}
+	t.Run("denial holds no token to revoke", func(t *testing.T) {
+		res, revokes, _ := runMintProbeScript(t, probeScriptRun{mintStatus: "401", mintBody: `{"error":"authentication failed"}`, revoke: "http-error"})
+		assert.Equal(t, "denied", res.Outcome)
+		assert.Equal(t, 401, res.HTTPStatus)
+		assert.Equal(t, mintProbeAuthFailedMessage, res.Message)
+		assert.Zero(t, revokes)
+	})
+}
+
+func TestMintProbeWorkflowScript_RejectsUnsafeTokens(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed")
+	}
+
+	for name, token := range map[string]string{
+		"percent-encoded newline": "abc%0Adef",
+		"percent-encoded return":  "abc%0Ddef",
+		"escape character":        "abc\u001bdef",
+		"workflow command":        "abc::set-output",
+		"whitespace":              "abc def",
+	} {
+		t.Run("oidc token with "+name, func(t *testing.T) {
+			res, revokes, _ := runMintProbeScript(t, probeScriptRun{oidcToken: token, mintStatus: "200", mintBody: probeMintedBody, revoke: "ok"})
+			assert.Equal(t, "error", res.Outcome)
+			assert.Equal(t, "oidc", res.Error)
+			assert.Zero(t, revokes)
+		})
+		t.Run("minted token with "+name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{"token": token, "repository_selection": "selected"})
+			require.NoError(t, err)
+			res, revokes, out := runMintProbeScript(t, probeScriptRun{mintStatus: "200", mintBody: string(body), revoke: "ok"})
+			assert.Equal(t, "error", res.Outcome)
+			assert.Equal(t, "response", res.Error)
+			assert.Zero(t, revokes, "an unusable token is never sent to the revocation endpoint")
+			assert.NotContains(t, out, "::add-mask::abc")
+		})
+	}
 }

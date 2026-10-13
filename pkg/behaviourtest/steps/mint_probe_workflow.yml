@@ -57,6 +57,7 @@ jobs:
           claims='{}'
           scope='{}'
           repos='[]'
+          token=''
           if jq -e 'type == "array" and all(.[]; type == "string")' <<<"${REPOS_JSON}" >/dev/null 2>&1; then
             repos="$(jq -c . <<<"${REPOS_JSON}")"
           fi
@@ -75,6 +76,37 @@ jobs:
             cat "${out}"
           }
 
+          # usable_token VALUE succeeds for a non-empty token made only of
+          # characters that appear in OIDC JWTs and GitHub installation
+          # tokens. Anything else (whitespace, control characters, "%"
+          # escapes, ":") could smuggle a workflow command into add-mask.
+          token_re='^[A-Za-z0-9._~+/=-]+$'
+          usable_token() {
+            [[ -n "$1" && "$1" =~ ${token_re} ]]
+          }
+
+          # revoke_token deletes the minted installation token, retrying with
+          # bounded timeouts. It clears ${token} only once GitHub answered 204
+          # and succeeds trivially when no token is held, so the exit trap
+          # below is a safety net that revokes at most once.
+          revoke_token() {
+            local attempt code
+            [[ -n "${token}" ]] || return 0
+            for attempt in 1 2 3; do
+              code="$(curl -sS --connect-timeout 10 --max-time 20 -o /dev/null -w '%{http_code}' -X DELETE \
+                -H "Authorization: Bearer ${token}" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/installation/token)" || code=000
+              if [[ "${code}" == 204 ]]; then
+                token=''
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+          trap 'revoke_token || true' EXIT
+
           if [[ -z "${MINT_URL}" ]]; then
             emit error config "" "FULLSEND_MINT_URL is not set on the calling repository"
             exit 0
@@ -91,7 +123,7 @@ jobs:
             exit 0
           fi
           oidc_token="$(jq -r '.value // empty' <<<"${oidc_response}" 2>/dev/null || true)"
-          if [[ -z "${oidc_token}" || "${oidc_token}" == *[[:space:]]* || "${oidc_token}" == *'::'* ]]; then
+          if ! usable_token "${oidc_token}"; then
             emit error oidc "" "the OIDC token response held no usable token"
             exit 0
           fi
@@ -121,29 +153,35 @@ jobs:
 
           case "${status}" in
             200)
-              token="$(jq -r '.token // empty' mint-response.json 2>/dev/null || true)"
-              if [[ -z "${token}" || "${token}" == *[[:space:]]* || "${token}" == *'::'* ]]; then
+              minted="$(jq -r '.token // empty' mint-response.json 2>/dev/null || true)"
+              if ! usable_token "${minted}"; then
                 emit error response "${status}" "the mint answered 200 without a usable token"
                 rm -f mint-response.json
                 exit 0
               fi
+              # From here the exit trap revokes the token on any early exit.
+              token="${minted}"
               echo "::add-mask::${token}"
+              scope_ok=1
               if ! scope="$(jq -c '{
                   repository_selection: (.repository_selection // ""),
                   granted_repos: (.granted_repos // []),
                   granted_permissions: (.granted_permissions // {})
                 }' mint-response.json 2>/dev/null)"; then
                 scope='{}'
+                scope_ok=0
+              fi
+              rm -f mint-response.json
+              # Revoke the token before reporting: the probe only needs its
+              # reported scope, and a token that stays valid must not pass.
+              if ! revoke_token; then
+                scope='{}'
+                emit error revoke "${status}" "revoking the minted installation token failed"
+              elif [[ "${scope_ok}" == 0 ]]; then
                 emit error response "${status}" "the mint answered 200 with an unreadable scope"
               else
                 emit minted "" "${status}" ""
               fi
-              rm -f mint-response.json
-              # Revoke the token now: the probe only needs its reported scope.
-              curl -sS -o /dev/null -X DELETE \
-                -H "Authorization: Bearer ${token}" \
-                -H "Accept: application/vnd.github+json" \
-                https://api.github.com/installation/token || true
               ;;
             401 | 403)
               emit denied "" "${status}" "${message}"

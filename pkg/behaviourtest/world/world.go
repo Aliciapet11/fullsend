@@ -275,7 +275,8 @@ type MintProbeResult struct {
 	// "error" (the probe could not get a policy answer).
 	Outcome string `json:"outcome"`
 	// Error classifies an "error" outcome: "config", "oidc",
-	// "transport", "http" or "response".
+	// "transport", "http", "response" or "revoke" (the minted token
+	// could not be revoked).
 	Error      string `json:"error,omitempty"`
 	HTTPStatus int    `json:"http_status,omitempty"`
 	// Message is the mint's error message, or the probe's own
