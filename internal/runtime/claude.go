@@ -410,6 +410,10 @@ func uploadHarnessSkills(sandboxName, skillsRoot string, skillDirs []string) err
 		if err := sandbox.Upload(sandboxName, skillPath, dest); err != nil {
 			return fmt.Errorf("copying skill %q: %w", skillPath, err)
 		}
+		if base := filepath.Base(skillPath); base != name {
+			fmt.Fprintf(os.Stderr, "Skill %q: uploaded to sandbox as %q, its declared SKILL.md name\n", base, name)
+			continue
+		}
 		fmt.Fprintf(os.Stderr, "Skill %q: uploaded to sandbox\n", name)
 	}
 	return nil

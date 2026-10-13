@@ -875,13 +875,14 @@ func TestClaudeRuntime_Bootstrap_NestedForgeSkillsShareBasename(t *testing.T) {
 	agentFile := filepath.Join(t.TempDir(), "agent.md")
 	require.NoError(t, os.WriteFile(agentFile, []byte("# agent"), 0o644))
 
-	err := ClaudeRuntime{}.Bootstrap(bootstrapInput{
-		sandboxName: "test-sandbox",
-		agentPath:   agentFile,
-		agentName:   "review",
-		skillDirs:   []string{labelsDir, reviewDir},
+	stderr := captureStderr(t, func() {
+		require.NoError(t, ClaudeRuntime{}.Bootstrap(bootstrapInput{
+			sandboxName: "test-sandbox",
+			agentPath:   agentFile,
+			agentName:   "review",
+			skillDirs:   []string{labelsDir, reviewDir},
+		}))
 	})
-	require.NoError(t, err)
 
 	log, readErr := os.ReadFile(logPath)
 	require.NoError(t, readErr)
@@ -889,6 +890,9 @@ func TestClaudeRuntime_Bootstrap_NestedForgeSkillsShareBasename(t *testing.T) {
 	assert.Contains(t, logStr, sandbox.SandboxClaudeConfig+"/skills/issue-labels")
 	assert.Contains(t, logStr, sandbox.SandboxClaudeConfig+"/skills/pr-review-github")
 	assert.NotContains(t, logStr, sandbox.SandboxClaudeConfig+"/skills/github")
+	// The operator is told where a skill landed when the name differs.
+	assert.Contains(t, stderr, `Skill "github": uploaded to sandbox as "issue-labels", its declared SKILL.md name`)
+	assert.Contains(t, stderr, `Skill "github": uploaded to sandbox as "pr-review-github", its declared SKILL.md name`)
 }
 
 func TestClaudeRuntime_Bootstrap_DuplicateDeclaredSkillName(t *testing.T) {
