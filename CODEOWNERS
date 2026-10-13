@@ -10,4 +10,3 @@
 # .gitmodules is deliberately excluded: it maps submodule fetch
 # URLs, so URL swaps must keep @fullsend-ai/core review (#6082).
 /experiments
-eval/.agent-eval-harness

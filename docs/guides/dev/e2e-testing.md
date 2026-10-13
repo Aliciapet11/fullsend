@@ -692,10 +692,10 @@ automatically and e2e is skipped until a maintainer re-applies it after
 reviewing the latest changes. Freshness compares the label timestamp against
 the frozen PR `updated_at` from the workflow event (`PR_UPDATED_AT`); the live
 API fallback may over-reject when non-push activity bumped `updated_at`.
-Applying the label triggers the **E2E ok-to-test** / **Functional ok-to-test**
-caller workflows, which `workflow_call` into the main suites.
+Applying the label triggers the **E2E ok-to-test** caller workflow, which
+`workflow_call`s into the main suite.
 
-The main **E2E Tests** and **Functional Tests** workflows do **not** subscribe to
+The main **E2E Tests** workflow does **not** subscribe to
 `labeled` events. Only `opened` / `synchronize` / `reopened` cancel in-progress
 work in the per-PR concurrency group (code changed). Label events are
 authorization only: they **never** cancel an in-progress suite. If a suite is
@@ -705,8 +705,8 @@ behind it (no expression-only “skip if busy”); that is accepted.
 Other labels (for example `ready-for-review`, `requires-manual-review`, or
 `component/*`) do **not** authorize e2e. They may start the thin ok-to-test
 caller with a skipped `run` job (GitHub cannot filter by label name at `on:`),
-but they do not start skipped checks under the **E2E Tests** / **Functional
-Tests** workflow names, and they never enter the suite concurrency group.
+but they do not start skipped checks under the **E2E Tests** workflow name,
+and they never enter the suite concurrency group.
 
 ### Blocked runs
 
@@ -717,10 +717,10 @@ gate. Re-run the workflow or add/re-apply `ok-to-test` as appropriate.
 
 ## CI architecture
 
-1. **PR open/sync** — **E2E Tests** / **Functional Tests** run gate then suite
-   jobs (trusted authors authorized immediately)
-2. **`ok-to-test` label** — thin **E2E ok-to-test** / **Functional ok-to-test**
-   workflows call the same suites via `workflow_call` (fork / external path)
+1. **PR open/sync** — **E2E Tests** runs the gate then suite jobs (trusted
+   authors authorized immediately)
+2. **`ok-to-test` label** — the thin **E2E ok-to-test** workflow calls the same
+   suite via `workflow_call` (fork / external path)
 3. **Gate** — authorize the PR author or a fresh `ok-to-test` label (base
    checkout only; never checks out PR head)
 4. **Behaviour / playback** — checkout PR head SHA, authenticate to GCP via

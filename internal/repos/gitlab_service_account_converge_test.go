@@ -66,6 +66,46 @@ func TestInstallConvergesLegacyServiceAccounts(t *testing.T) {
 
 func acceptReplacementToken(context.Context, string, string, *ProjectAccessToken) error { return nil }
 
+// When the variable write is saved but its response is lost during
+// convergence, the replacement service-account token is kept rather than
+// revoked, so the project variable never holds a revoked credential.
+func TestInstallConvergenceKeepsReplacementAfterLostPublicationResponse(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
+	inner := seededRoleClient(t, gitlabroles.RoleCoder)
+	fc := &saveThenFailSecretClient{FakeClient: inner, name: forge.SecretGitLabCoderToken, fail: true}
+	legacy := &fakeTokens{}
+	sa := newFakeSAAPI()
+	var rec gitlabroles.Registration
+	for _, r := range gitlabroles.BuiltinRegistry().Registrations() {
+		if r.Name == gitlabroles.RoleCoder {
+			rec = r
+		}
+	}
+	legacy.seed(ProjectAccessToken{ID: 1, Name: rec.Credential.TokenName, Active: true, ExpiresAt: GitLabPATExpiresAt(now), UserID: 101})
+	state := rotationStateFile{Roles: map[string]rotationRoleState{string(rec.Name): {CreatedTokenIDs: []int{1}, Phase: rotationPhaseIdle, IncomingID: 1, DistributedAt: now.Format(time.RFC3339)}}}
+	require.NoError(t, writeRotationState(ctx, fc, "group", "project", state))
+	c := ServiceAccountTokenClient{SA: sa, Legacy: legacy, VerifyToken: acceptReplacementToken, ManagedLegacyTokenIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+		return ManagedGitLabLegacyTokenIDs(ctx, fc, owner, repo)
+	}}
+	c.AccountCreated = func(ctx context.Context, owner, repo string, account GitLabServiceAccount) error {
+		return RecordManagedGitLabServiceAccount(ctx, fc, owner, repo, account)
+	}
+	c.ManagedAccountIDs = func(ctx context.Context, owner, repo string) ([]int, error) {
+		return ManagedGitLabRoleAccountIDs(ctx, fc, owner, repo)
+	}
+
+	result := RoleProvisionResult{}
+	convergeInstalledServiceAccount(ctx, RoleProvisionConfig{Owner: "group", Repo: "project", Client: fc, Tokens: c, Now: now}, rec, now, true, &result)
+	require.Len(t, result.Failed, 1)
+	assert.Empty(t, sa.revoked, "the saved replacement must not be revoked")
+	assert.Empty(t, legacy.revoked, "the previous credential stays usable")
+	rs := readRoleState(t, inner, gitlabroles.RoleCoder)
+	assert.Equal(t, rotationPhaseDistributing, rs.Phase)
+	assert.NotZero(t, rs.IncomingID)
+	assert.Contains(t, rs.OutgoingIDs, 1)
+}
+
 func TestInstallConvergenceRequiresReplacementVerifier(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
@@ -191,7 +231,7 @@ func TestCreatedAccountProofAndCredentialFailure(t *testing.T) {
 	for _, mode := range []string{"validate", "record"} {
 		t.Run(mode, func(t *testing.T) {
 			sa := newFakeSAAPI()
-			c := ServiceAccountTokenClient{SA: sa}
+			c := ServiceAccountTokenClient{SA: sa, VerifyToken: acceptReplacementToken}
 			verifyCalled, createdCalled := false, false
 			if mode == "validate" {
 				c.VerifyToken = func(context.Context, string, string, *ProjectAccessToken) error {
@@ -700,7 +740,7 @@ func TestReinstallReconcilesManagedRoleMembership(t *testing.T) {
 				ctx := context.Background()
 				fc := seededRoleClient(t, gitlabroles.RolePoller, gitlabroles.RoleAnalyst, gitlabroles.RoleCoder)
 				sa := newFakeSAAPI()
-				c := ServiceAccountTokenClient{SA: sa}
+				c := ServiceAccountTokenClient{SA: sa, VerifyToken: acceptReplacementToken}
 				c.AccountCreated = func(ctx context.Context, owner, repo string, account GitLabServiceAccount) error {
 					return RecordManagedGitLabServiceAccount(ctx, fc, owner, repo, account)
 				}
@@ -1073,7 +1113,7 @@ func TestSharedSuppliedTokenReportedForEveryRole(t *testing.T) {
 		state.Roles[role] = rotationRoleState{Supplied: true, SuppliedUserID: 501, SuppliedTokenID: 12, SuppliedDistributed: true, Phase: rotationPhaseIdle, DistributedAt: now.Format(time.RFC3339)}
 	}
 	require.NoError(t, writeRotationState(ctx, fc, "g", "p", state))
-	c := ServiceAccountTokenClient{SA: sa, SuppliedAccountIDs: func(context.Context, string, string) ([]int, error) { return []int{501}, nil }, SuppliedTokenIDs: func(context.Context, string, string) (map[int][]SuppliedTokenRef, error) {
+	c := ServiceAccountTokenClient{SA: sa, VerifySuppliedAccess: allowSuppliedAccess, SuppliedAccountIDs: func(context.Context, string, string) ([]int, error) { return []int{501}, nil }, SuppliedTokenIDs: func(context.Context, string, string) (map[int][]SuppliedTokenRef, error) {
 		return map[int][]SuppliedTokenRef{501: {{ID: 12, Name: gitlabroles.AnalystTokenName}, {ID: 12, Name: gitlabroles.CoderTokenName}}}, nil
 	}}
 	tokens, err := c.ListProjectAccessTokens(ctx, "g", "p")
@@ -1135,7 +1175,7 @@ func TestCreationBoundaryContainsElevatedOwnedRole(t *testing.T) {
 			if failure == "membership" {
 				sa.failUpdate = errors.New("offline")
 			}
-			c := ServiceAccountTokenClient{SA: sa, ContainmentClient: fc, ManagedAccountIDs: sa.ownedIDs}
+			c := ServiceAccountTokenClient{SA: sa, ContainmentClient: fc, ManagedAccountIDs: sa.ownedIDs, VerifyToken: acceptReplacementToken}
 			if failure == "unresolved" {
 				c.SuppliedAccountIDs = func(context.Context, string, string) ([]int, error) { return nil, ErrPollerSuppliedUnresolved }
 			}
@@ -1230,7 +1270,7 @@ func TestDirectRotationContainsInheritedManagedRole(t *testing.T) {
 	sa.members[501] = 40
 	sa.inherited = map[int64]int{501: 40}
 	sa.tokens[501] = []ProjectAccessToken{{ID: 12, Name: gitlabroles.CoderTokenName, Active: true, ExpiresAt: GitLabPATExpiresAt(now)}}
-	c := ServiceAccountTokenClient{SA: sa, ContainmentClient: fc, ManagedAccountIDs: sa.ownedIDs}
+	c := ServiceAccountTokenClient{SA: sa, ContainmentClient: fc, ManagedAccountIDs: sa.ownedIDs, VerifyToken: acceptReplacementToken}
 	result, err := RotateGitLabRoleCredentials(ctx, RoleRotateConfig{Owner: "group", Repo: "project", Client: fc, Tokens: c, Roles: []gitlabroles.Role{gitlabroles.RoleCoder}, Force: true, Now: now})
 	require.NoError(t, err)
 	require.Len(t, result.Failed, 1)
@@ -1380,6 +1420,7 @@ func TestMissingSecretProvisioningAppliesRecordedExclusions(t *testing.T) {
 	sa.members[501] = 20
 	c := ServiceAccountTokenClient{
 		SA:                sa,
+		VerifyToken:       acceptReplacementToken,
 		ManagedAccountIDs: func(context.Context, string, string) ([]int, error) { return []int{501}, nil },
 	}
 	result := &RoleProvisionResult{}
@@ -1596,6 +1637,460 @@ func TestWithProjectExclusionsRejectsMalformedRecordedIDs(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := (ServiceAccountTokenClient{}).withProjectExclusions(context.Background(), "g", "p", rotationStateFile{Roles: map[string]rotationRoleState{"coder": rs}})
 			require.Error(t, err)
+		})
+	}
+}
+
+// An administrator-supplied replacement of a managed legacy credential whose
+// publication committed but lost its response may be the installed credential.
+// Install convergence sets Force internally, but it is not an operator-requested
+// forced rotation: it must honor the hold instead of publishing a managed
+// service-account credential over the possibly installed supplied one.
+func TestInstallConvergenceHonorsAmbiguousSuppliedPublicationHold(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
+	fc := seededRoleClient(t, gitlabroles.RoleCoder)
+	legacy := &fakeTokens{}
+	sa := newFakeSAAPI()
+	var coder gitlabroles.Registration
+	for _, rec := range gitlabroles.BuiltinRegistry().Registrations() {
+		if rec.Name == gitlabroles.RoleCoder {
+			coder = rec
+		}
+	}
+	legacy.seed(ProjectAccessToken{ID: 3, Name: coder.Credential.TokenName, Active: true, ExpiresAt: GitLabPATExpiresAt(now), UserID: 103})
+	state := rotationStateFile{Roles: map[string]rotationRoleState{
+		string(coder.Name): {CreatedTokenIDs: []int{3}, Phase: rotationPhaseIdle, IncomingID: 3, DistributedAt: now.Add(-48 * time.Hour).Format(time.RFC3339)},
+	}}
+	require.NoError(t, writeRotationState(ctx, fc, "group", "project", state))
+	c := ServiceAccountTokenClient{
+		SA: sa, Legacy: legacy, VerifyToken: acceptReplacementToken,
+		ManagedLegacyTokenIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+			return ManagedGitLabLegacyTokenIDs(ctx, fc, owner, repo)
+		},
+		AccountCreated: func(ctx context.Context, owner, repo string, account GitLabServiceAccount) error {
+			return RecordManagedGitLabServiceAccount(ctx, fc, owner, repo, account)
+		},
+		ManagedAccountIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+			return ManagedGitLabRoleAccountIDs(ctx, fc, owner, repo)
+		},
+		SuppliedCredentialIdentity: func(context.Context, string) (SuppliedIdentity, error) {
+			return describedCoderIdentity(777, 13), nil
+		},
+		VerifySuppliedAccess: allowSuppliedAccess,
+	}
+
+	// The supplied replacement commits but its response is lost.
+	first, err := RotateGitLabRoleCredentials(ctx, RoleRotateConfig{
+		Owner: "group", Repo: "project", Client: &commitThenErrorSecretClient{Client: fc}, Tokens: c,
+		Registry: gitlabroles.BuiltinRegistry(), Roles: []gitlabroles.Role{gitlabroles.RoleCoder}, Force: true, Now: now,
+		ProvidedTokens: map[gitlabroles.Role]string{gitlabroles.RoleCoder: "replacement-coder-token"},
+	})
+	require.NoError(t, err)
+	require.Len(t, first.Failed, 1)
+	held, _, err := loadRotationState(ctx, fc, "group", "project")
+	require.NoError(t, err)
+	require.True(t, providedPublicationUnresolved(held.Roles[string(coder.Name)]))
+	coderWrites := func() int {
+		n := 0
+		for _, rec := range fc.CreatedSecrets {
+			if rec.Name == forge.SecretGitLabCoderToken {
+				n++
+			}
+		}
+		return n
+	}
+	secretWrites := coderWrites()
+
+	// An ordinary install must not replace the possibly installed credential.
+	result, err := ProvisionGitLabRoleCredentials(ctx, RoleProvisionConfig{Owner: "group", Repo: "project", Client: fc, Tokens: c, Now: now.Add(time.Hour)})
+	require.NoError(t, err)
+	assert.NotContains(t, result.Created, gitlabroles.RoleCoder)
+	var heldFailure bool
+	for _, f := range result.Failed {
+		if f.Role == gitlabroles.RoleCoder {
+			heldFailure = strings.Contains(f.Reason, "outcome is unknown")
+		}
+	}
+	assert.True(t, heldFailure, "convergence reports the held publication")
+	assert.Equal(t, secretWrites, coderWrites(), "no managed credential overwrote the installed credential")
+	for _, account := range sa.accounts {
+		assert.NotEqual(t, coder.Credential.TokenName, account.Name, "no managed service account is created for the held role")
+	}
+	assert.Empty(t, legacy.revoked)
+
+	// An operator-requested recovery of the role (a supplied credential or a
+	// forced rotation covering it) is not rejected by convergence, so the
+	// recovery that runs after provisioning is reachable. Convergence still
+	// publishes nothing itself. A forced rotation of another role does not
+	// release the hold.
+	for name, cfg := range map[string]RoleProvisionConfig{
+		"supplied credential": {ProvidedTokens: map[gitlabroles.Role]string{gitlabroles.RoleCoder: "replacement-coder-token"}},
+		"forced rotation":     {ForceRotation: true},
+		"forced role filter":  {ForceRotation: true, ForceRoles: []gitlabroles.Role{gitlabroles.RoleCoder}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg.Owner, cfg.Repo, cfg.Client, cfg.Tokens, cfg.Now = "group", "project", fc, c, now.Add(time.Hour)
+			recovery, err := ProvisionGitLabRoleCredentials(ctx, cfg)
+			require.NoError(t, err)
+			for _, f := range recovery.Failed {
+				assert.NotEqual(t, coder.Name, f.Role, "convergence must not reject a role the operator is recovering")
+			}
+			assert.NotContains(t, recovery.Created, gitlabroles.RoleCoder)
+			assert.Equal(t, secretWrites, coderWrites(), "convergence itself publishes nothing")
+			assert.Empty(t, legacy.revoked)
+		})
+	}
+	other, err := ProvisionGitLabRoleCredentials(ctx, RoleProvisionConfig{
+		Owner: "group", Repo: "project", Client: fc, Tokens: c, Now: now.Add(time.Hour),
+		ForceRotation: true, ForceRoles: []gitlabroles.Role{gitlabroles.RolePoller},
+	})
+	require.NoError(t, err)
+	var stillHeld bool
+	for _, f := range other.Failed {
+		if f.Role == gitlabroles.RoleCoder {
+			stillHeld = strings.Contains(f.Reason, "outcome is unknown")
+		}
+	}
+	assert.True(t, stillHeld, "forcing another role does not release the hold")
+
+	// The requested recovery then runs and resolves the held state.
+	retry, err := RotateGitLabRoleCredentials(ctx, RoleRotateConfig{
+		Owner: "group", Repo: "project", Client: fc, Tokens: c,
+		Registry: gitlabroles.BuiltinRegistry(), Roles: []gitlabroles.Role{gitlabroles.RoleCoder}, Now: now.Add(time.Hour),
+		ProvidedTokens: map[gitlabroles.Role]string{gitlabroles.RoleCoder: "replacement-coder-token"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, retry.Failed)
+	assert.Contains(t, retry.Rotated, gitlabroles.RoleCoder)
+	assert.False(t, providedPublicationUnresolved(readRoleState(t, fc, gitlabroles.RoleCoder)))
+}
+
+// ambiguousSuppliedHoldFixture seeds a coder role whose supplied replacement
+// committed but lost its response, so the role is held, plus a custom role that
+// reuses the coder credential.
+func ambiguousSuppliedHoldFixture(t *testing.T, now time.Time) (*forge.FakeClient, ServiceAccountTokenClient, gitlabroles.Registry, func() int) {
+	t.Helper()
+	ctx := context.Background()
+	reg, err := gitlabroles.ParseRegistry(`{"roles":[{"name":"deployer","credential":"reuse","reuse":"coder","capabilities":["write_repository"],"agents":["deploy"]}]}`)
+	require.NoError(t, err)
+	fc := seededRoleClient(t, gitlabroles.RolePoller, gitlabroles.RoleAnalyst, gitlabroles.RoleCoder)
+	legacy := &fakeTokens{}
+	sa := newFakeSAAPI()
+	coder, ok := reg.Lookup(gitlabroles.RoleCoder)
+	require.True(t, ok)
+	legacy.seed(ProjectAccessToken{ID: 3, Name: coder.Credential.TokenName, Active: true, ExpiresAt: GitLabPATExpiresAt(now), UserID: 103})
+	state := rotationStateFile{Roles: map[string]rotationRoleState{
+		string(coder.Name): {CreatedTokenIDs: []int{3}, Phase: rotationPhaseIdle, IncomingID: 3, DistributedAt: now.Add(-48 * time.Hour).Format(time.RFC3339)},
+	}}
+	require.NoError(t, writeRotationState(ctx, fc, "group", "project", state))
+	c := ServiceAccountTokenClient{
+		SA: sa, Legacy: legacy, VerifyToken: acceptReplacementToken,
+		ManagedLegacyTokenIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+			return ManagedGitLabLegacyTokenIDs(ctx, fc, owner, repo)
+		},
+		AccountCreated: func(ctx context.Context, owner, repo string, account GitLabServiceAccount) error {
+			return RecordManagedGitLabServiceAccount(ctx, fc, owner, repo, account)
+		},
+		ManagedAccountIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+			return ManagedGitLabRoleAccountIDs(ctx, fc, owner, repo)
+		},
+		SuppliedCredentialIdentity: func(context.Context, string) (SuppliedIdentity, error) {
+			return describedCoderIdentity(777, 13), nil
+		},
+		VerifySuppliedAccess: allowSuppliedAccess,
+	}
+	first, err := RotateGitLabRoleCredentials(ctx, RoleRotateConfig{
+		Owner: "group", Repo: "project", Client: &commitThenErrorSecretClient{Client: fc}, Tokens: c,
+		Registry: reg, Roles: []gitlabroles.Role{gitlabroles.RoleCoder}, Force: true, Now: now,
+		ProvidedTokens: map[gitlabroles.Role]string{gitlabroles.RoleCoder: "replacement-coder-token"},
+	})
+	require.NoError(t, err)
+	require.Len(t, first.Failed, 1)
+	require.True(t, providedPublicationUnresolved(readRoleState(t, fc, gitlabroles.RoleCoder)))
+	coderWrites := func() int {
+		n := 0
+		for _, rec := range fc.CreatedSecrets {
+			if rec.Name == forge.SecretGitLabCoderToken {
+				n++
+			}
+		}
+		return n
+	}
+	return fc, c, reg, coderWrites
+}
+
+func coderHeldInProvision(result RoleProvisionResult) bool {
+	for _, f := range result.Failed {
+		if f.Role == gitlabroles.RoleCoder && strings.Contains(f.Reason, "outcome is unknown") {
+			return true
+		}
+	}
+	return false
+}
+
+// Install convergence judges operator recovery against the same role set the
+// rotation pass uses: the filter is expanded through credential reuse, and a
+// supplied credential for a role the filter excludes is never processed, so it
+// cannot release the hold.
+func TestInstallConvergenceRecoveryUsesRotationRoleSet(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
+	fc, c, reg, coderWrites := ambiguousSuppliedHoldFixture(t, now)
+	secretWrites := coderWrites()
+	base := RoleProvisionConfig{Owner: "group", Repo: "project", Client: fc, Tokens: c, Registry: reg, Now: now.Add(time.Hour)}
+
+	// A forced rotation of a role that reuses coder reaches coder's rotation.
+	cfg := base
+	cfg.ForceRotation, cfg.ForceRoles = true, []gitlabroles.Role{"deployer"}
+	reuse, err := ProvisionGitLabRoleCredentials(ctx, cfg)
+	require.NoError(t, err)
+	assert.False(t, coderHeldInProvision(reuse), "recovery through a reuse role is not rejected by convergence")
+	assert.Equal(t, secretWrites, coderWrites())
+
+	// A supplied coder credential excluded by the rotation filter is never
+	// processed, so it does not exempt coder from the hold.
+	cfg = base
+	cfg.ForceRoles = []gitlabroles.Role{gitlabroles.RolePoller}
+	cfg.ProvidedTokens = map[gitlabroles.Role]string{gitlabroles.RoleCoder: "replacement-coder-token"}
+	excluded, err := ProvisionGitLabRoleCredentials(ctx, cfg)
+	require.NoError(t, err)
+	assert.True(t, coderHeldInProvision(excluded), "a supplied credential outside the rotation filter leaves the hold in place")
+	assert.Equal(t, secretWrites, coderWrites())
+}
+
+// An explicit --gitlab-role-token wins over automatic service-account
+// convergence of an owned, managed legacy credential: convergence publishes no
+// managed credential and the rotation pass that follows enrolls the supplied
+// value even though the managed credential is fresh.
+func TestInstallSuppliedTokenWinsOverServiceAccountConvergence(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
+	fc := seededRoleClient(t, gitlabroles.RoleCoder)
+	legacy := &fakeTokens{}
+	sa := newFakeSAAPI()
+	coder, ok := gitlabroles.BuiltinRegistry().Lookup(gitlabroles.RoleCoder)
+	require.True(t, ok)
+	legacy.seed(ProjectAccessToken{ID: 3, Name: coder.Credential.TokenName, Active: true, ExpiresAt: GitLabPATExpiresAt(now), UserID: 103})
+	state := rotationStateFile{Roles: map[string]rotationRoleState{
+		string(coder.Name): {CreatedTokenIDs: []int{3}, Phase: rotationPhaseIdle, IncomingID: 3, DistributedAt: now.Add(-time.Hour).Format(time.RFC3339)},
+	}}
+	require.NoError(t, writeRotationState(ctx, fc, "group", "project", state))
+	c := ServiceAccountTokenClient{
+		SA: sa, Legacy: legacy, VerifyToken: acceptReplacementToken,
+		ManagedLegacyTokenIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+			return ManagedGitLabLegacyTokenIDs(ctx, fc, owner, repo)
+		},
+		AccountCreated: func(ctx context.Context, owner, repo string, account GitLabServiceAccount) error {
+			return RecordManagedGitLabServiceAccount(ctx, fc, owner, repo, account)
+		},
+		ManagedAccountIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+			return ManagedGitLabRoleAccountIDs(ctx, fc, owner, repo)
+		},
+		SuppliedCredentialIdentity: func(context.Context, string) (SuppliedIdentity, error) {
+			return describedCoderIdentity(777, 13), nil
+		},
+		VerifySuppliedAccess: allowSuppliedAccess,
+	}
+	provided := map[gitlabroles.Role]string{gitlabroles.RoleCoder: "supplied-coder-token"}
+	coderWrites := func() int {
+		n := 0
+		for _, rec := range fc.CreatedSecrets {
+			if rec.Name == forge.SecretGitLabCoderToken {
+				n++
+			}
+		}
+		return n
+	}
+	before := coderWrites()
+
+	result, err := ProvisionGitLabRoleCredentials(ctx, RoleProvisionConfig{
+		Owner: "group", Repo: "project", Client: fc, Tokens: c, ProvidedTokens: provided, Now: now,
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, result.Created, gitlabroles.RoleCoder, "convergence must not publish a managed credential over the supplied one")
+	assert.Equal(t, before, coderWrites())
+	for _, account := range sa.accounts {
+		assert.NotEqual(t, coder.Credential.TokenName, account.Name, "no managed service account is created for the supplied role")
+	}
+	assert.False(t, provenanceOf(readRoleState(t, fc, gitlabroles.RoleCoder)).Supplied)
+
+	rotated, err := RotateGitLabRoleCredentials(ctx, RoleRotateConfig{
+		Owner: "group", Repo: "project", Client: fc, Tokens: c,
+		Registry: gitlabroles.BuiltinRegistry(), ProvidedTokens: provided, Now: now,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, rotated.Failed)
+	assert.Contains(t, rotated.Rotated, gitlabroles.RoleCoder)
+	assert.Equal(t, before+1, coderWrites(), "the supplied credential is published")
+	assert.True(t, provenanceOf(readRoleState(t, fc, gitlabroles.RoleCoder)).Supplied, "supplied provenance is recorded")
+}
+
+// A credential supplied for one role is protected from grace cleanup run by
+// install convergence of an earlier-ordered role, even when that credential is
+// the earlier role's overdue outgoing token.
+func TestProvisionConvergenceDoesNotRevokeCredentialSuppliedForAnotherRole(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	fc := seededRoleClient(t, gitlabroles.RolePoller, gitlabroles.RoleAnalyst, gitlabroles.RoleCoder)
+	seedRepo(fc, "group", "project", "main")
+	fc.ProtectedBranchRules["group/project/main"] = maintainerOnlyRule("main")
+	legacy := &fakeTokens{}
+	sa := newFakeSAAPI()
+	const overdueID = 50
+	state := rotationStateFile{Roles: map[string]rotationRoleState{}}
+	for i, rec := range gitlabroles.BuiltinRegistry().Registrations() {
+		id := i + 1
+		legacy.seed(ProjectAccessToken{ID: id, Name: rec.Credential.TokenName, Active: true, ExpiresAt: GitLabPATExpiresAt(now), UserID: 100 + id})
+		state.Roles[string(rec.Name)] = rotationRoleState{CreatedTokenIDs: []int{id}, Phase: rotationPhaseIdle, IncomingID: id, DistributedAt: now.Format(time.RFC3339)}
+	}
+	poller := gitlabroles.BuiltinRegistry().Registrations()[0]
+	legacy.seed(ProjectAccessToken{ID: overdueID, Name: poller.Credential.TokenName, Active: true, ExpiresAt: GitLabPATExpiresAt(now), UserID: 150})
+	pollerState := state.Roles[string(poller.Name)]
+	pollerState.CreatedTokenIDs = append(pollerState.CreatedTokenIDs, overdueID)
+	pollerState.OutgoingIDs = []int{overdueID}
+	pollerState.Phase = rotationPhaseOverlapping
+	pollerState.DistributedAt = now.Add(-72 * time.Hour).Format(time.RFC3339)
+	state.Roles[string(poller.Name)] = pollerState
+	require.NoError(t, writeRotationState(ctx, fc, "group", "project", state))
+	c := ServiceAccountTokenClient{SA: sa, Legacy: legacy, VerifyToken: acceptReplacementToken, ManagedLegacyTokenIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+		return ManagedGitLabLegacyTokenIDs(ctx, fc, owner, repo)
+	}}
+	c.AccountCreated = func(ctx context.Context, owner, repo string, account GitLabServiceAccount) error {
+		return RecordManagedGitLabServiceAccount(ctx, fc, owner, repo, account)
+	}
+	c.ManagedAccountIDs = func(ctx context.Context, owner, repo string) ([]int, error) {
+		return ManagedGitLabRoleAccountIDs(ctx, fc, owner, repo)
+	}
+	c.SuppliedCredentialIdentity = func(context.Context, string) (SuppliedIdentity, error) {
+		return describedCoderIdentity(150, overdueID), nil
+	}
+	c.VerifySuppliedAccess = allowSuppliedAccess
+
+	result, err := ProvisionGitLabRoleCredentials(ctx, RoleProvisionConfig{
+		Owner: "group", Repo: "project", Client: fc, Tokens: c, Now: now,
+		ProvidedTokens: map[gitlabroles.Role]string{gitlabroles.RoleCoder: "supplied-coder-token"},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, legacy.revoked, overdueID, "the credential supplied for another role must not be revoked by convergence cleanup")
+	assert.NotEmpty(t, result.Created, "the earlier role still converges")
+}
+
+// A managed account that is positively absent from the complete inventory must
+// not fail provisioning when the operator supplied a replacement for that role:
+// the CLI skips rotation after a provisioning failure, so the failure would
+// leave the supplied credential unable to recover the role. Without a supplied
+// credential the absence is still reported, and an unreadable inventory still
+// fails closed even with one.
+func TestInstallConvergenceDeletedManagedAccountLetsSuppliedReplacementRecover(t *testing.T) {
+	ctx := context.Background()
+	rec, _ := gitlabroles.BuiltinRegistry().Lookup(gitlabroles.RolePoller)
+	for _, tc := range []struct {
+		name       string
+		supplied   bool
+		listErr    error
+		wantFailed bool
+	}{
+		{name: "supplied replacement", supplied: true},
+		{name: "no supplied replacement", wantFailed: true},
+		{name: "unreadable inventory", supplied: true, listErr: errors.New("offline"), wantFailed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := forge.NewFakeClient()
+			sa := newFakeSAAPI()
+			sa.failList = tc.listErr
+			require.NoError(t, writeRotationState(ctx, fc, "g", "p", rotationStateFile{Roles: map[string]rotationRoleState{"poller": {ManagedUserID: 501, IncomingID: 1}}}))
+			cfg := RoleProvisionConfig{Owner: "g", Repo: "p", Client: fc, Tokens: ServiceAccountTokenClient{SA: sa, Legacy: &fakeTokens{}}}
+			if tc.supplied {
+				cfg.ProvidedTokens = map[gitlabroles.Role]string{gitlabroles.RolePoller: "replacement-poller-token"}
+			}
+			result := RoleProvisionResult{}
+			convergeInstalledServiceAccount(ctx, cfg, rec, time.Now(), true, &result)
+			if tc.wantFailed {
+				assert.Len(t, result.Failed, 1)
+			} else {
+				assert.Empty(t, result.Failed)
+				require.Len(t, result.Diagnostics, 1)
+				assert.Contains(t, result.Diagnostics[0], "no longer present")
+			}
+			assert.Empty(t, sa.accounts)
+			state, _, err := loadRotationState(ctx, fc, "g", "p")
+			require.NoError(t, err)
+			assert.Equal(t, 501, state.Roles["poller"].ManagedUserID, "ownership stays recorded")
+		})
+	}
+}
+
+// After a supplied enrollment completes, the historical managed account stays
+// recorded as cleanup provenance. Its positive absence from the complete
+// inventory must not make later ordinary installs fail; a role with only
+// managed provenance still reports the absence, and an unreadable inventory
+// still fails closed.
+func TestInstallConvergenceDeletedManagedAccountDoesNotBlockEnrolledSupplied(t *testing.T) {
+	ctx := context.Background()
+	rec, _ := gitlabroles.BuiltinRegistry().Lookup(gitlabroles.RolePoller)
+	for _, tc := range []struct {
+		name       string
+		state      rotationRoleState
+		listErr    error
+		wantFailed bool
+	}{
+		{name: "enrolled supplied", state: rotationRoleState{ManagedUserID: 501, Supplied: true, SuppliedUserID: 777, Phase: rotationPhaseIdle, DistributedAt: "2026-10-01T00:00:00Z"}},
+		{name: "managed only", state: rotationRoleState{ManagedUserID: 501, IncomingID: 1}, wantFailed: true},
+		{name: "unreadable inventory", state: rotationRoleState{ManagedUserID: 501, Supplied: true, SuppliedUserID: 777}, listErr: errors.New("offline"), wantFailed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := forge.NewFakeClient()
+			sa := newFakeSAAPI()
+			sa.failList = tc.listErr
+			require.NoError(t, writeRotationState(ctx, fc, "g", "p", rotationStateFile{Roles: map[string]rotationRoleState{"poller": tc.state}}))
+			cfg := RoleProvisionConfig{Owner: "g", Repo: "p", Client: fc, Tokens: ServiceAccountTokenClient{SA: sa, Legacy: &fakeTokens{}}}
+			result := RoleProvisionResult{}
+			convergeInstalledServiceAccount(ctx, cfg, rec, time.Now(), true, &result)
+			if tc.wantFailed {
+				assert.Len(t, result.Failed, 1)
+			} else {
+				assert.Empty(t, result.Failed)
+			}
+			state, _, err := loadRotationState(ctx, fc, "g", "p")
+			require.NoError(t, err)
+			assert.Equal(t, 501, state.Roles["poller"].ManagedUserID, "ownership stays recorded")
+		})
+	}
+}
+
+// Status must agree with install: after a supplied enrollment completes, the
+// historical managed account stays recorded as cleanup provenance, so its
+// positive absence from a complete inventory is not a readiness failure. A
+// role with only managed provenance still reports the absence, and an
+// unreadable inventory still fails closed.
+func TestServiceAccountStatusDeletedManagedAccountDoesNotBlockEnrolledSupplied(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     rotationRoleState
+		listErr   error
+		wantDrift bool
+	}{
+		{name: "enrolled supplied", state: rotationRoleState{ManagedUserID: 501, Supplied: true, SuppliedUserID: 777, Phase: rotationPhaseIdle, DistributedAt: "2026-10-01T00:00:00Z"}},
+		{name: "managed only", state: rotationRoleState{ManagedUserID: 501, IncomingID: 1}, wantDrift: true},
+		{name: "unreadable inventory", state: rotationRoleState{ManagedUserID: 501, Supplied: true, SuppliedUserID: 777}, listErr: errors.New("offline"), wantDrift: true},
+		// A supplied-to-managed replacement whose publish may have committed
+		// keeps the Supplied marker until completion, so the new managed
+		// account may back the installed credential.
+		{name: "replacement distributing", state: rotationRoleState{ManagedUserID: 501, IncomingID: 9, Supplied: true, SuppliedUserID: 777, Phase: rotationPhaseDistributing}, wantDrift: true},
+		{name: "replacement failed", state: rotationRoleState{ManagedUserID: 501, IncomingID: 9, Supplied: true, SuppliedUserID: 777, Phase: rotationPhaseFailed, Error: "publish failed"}, wantDrift: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fc := forge.NewFakeClient()
+			sa := newFakeSAAPI()
+			sa.failList = tc.listErr
+			require.NoError(t, writeRotationState(ctx, fc, "g", "p", rotationStateFile{Roles: map[string]rotationRoleState{"poller": tc.state}}))
+			status := &RepoStatus{GitLabRolesReady: true}
+			assert.Equal(t, tc.wantDrift, (ServiceAccountTokenClient{SA: sa}).AppendGitLabServiceAccountStatus(ctx, fc, "g", "p", status))
+			assert.Equal(t, !tc.wantDrift, status.GitLabRolesReady)
+			assert.Equal(t, tc.wantDrift, len(status.Drifts) > 0)
 		})
 	}
 }

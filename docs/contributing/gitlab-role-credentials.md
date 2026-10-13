@@ -194,24 +194,20 @@ GitLab permissions than the implementation uses.
 
 ### Project service accounts
 
-> **Status: rolling out, not active yet.** This section and
-> [Poller-owned webhook trigger token](#poller-owned-webhook-trigger-token)
-> record the target contract that
+> **Status: active.** The CLI activation change
+> ([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)) of
 > [#7772](https://github.com/fullsend-ai/fullsend/issues/7772) (originating
-> issue [#8083](https://github.com/fullsend-ai/fullsend/issues/8083)) delivers
-> as a series of small changes. The type, function, and package names below
-> (`internal/gitlablifecycle`, `repos.GitLabManagedAccountCleaner`, and
-> others) are introduced by those changes and may not exist yet. Until the
-> CLI activation change
-> ([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)) merges,
-> install provisions role project access tokens as described in
-> [Project access token names](#project-access-token-names), and rotation
-> state stays in the unversioned format. The webhook fast path stays deferred,
-> with polling retained, until the live fresh-identity Poller handoff
-> ([#8243](https://github.com/fullsend-ai/fullsend/issues/8243)) merges and is
-> validated.
+> issue [#8083](https://github.com/fullsend-ai/fullsend/issues/8083)) wires the
+> live `ServiceAccountTokenClient` (`newGitLabRoleTokenClient` in
+> `internal/cli/repos_gitlab_service_accounts.go`) and
+> `gitlablifecycle.NewTriggerOwner` into install, rotation, status and
+> uninstall, and writes rotation state as version 2. The webhook fast path
+> stays deferred, with polling retained, until the live fresh-identity Poller
+> handoff ([#8243](https://github.com/fullsend-ai/fullsend/issues/8243)) merges
+> and is validated: the live `TriggerOwner` does not implement
+> `repos.GitLabPollerQuiescenceVerifier`.
 
-Once activated, a newly provisioned or rotated own-credential role is a
+A newly provisioned or rotated own-credential role is a
 **project service account** named after the token name above (for example
 `fullsend-poller`). Its credential is a personal access token of that
 service account with the same name, `api` scope, and expiry. The
@@ -240,17 +236,39 @@ current Poller.
 - Unflagged install reconciles a positively identified managed legacy role
   onto a service account using the existing rotation/recovery state. It
   preserves administrator-supplied identities and does not require a separate
-  migration command or runtime compatibility gate. Replacement credentials
+  migration command or runtime compatibility gate. An installed credential
+  with no recorded provenance is fail-static: it is left untouched with a
+  diagnostic, never migrated automatically. Operators re-adopt it by
+  following the CLI reference's
+  [re-adoption runbook](../cli/repos.md#re-adopting-a-role-credential-of-unknown-provenance). Replacement credentials
   are authenticated and checked for identity, `api` scope and effective
   Developer access before publication. Rotation of an existing role mints the
   new credential on a service account. The old project access token is
-  revoked after the usual 24-hour grace.
+  revoked after the usual 24-hour grace; this does not apply when you switch
+  the role to a supplied credential, which leaves earlier managed tokens usable
+  until they expire or are revoked manually.
 
 A failed credential-publication response does not prove the write failed.
 The forge secret interface cannot read values back, so rotation keeps the
 incoming credential active and retains recovery state, invalidating any prior
-supplied distribution proof. The next rotation replaces it safely and
-preserves the usual grace period before revocation.
+supplied distribution proof. For a managed replacement the next rotation
+replaces it safely and preserves the usual grace period before revocation.
+
+An interrupted or ambiguous publication of an administrator-supplied
+replacement behaves differently, because the installed value may be the
+supplied one and an automatic managed replacement would overwrite it.
+`providedPublicationUnresolved` (which also covers the owner-unresolved
+variants) holds automatic replacement: install convergence and unforced
+rotation fail closed for that role. The administrator recovers by re-enrolling
+with `--gitlab-role-token` or forcing rotation with `--rotate-gitlab-roles`.
+When the same install requests that recovery, convergence defers to the
+rotation pass instead of failing provisioning. "Requests" is judged against the
+role set rotation processes: the `--rotate-gitlab-role` filter expanded through
+credential reuse (`wantedRoles`), so a supplied credential for a role the
+filter excludes does not release the hold. An explicit supplied credential for
+a role in that set also wins over automatic service-account convergence, and
+the rotation pass enrolls it over a managed credential even when that
+credential is fresh.
 
 `repos uninstall` revokes service-account tokens with the other role
 tokens, then deletes accounts whose IDs are durably recorded as managed.
@@ -308,29 +326,100 @@ implement domain reconciliation. Enrolled supplied PATs shared by multiple
 roles produce one inventory snapshot per matching role reference, so reporting
 and unforced rotation retain every enrolled role.
 
-Provisioning and rotation accept one `ProvidedRoleCredential` per registered
-role, bundling the sensitive token with its optional resolved owner and token
-IDs. Neither credential values nor remote error text are reported. Ownership
-lookup errors intentionally expose only the unresolved-ownership sentinel:
-redacted remote causes are flattened so an inner 403/404 cannot authorize
-legacy fallback or imply that managed accounts are absent.
+Provisioning and rotation accept administrator-supplied credentials as
+`ProvidedTokens` (role name to token value). Enrollment authenticates the
+supplied value through the client's `SuppliedCredentialIdentity` callback and
+records the credential's owner, token ID and the owner's permanent exclusion
+in rotation state, alongside the distribution proof, while the credential still
+authenticates. Enrollment is an explicit supplied transition: it replaces any
+rotation-state entry the role still holds (a managed one, or a supplied one left
+when the credential variable was removed), records the new credential's own
+owner and keeps every previous owner excluded, while creation records and
+earlier exclusions are preserved. Replacing a supplied credential with another
+supplied credential does the same. A managed replacement of a supplied
+credential clears the supplied provenance and keeps the old owner excluded. The
+project inventory lists only project access tokens and service-account tokens,
+so an unforced rotation authenticates the installed value of a supplied
+personal access token it cannot list (`InstalledRoleCredentialSelf`): one that
+authenticates and has not expired is retained rather than replaced as
+unverified, so replace it by enrolling a new credential or with a forced
+rotation; one GitLab refuses with 401, whose secret is empty, or that is
+revoked, inactive or expired is unhealthy and replaced normally; any other
+failure (outage, throttling) leaves it unverifiable, so it is left untouched
+and reported as a role failure. A client without that capability retains it
+unverified. At enrollment, `SuppliedCredentialIdentity` also returns the
+authenticated token's name, scopes, expiry and state, and enrollment rejects
+(`validateSuppliedCredentialPolicy`) a credential that is not active, does not
+carry the role's token name and exactly the minted scopes, or has no expiry, an
+elapsed expiry or one beyond the permitted lifetime, before recording state or
+writing the secret, so the installed credential is never replaced by an
+unsuitable one. An
+expired or revoked credential therefore keeps its owner excluded and can be
+replaced normally, and `SuppliedTokenIDs` reports only the enrolled token under
+the role's token name. A credential enrolled earlier without a recorded owner is
+attributed by authenticating with the installed secret
+(`TriggerOwner.SuppliedAccountIDs`, `CurrentSuppliedAccountIDs`), and rotation
+persists that owner through `AttributeSuppliedOwners` before it can replace
+anything; failure to attribute or persist it fails closed. An owner whose
+enrolled token ID was not recorded keeps every one of its tokens excluded.
+`TestNewGitLabRoleTokenClient_SuppliedCredentialAttribution` and
+`TestProvisionGitLabRoleCredentials_EnrollmentRecordsSuppliedIdentity` cover
+this. Neither credential values nor remote error text are reported.
+Ownership lookup errors intentionally expose only the unresolved-ownership
+sentinel: redacted remote causes are flattened so an inner 403/404 cannot
+authorize legacy fallback or imply that managed accounts are absent.
 
-Rotation-state writes use schema version 1 once the writer flips in
-[#8242](https://github.com/fullsend-ai/fullsend/issues/8242); the tolerant
-reader ([#8233](https://github.com/fullsend-ai/fullsend/issues/8233)) lands
-first. Version 1 state adds managed service-account IDs and supplied-account
+Rotation-state writes use schema version 2
+([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)). Version 2
+state adds managed service-account IDs and supplied-account
 ownership/exclusions to the `FULLSEND_GITLAB_ROLE_ROTATION` document and still
-never stores token values. Unversioned state remains readable; unsupported
-versions fail closed and are not rewritten. The marker cannot protect against
-older CLIs that ignore it; mixed-version lifecycle operations remain
-unsupported. If ownership recording fails immediately after account creation,
+never stores token values. Unversioned and version 1 state remain readable;
+unsupported versions fail closed and are not rewritten. Version 1 is never
+written: CLIs built with the tolerant reader
+([#8233](https://github.com/fullsend-ai/fullsend/issues/8233)) accept it but
+ignore the ownership fields during outgoing-token selection and grace cleanup.
+They reject version 2 before touching any credential, and CLIs older still
+reject the unknown `version` key, so older rotation and status operations,
+which consult rotation state before mutating, fail closed. Older provisioning
+publishes missing supplied or minted secrets before recording distribution
+state, and older uninstall cleanup never reads rotation state: it deletes
+identity variables and revokes active role-named project tokens, supplied ones
+included, so those paths are not protected by the version gate.
+`gitlab_roles_rotate_version_gate_test.go` runs the older reader against a
+written document with a supplied PAT. It proves the older reader's rotation
+never selects, schedules or revokes that PAT, and never rewrites the
+document. Operators must still upgrade every CLI that runs install, converge
+or uninstall.
+
+Enrollment fails the role, recording nothing and publishing nothing, when the
+supplied value cannot be authenticated (a rejection or a transient failure),
+when a client that can describe credentials returns an identity without token
+metadata, when it violates the role's credential policy, or when the optional
+`VerifySuppliedAccess` callback rejects its owner's effective project access
+(the live client requires exactly Developer). A client that cannot authenticate
+supplied credentials at all, as in library use, resolves no owner: the
+credential is then recorded as supplied without an owner, and `rotateProvided`
+keeps that state when a replacement write fails ambiguously, because the
+installed value cannot be read back.
+There is no automatic re-enrollment from it: attribution authenticates with the
+installed credential, and project-wide exclusions are resolved before
+`ProvidedTokens` is processed, so `--gitlab-role-token` alone cannot recover a
+credential that no longer authenticates. The failure diagnostics
+(`ownerlessSuppliedRecoveryHint`) and the runbook in
+[`docs/cli/repos.md`](../cli/repos.md#recovering-a-supplied-credential-recorded-without-an-owner)
+direct the administrator to set a working credential in the role variable by
+hand and rerun install. On that rerun, owner attribution only records the
+owner: for an ambiguous replacement it does not release the
+`providedPublicationUnresolved` hold, and resuming the normal lifecycle still
+requires re-enrollment with `--gitlab-role-token` or a forced rotation.
+If ownership recording fails immediately after account creation,
 install requests deletion of that newly created ID on a detached cleanup
 context before any membership or PAT is issued. It never deletes an
 unverified same-named account; failed deletion is reported for administrator
 cleanup.
 
 Legacy project-token creation ownership is tracked by `created_token_ids` in
-version 1 role state. Only IDs returned by token creation are recorded there;
+version 2 role state. Only IDs returned by token creation are recorded there;
 `incoming_id`, `outgoing_ids`, token names, and distribution backfill alone do
 not authorize legacy convergence or revocation. Unverified same-named legacy
 tokens are preserved and require manual recovery or explicit supplied
@@ -446,7 +535,7 @@ and no further generation starts until retirement completes.
 > compliant existing triggers can still be reused. Revocation and empty
 > resource inventories alone do not prove that requests have drained.
 
-This lifecycle is part of the rolling-out contract described under
+This lifecycle is part of the contract described under
 [Project service accounts](#project-service-accounts). The target way to
 obtain a Poller-owned trigger is the fresh replacement identity described in
 [Poller identity generations](#poller-identity-generations), which never
@@ -973,22 +1062,32 @@ still `ErrAuthFailed`.
 
 **Administrator-provided replacement does not auto-revoke leftovers.**
 `--gitlab-role-token` (free-tier enrollment or a custom `own`
-credential) stores the supplied value directly. Its own GitLab token ID
-cannot be resolved from the value alone, so it cannot be excluded from
-the same-named project access tokens GitLab already lists — recording
-all of them for grace revocation risks revoking the just-enrolled
-replacement itself. Enrolling a replacement this way therefore does not
-schedule any other active same-named PAT for revocation; if one exists,
-confirm it is not the replacement and revoke it manually.
+credential) stores the supplied value directly. Enrollment resolves the
+supplied credential's owner and token ID through
+`SuppliedCredentialIdentity` and records the owner's permanent exclusion,
+so the enrolled credential is never grace-revoked as a same-named
+leftover. Enrolling a replacement this way still does not schedule any
+other active same-named PAT for revocation; if one exists, confirm it is
+not the replacement and revoke it manually. Previously tracked managed
+tokens stay recorded as outgoing obligations and remain usable: the 24-hour
+grace cleanup applies only after a later managed replacement runs, so the
+supplied-switch path never retires them automatically. Enrollment also
+recovers a role whose recorded `ManagedUserID` account was deleted: with a
+complete inventory that positively lacks the account, convergence defers to the
+supplied enrollment, and once enrollment completes the absent historical
+account (kept as cleanup provenance) no longer blocks ordinary installs or
+forced rotations. An unreadable inventory still fails closed.
 
-**Identity continuity.** GitLab assigns a new bot user per PAT, so the
-GitLab user ID changes on replacement. Fullsend preserves the role
-name, token name (`fullsend-poller`, `fullsend-role-<name>`), CI
-variable, and capability set. Rotation state records the old and new
-token IDs (never secret values) for internal use by
-`RotateGitLabRoleCredentials`: serialization between runs, crash
+**Identity continuity.** Rotating a service-account PAT keeps the
+account's GitLab user ID; only a legacy project access token gets a new
+bot user per PAT, so the user ID changes on replacement there. Fullsend
+preserves the role name, token name (`fullsend-poller`,
+`fullsend-role-<name>`), CI variable, and capability set. Rotation state
+records the old and new token IDs (never secret values) for internal use
+by `RotateGitLabRoleCredentials`: serialization between runs, crash
 recovery, and grace-period revocation tracking during `repos install`.
-It is not read or displayed by `repos status`.
+`repos status` also reads it (`AppendGitLabServiceAccountStatus`) to
+report service-account lifecycle state.
 
 **Diagnostics.** `DiagnoseLifecycle` classifies each role as `ok`,
 `expiring`, `expired`, `revoked`, `unverified`, `overlapping`, or
@@ -1010,7 +1109,7 @@ Leave these to the follow-up issues.
 | [#7558](https://github.com/fullsend-ai/fullsend/issues/7558) | **Implemented.** `repos uninstall` removes GitLab role-identity state: the registry, rotation document, built-in and custom role secrets, and matching project access tokens. |
 | [#7559](https://github.com/fullsend-ai/fullsend/issues/7559) | **Implemented.** Shared-token fallback and the public migration/cutover/rollback controls are removed; old state is ignored by runtime. |
 | [#7502](https://github.com/fullsend-ai/fullsend/issues/7502) | **Implemented.** [ADR 0067](../ADRs/0067-gitlab-cron-polling-event-dispatch.md) records that the three-role decision in [#7424](https://github.com/fullsend-ai/fullsend/issues/7424) / [#7496](https://github.com/fullsend-ai/fullsend/issues/7496) supersedes its shared-identity assumption and permits registered custom roles as an extension. Operator-facing lifecycle is in [configuring-gitlab.md](../guides/getting-started/configuring-gitlab.md#role-identity-model-and-credential-lifecycle). |
-| [#8083](https://github.com/fullsend-ai/fullsend/issues/8083) | **In progress** under [#7772](https://github.com/fullsend-ai/fullsend/issues/7772). Role service-account provisioning, install reconciliation, rotation/recovery, status/drift, ownership-gated uninstall cleanup, and the Poller-owned trigger lifecycle are delivered as a series of small changes; none is active until CLI activation ([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)) merges. The webhook fast path stays deferred until the live handoff ([#8243](https://github.com/fullsend-ai/fullsend/issues/8243)) merges, and live acceptance validation, including GitLab.com Free and actual webhook/role-job execution, remains required. See [Project service accounts](#project-service-accounts). |
+| [#8083](https://github.com/fullsend-ai/fullsend/issues/8083) | **In progress** under [#7772](https://github.com/fullsend-ai/fullsend/issues/7772). Role service-account provisioning, install reconciliation, rotation/recovery, status/drift, and ownership-gated uninstall cleanup are active: CLI activation ([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)) wires the service-account lifecycle into the CLI. The Poller-owned trigger token lifecycle and the webhook fast path stay deferred until the live handoff ([#8243](https://github.com/fullsend-ai/fullsend/issues/8243)) merges, and live acceptance validation, including GitLab.com Free and actual webhook/role-job execution, remains required. See [Project service accounts](#project-service-accounts). |
 | [#7931](https://github.com/fullsend-ai/fullsend/issues/7931) | **Implemented.** The `FULLSEND_GITLAB_ROLE_MIGRATION` gate constant, the cutover mechanism that retired a leftover shared credential during install, and the uninstall cleanup of that leftover secret and its project access token are all removed. Automated cleanup for a repository installed before the role-only rollout is intentionally not preserved; that repository may require manual cleanup. |
 
 ## Credential-routing security checklist
