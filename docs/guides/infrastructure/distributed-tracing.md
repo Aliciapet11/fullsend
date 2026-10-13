@@ -96,8 +96,9 @@ or spelled that way which a pattern also recognises — in one of those
 contexts, in a connection string, or by its own prefix — is masked by
 that pattern, and shows what the pattern's mask shows. A tool call loses
 its `summary` when redaction found a secret in its arguments, the dropped
-members included, or stripped an escape sequence or tag characters from
-them: the parser cut the summary out of them before anything scanned it,
+members included, stripped an escape sequence or tag characters from
+them, or could not judge them at all (invalid UTF-8 or the replacement
+character): the parser cut the summary out of them before anything scanned it,
 so the secret could be there as a beginning. Where a runtime reports a summary and no
 arguments (pi, codex, OpenCode), its parser has already run the patterns
 over the summary and, for pi and codex, cut it: a value that straddles a
@@ -136,9 +137,11 @@ dropped — scanned first, so a secret in them still counts — and the part
 is marked `fullsend.truncated`. The kept members are decoded, redacted
 one by one and encoded again, so key order, spacing and escapes are not
 the stream's; a string a terminal escape sequence or tag characters were
-stripped from, or that holds invalid UTF-8, is masked whole, since the
-stripping can leave most of a token and a later write would join the
-halves of a value an invalid byte splits.
+stripped from, or that holds invalid UTF-8 or the replacement character
+a lossy decode leaves (U+FFFD), is masked whole, since the
+stripping can leave most of a token, a later write would join the
+halves of a value an invalid byte splits, and no pattern spans the
+replacement character.
 
 On a retry iteration under `validation_loop.feedback_mode: append`, the
 prompt the runner composed — its fixed framing around the previous
@@ -157,8 +160,8 @@ which sees the runtime's stream, not its API requests.
 **Redaction and size:** every part passes through security redaction
 (runner environment values, Unicode normalization, secret masking, then
 runner environment values again; a string the normalizer stripped an
-escape sequence or tag characters from, or that holds invalid UTF-8, is
-masked whole) before reaching the span. What
+escape sequence or tag characters from, or that holds invalid UTF-8 or
+the replacement character, is masked whole) before reaching the span. What
 that guarantees, and its four named limits, is stated in the
 [developer guide](../dev/tracing.md) beside the test that checks it.
 Content is bounded at 256 KiB per iteration — each tool result at 8 KiB,
@@ -177,8 +180,8 @@ Truncation is marked via `fullsend.content.truncated` on the span and
 its tail; arguments over theirs, or not a complete JSON object, are
 dropped whole — a cut object is not JSON — and the marked `tool_call`
 part keeps its `id`, name and summary — not the summary when redaction
-found a secret in the arguments or stripped an escape sequence or tag
-characters from them. A member outside the recorded list (above) is
+found a secret in the arguments, stripped an escape sequence or tag
+characters from them, or could not judge them at all. A member outside the recorded list (above) is
 dropped and the part marked the same way, its listed members kept.
 Arguments also go, charged and marked, when the call's name redacts to
 nothing; that part survives only if it has a summary. So

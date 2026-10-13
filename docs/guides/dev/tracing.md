@@ -237,7 +237,9 @@ ends at the next letter, so it can take a token's first letter, and a
 title code's payload is text no pattern sees, so nothing cut from such a
 string can be trusted, and no scan of it as written can stand in; so is a
 string holding invalid UTF-8, since the span and attribute writers would
-join the halves of a value such a byte splits) — at assembly (redaction runs
+join the halves of a value such a byte splits, or the replacement
+character a lossy decode leaves in its place, which splits a value the
+same way) — at assembly (redaction runs
 before the size budget — truncating first could split a secret past
 recognition), enforces a 256 KiB ordered-suffix budget (the ending survives — the
 final answer is what consumers judge) plus an 8 KiB per-tool-result
@@ -270,10 +272,14 @@ string walked; a known secret is one a `SecretRedactor` pattern matches, or
 a runner env or provider-only env value the literal pass holds.
 `TestRedaction_NoSecretSurvivesAnyWrapping` (`internal/cli`) states it and
 checks it over every surface (text, names, summaries, arguments on each
-path, results, the input message, span names and ids) and every wrapping a
-review has constructed so far — terminal escapes before, around and inside
-a secret, repeated and paired secrets, zero-width, bidi, tag, NUL and
-variation-selector characters inside it, compatibility forms, and noise.
+path, results, the input message, span names and ids, and a Claude call
+with the summary the parser derives from it) and every wrapping a review
+has constructed so far — terminal escapes before, around and inside a
+secret, repeated and paired secrets, zero-width, bidi, tag, NUL and
+variation-selector characters inside it, an invalid byte or the
+replacement character inside it, an invalid byte after it with the
+secret straddling the parser's summary cut, compatibility forms, and
+noise, inside the record and across the feedback cut.
 Four limits are named there and here, and nowhere else: an env value
 written in compatibility (fullwidth) forms, since the normalizer rewrites
 it and the literal pass matches only what the env has; a secret split
@@ -303,7 +309,10 @@ string is (above). Discarded content is redacted
 first, here as everywhere: a dropped member is scanned as text — the
 decoded string, or the compact encoding of an object or an array — so a
 secret in a file body still counts, and costs the summary as a secret
-found anywhere in the arguments does. Arguments that are not one JSON
+found anywhere in the arguments does; so do arguments that could not be
+judged at all — stripped, or holding invalid UTF-8 or the replacement
+character — since the summary was cut from a member no scan saw whole.
+Arguments that are not one JSON
 object are scanned as text and dropped whole, charged; so are kept
 members whose encoding exceeds `maxToolArgumentsBytes`, charged as
 encoded. A call the stream reports without a name carries no arguments.

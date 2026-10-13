@@ -86,8 +86,9 @@ const maxToolResultBytes = 8 * 1024
 // their redacted encoding. Arguments over it are dropped whole, not cut:
 // a cut object is not JSON, and the part keeps its id, name and summary
 // (not the summary when redaction found a secret in the arguments,
-// stripped an escape sequence or tag characters from them, or masked a
-// document there it could not judge; see Handle).
+// stripped an escape sequence or tag characters from them, or could not
+// judge them at all — invalid UTF-8 or the replacement character; see
+// Handle).
 // Like maxToolResultBytes it exists because the total above is small;
 // what blocks raising it is the same unproven backend ceiling named on
 // maxContentBytes.
@@ -426,10 +427,11 @@ func (c *contentCollector) Handle(evt agentruntime.AgentEvent) {
 			if slices.ContainsFunc(c.findings[scanned:], revealing) {
 				// The parser cut the summary out of these arguments
 				// before anything scanned it, so a secret found in them,
-				// or stripped with an escape sequence or tag characters,
-				// can be in the summary as a beginning that neither the
-				// literal pass nor a pattern matches, nor the normalizer
-				// strips once its terminator is cut.
+				// stripped with an escape sequence or tag characters, or
+				// never judged (invalid UTF-8 or the replacement
+				// character), can be in the summary as a beginning that
+				// neither the literal pass nor a pattern matches, nor the
+				// normalizer strips once its terminator is cut.
 				p.Summary = ""
 			}
 		}
@@ -755,20 +757,23 @@ func (c *contentCollector) redact(text string, findings *[]security.Finding) str
 // mask shows; and a value the normalizer itself rewrites is matched only as
 // the env has it. An empty result with findings means fully redacted. A
 // string the normalizer stripped an escape sequence or tag characters
-// from (stripped), or that holds invalid UTF-8, is masked *** whole.
+// from (stripped), or that holds invalid UTF-8 or the replacement
+// character a lossy decode leaves, is masked *** whole.
 func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text string, findings *[]security.Finding) string {
 	if text == "" {
 		return text
 	}
-	if !utf8.ValidString(text) {
+	if strings.ContainsRune(text, utf8.RuneError) { // true for an invalid byte sequence too
 		// An invalid byte splits a value as a zero-width character does,
 		// but nothing here joins it: the normalizer leaves it, no pattern
 		// spans it, the literal pass needs the value whole — and the span
 		// and attribute writers' ToValidUTF8 would join the halves after
-		// this pass. Masked whole, as every string the normalizer stripped
-		// something from is.
+		// this pass. The replacement character is the mark a lossy decode
+		// leaves where such a byte was (the parser's summary, the stream
+		// path's partial_json), and splits a value the same way. Masked
+		// whole, as every string the normalizer stripped something from is.
 		*findings = append(*findings, security.Finding{Scanner: "unicode_normalizer", Name: "invalid_utf8", Severity: "medium",
-			Detail: "invalid UTF-8 inside the string; masked whole", Position: -1})
+			Detail: "invalid UTF-8, or the replacement character a lossy decode leaves, inside the string; masked whole", Position: -1})
 		return "***"
 	}
 	text = replaceEnv(runnerEnv, text, findings)
@@ -834,9 +839,9 @@ var recordedArguments = map[string]bool{
 // wire's. A kept number is scanned as its digits — a runner env value
 // can be sent as one — and stays a number when nothing was replaced.
 // Text that is not one JSON object (see ToolUseEvent.Arguments), or
-// carries anything but white space after it, or holds invalid UTF-8,
-// cannot be walked that way: it is scanned as text so its findings count,
-// then dropped whole and charged.
+// carries anything but white space after it, or holds invalid UTF-8 or
+// the replacement character, cannot be walked that way: it is scanned as
+// text so its findings count, then dropped whole and charged.
 // So are arguments whose encoding exceeds maxToolArgumentsBytes, charged
 // as encoded. A dropped member is charged as the redacted text it was
 // scanned as.
@@ -844,10 +849,12 @@ func (c *contentCollector) toolArguments(args string) (json.RawMessage, bool) {
 	if strings.TrimSpace(args) == "" {
 		return nil, false
 	}
-	if !utf8.ValidString(args) {
-		// The decoder would coerce an invalid byte to a visible U+FFFD,
-		// and a value it splits would reach the record in halves no pattern
-		// spans. Scanned as text — which masks it whole — and dropped.
+	if strings.ContainsRune(args, utf8.RuneError) { // true for an invalid byte sequence too
+		// The decoder would coerce an invalid byte to a visible U+FFFD —
+		// or the stream path already has — and a value it splits would
+		// reach the record in halves no pattern spans. Scanned as text,
+		// which masks it whole and clears the summary (revealing), and
+		// dropped.
 		c.evicted += len(c.redact(args, &c.findings))
 		return nil, true
 	}
@@ -923,10 +930,13 @@ func decodeJSON(s string) (any, error) {
 	return v, nil
 }
 
-// revealing reports a finding that shows a secret was there: any but the
-// normalizer's, and the normalizer's stripping of content.
+// revealing reports a finding that costs a call its summary: any but the
+// normalizer's, which shows a secret was there; the normalizer's stripping
+// of content; and invalid UTF-8, after which the arguments were not judged
+// at all — and a summary is cut from a member only that judgement sees
+// whole.
 func revealing(f security.Finding) bool {
-	return f.Scanner != "unicode_normalizer" || stripped(f)
+	return f.Scanner != "unicode_normalizer" || stripped(f) || f.Name == "invalid_utf8"
 }
 
 // stripped reports the normalizer's removal of an escape sequence or of

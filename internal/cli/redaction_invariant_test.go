@@ -156,6 +156,8 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 		{"tag characters every four bytes", func(a, _ secret) string { return tags(a) }, none, false},
 		{"NUL inside", func(a, _ secret) string { return insert(a, 5, "\x00") }, none, false},
 		{"invalid byte inside the body", func(a, _ secret) string { return insert(a, 1, "\xff") }, none, false},
+		{"replacement character inside the body", func(a, _ secret) string { return insert(a, 1, "\ufffd") }, none, false},
+		{"invalid byte after the body, secret straddling the summary cut", func(a, _ secret) string { return noise(4, 100) + " " + a.text + " \xff" }, none, false},
 		{"variation selector inside", func(a, _ secret) string { return insert(a, 5, "\ufe0f") }, none, false},
 		{"fullwidth body", func(a, _ secret) string { return fullwidth(a) }, envExcluded, false},
 		{"inside 2 KiB of noise each side", func(a, _ secret) string { return noise(1, 2048) + " " + a.text + " " + noise(2, 2048) }, none, false},
@@ -279,6 +281,18 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 		})},
 		{"array under a listed member", viaCollector(func(c *contentCollector, text string) {
 			c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: "Grep", Arguments: `{"path":[` + jsonStr(text) + `]}`})
+		})},
+		{"Claude call with its derived summary", viaCollector(func(c *contentCollector, text string) {
+			// As the Claude parser derives a Bash summary: the member decoded
+			// into a Go string (an invalid byte becomes U+FFFD) and cut to
+			// maxCommandDisplay runes.
+			var cmd string
+			_ = json.Unmarshal([]byte(jsonStr(text)), &cmd)
+			summary := cmd
+			if r := []rune(cmd); len(r) > 120 {
+				summary = string(r[:120]) + "…"
+			}
+			c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: "Bash", Summary: summary, Arguments: `{"command":` + jsonStr(text) + `}`})
 		})},
 		{"arguments that are not JSON", viaCollector(func(c *contentCollector, text string) {
 			c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: "Bash", Arguments: text})
