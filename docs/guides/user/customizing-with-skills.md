@@ -150,7 +150,10 @@ composition model and config-driven registration.
 > release. Also, entries in a single harness's `skills:` list no longer
 > replace each other when they share an identity (previously the later one
 > won); only a child entry replacing a base entry overrides, and any
-> remaining duplicate destination now fails at bootstrap.
+> remaining duplicate destination now fails at bootstrap. A skill's
+> destination name, declared or directory, must be a single path segment of
+> letters, digits, `.`, `-` and `_` that does not start with a dot; bootstrap
+> rejects any other name.
 
 ### Built-in skills
 

@@ -667,7 +667,9 @@ func resolvePathWithin(baseDir, field, p string) (string, error) {
 // cannot be read (a directory named SKILL.md). filepath.Join cleans `..`
 // in rel lexically, as the path opened later is cleaned, rather than
 // against a preceding link's target. A missing marker counts as within:
-// there is nothing to read. A nil root is never within.
+// there is nothing to read. A nil root is never within. The check and the
+// later read are separate operations: the harness tree is taken as
+// unchanged while a harness is composed.
 func markersWithin(root *os.Root, rel string) bool {
 	if root == nil {
 		return false
