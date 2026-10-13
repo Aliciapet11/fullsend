@@ -222,6 +222,12 @@ func givenMintProbe(ctx context.Context, w *world.World, forgeName, arrangement 
 
 // createMintProbeHost creates a public host repository and commits the
 // reusable probe workflow to its default branch.
+//
+// Host repositories are temporary repos named after the leased slot, not
+// leased pool slots (issue #8387 asks for probe workflows in leased repos).
+// The slot lease already prevents name collisions and cleanup deletes the
+// hosts. A temporary repo is needed because the unapproved host must not
+// be on the mint's --workflow-host-repos list, and every pool repo is.
 func createMintProbeHost(ctx context.Context, w *world.World, p *world.MintProbe, host string) error {
 	if host == w.RepoName {
 		return fmt.Errorf("mint probe: host repository %q must differ from the leased repository", host)
