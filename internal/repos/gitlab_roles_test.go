@@ -478,7 +478,7 @@ func TestProvisionGitLabRoleCredentials_ProvidedTokenEnrolled(t *testing.T) {
 		Owner:    "group",
 		Repo:     "project",
 		Client:   fc,
-		Tokens:   tokens,
+		Tokens:   verifyingTokens(tokens, describedIdentity(gitlabroles.PollerTokenName, 777, 11)),
 		Registry: gitlabroles.BuiltinRegistry(),
 		ProvidedTokens: map[gitlabroles.Role]string{
 			gitlabroles.RolePoller: provided,
@@ -891,7 +891,8 @@ func TestProvisionGitLabRoleCredentials_ErrorPaths(t *testing.T) {
 		fc := provisionClient(t)
 		fc.Errors["CreateRepoSecret"] = fmt.Errorf("denied")
 		result, err := ProvisionGitLabRoleCredentials(ctx, RoleProvisionConfig{
-			Owner: "group", Repo: "project", Client: fc, Tokens: &fakeTokens{},
+			Owner: "group", Repo: "project", Client: fc,
+			Tokens:         verifyingTokens(&fakeTokens{}, describedIdentity(gitlabroles.PollerTokenName, 777, 11)),
 			Registry:       gitlabroles.BuiltinRegistry(),
 			ProvidedTokens: map[gitlabroles.Role]string{gitlabroles.RolePoller: "provided"},
 		})

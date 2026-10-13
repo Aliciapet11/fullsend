@@ -269,7 +269,7 @@ func TestCreateProjectAccessTokenAppliesDurableExclusionsDirectly(t *testing.T) 
 	sa.nextUser = 900
 	sa.accounts = []GitLabServiceAccount{{ID: 501, Name: rec.Credential.TokenName}}
 	sa.members[501] = 40
-	c := ServiceAccountTokenClient{SA: sa, ContainmentClient: fc, ManagedAccountIDs: sa.ownedIDs}
+	c := ServiceAccountTokenClient{SA: sa, ContainmentClient: fc, ManagedAccountIDs: sa.ownedIDs, VerifyToken: acceptReplacementToken}
 
 	tok, err := c.CreateProjectAccessToken(ctx, "g", "p", rec.Credential.TokenName, gitlabroles.TokenScopes(), 30, validRolePATExpiry())
 	require.NoError(t, err)
