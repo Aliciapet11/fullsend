@@ -1235,10 +1235,11 @@ func runProviderCreateFailure(t *testing.T, provider harness.ProviderDef, extraF
 	assert.Equal(t, 41, originalExit.ExitCode())
 
 	dir = t.TempDir()
+	writePolicyFixture(t, dir)
 	files := map[string]string{
 		"agents/code.md":    "You are a coding agent.",
 		"config.yaml":       "agents:\n  - harness/code.yaml\n",
-		"harness/code.yaml": fmt.Sprintf("agent: agents/code.md\nrole: test\nproviders:\n  - %s\n", provider.Name),
+		"harness/code.yaml": fmt.Sprintf("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\nproviders:\n  - %s\n", provider.Name),
 	}
 	for path, content := range extraFiles {
 		files[path] = content
@@ -1264,6 +1265,7 @@ func TestRunAgent_ReservedProviderAndProfileCopies_CreateFailureAddsMigrationHin
 	runErr, originalErr, dir := runProviderCreateFailure(t, provider, map[string]string{
 		"harness/code.yaml": `agent: agents/code.md
 role: test
+policy: policies/base.yaml
 providers:
   - providers/github.yaml
 openshell:
@@ -1354,6 +1356,7 @@ openshell:
 		"harness/code.yaml": `base: base.yaml
 agent: agents/code.md
 role: test
+policy: policies/base.yaml
 providers:
   - providers/child-github.yaml
 openshell:
