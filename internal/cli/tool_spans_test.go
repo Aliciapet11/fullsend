@@ -434,6 +434,23 @@ func TestToolSpanTracker_ANameTheNormalizerStrippedIsMaskedWhole(t *testing.T) {
 	}
 }
 
+func TestToolSpanTracker_AnInvalidByteInsideASecretIsMaskedWhole(t *testing.T) {
+	// An invalid byte inside a token keeps every pattern from matching it,
+	// and ToValidUTF8 on the way to the span would then join the halves
+	// (an oversized result's id reaches the tracker as raw line bytes).
+	// redactText masks such a string whole; safeID drops the id.
+	token := "ghp_a" + "\xff" + strings.Repeat("r", 35)
+	tr, rec, _ := toolSpanFixture(t)
+	tr.Handle(agentruntime.ToolUseEvent{ID: token, Name: token})
+	tr.Handle(agentruntime.ToolResultEvent{ID: token})
+	spans := endedToolSpans(rec)
+	require.Len(t, spans, 1)
+	assert.NotContains(t, spans[0].Name, "rrrrrrrrrrrr")
+	attrs := toolSpanAttrs(spans[0])
+	assert.Equal(t, "***", attrs["gen_ai.tool.name"].AsString())
+	assert.NotContains(t, attrs, attribute.Key("gen_ai.tool.call.id"))
+}
+
 func TestRecordToolSpanOverflow_MarksAgentSpanOnlyWhenDropped(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))

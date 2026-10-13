@@ -2501,14 +2501,14 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// append, the previous validation failure is injected so the agent
 		// can self-correct instead of re-running blindly (#1050, #6494).
 		agentPrompt := ""
+		promptSanitized := 0
 		if iteration > 1 && feedbackEnabled && validationFeedback != "" {
-			var sanitizedFindings int
-			agentPrompt, sanitizedFindings = buildFeedbackPrompt(validationFeedback)
+			agentPrompt, promptSanitized = buildFeedbackPrompt(validationFeedback)
 			printer.StepInfo("Injecting validation feedback into agent prompt")
-			if sanitizedFindings > 0 {
+			if promptSanitized > 0 {
 				printer.StepWarn(fmt.Sprintf(
 					"Unicode sanitization altered validation feedback (%d finding(s) stripped)",
-					sanitizedFindings))
+					promptSanitized))
 			}
 		}
 
@@ -2542,7 +2542,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// tool-span tracker is per iteration for the same reason and is not
 		// gated: execute_tool spans are metadata.
 		collector := newContentCollectorIfEnabled(h.RunnerEnv)
-		collector.attachInput(agentSpan, agentPrompt)
+		collector.attachInput(agentSpan, agentPrompt, promptHidesAlterations(validationFeedback, promptSanitized))
 		toolSpans := newToolSpanTracker(tracer, agentCtx)
 		toolSpans.runnerEnv = h.RunnerEnv
 		var metrics agentruntime.RunMetrics
@@ -3872,6 +3872,18 @@ func buildFeedbackPrompt(feedback string) (string, int) {
 			feedbackDelimiterClose + "\n\n" +
 			"Fix the issues described in the validation output above and try again.",
 		sanitizedFindings
+}
+
+// promptHidesAlterations reports whether the retry prompt's telemetry copy
+// (contentCollector.attachInput) must be recorded masked whole: the
+// sanitizer stripped something (sanitized > 0), which the collector's own
+// normalizer can then no longer see — a stripped colour code can take a
+// token's first letter with it, and what is left matches no pattern — or
+// the feedback was cut at maxFeedbackBytes while it held compatibility
+// characters, so the cut may have split a secret written in those forms,
+// which only the collector's fold would have recognised whole.
+func promptHidesAlterations(feedback string, sanitized int) bool {
+	return sanitized > 0 || (len(feedback) > maxFeedbackBytes && !security.NewUnicodeNormalizer().Scan(feedback).Safe)
 }
 
 // sanitizeFeedbackUnicode strips dangerous non-rendering Unicode characters

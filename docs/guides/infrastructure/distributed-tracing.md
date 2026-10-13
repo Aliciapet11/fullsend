@@ -135,8 +135,10 @@ todo list, and any member whose value is an object or an array are
 dropped — scanned first, so a secret in them still counts — and the part
 is marked `fullsend.truncated`. The kept members are decoded, redacted
 one by one and encoded again, so key order, spacing and escapes are not
-the stream's; a string a terminal escape sequence was stripped from is
-masked whole, since the stripping can leave most of a token.
+the stream's; a string a terminal escape sequence or tag characters were
+stripped from, or that holds invalid UTF-8, is masked whole, since the
+stripping can leave most of a token and a later write would join the
+halves of a value an invalid byte splits.
 
 On a retry iteration under `validation_loop.feedback_mode: append`, the
 prompt the runner composed — its fixed framing around the previous
@@ -155,7 +157,10 @@ which sees the runtime's stream, not its API requests.
 **Redaction and size:** every part passes through security redaction
 (runner environment values, Unicode normalization, secret masking, then
 runner environment values again; a string the normalizer stripped an
-escape sequence from is masked whole) before reaching the span.
+escape sequence or tag characters from, or that holds invalid UTF-8, is
+masked whole) before reaching the span. What
+that guarantees, and its four named limits, is stated in the
+[developer guide](../dev/tracing.md) beside the test that checks it.
 Content is bounded at 256 KiB per iteration — each tool result at 8 KiB,
 each call's arguments at 8 KiB —
 kept as an ordered suffix; overflow drops the oldest content first. Those

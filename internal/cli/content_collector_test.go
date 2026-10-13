@@ -357,6 +357,56 @@ func TestContentCollector_AResultTheNormalizerStrippedIsMaskedWhole(t *testing.T
 	assert.NotContains(t, res.OutputMessages, token[4:])
 }
 
+func TestAttachInput_APromptAlteredUpstreamIsMaskedWhole(t *testing.T) {
+	// The retry prompt is sanitized and cut before it is recorded
+	// (buildFeedbackPrompt), so the recorder's own pass cannot see what
+	// the sanitizer stripped: a colour code that ate a token's first
+	// letter plus a zero-width character that kept the token from the
+	// pattern scan leave "hp_" and the body; and a token in compatibility
+	// forms straddling the cut is split before anything can fold it. Both
+	// are recorded masked whole (promptHidesAlterations). Big plain
+	// feedback is not.
+	token := "ghp_" + strings.Repeat("r", 36)
+	var fw strings.Builder
+	for _, r := range token {
+		fw.WriteRune(r + 0xfee0)
+	}
+	plain := strings.Repeat("the validator said no. ", 600) // over maxFeedbackBytes
+	for name, tc := range map[string]struct {
+		feedback string
+		masked   bool
+	}{
+		"a colour code ate the first letter of a zero-width-split token": {"\x1b[" + token[:20] + "\u200b" + token[20:], true},
+		"a fullwidth token straddling the cut":                           {strings.Repeat("x", maxFeedbackBytes-48) + " " + fw.String(), true},
+		"plain feedback over the cut":                                    {plain, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fb := redactFeedback(tc.feedback, nil)
+			prompt, sanitized := buildFeedbackPrompt(fb)
+			c := newContentCollector(maxContentBytes)
+			in := recordedInput(t, c, prompt, promptHidesAlterations(fb, sanitized))["gen_ai.input.messages"].AsString()
+			assert.NotContains(t, in, token[4:16])
+			if tc.masked {
+				assert.Contains(t, in, `"content":"***"`)
+			} else {
+				assert.Contains(t, in, "the validator said no.")
+			}
+		})
+	}
+}
+
+func TestContentCollector_WhiteSpaceArgumentsAreNone(t *testing.T) {
+	// A call whose arguments are white space only carried nothing: no
+	// arguments, nothing charged, nothing marked — as for "".
+	c := newContentCollector(4096)
+	c.Handle(agentruntime.ToolUseEvent{Name: "Bash", Summary: "ls", Arguments: " \n\t"})
+	res := c.Result("stop")
+	assert.Contains(t, res.OutputMessages, `"summary":"ls"}`)
+	assert.NotContains(t, res.OutputMessages, "arguments")
+	assert.False(t, res.Truncated)
+	assert.Zero(t, res.DroppedBytes)
+}
+
 func TestContentCollector_NamelessCallCarriesNoArgumentsAndNoCharge(t *testing.T) {
 	// The schema requires a name on a tool_call part. A nameless call is
 	// refused; its arguments must not survive alone, nor charge a part
@@ -458,7 +508,7 @@ func TestContentCollector_ReplacesRunnerEnvValuesTheNormalizerSpellsOut(t *testi
 	assert.Equal(t, 2, strings.Count(res.OutputMessages, "[REDACTED:PUSH_TOKEN]"))
 	assert.Equal(t, 2, runnerEnvFindings(res), "a value found after the pipeline counts like any other")
 
-	input := recordedInput(t, newContentCollectorIfEnabled(env), "validator said: "+fullwidth(secret))["gen_ai.input.messages"].AsString()
+	input := recordedInput(t, newContentCollectorIfEnabled(env), "validator said: "+fullwidth(secret), false)["gen_ai.input.messages"].AsString()
 	assert.Contains(t, input, "validator said: [REDACTED:PUSH_TOKEN]")
 }
 
@@ -1446,9 +1496,11 @@ func TestContentCollector_EvictsWholeOldPartsExactly(t *testing.T) {
 
 func TestContentCollector_EncodedCeilingBoundsEscapeDenseContent(t *testing.T) {
 	// The size budget counts raw bytes; JSON encoding spends six on every
-	// '<', control byte and invalid byte. The exported attribute must
-	// still fit the encoded ceiling, keeping as much of the tail as fits.
-	for _, unit := range []string{"<", "\x01", "\xff", "€\xe2\x82"} {
+	// '<' and control byte. The exported attribute must still fit the
+	// encoded ceiling, keeping as much of the tail as fits. (An invalid
+	// byte never reaches the encoder: a string holding one is masked whole
+	// by redactText.)
+	for _, unit := range []string{"<", "\x01"} {
 		t.Run(fmt.Sprintf("%q", unit), func(t *testing.T) {
 			raw := strings.Repeat(unit, 100*1024/len(unit))
 			c := newContentCollector(200_000)
@@ -1749,10 +1801,10 @@ func TestTailToRuneBoundary(t *testing.T) {
 
 // recordedInput runs attachInput on a recorded agent span and returns the
 // attributes the span ended with.
-func recordedInput(t *testing.T, c *contentCollector, prompt string) map[attribute.Key]attribute.Value {
+func recordedInput(t *testing.T, c *contentCollector, prompt string, alteredUpstream bool) map[attribute.Key]attribute.Value {
 	t.Helper()
 	_, rec, span := toolSpanFixture(t)
-	c.attachInput(span, prompt)
+	c.attachInput(span, prompt, alteredUpstream)
 	span.End()
 	ended := rec.Ended()
 	require.Len(t, ended, 1)
@@ -1761,7 +1813,7 @@ func recordedInput(t *testing.T, c *contentCollector, prompt string) map[attribu
 
 func TestAttachInput_RecordsTheRetryPromptAsOneUserMessage(t *testing.T) {
 	prompt, _ := buildFeedbackPrompt("lint: main.go:3 unused variable <x>")
-	attrs := recordedInput(t, newContentCollector(maxContentBytes), prompt)
+	attrs := recordedInput(t, newContentCollector(maxContentBytes), prompt, false)
 
 	var msgs []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(attrs["gen_ai.input.messages"].AsString()), &msgs))
@@ -1774,15 +1826,15 @@ func TestAttachInput_RecordsTheRetryPromptAsOneUserMessage(t *testing.T) {
 }
 
 func TestAttachInput_NoPromptOrNoCollectorAddsNothing(t *testing.T) {
-	assert.Empty(t, recordedInput(t, newContentCollector(maxContentBytes), ""),
+	assert.Empty(t, recordedInput(t, newContentCollector(maxContentBytes), "", false),
 		"no composed prompt (the first iteration, or feedback_mode off)")
-	assert.Empty(t, recordedInput(t, nil, "would-be prompt"), "gate off")
+	assert.Empty(t, recordedInput(t, nil, "would-be prompt", false), "gate off")
 }
 
 func TestAttachInput_RedactsAndCountsFindings(t *testing.T) {
 	secret := "ghp_" + strings.Repeat("k", 36)
 	c := newContentCollector(maxContentBytes)
-	in := recordedInput(t, c, "token "+secret+" leaked")["gen_ai.input.messages"].AsString()
+	in := recordedInput(t, c, "token "+secret+" leaked", false)["gen_ai.input.messages"].AsString()
 
 	assert.NotContains(t, in, secret)
 	assert.Contains(t, in, "leaked")
@@ -1797,7 +1849,7 @@ func TestAttachInput_WorstCaseFeedbackSharesTheEncodedCeiling(t *testing.T) {
 	// order of magnitude larger than the prompt the agent was sent.
 	prompt, _ := buildFeedbackPrompt(strings.Repeat("\uFDFA", maxFeedbackBytes))
 	c := newContentCollector(maxContentBytes)
-	in := recordedInput(t, c, prompt)["gen_ai.input.messages"].AsString()
+	in := recordedInput(t, c, prompt, false)["gen_ai.input.messages"].AsString()
 	require.Greater(t, len(in), 10*maxFeedbackBytes, "fixture must expand for this test to prove anything")
 
 	c.Handle(agentruntime.TextEvent{Text: strings.Repeat("<", maxContentBytes)}) // encodes sixfold

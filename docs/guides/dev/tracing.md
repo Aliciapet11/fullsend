@@ -193,7 +193,7 @@ result never arrives as a `tool_result`), so it appears in neither count. The na
 — the runner env literal pass on both sides of `security.OutputPipeline()`,
 the redaction span content gets — and is bounded to 256 bytes before it becomes the attribute; the
 span name keeps at most 128 bytes of it. The call id goes through the
-same `redactText` and dropped from the span on any finding — never substituted,
+same `redactText` and is dropped from the span on any finding — never substituted,
 since a masked id could collide with another call's — while the raw bounded
 id still keys the open-call map, so correlation is unaffected.
 The tracker records at most `maxToolSpansPerIteration` (1,024) spans per
@@ -235,7 +235,9 @@ sides of it (`redactText`; a string the normalizer stripped an escape
 sequence or tag characters from is masked `***` whole — a colour code
 ends at the next letter, so it can take a token's first letter, and a
 title code's payload is text no pattern sees, so nothing cut from such a
-string can be trusted, and no scan of it as written can stand in) — at assembly (redaction runs
+string can be trusted, and no scan of it as written can stand in; so is a
+string holding invalid UTF-8, since the span and attribute writers would
+join the halves of a value such a byte splits) — at assembly (redaction runs
 before the size budget — truncating first could split a secret past
 recognition), enforces a 256 KiB ordered-suffix budget (the ending survives — the
 final answer is what consumers judge) plus an 8 KiB per-tool-result
@@ -260,6 +262,26 @@ including the schema-required `finish_reason` from the iteration outcome. `attac
 content and its marker attributes on the span before either
 `finalizeAgentSpan` path can end it, so failed iterations keep their
 content.
+
+**Guarantee and limits.** For every string the record or an `execute_tool`
+span exports, no 12-byte run of a known secret's body appears, read as raw
+bytes, after the normalizer, or after decoding the record's JSON with every
+string walked; a known secret is one a `SecretRedactor` pattern matches, or
+a runner env or provider-only env value the literal pass holds.
+`TestRedaction_NoSecretSurvivesAnyWrapping` (`internal/cli`) states it and
+checks it over every surface (text, names, summaries, arguments on each
+path, results, the input message, span names and ids) and every wrapping a
+review has constructed so far — terminal escapes before, around and inside
+a secret, repeated and paired secrets, zero-width, bidi, tag, NUL and
+variation-selector characters inside it, compatibility forms, and noise.
+Four limits are named there and here, and nowhere else: an env value
+written in compatibility (fullwidth) forms, since the normalizer rewrites
+it and the literal pass matches only what the env has; a secret split
+across two parts or events; a secret that matches no pattern and is in no
+env; a summary a pi or codex parser cut before the collector saw it, since
+that cut can split a value the parser's own scan did not see joined (a
+Claude summary is cut from a member the collector scans whole). A finding
+inside the guarantee is a defect; one on this list is a documented limit.
 
 `toolArguments` records the members of a call's input that
 `recordedArguments` names — paths, patterns, commands, modes and bounds:
@@ -295,7 +317,10 @@ a retry prompt (`buildFeedbackPrompt`, under `feedback_mode: append`),
 `attachInput` redacts it with the collector's pipeline — `redactFeedback`
 ran before the feedback was sanitized and framed, and sanitizing can join
 a token that scan saw split, so the recorded copy is pattern-scanned
-again; the prompt the agent is sent is not changed, and the mask the first
+again; a prompt the composition altered in a way that pass cannot see —
+sanitized, or cut at `maxFeedbackBytes` while holding compatibility
+characters (`promptHidesAlterations`) — is recorded `***` whole; the
+prompt the agent is sent is not changed, and the mask the first
 scan leaves for a connection-string password of ten or more bytes matches
 its own pattern and counts a finding —
 and sets `gen_ai.input.messages` on the span

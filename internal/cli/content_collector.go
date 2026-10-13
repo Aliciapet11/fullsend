@@ -184,12 +184,24 @@ func attachContent(span trace.Span, res contentResult) {
 // The prompt is cut upstream (maxFeedbackBytes), not here. Folding can
 // grow the copy about elevenfold, so its encoded size is charged to
 // maxEncoded: the two content attributes of one span together stay
-// within the size maxEncodedContentBytes is proven for.
-func (c *contentCollector) attachInput(span trace.Span, prompt string) {
-	if c == nil {
+// within the size maxEncodedContentBytes is proven for. A prompt the
+// composition altered in a way this pass cannot see — sanitized, or cut
+// while holding compatibility characters (promptHidesAlterations) — is
+// recorded "***" whole.
+func (c *contentCollector) attachInput(span trace.Span, prompt string, alteredUpstream bool) {
+	if c == nil || prompt == "" {
 		return
 	}
 	text := c.redact(prompt, &c.findings)
+	if alteredUpstream {
+		// The composition stripped or cut the feedback before this pass
+		// could see it (promptHidesAlterations), so what is left can be
+		// most of a token that no longer matches: masked whole, as every
+		// string the normalizer stripped something from is (redactText).
+		c.findings = append(c.findings, security.Finding{Scanner: "unicode_normalizer", Name: "altered_upstream", Severity: "medium",
+			Detail: "the retry prompt was sanitized or cut before it was recorded; recorded masked whole", Position: -1})
+		text = "***"
+	}
 	if text == "" {
 		return
 	}
@@ -743,10 +755,21 @@ func (c *contentCollector) redact(text string, findings *[]security.Finding) str
 // mask shows; and a value the normalizer itself rewrites is matched only as
 // the env has it. An empty result with findings means fully redacted. A
 // string the normalizer stripped an escape sequence or tag characters
-// from (stripped) is masked *** whole.
+// from (stripped), or that holds invalid UTF-8, is masked *** whole.
 func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text string, findings *[]security.Finding) string {
 	if text == "" {
 		return text
+	}
+	if !utf8.ValidString(text) {
+		// An invalid byte splits a value as a zero-width character does,
+		// but nothing here joins it: the normalizer leaves it, no pattern
+		// spans it, the literal pass needs the value whole — and the span
+		// and attribute writers' ToValidUTF8 would join the halves after
+		// this pass. Masked whole, as every string the normalizer stripped
+		// something from is.
+		*findings = append(*findings, security.Finding{Scanner: "unicode_normalizer", Name: "invalid_utf8", Severity: "medium",
+			Detail: "invalid UTF-8 inside the string; masked whole", Position: -1})
+		return "***"
 	}
 	text = replaceEnv(runnerEnv, text, findings)
 	scanned := pipeline.Scan(text)
@@ -801,7 +824,7 @@ var recordedArguments = map[string]bool{
 // toolArguments returns the recorded members of a tool call's arguments
 // (recordedArguments), redacted and encoded again, and whether any of
 // the input was dropped instead. There are none to return when the event
-// carries none or JSON null.
+// carries none, white space only, or JSON null.
 //
 // The input is decoded and each kept string is redacted on its own: the
 // redactor's patterns are written for plain text, and run over serialised
@@ -811,15 +834,22 @@ var recordedArguments = map[string]bool{
 // wire's. A kept number is scanned as its digits — a runner env value
 // can be sent as one — and stays a number when nothing was replaced.
 // Text that is not one JSON object (see ToolUseEvent.Arguments), or
-// carries anything but white space after it, cannot be walked that way:
-// it is scanned as text so its findings count, then dropped whole and
-// charged.
+// carries anything but white space after it, or holds invalid UTF-8,
+// cannot be walked that way: it is scanned as text so its findings count,
+// then dropped whole and charged.
 // So are arguments whose encoding exceeds maxToolArgumentsBytes, charged
 // as encoded. A dropped member is charged as the redacted text it was
 // scanned as.
 func (c *contentCollector) toolArguments(args string) (json.RawMessage, bool) {
-	if args == "" {
+	if strings.TrimSpace(args) == "" {
 		return nil, false
+	}
+	if !utf8.ValidString(args) {
+		// The decoder would coerce an invalid byte to a visible U+FFFD,
+		// and a value it splits would reach the record in halves no pattern
+		// spans. Scanned as text — which masks it whole — and dropped.
+		c.evicted += len(c.redact(args, &c.findings))
+		return nil, true
 	}
 	v, err := decodeJSON(args)
 	if err == nil && v == nil {

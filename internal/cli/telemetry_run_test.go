@@ -1660,7 +1660,7 @@ func TestContentCapture_EndToEndFileSink(t *testing.T) {
 	prompt, _ := buildFeedbackPrompt(strings.Repeat("the validator said no. ", 500)) // cut at 10 KiB > 8192
 
 	_, span := tracer.Start(context.Background(), "agent")
-	c.attachInput(span, prompt)
+	c.attachInput(span, prompt, false)
 	res := c.Result("stop")
 	attachContent(span, res)
 	span.End()
@@ -1713,7 +1713,7 @@ func TestContentCapture_GateOffProducesNoContent(t *testing.T) {
 	c.Handle(agentruntime.TextEvent{Text: "would-be content"}) // nil-safe no-op
 
 	ctx, span := tracer.Start(context.Background(), "agent")
-	c.attachInput(span, "would-be prompt") // nil-safe no-op
+	c.attachInput(span, "would-be prompt", false) // nil-safe no-op
 	handle := iterationEventHandler(func(agentruntime.AgentEvent) {}, c, newToolSpanTracker(tracer, ctx))
 	handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: "Bash", Arguments: `{"command":"would-be arguments"}`})
 	handle(agentruntime.ToolResultEvent{ID: "toolu_01", Result: "would-be result"})
