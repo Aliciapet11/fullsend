@@ -368,6 +368,20 @@ func TestBuildRepoList(t *testing.T) {
 	assert.Equal(t, "my-org/test-repo-01,my-org/test-repo-02,my-org/test-repo-03", list)
 }
 
+func TestBuildWorkflowHostRepoList(t *testing.T) {
+	list := buildWorkflowHostRepoList("my-org", 2)
+	assert.Equal(t,
+		"my-org/test-repo-01,my-org/test-repo-01-mint-host,my-org/test-repo-02,my-org/test-repo-02-mint-host",
+		list)
+
+	// The pool repos stay workflow hosts, and only they are enrolled
+	// callers: the probe hosts must not leak into PER_REPO_WIF_REPOS.
+	for _, repo := range strings.Split(buildRepoList("my-org", 2), ",") {
+		assert.Contains(t, strings.Split(list, ","), repo)
+	}
+	assert.NotContains(t, buildRepoList("my-org", 2), MintProbeHostRepoSuffix)
+}
+
 func TestSetupCFMintPEMDir_NoPEMVars(t *testing.T) {
 	// When no TEST_*_PEM env vars are set, returns ("", nil).
 	dir, err := setupCFMintPEMDir()
