@@ -467,6 +467,10 @@ protected, masked CI/CD variable (`FULLSEND_FORGE_TOKEN`).
 > project service account by default. Trigger creation and rotation as the
 > Poller remain deferred, and cron polling remains the dispatch path.
 >
+> **Update (#8243):** trigger creation and rotation are now enabled for
+> eligible projects through a fresh Poller service-account generation; cron
+> polling remains available as the fallback dispatch path.
+>
 > **Update (#7667):** a failed `CreatePipeline` (including that 403) now
 > fails the poll cycle after persisting retry state. The permission gap
 > is unchanged; the poll job no longer reports success when no agent

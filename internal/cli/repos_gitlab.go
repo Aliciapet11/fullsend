@@ -321,8 +321,10 @@ func ensureGitLabPipelineVariableOverrideRole(ctx context.Context, client forge.
 // like setupGitLabPipelineSchedules' callers: an already-provisioned repo
 // is a no-op. rotate force-rotates the trigger token. Output names
 // variables and numeric IDs only — never the trigger token, webhook
-// secret, or webhook URL. The trigger token is owned by the Poller service
-// account; minting and rotating it stay deferred (see gitlabTriggerOwnerFor).
+// secret, or webhook URL. The trigger token is owned by a fresh Poller
+// service account generation that is verified at Developer before it is
+// published; ineligible repos defer and keep polling (see
+// gitlabTriggerOwnerFor).
 func setupGitLabWebhookFastPath(ctx context.Context, client forge.Client, printer *ui.Printer, owner, repo string, rotate, dryRun bool) error {
 	repoFullName := owner + "/" + repo
 	res, err := repos.EnsureGitLabWebhookFastPathWithTriggerOwner(ctx, client, gitlabTriggerOwnerFor(client), repos.GitLabBaseURL(client), owner, repo, rotate, dryRun)

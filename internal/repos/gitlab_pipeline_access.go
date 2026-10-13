@@ -311,6 +311,36 @@ func VerifyGitLabSuppliedPollerPipelineAccess(ctx context.Context, client forge.
 	return nil
 }
 
+// VerifyGitLabPollerProtectedPipelineAccess checks, without changing the
+// protected-branch rule, that userID may start pipelines on the project's
+// default branch under the existing branch policy. A forge without
+// protected-branch support passes; an unreadable rule fails closed.
+func VerifyGitLabPollerProtectedPipelineAccess(ctx context.Context, client forge.Client, owner, repo string, userID int) error {
+	if userID <= 0 {
+		return fmt.Errorf("Poller identity unavailable")
+	}
+	branch, rule, err := loadDefaultBranchRule(ctx, client, owner, repo)
+	if err != nil {
+		if forge.IsNotSupported(err) {
+			return nil
+		}
+		return err
+	}
+	if !PollerCanCreatePipeline(rule, []int{userID}) {
+		return &PollerPipelineAccessDeniedError{Reason: fmt.Sprintf("user ID %d cannot start pipelines on protected branch %q (%s)", userID, branch, describePipelineAccess(rule))}
+	}
+	return nil
+}
+
+// PollerPipelineAccessDeniedError reports that the existing protected-branch
+// policy does not let the account start pipelines. Reason is authored by
+// fullsend and carries no credential material.
+type PollerPipelineAccessDeniedError struct {
+	Reason string
+}
+
+func (e *PollerPipelineAccessDeniedError) Error() string { return e.Reason }
+
 // VerifyGitLabReplacementPipelineAccess establishes protected-default-branch
 // access and rereads the rule before a replacement Poller credential is published.
 func VerifyGitLabReplacementPipelineAccess(ctx context.Context, client forge.Client, owner, repo string, userID int) error {

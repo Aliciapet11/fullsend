@@ -2,6 +2,7 @@ package repos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -129,6 +130,27 @@ func TestEnsureGitLabPollerPipelineAccess_Unprotected(t *testing.T) {
 	assert.Equal(t, "main", res.Branch)
 	assert.Empty(t, res.Action)
 	assert.Empty(t, fc.GrantedProtectedBranchMergeUsers)
+}
+
+// The protected-pipeline probe of a replacement Poller generation reads the
+// branch policy and never changes it.
+func TestVerifyGitLabPollerProtectedPipelineAccess(t *testing.T) {
+	ctx := context.Background()
+	fc := forge.NewFakeClient()
+	seedRepo(fc, "group", "project", "release")
+	require.Error(t, VerifyGitLabPollerProtectedPipelineAccess(ctx, fc, "group", "project", 0))
+	require.NoError(t, VerifyGitLabPollerProtectedPipelineAccess(ctx, fc, "group", "project", 99), "an unprotected branch passes")
+
+	fc.ProtectedBranchRules["group/project/release"] = maintainerOnlyRule("release")
+	err := VerifyGitLabPollerProtectedPipelineAccess(ctx, fc, "group", "project", 99)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `user ID 99 cannot start pipelines on protected branch "release"`)
+	assert.Empty(t, fc.GrantedProtectedBranchMergeUsers, "the probe never grants access")
+
+	fc.Errors = map[string]error{"GetProtectedBranch": forge.ErrNotSupported}
+	require.NoError(t, VerifyGitLabPollerProtectedPipelineAccess(ctx, fc, "group", "project", 99))
+	fc.Errors = map[string]error{"GetProtectedBranch": errors.New("500")}
+	require.Error(t, VerifyGitLabPollerProtectedPipelineAccess(ctx, fc, "group", "project", 99))
 }
 
 func TestEnsureGitLabPollerPipelineAccess_DeveloperPreset(t *testing.T) {

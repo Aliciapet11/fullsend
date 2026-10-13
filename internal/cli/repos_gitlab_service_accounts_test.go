@@ -777,10 +777,13 @@ func TestGitlabTriggerOwnerFor(t *testing.T) {
 	to := gitlabTriggerOwnerFor(s.client("admin-token"))
 	require.NotNil(t, to)
 	assert.IsType(t, &gitlablifecycle.TriggerOwner{}, to)
-	// The live owner cannot guarantee request draining, so the webhook fast
-	// path keeps deferring trigger creation and rotation.
+	// The live owner cannot guarantee request draining, so the current Poller
+	// is never re-elevated; trigger creation and rotation go through a fresh
+	// Poller generation instead.
 	_, verifies := to.(repos.GitLabPollerQuiescenceVerifier)
 	assert.False(t, verifies, "the live trigger owner must not enable elevation")
+	_, hands := to.(repos.GitLabPollerHandoff)
+	assert.True(t, hands, "the live trigger owner hands off to a fresh Poller generation")
 }
 
 // fakeTriggerOwner identifies one managed Poller and applies membership

@@ -45,6 +45,8 @@ type handoffFake struct {
 	accountUID    int64
 	accountErr    error
 	accountCalls  int
+	prepareErrs   []error // consumed per EnsureReplacementPollerAccess call
+	prepareCalls  int
 	inventoryErrs []error // consumed per VerifyReplacementPollerCredentialsRevoked call
 	bootstrapErr  error
 	bootRevokeErr error
@@ -82,6 +84,19 @@ func (f *handoffFake) CreateReplacementPoller(context.Context, string, string) (
 		f.c.ProjectMemberAccess[f.accountUID] = forge.GitLabAccessLevelDeveloper
 	}
 	return f.accountUID, f.accountErr
+}
+
+// EnsureReplacementPollerAccess consumes prepareErrs one call at a time, so a
+// membership or branch-policy failure can be followed by a later success. It
+// is not recorded in events: the ordering tests concern the elevation steps.
+func (f *handoffFake) EnsureReplacementPollerAccess(context.Context, string, string, int64) error {
+	f.prepareCalls++
+	if len(f.prepareErrs) == 0 {
+		return nil
+	}
+	err := f.prepareErrs[0]
+	f.prepareErrs = f.prepareErrs[1:]
+	return err
 }
 
 func (f *handoffFake) VerifyTriggerStartsProtectedPipeline(context.Context, string, string, *forge.PipelineTriggerToken) error {
@@ -1109,12 +1124,46 @@ func TestLoadPollerGenerations_Validation(t *testing.T) {
 	assert.Equal(t, int64(6), pair.CurrentUserID)
 	assert.Equal(t, int64(5), pair.RetiringUserID)
 
-	fc = forge.NewFakeClient()
-	fc.VariableValues = map[string]string{handoffOwner + "/" + handoffRepo + "/" + forge.VarGitLabPollerGenerations: "  "}
-	fc.VariablesExist = map[string]bool{handoffOwner + "/" + handoffRepo + "/" + forge.VarGitLabPollerGenerations: true}
-	st, err = loadPollerGenerations(ctx, fc, handoffOwner, handoffRepo)
+}
+
+// An absent variable is the first handoff, or the documented recovery after
+// an administrator deleted it, so it loads as an empty state.
+func TestLoadPollerGenerations_AbsentIsEmpty(t *testing.T) {
+	fc := forge.NewFakeClient()
+	st, err := loadPollerGenerations(context.Background(), fc, handoffOwner, handoffRepo)
 	require.NoError(t, err)
-	assert.Equal(t, PollerGenerationState{}, st, "an empty variable is an empty state")
+	assert.Equal(t, PollerGenerationState{}, st)
+}
+
+// A variable that exists but is blank may mean recorded state was lost, so it
+// fails closed instead of silently dropping a current, retiring, or
+// quarantined record.
+func TestLoadPollerGenerations_PresentBlankFailsClosed(t *testing.T) {
+	key := handoffOwner + "/" + handoffRepo + "/" + forge.VarGitLabPollerGenerations
+	for name, raw := range map[string]string{"empty": "", "whitespace": " \n\t "} {
+		t.Run(name, func(t *testing.T) {
+			fc := forge.NewFakeClient()
+			fc.VariableValues = map[string]string{key: raw}
+			_, err := loadPollerGenerations(context.Background(), fc, handoffOwner, handoffRepo)
+			require.ErrorIs(t, err, errPollerGenerationsBlank)
+		})
+	}
+}
+
+// The handoff refuses to start a generation over blank state, and leaves the
+// variable for the administrator to reconcile.
+func TestHandoffPollerGeneration_BlankStateFailsClosed(t *testing.T) {
+	f := newHandoffFake()
+	key := handoffOwner + "/" + handoffRepo + "/" + forge.VarGitLabPollerGenerations
+	if f.c.VariableValues == nil {
+		f.c.VariableValues = map[string]string{}
+	}
+	f.c.VariableValues[key] = "  "
+	res, err := f.run(t)
+	require.ErrorIs(t, err, errPollerGenerationsBlank)
+	assert.Nil(t, res.Trigger)
+	assert.Zero(t, f.accountCalls, "no account is created over possibly lost state")
+	assert.Equal(t, "  ", f.c.VariableValues[key])
 }
 
 func TestWritePollerGenerations_Error(t *testing.T) {
@@ -1159,4 +1208,52 @@ func TestPollerCutoverTransitions(t *testing.T) {
 	require.Error(t, err)
 	_, err = finishPollerRetirement(done, 0)
 	require.Error(t, err)
+}
+
+// A generation left at account_recorded after a failed membership write is
+// resumable: the next run re-establishes Developer membership before it
+// elevates, instead of minting a trigger for an account that is not a member.
+func TestHandoffPollerGeneration_AccountRecordedResumesAfterMembershipFailure(t *testing.T) {
+	f := newHandoffFake()
+	f.c.ProjectMemberAccess[handoffNewUID] = forge.GitLabAccessLevelDeveloper
+	f.seed(t, PollerGenerationState{CurrentUserID: handoffCurrentUID, Pending: &PendingPollerGeneration{UserID: handoffNewUID, Phase: PollerPhaseAccountRecorded}})
+	f.prepareErrs = []error{fmt.Errorf("adding the replacement Poller as a Developer: %w", errors.New("500 internal error"))}
+
+	res, err := f.run(t)
+	require.Error(t, err)
+	assert.Nil(t, res.Trigger)
+	assert.Empty(t, f.events, "the account is not raised while its membership is unproven")
+	assert.Equal(t, PollerPhaseAccountRecorded, f.state(t).Pending.Phase)
+
+	res, err = f.run(t)
+	require.NoError(t, err)
+	require.NotNil(t, res.Trigger)
+	assert.Equal(t, 2, f.prepareCalls, "every attempt re-prepares the recorded account")
+	assert.Zero(t, f.accountCalls, "the recorded account is reused")
+	assert.Equal(t, PollerPhaseVerified, f.state(t).Pending.Phase)
+}
+
+// A protected-branch policy that does not admit the account defers before any
+// elevation or trigger mint, stays resumable, and completes once the
+// operator's policy admits it.
+func TestHandoffPollerGeneration_AccountRecordedDefersUntilBranchPolicyAdmitsIt(t *testing.T) {
+	f := newHandoffFake()
+	f.prepareErrs = []error{&PollerGenerationUnsafeError{Reason: "user ID 5005 cannot start pipelines on protected branch \"main\""}}
+
+	res, err := f.run(t)
+	require.NoError(t, err)
+	assert.Nil(t, res.Trigger)
+	assert.Contains(t, res.DeferReason, "cannot start pipelines on protected branch")
+	assert.Contains(t, res.DeferReason, "polling schedules remain in effect")
+	assert.Equal(t, []string{"create-account"}, f.events, "no elevation, bootstrap credential, or trigger")
+	assert.Zero(t, f.triggerCreates)
+	st := f.state(t)
+	require.NotNil(t, st.Pending)
+	assert.Equal(t, PollerPhaseAccountRecorded, st.Pending.Phase)
+
+	res, err = f.run(t)
+	require.NoError(t, err)
+	require.NotNil(t, res.Trigger)
+	assert.Equal(t, 1, f.accountCalls, "the deferred account is resumed, not replaced")
+	assert.Equal(t, 1, f.triggerCreates)
 }
