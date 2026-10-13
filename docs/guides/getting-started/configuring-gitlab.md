@@ -210,7 +210,17 @@ then converges the project:
   step is deferred until the dispatcher and its scripts are on the default
   branch, the default branch is protected, and
   `no_one_allowed` is verified, so on a merge-request install re-run
-  `repos install` after the scaffold merges. Re-runs are no-ops and repair a
+  `repos install` after the scaffold merges. A project, group, or
+  instance-level CI/CD variable that redefines a predefined variable such
+  as `CI_PIPELINE_SOURCE` or `CI_COMMIT_REF_PROTECTED` also defers it.
+  Instance-level variables can only be listed with administrator access
+  and group variables with group Owner access. Every scope your
+  credential can read is still checked; a scope it cannot read defers the
+  fast path until a project Maintainer, after confirming that none of
+  those variables is defined there, lists it in the project CI/CD
+  variable `FULLSEND_GITLAB_ACCEPT_UNVERIFIED_VARIABLE_SCOPES` (for
+  example `instance,group:my-group`; the deferral message gives the exact
+  value). Re-runs are no-ops and repair a
   missing or drifted webhook or token; `--rotate-gitlab-trigger-token`
   rotates the token and revokes the old one after the webhook is updated.
   The polling schedules stay in place as the backstop. Token and secret

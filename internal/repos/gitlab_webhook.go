@@ -765,49 +765,11 @@ func gitlabTriggerSafetyProblem(ctx context.Context, client forge.Client, owner,
 			return "webhook fast-path deferred: predefined project variable override: " + key, nil
 		}
 	}
-	// Instance-level variables (self-managed GitLab) are inherited by every
-	// project and can redefine the predefined variables the evaluator treats
-	// as fixed. Without administrator access they cannot be inspected, so
-	// the overrides cannot be ruled out.
-	instanceVars, instanceErr := client.ListInstanceVariables(ctx)
-	if forge.IsForbidden(instanceErr) {
-		return "webhook fast-path deferred: instance-level CI/CD variables cannot be inspected without administrator access, so predefined variable overrides cannot be ruled out and the managed credentials are revoked", nil
-	}
-	if instanceErr != nil {
-		return "", safeAPIError("checking instance variable overrides", instanceErr)
-	}
-	for _, variable := range instanceVars {
-		if _, reserved := env[variable.Name]; reserved {
-			return "webhook fast-path deferred: predefined instance variable override: " + variable.Name, nil
-		}
-	}
-	// owner may contain only the first path component for nested projects.
-	namespace := owner
-	if slash := strings.LastIndex(repo, "/"); slash >= 0 {
-		namespace += "/" + repo[:slash]
-	}
-	parts := strings.Split(namespace, "/")
-	for i := range parts {
-		group := strings.Join(parts[:i+1], "/")
-		inherited, groupErr := client.ListOrgVariables(ctx, group)
-		if forge.IsNotFound(groupErr) && i == 0 && len(parts) == 1 {
-			continue
-		} // personal namespace
-		if forge.IsForbidden(groupErr) {
-			// Listing group variables needs group Owner access, which a
-			// project Maintainer lacks. That is a deferral, not an install
-			// failure: the overrides cannot be ruled out, so the fast path
-			// stays off and any managed credential is revoked.
-			return fmt.Sprintf("webhook fast-path deferred: group variables of %q cannot be inspected without group Owner access, so predefined variable overrides cannot be ruled out and the managed credentials are revoked", group), nil
-		}
-		if groupErr != nil {
-			return "", safeAPIError("checking inherited group variable overrides", groupErr)
-		}
-		for _, variable := range inherited {
-			if _, reserved := env[variable.Name]; reserved {
-				return "webhook fast-path deferred: predefined group variable override: " + variable.Name, nil
-			}
-		}
+	// Instance-level and group variables can redefine the same predefined
+	// variables; scopes this credential cannot read must be accepted
+	// explicitly (see gitlabInheritedVariableOverrideProblem).
+	if problem, err := gitlabInheritedVariableOverrideProblem(ctx, client, owner, repo, env); problem != "" || err != nil {
+		return problem, err
 	}
 	// A trigger pipeline must run only the dispatcher. Other root jobs, or
 	// jobs from other includes, would run with the protected credentials
