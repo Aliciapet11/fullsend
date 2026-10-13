@@ -2,6 +2,7 @@ package scaffold
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1561,4 +1562,53 @@ func TestGCPSetupOccursInsideSingleRun(t *testing.T) {
 		assert.Equal(t, "${{ inputs.gcp_project_id }}", steps["Run fullsend"].Env["FULLSEND_GCP_PROJECT_ID"])
 		assert.Equal(t, 1, runInvocations)
 	})
+}
+
+// TestWorkflowDispatchInputsHaveDescriptions guards #7903: SchemaStore's
+// workflow schema (check-jsonschema before SchemaStore #5277) rejects a
+// workflow_dispatch input without a description, failing adopters' lint.
+func TestWorkflowDispatchInputsHaveDescriptions(t *testing.T) {
+	check := func(t *testing.T, name string, raw []byte) {
+		var wf struct {
+			On yaml.Node `yaml:"on"`
+		}
+		require.NoError(t, yaml.Unmarshal(raw, &wf), "%s: invalid YAML", name)
+		if wf.On.Kind != yaml.MappingNode { // on: push / [push, pull_request]
+			return
+		}
+		var on struct {
+			WorkflowDispatch struct {
+				Inputs map[string]struct {
+					Description string `yaml:"description"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_dispatch"`
+		}
+		require.NoError(t, wf.On.Decode(&on), "%s: invalid on:", name)
+		for input, def := range on.WorkflowDispatch.Inputs {
+			assert.NotEmpty(t, strings.TrimSpace(def.Description),
+				"%s: workflow_dispatch input %q needs a description", name, input)
+		}
+	}
+
+	checked := 0
+	require.NoError(t, fs.WalkDir(content, "fullsend-repo", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.Contains(path, ".github/workflows/") {
+			return err
+		}
+		raw, err := content.ReadFile(path)
+		require.NoError(t, err)
+		check(t, path, raw)
+		checked++
+		return nil
+	}))
+
+	repoWorkflows, err := filepath.Glob(filepath.Join("..", "..", ".github", "workflows", "*.y*ml"))
+	require.NoError(t, err)
+	for _, path := range repoWorkflows {
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		check(t, path, raw)
+		checked++
+	}
+	require.Greater(t, checked, 1, "expected to scan scaffold and repo workflows")
 }
