@@ -54,6 +54,7 @@ type fakeMintProbeSCM struct {
 	deletedRepos []string
 	deleteErr    error
 
+	lookupErr   error          // returned by GetDefaultBranch for a repo this fake created
 	deleteLag   int            // lookups that still see a repo after it is deleted
 	deleting    map[string]int // repo → remaining lagging lookups
 	reservedFor int            // CreateRepo calls that report already-exists (nil) without creating
@@ -114,6 +115,9 @@ func (f *fakeMintProbeSCM) GetDefaultBranch(_ context.Context, _, repo string) (
 	if n := f.deleting[repo]; n > 0 {
 		f.deleting[repo] = n - 1
 		return "main", nil
+	}
+	if f.lookupErr != nil && slices.Contains(f.createdRepos, repo) {
+		return "", f.lookupErr
 	}
 	if !f.existing[repo] && !slices.Contains(f.createdRepos, repo) {
 		return "", fmt.Errorf("getting default branch: %w", forge.ErrNotFound)
@@ -714,7 +718,9 @@ func TestGivenMintProbe_SlowStaleDeletion(t *testing.T) {
 	assert.ErrorContains(t, givenMintProbe(context.Background(), w, "github", "approved"), "not visible")
 	assert.Equal(t, mintProbeRepoMaxAttempts, scmDriver.createCalls)
 	assert.Empty(t, scmDriver.publicRepos)
-	assert.Empty(t, w.MintProbe.CreatedRepos)
+	// CreateRepo reported success, so the host is recorded once for
+	// cleanup (which tolerates a repo that never appeared).
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, w.MintProbe.CreatedRepos)
 
 	// Cancellation interrupts the wait.
 	scmDriver = newFakeMintProbeSCM()
@@ -724,6 +730,37 @@ func TestGivenMintProbe_SlowStaleDeletion(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	assert.ErrorIs(t, givenMintProbe(ctx, w, "github", "approved"), context.Canceled)
+}
+
+func TestGivenMintProbe_RecordsHostOnceCreated(t *testing.T) {
+	fastMintProbePolls(t)
+
+	// A create that succeeds and is then followed by a lookup error still
+	// leaves the host recorded, so cleanup deletes it.
+	scmDriver := newFakeMintProbeSCM()
+	scmDriver.lookupErr = errors.New("rate limited")
+	w := mintProbeTestWorld(scmDriver, nil)
+	assert.ErrorContains(t, givenMintProbe(context.Background(), w, "github", "approved"), "checking new host repository")
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, scmDriver.createdRepos)
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, w.MintProbe.CreatedRepos)
+	assert.Empty(t, scmDriver.publicRepos)
+
+	// Cancellation during the visibility backoff after a successful create
+	// also leaves the host recorded.
+	scmDriver = newFakeMintProbeSCM()
+	scmDriver.reservedFor = 1000
+	w = mintProbeTestWorld(scmDriver, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.ErrorIs(t, givenMintProbe(ctx, w, "github", "approved"), context.Canceled)
+	assert.Equal(t, []string{"test-repo-07-mint-host"}, w.MintProbe.CreatedRepos)
+
+	// A create that itself fails records nothing.
+	scmDriver = newFakeMintProbeSCM()
+	scmDriver.createErr = errors.New("boom")
+	w = mintProbeTestWorld(scmDriver, nil)
+	assert.ErrorContains(t, givenMintProbe(context.Background(), w, "github", "approved"), "boom")
+	assert.Empty(t, w.MintProbe.CreatedRepos)
 }
 
 func TestGivenMintProbe_Errors(t *testing.T) {

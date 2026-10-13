@@ -243,10 +243,9 @@ func createMintProbeHost(ctx context.Context, w *world.World, p *world.MintProbe
 	} else if !forge.IsNotFound(err) {
 		return fmt.Errorf("mint probe: checking for an existing host repository %s/%s: %w", w.Org, host, err)
 	}
-	if err := createMintProbeHostRepo(ctx, w, host); err != nil {
+	if err := createMintProbeHostRepo(ctx, w, p, host); err != nil {
 		return err
 	}
-	p.CreatedRepos = append(p.CreatedRepos, host)
 	// Another repository can call a reusable workflow only when the
 	// host is public (or explicitly shared), and orgs may force new
 	// repositories private.
@@ -270,16 +269,6 @@ var (
 	mintProbeRepoRetryDelay  = time.Second
 )
 
-// sleepMintProbe waits for d or until ctx is cancelled.
-func sleepMintProbe(ctx context.Context, d time.Duration) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(d):
-		return nil
-	}
-}
-
 // awaitMintProbeHostGone polls until the deleted host repository returns
 // not-found, so the replacement is created against a free name. It fails
 // when the repository is still visible after the bounded backoff, since
@@ -295,7 +284,7 @@ func awaitMintProbeHostGone(ctx context.Context, w *world.World, host string) er
 			return fmt.Errorf("mint probe: checking deletion of host repository %s/%s: %w", w.Org, host, err)
 		}
 		if attempt < mintProbeRepoMaxAttempts {
-			if err := sleepMintProbe(ctx, delay); err != nil {
+			if err := mintProbeSleep(ctx, delay); err != nil {
 				return fmt.Errorf("mint probe: waiting for host repository %s/%s to be deleted: %w", w.Org, host, err)
 			}
 			delay *= 2
@@ -309,11 +298,21 @@ func awaitMintProbeHostGone(ctx context.Context, w *world.World, host string) er
 // name already exists, which is what a name still reserved after a delete
 // looks like, so a create that does not become visible is retried with
 // bounded, context-aware backoff.
-func createMintProbeHostRepo(ctx context.Context, w *world.World, host string) error {
+//
+// The host is recorded for cleanup as soon as the first CreateRepo
+// succeeds, before the visibility checks that can fail, so a later error
+// or cancellation does not leave a created public repo behind. Any
+// leftover was already deleted by the caller, so a repo that exists at
+// this point is one this run created; cleanup tolerates a repo that
+// never became visible.
+func createMintProbeHostRepo(ctx context.Context, w *world.World, p *world.MintProbe, host string) error {
 	delay := mintProbeRepoRetryDelay
 	for attempt := 1; attempt <= mintProbeRepoMaxAttempts; attempt++ {
 		if err := w.SCM.CreateRepo(ctx, w.Org, host, "behaviour test: mint probe workflow host"); err != nil {
 			return fmt.Errorf("mint probe: creating host repository %s/%s: %w", w.Org, host, err)
+		}
+		if !slices.Contains(p.CreatedRepos, host) {
+			p.CreatedRepos = append(p.CreatedRepos, host)
 		}
 		_, err := w.SCM.GetDefaultBranch(ctx, w.Org, host)
 		if err == nil {
@@ -323,7 +322,7 @@ func createMintProbeHostRepo(ctx context.Context, w *world.World, host string) e
 			return fmt.Errorf("mint probe: checking new host repository %s/%s: %w", w.Org, host, err)
 		}
 		if attempt < mintProbeRepoMaxAttempts {
-			if err := sleepMintProbe(ctx, delay); err != nil {
+			if err := mintProbeSleep(ctx, delay); err != nil {
 				return fmt.Errorf("mint probe: waiting for host repository %s/%s to appear: %w", w.Org, host, err)
 			}
 			delay *= 2
