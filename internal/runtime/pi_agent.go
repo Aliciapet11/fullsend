@@ -80,7 +80,6 @@ func parsePiAgent(data []byte) (*piAgentDef, error) {
 	def.Model = strings.TrimSpace(fm.Model)
 	def.Body = strings.TrimSpace(string(body))
 	def.Frontmatter = front
-	def.Frontmatter = front
 
 	specs, err := piToolSpecs(fm.Tools)
 	if err != nil {
