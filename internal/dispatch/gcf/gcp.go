@@ -1993,6 +1993,14 @@ func (c *LiveGCFClient) readTrafficEnvVars(ctx context.Context, projectID, regio
 		return nil, fmt.Errorf("traffic-serving revision %s has no containers", trafficRevision)
 	}
 
+	// The strict variant mirrors GetServiceRevisionInfo: a serving revision
+	// reporting zero env vars is not a verified "nothing to report" read
+	// (mint's init() fatals on missing required env vars), so refuse rather
+	// than present an empty map as verified serving state.
+	if strict && len(revision.Containers[0].Env) == 0 {
+		return nil, fmt.Errorf("traffic-serving revision %s reports no container env vars; refusing to report it as verified serving state", trafficRevision)
+	}
+
 	envVars := make(map[string]string)
 	for _, e := range revision.Containers[0].Env {
 		envVars[e.Name] = e.Value

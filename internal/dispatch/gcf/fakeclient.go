@@ -367,6 +367,10 @@ func (f *fakeGCFClient) GetServiceServingEnvVars(ctx context.Context, p, r, s st
 	calls := f.calls
 	envVars, err := f.GetServiceTrafficEnvVars(ctx, p, r, s)
 	f.calls = calls
+	// The live strict read refuses a serving revision with an empty env list.
+	if err == nil && envVars != nil && len(envVars) == 0 {
+		return nil, fmt.Errorf("traffic-serving revision reports no container env vars")
+	}
 	return envVars, err
 }
 

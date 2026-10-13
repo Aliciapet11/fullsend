@@ -3955,6 +3955,32 @@ func TestRunMintStatus_TrafficEnvUnreliableFallsBackToLiveRead(t *testing.T) {
 	assert.NotContains(t, out.String(), "revoked-org/app")
 }
 
+// TestRunMintStatus_EmptyServingEnvFallbackStaysUnverified ensures that when
+// the revision info marks the traffic env unreliable and the strict fallback
+// read also finds an empty serving env list, status reports unknown serving
+// state instead of presenting the empty map as verified (absent roles/repos).
+func TestRunMintStatus_EmptyServingEnvFallbackStaysUnverified(t *testing.T) {
+	client := gcf.NewFakeGCFClient(
+		gcf.WithFakeFunctionInfo(&gcf.FunctionInfo{
+			URI:     "https://mint.example.com",
+			EnvVars: map[string]string{"PER_REPO_WIF_REPOS": "acme/app"},
+		}),
+		gcf.WithFakeTrafficEnvVars(map[string]string{}),
+		gcf.WithFakeRevisionInfo(&gcf.ServiceRevisionInfo{
+			TrafficRevisionShort:     "fullsend-mint-00001",
+			TrafficPercent:           100,
+			TemplateMatchesTraffic:   true,
+			TrafficEnvVars:           map[string]string{},
+			TrafficEnvVarsUnreliable: true,
+		}),
+	)
+	withMintGCFClient(t, client)
+	out := &strings.Builder{}
+	err := runMintStatus(context.Background(), ui.New(out), "my-project", "us-central1", "acme")
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Could not verify serving allow-lists")
+}
+
 // TestRunMintStatus_SplitTrafficWarns ensures a 60/40 split — where the latest
 // revision is the majority target but an older revision still serves traffic —
 // is reported as split rather than silently treated as matching.

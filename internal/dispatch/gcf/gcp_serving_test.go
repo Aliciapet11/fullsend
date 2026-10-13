@@ -155,6 +155,45 @@ func TestLiveGCFClient_GetServiceServingEnvVars(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "org-a", envVars["ALLOWED_ORGS"])
 	})
+
+	// A serving revision whose container reports an empty env list is not a
+	// verified read: GetServiceRevisionInfo marks it unreliable, so the strict
+	// read must refuse too instead of returning a non-nil empty map.
+	for name, container := range map[string]map[string]interface{}{
+		"empty_env_list": {"env": []interface{}{}},
+		"missing_env":    {},
+	} {
+		t.Run("serving_revision_"+name+"_strict_errors", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				if strings.Contains(r.URL.Path, "/revisions/my-svc-00001-abc") {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"containers": []interface{}{container},
+					})
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"trafficStatuses": []interface{}{
+						map[string]interface{}{
+							"type":     "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+							"revision": "my-svc-00001-abc",
+							"percent":  100,
+						},
+					},
+				})
+			}))
+			defer srv.Close()
+			envVars, err := newTestClient(srv).GetServiceServingEnvVars(context.Background(), "proj", "us-central1", "my-svc")
+			require.Error(t, err)
+			assert.Nil(t, envVars)
+			assert.Contains(t, err.Error(), "no container env vars")
+
+			// The lenient read keeps returning the (empty) revision env.
+			lenient, err := newTestClient(srv).GetServiceTrafficEnvVars(context.Background(), "proj", "us-central1", "my-svc")
+			require.NoError(t, err)
+			assert.Empty(t, lenient)
+		})
+	}
 }
 
 // A desired explicit-revision split that differs from the observed
