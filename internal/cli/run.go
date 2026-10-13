@@ -7065,11 +7065,13 @@ func dedupResolvedProfiles(profiles []resolve.ResolvedProfile) []resolve.Resolve
 	return deduped
 }
 
-// mergeProviderDefs selects URL-resolved provider definitions not shadowed
-// by local definitions. Resolved providers must already be deduplicated by
-// the caller using dedupResolvedProviders. The selected slice is sorted by
-// provider name, and allDefs contains local definitions first, followed by
-// the selected resolved definitions in that order.
+// mergeProviderDefs merges local and URL-resolved provider definitions.
+// Local defs have highest precedence. URL-resolved defs must already be
+// deduplicated by the caller using dedupResolvedProviders (child over base).
+// allDefs is deterministically ordered: local defs first, then URL-resolved
+// names in sorted order. selectedResolved contains the included resolved defs.
+// shadowed returns the names of URL-resolved providers that were overridden
+// by a local provider of the same name.
 func mergeProviderDefs(localDefs []harness.ProviderDef, resolvedProviders []resolve.ResolvedProvider) (allDefs []harness.ProviderDef, selectedResolved []resolve.ResolvedProvider, shadowed []string) {
 	localNames := make(map[string]struct{}, len(localDefs))
 	for _, ld := range localDefs {
@@ -7136,8 +7138,8 @@ func providerMigrationHint(pd harness.ProviderDef, providerOverrides, profileOve
 		strings.Join(definitions, " and "))
 }
 
-// A repository file name must not inject log lines (%q escapes
-// newlines and control characters) or a legacy "##[" workflow
+// quotePathForLog prevents repository file names from injecting log lines
+// (%q escapes newlines and control characters) or a legacy "##[" workflow
 // command, which the runner matches anywhere in a line.
 func quotePathForLog(path string) string {
 	return strings.ReplaceAll(fmt.Sprintf("%q", path), "##[", `#\#[`)
