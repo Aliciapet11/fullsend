@@ -741,15 +741,19 @@ production).
 Pool organizations intentionally do not keep the production agent apps
 installed as baseline test infrastructure. The test mint uses the isolated
 `fullsend-test-*` identities, which limits the blast radius of test credentials
-and prevents ordinary behaviour runs from acting as production agents. The
-suite can use both credential paths: the public mint backed by the production
-`fullsend-ai-*` apps and a per-run preview or durable stage mint backed by the
-`fullsend-test-*` apps. Tests that need to emulate a third-party production
-agent can opt into the public mint path only after an operator has installed
-the corresponding production app on the target organization and granted any
-required cross-organization access. Ordinary tests use the isolated test
-identities without permanently trusting production apps in every test
-organization.
+and prevents ordinary behaviour runs from acting as production agents.
+
+The two credential paths serve different callers. The behaviour-test suite in
+this repository can point at the same hosted public mint used by
+`fullsend-ai/fullsend`, while workflows running in an enrolled test repository
+can point at that repository's dedicated per-run preview or durable stage mint.
+With the appropriate mint URL, credentials, and target-organization App
+installation/foreign-grant plumbing, a scenario can use either credential
+set. A scenario that emulates a third-party production agent must have an
+operator install the corresponding production app on the target organization
+and grant any required cross-organization access. Ordinary tests use the
+isolated test identities without permanently trusting production apps in every
+test organization.
 
 > **Warning:** Do **not** enroll these apps on the production community mint.
 > They are strictly for test infrastructure.
