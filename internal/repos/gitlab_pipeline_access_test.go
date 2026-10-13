@@ -380,3 +380,70 @@ func TestReplacementPipelineAccessVerifiesGrant(t *testing.T) {
 	}
 	require.Error(t, VerifyGitLabReplacementPipelineAccess(context.Background(), forge.NewFakeClient(), "g", "p", 0))
 }
+
+// Verifying a supplied Poller never changes the protected-branch rule: the
+// grant is applied later, after enrollment is recorded, so a rejected
+// enrollment leaves nothing behind.
+func TestVerifySuppliedPollerPipelineAccessIsReadOnly(t *testing.T) {
+	ctx := context.Background()
+	newClient := func(rule *forge.ProtectedBranchRule) *forge.FakeClient {
+		fc := forge.NewFakeClient()
+		seedRepo(fc, "g", "p", "main")
+		if rule != nil {
+			fc.ProtectedBranchRules["g/p/main"] = rule
+		}
+		return fc
+	}
+
+	t.Run("elevated-only rule passes without a grant", func(t *testing.T) {
+		fc := newClient(maintainerOnlyRule("main"))
+		require.NoError(t, VerifyGitLabSuppliedPollerPipelineAccess(ctx, fc, "g", "p", 501))
+		assert.Empty(t, fc.GrantedProtectedBranchMergeUsers, "no merge grant is made")
+		assert.False(t, PollerCanCreatePipeline(fc.ProtectedBranchRules["g/p/main"], []int{501}))
+	})
+
+	t.Run("unprotected branch passes", func(t *testing.T) {
+		require.NoError(t, VerifyGitLabSuppliedPollerPipelineAccess(ctx, newClient(nil), "g", "p", 501))
+	})
+
+	t.Run("existing grant passes", func(t *testing.T) {
+		rule := maintainerOnlyRule("main")
+		rule.MergeAccessLevels = append(rule.MergeAccessLevels, forge.ProtectedBranchAccess{UserID: 501})
+		require.NoError(t, VerifyGitLabSuppliedPollerPipelineAccess(ctx, newClient(rule), "g", "p", 501))
+	})
+
+	t.Run("wildcard-only protection is rejected", func(t *testing.T) {
+		fc := newClient(maintainerOnlyRule("*"))
+		err := VerifyGitLabSuppliedPollerPipelineAccess(ctx, fc, "g", "p", 501)
+		require.ErrorContains(t, err, "wildcard")
+		assert.Empty(t, fc.GrantedProtectedBranchMergeUsers)
+	})
+
+	t.Run("an unknown owner is rejected", func(t *testing.T) {
+		require.Error(t, VerifyGitLabSuppliedPollerPipelineAccess(ctx, forge.NewFakeClient(), "g", "p", 0))
+	})
+}
+
+const suppliedPollerState = `{"roles":{"poller":{"phase":"idle","distributed_at":"2026-10-01T00:00:00Z","supplied":true,"supplied_user_id":888,"supplied_token_id":14,"excluded_user_ids":[888]}}}`
+
+// Install and status include the supplied Poller's owner, which no token
+// inventory lists, in their protected-branch pipeline-access checks.
+func TestWithSuppliedPollerUserID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	set := func(t *testing.T, state string) forge.Client {
+		t.Helper()
+		fc := provisionClient(t)
+		if state != "" {
+			require.NoError(t, fc.UpdateCIVariable(ctx, "group", "project", forge.VarGitLabRoleRotation, state, true))
+		}
+		return fc
+	}
+
+	assert.Equal(t, []int{5, 888}, WithSuppliedPollerUserID(ctx, set(t, suppliedPollerState), "group", "project", []int{5}))
+	assert.Equal(t, []int{888}, WithSuppliedPollerUserID(ctx, set(t, suppliedPollerState), "group", "project", nil))
+	assert.Equal(t, []int{888}, WithSuppliedPollerUserID(ctx, set(t, suppliedPollerState), "group", "project", []int{888}), "already listed")
+	assert.Equal(t, []int{5}, WithSuppliedPollerUserID(ctx, set(t, suppliedCoderEnrolledState), "group", "project", []int{5}), "a supplied non-Poller role adds nothing")
+	assert.Equal(t, []int{5}, WithSuppliedPollerUserID(ctx, set(t, ""), "group", "project", []int{5}), "no state adds nothing")
+	assert.Equal(t, []int{5}, WithSuppliedPollerUserID(ctx, nil, "group", "project", []int{5}), "no client adds nothing")
+}

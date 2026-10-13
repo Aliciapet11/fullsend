@@ -804,13 +804,17 @@ func TestCustomAppSetReviewBotWiring(t *testing.T) {
 				section := extractStepSection(t, s, stepName)
 				assert.Contains(t, section, "FULLSEND_APP_SET: ${{ vars.FULLSEND_APP_SET || 'fullsend-ai' }}",
 					"%s must receive the configured app-set prefix", stepName)
-				if stepName == "Pre-fetch review body" {
-					assert.Contains(t, section, `--arg custom_bot "${CUSTOM_REVIEW_BOT}"`)
-					assert.Contains(t, section, `($custom_bot != "" and .user.login == $custom_bot)`)
-				}
 			}
 		})
 	}
+
+	// The "Pre-fetch review body" step delegates to the vendored script
+	// (#8353); the custom review-bot filter now lives there, not inline.
+	t.Run("pre-fetch-review-body-script", func(t *testing.T) {
+		script := string(loadRepoFile(".github/scripts/pre-fetch-review-body.sh")(t))
+		assert.Contains(t, script, `--arg custom_bot "${CUSTOM_REVIEW_BOT}"`)
+		assert.Contains(t, script, `($custom_bot != "" and .user.login == $custom_bot)`)
+	})
 }
 
 // TestDispatchPunctuationStrip ensures reusable-dispatch.yml strips trailing
