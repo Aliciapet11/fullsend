@@ -108,6 +108,10 @@ and compatibility details belong in the
 > **Update (#8242):** the CLI activation change has merged and the Poller
 > service-account lifecycle is active. New trigger creation and rotation as the
 > Poller remain deferred.
+>
+> **Update (#8243):** new trigger creation and rotation are now enabled for
+> eligible projects: a fresh Poller service-account generation owns the
+> trigger, so the current Poller is never re-elevated.
 
 ## References
 

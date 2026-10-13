@@ -779,9 +779,9 @@ func extraGitLabRoleUninstallVars(ctx context.Context, client forge.Client, owne
 		}
 		// The Poller generation document records quarantine and retirement
 		// obligations for replacement Poller accounts and triggers.
-		// Deleting it would forget them, so uninstall retains it until an
-		// operator has reconciled those obligations; the live handoff
-		// (#8243) and uninstall cleanup (#8210) may revisit this.
+		// Deleting it here would forget them, so it is not in the generic
+		// variable list. CleanupGitLabRoleIdentityLocked retires it only after
+		// every account it records was cleaned up, and keeps it otherwise.
 		if name == forge.VarGitLabPollerGenerations {
 			return
 		}

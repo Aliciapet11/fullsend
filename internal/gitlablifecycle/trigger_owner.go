@@ -4,9 +4,12 @@
 //
 // The live TriggerOwner deliberately does not implement
 // repos.GitLabPollerQuiescenceVerifier: GitLab offers no server-side drain
-// barrier for requests accepted with revoked credentials, so the webhook fast
-// path keeps deferring trigger creation and rotation, and polling remains the
-// dispatch path.
+// barrier for requests accepted with revoked credentials, so the current
+// Poller is never re-elevated. It implements repos.GitLabPollerHandoff
+// instead (poller_handoff.go): a fresh service account mints the webhook
+// trigger, is demoted to Developer and verified, and only then receives a
+// runtime credential. Any ineligible or ambiguous state defers the fast path
+// and polling remains the dispatch path.
 package gitlablifecycle
 
 import (

@@ -17,9 +17,12 @@ import (
 // creating one needs Maintainer access, so the Poller service account is
 // raised to Maintainer only for the duration of the create call and then
 // restored to Developer before the webhook is enabled or updated.
-// Creation and rotation additionally require GitLabPollerQuiescenceVerifier.
-// This optional capability must guarantee server-side request draining; owners
-// without it can reconcile existing triggers but defer new creation/rotation.
+// An owner that also implements GitLabPollerHandoff creates and rotates the
+// trigger through a fresh Poller generation instead and never raises the
+// current Poller (#8243). Otherwise creation and rotation require
+// GitLabPollerQuiescenceVerifier, which must guarantee server-side request
+// draining; owners with neither capability can reconcile existing triggers
+// but defer new creation/rotation.
 type GitLabTriggerOwner interface {
 	// PollerUserID identifies the fullsend-managed Poller service account
 	// using the installer's own authority, so identification keeps working
@@ -113,7 +116,16 @@ func EnsureGitLabWebhookFastPathWithTriggerOwner(ctx context.Context, client for
 	// revocation, elevation, minting, restoration, and webhook publication)
 	// holds the same project lease as the role-credential provisioning,
 	// rotation, and cleanup.
-	release, lockErr := LockGitLabProject(ctx, client, owner, repo, dryRun)
+	// A non-dry run takes the lease capability, which the Poller generation
+	// handoff requires.
+	var lease *GitLabProjectLease
+	var release func(errp *error)
+	var lockErr error
+	if dryRun {
+		release, lockErr = LockGitLabProject(ctx, client, owner, repo, true)
+	} else {
+		lease, release, lockErr = LockGitLabProjectLease(ctx, client, owner, repo)
+	}
 	if lockErr != nil {
 		return GitLabWebhookResult{Action: "deferred"}, lockErr
 	}
@@ -122,7 +134,7 @@ func EnsureGitLabWebhookFastPathWithTriggerOwner(ctx context.Context, client for
 		err = red.redact(err)
 		release(&err)
 	}()
-	return ensureGitLabWebhookFastPath(ctx, client, triggerOwner, baseURL, owner, repo, rotate, dryRun, red)
+	return ensureGitLabWebhookFastPath(ctx, client, triggerOwner, lease, baseURL, owner, repo, rotate, dryRun, red)
 }
 
 // gitlabPollerRestoreError reports that the Poller's temporary Maintainer
@@ -230,6 +242,16 @@ func ReconcileGitLabPollerElevation(ctx context.Context, client forge.Client, tr
 // the runtime credential: an interrupted transaction may have elevated an
 // account that a later run no longer selects.
 func reconcilePollerElevation(ctx context.Context, client forge.Client, to GitLabTriggerOwner, owner, repo string) (res GitLabWebhookResult, err error) {
+	res, err = reconcileManagedPollerElevation(ctx, client, to, owner, repo)
+	genRes, genErr := reconcilePendingPollerGeneration(ctx, client, to, owner, repo)
+	if genRes.Action != "" {
+		res.Action = genRes.Action
+	}
+	res.Details = append(res.Details, genRes.Details...)
+	return res, errors.Join(err, genErr)
+}
+
+func reconcileManagedPollerElevation(ctx context.Context, client forge.Client, to GitLabTriggerOwner, owner, repo string) (res GitLabWebhookResult, err error) {
 	if to == nil {
 		return GitLabWebhookResult{}, nil
 	}
@@ -357,6 +379,17 @@ type pollerMint struct {
 	// is inert, so a compliant fast path can no longer be preserved; revoked
 	// superseded triggers leave an unrelated compliant fast path intact.
 	revokedIDs []int64
+	// cutover, when set, makes the verified generation that owns minted the
+	// runtime Poller. The caller runs it only after the trigger secret and the
+	// webhook are published, so a failed publication leaves the current
+	// Poller in service and no retiring generation recorded.
+	cutover func(ctx context.Context) ([]string, error)
+	// beginPublish, when set, durably records that the minted trigger's
+	// credential may be distributed. The caller runs it before it stores the
+	// trigger secret and does not store the secret when it fails: once
+	// recorded (even by a write whose outcome is unknown), the generation's
+	// account is never re-elevated and recovery abandons it.
+	beginPublish func(ctx context.Context) error
 }
 
 // mintPollerOwnedTrigger mints the managed pipeline trigger token as the

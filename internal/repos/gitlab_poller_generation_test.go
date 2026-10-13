@@ -1109,12 +1109,46 @@ func TestLoadPollerGenerations_Validation(t *testing.T) {
 	assert.Equal(t, int64(6), pair.CurrentUserID)
 	assert.Equal(t, int64(5), pair.RetiringUserID)
 
-	fc = forge.NewFakeClient()
-	fc.VariableValues = map[string]string{handoffOwner + "/" + handoffRepo + "/" + forge.VarGitLabPollerGenerations: "  "}
-	fc.VariablesExist = map[string]bool{handoffOwner + "/" + handoffRepo + "/" + forge.VarGitLabPollerGenerations: true}
-	st, err = loadPollerGenerations(ctx, fc, handoffOwner, handoffRepo)
+}
+
+// An absent variable is the first handoff, or the documented recovery after
+// an administrator deleted it, so it loads as an empty state.
+func TestLoadPollerGenerations_AbsentIsEmpty(t *testing.T) {
+	fc := forge.NewFakeClient()
+	st, err := loadPollerGenerations(context.Background(), fc, handoffOwner, handoffRepo)
 	require.NoError(t, err)
-	assert.Equal(t, PollerGenerationState{}, st, "an empty variable is an empty state")
+	assert.Equal(t, PollerGenerationState{}, st)
+}
+
+// A variable that exists but is blank may mean recorded state was lost, so it
+// fails closed instead of silently dropping a current, retiring, or
+// quarantined record.
+func TestLoadPollerGenerations_PresentBlankFailsClosed(t *testing.T) {
+	key := handoffOwner + "/" + handoffRepo + "/" + forge.VarGitLabPollerGenerations
+	for name, raw := range map[string]string{"empty": "", "whitespace": " \n\t "} {
+		t.Run(name, func(t *testing.T) {
+			fc := forge.NewFakeClient()
+			fc.VariableValues = map[string]string{key: raw}
+			_, err := loadPollerGenerations(context.Background(), fc, handoffOwner, handoffRepo)
+			require.ErrorIs(t, err, errPollerGenerationsBlank)
+		})
+	}
+}
+
+// The handoff refuses to start a generation over blank state, and leaves the
+// variable for the administrator to reconcile.
+func TestHandoffPollerGeneration_BlankStateFailsClosed(t *testing.T) {
+	f := newHandoffFake()
+	key := handoffOwner + "/" + handoffRepo + "/" + forge.VarGitLabPollerGenerations
+	if f.c.VariableValues == nil {
+		f.c.VariableValues = map[string]string{}
+	}
+	f.c.VariableValues[key] = "  "
+	res, err := f.run(t)
+	require.ErrorIs(t, err, errPollerGenerationsBlank)
+	assert.Nil(t, res.Trigger)
+	assert.Zero(t, f.accountCalls, "no account is created over possibly lost state")
+	assert.Equal(t, "  ", f.c.VariableValues[key])
 }
 
 func TestWritePollerGenerations_Error(t *testing.T) {
