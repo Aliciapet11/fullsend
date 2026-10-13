@@ -8,7 +8,10 @@
 # Idempotent: safe to run multiple times. Checks each prerequisite and
 # only acts on what's missing. Pauses for manual steps and verifies
 # before continuing. Test actors receive organization-level all-repository
-# roles so access survives pool repo delete/recreate.
+# roles so access survives pool repo delete/recreate. The write test actor
+# is also made an active member of the mint-status team, the allowlist for
+# GitHub user-token auth on test mint status endpoints
+# (--status-github-group=ORG/mint-status).
 
 set -euo pipefail
 
@@ -20,6 +23,7 @@ BOT_USER="botsend"
 TEST_WRITE_USER="fstest-write"
 TEST_TRIAGE_USER="fstest-triage"
 TEST_OUTSIDER_USER="fstest-outsider"
+STATUS_TEAM_SLUG="mint-status"
 
 # open_browser tries to open a URL in the default browser.
 open_browser() {
@@ -117,6 +121,107 @@ assign_all_repo_role() {
   fi
   echo "    OK: ${username} has all-repository ${perm}"
 }
+
+# team_membership_state prints the state of username's membership in
+# org/slug ("active" or "pending"), or "none" when GitHub answers 404.
+# Any other API error goes to stderr and returns 1, so callers fail closed.
+team_membership_state() {
+  local org="$1" slug="$2" username="$3" body
+  if body=$(gh api "/orgs/${org}/teams/${slug}/memberships/${username}" 2>&1); then
+    echo "${body}" | jq -r '.state // "unknown"'
+  elif echo "${body}" | grep -q "HTTP 404"; then
+    echo "none"
+  else
+    echo "    ERROR: could not read ${username} membership in ${org}/${slug}: ${body}" >&2
+    return 1
+  fi
+}
+
+# ensure_status_team creates the STATUS_TEAM_SLUG team in org when it is
+# missing and makes member an active team member. Every username after
+# member must not be on the team. Idempotent: an existing team and an
+# active membership are verified, not recreated. Fails closed on any API
+# error other than the documented 404.
+ensure_status_team() {
+  local org="$1" member="$2"
+  shift 2
+  local slug="${STATUS_TEAM_SLUG}"
+  local body creator state actual_slug username
+
+  if body=$(gh api "/orgs/${org}/teams/${slug}" 2>&1); then
+    echo "    OK: team ${org}/${slug} exists"
+  elif echo "${body}" | grep -q "HTTP 404"; then
+    echo "    Creating team ${org}/${slug}..."
+    if ! body=$(gh api -X POST "/orgs/${org}/teams" \
+        -f name="${slug}" \
+        -f privacy="closed" \
+        -f description="Allowlist for GitHub user-token auth on test mint status endpoints" 2>&1); then
+      echo "    ERROR: failed to create team ${org}/${slug}: ${body}" >&2
+      return 1
+    fi
+    # GitHub adds the user who creates a team as a maintainer. Remove that
+    # user so the team holds only the intended allowlist.
+    if ! creator=$(gh api /user --jq '.login' 2>&1); then
+      echo "    ERROR: could not read the authenticated gh user: ${creator}" >&2
+      return 1
+    fi
+    if [[ "${creator}" != "${member}" ]]; then
+      if ! body=$(gh api -X DELETE "/orgs/${org}/teams/${slug}/memberships/${creator}" 2>&1) \
+          && ! echo "${body}" | grep -q "HTTP 404"; then
+        echo "    ERROR: could not remove ${creator} from ${org}/${slug}: ${body}" >&2
+        return 1
+      fi
+      echo "    Removed team creator ${creator} from ${org}/${slug}"
+    fi
+    echo "    OK: created team ${org}/${slug}"
+  else
+    echo "    ERROR: could not read team ${org}/${slug}: ${body}" >&2
+    return 1
+  fi
+
+  if ! actual_slug=$(gh api "/orgs/${org}/teams/${slug}" --jq '.slug' 2>&1); then
+    echo "    ERROR: could not verify team ${org}/${slug}: ${actual_slug}" >&2
+    return 1
+  fi
+  if [[ "${actual_slug}" != "${slug}" ]]; then
+    echo "    ERROR: team slug is '${actual_slug}', expected '${slug}'." >&2
+    return 1
+  fi
+  echo "    OK: team slug ${org}/${slug} verified"
+
+  state=$(team_membership_state "${org}" "${slug}" "${member}") || return 1
+  if [[ "${state}" != "active" ]]; then
+    echo "    Adding ${member} to ${org}/${slug} (state: ${state})..."
+    if ! body=$(gh api -X PUT "/orgs/${org}/teams/${slug}/memberships/${member}" \
+        -f role="member" 2>&1); then
+      echo "    ERROR: failed to add ${member} to ${org}/${slug}: ${body}" >&2
+      return 1
+    fi
+    state=$(team_membership_state "${org}" "${slug}" "${member}") || return 1
+    if [[ "${state}" != "active" ]]; then
+      echo "    ERROR: ${member} membership in ${org}/${slug} is '${state}', not active." >&2
+      echo "    ${member} must be an active member of ${org} first." >&2
+      return 1
+    fi
+  fi
+  echo "    OK: ${member} is an active member of ${org}/${slug}"
+
+  for username in "$@"; do
+    state=$(team_membership_state "${org}" "${slug}" "${username}") || return 1
+    if [[ "${state}" != "none" ]]; then
+      echo "    ERROR: ${username} is on ${org}/${slug} (state: ${state})." >&2
+      echo "    Remove them so the team stays a write-actor-only allowlist." >&2
+      return 1
+    fi
+    echo "    OK: ${username} is not on ${org}/${slug}"
+  done
+}
+
+# Tests source this file for its function definitions; stop here when
+# sourced so nothing below runs against GitHub.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
 
 # --- arg parsing ---
 if [[ $# -ne 1 ]]; then
@@ -339,6 +444,17 @@ if "${outsider_has_all_repo_role}"; then
 else
   echo "    OK: ${TEST_OUTSIDER_USER} has no all-repository write/triage role"
 fi
+echo
+
+# --- 3d. mint status team ---
+# GitHub user-token auth on the test mint status endpoints allows members
+# of ORG/mint-status (--status-github-group=ORG/mint-status).
+echo "==> Checking ${STATUS_TEAM_SLUG} team (mint status allowlist)..."
+if ! ensure_status_team "${ORG}" "${TEST_WRITE_USER}" "${TEST_TRIAGE_USER}" "${TEST_OUTSIDER_USER}"; then
+  echo "    ERROR: ${ORG}/${STATUS_TEAM_SLUG} is not provisioned." >&2
+  exit 1
+fi
+echo "    Status auth group: ${ORG}/${STATUS_TEAM_SLUG}"
 echo
 
 # --- 4. check app installations ---
