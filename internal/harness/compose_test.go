@@ -234,10 +234,10 @@ func TestMergeSkills(t *testing.T) {
 			want:  []string{"/base/skill-a", "skills/issue-labels/github", "skills/pr-review/github"},
 		},
 		{
-			name:  "last child wins when replacing a matching base skill",
+			name:  "two children with one identity are both kept for bootstrap to reject",
 			base:  se("/base/skill-b"),
 			child: se("/child1/skill-b", "/child2/skill-b"),
-			want:  []string{"/child2/skill-b"},
+			want:  []string{"/child1/skill-b", "/child2/skill-b"},
 		},
 	}
 	for _, tt := range tests {

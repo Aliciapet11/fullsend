@@ -2314,9 +2314,11 @@ func urlIndexPut(workspaceRoot, rawURL, hash string) error {
 // do not collapse against each other: only a *base* entry is an override
 // target. True destination collisions fail at bootstrap via
 // uploadHarnessSkills (duplicateNameError) rather than silently dropping a
-// skill (#7830). When a child replaces a base entry whose directory
-// basename differs (i.e. the match came from the declared SKILL.md name),
-// the replacement is logged so it is not silent.
+// skill (#7830). Two child entries with one identity are both kept, whether
+// or not a base entry shares it, so the same bootstrap check rejects them.
+// When a child replaces a base entry whose directory basename differs (i.e.
+// the match came from the declared SKILL.md name), the replacement is
+// logged so it is not silent.
 func mergeSkills(base, child []SkillEntry) []SkillEntry {
 	baseIndex := make(map[string]int, len(base))
 	result := make([]SkillEntry, 0, len(base)+len(child))
@@ -2327,10 +2329,7 @@ func mergeSkills(base, child []SkillEntry) []SkillEntry {
 		result = append(result, s)
 	}
 
-	// Snapshot of names that originated in base. Child entries may override
-	// those slots; they must not override other child entries that happen
-	// to share a basename (the review/retro forge-skill collision).
-	childOverride := make(map[string]int, len(child))
+	// Child entries override base slots only, never other child entries.
 	for _, s := range child {
 		name := skill.SandboxName(s.Source)
 		if idx, exists := baseIndex[name]; exists {
@@ -2344,15 +2343,6 @@ func mergeSkills(base, child []SkillEntry) []SkillEntry {
 			}
 			result[idx] = merged
 			delete(baseIndex, name)
-			childOverride[name] = idx
-		} else if idx, exists := childOverride[name]; exists {
-			// Last child wins when several children replace the same base
-			// skill (#5408 last-writer-wins).
-			merged := SkillEntry{
-				Source:    s.Source,
-				Overrides: mergeOverrides(result[idx].Overrides, s.Overrides),
-			}
-			result[idx] = merged
 		} else {
 			result = append(result, s)
 		}
