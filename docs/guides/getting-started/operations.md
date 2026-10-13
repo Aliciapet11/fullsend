@@ -40,6 +40,7 @@ fullsend github set "$OWNER/$REPO" FULLSEND_GCP_REGION global
 | `FULLSEND_GCP_WIF_PROVIDER` | Repo secret | Full WIF provider resource name for OIDC authentication | `projects/123456789/locations/global/...` |
 | `FULLSEND_OPENAI_API_KEY` | Repo secret | OpenAI API key for repos whose `inference.auth` is `openai-api-key`, written by `repos install --openai-api-key` (exported as `OPENAI_API_KEY`; unused when the WIF trio is set) | `sk-...` |
 | `FULLSEND_INFERENCE_GATEWAY_API_KEY` | Repo secret | Inference gateway API key for repos whose `inference.gateway.auth` is `api-key` (ADR 0138); set by the repository admin (`fullsend github set`), not by setup. A long-lived secret: prefer `auth: oidc` | — |
+| `FULLSEND_RUNNER_SECRETS` | Repo or org secret (optional) | JSON object of name → value for host-side scripts, read through each harness's `env.runner` ([ADR 0136](../../ADRs/0136-runner-secrets-through-one-stored-secret.md)). Set with `gh secret set`, not `fullsend github set`; see [Pass secrets to host-side scripts](../user/building-custom-agents.md#pass-secrets-to-host-side-scripts-github) | `{"JIRA_API_TOKEN":"..."}` |
 
 Repositories selecting `inference.auth: openai-wif` need no inference secrets unless
 Vertex sub-agents require GCP credentials. See [OpenAI Workload Identity](../infrastructure/openai-workload-identity.md)
