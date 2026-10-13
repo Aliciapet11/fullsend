@@ -552,7 +552,7 @@ Each probe job requests one token with the job's OIDC token, then masks and revo
 
 The steps report a policy denial separately from an infrastructure failure. These are infrastructure failures, and none can satisfy an expected denial:
 
-- an OIDC failure: no OIDC token was obtained;
+- an OIDC failure: no OIDC token was obtained, or the probe could not verify it (see below);
 - a transport failure: the mint request did not complete;
 - a server failure: an unexpected HTTP status, such as a 422 for a missing App permission, or a 5xx;
 - a malformed result: a 200 without a usable token;
@@ -561,6 +561,8 @@ The steps report a policy denial separately from an infrastructure failure. Thes
 - a result-artifact failure: the artifact is missing or holds an unknown outcome.
 
 A scope denial must be a 403 with one of the mint's repos-scope messages (`validateReposScope` in `internal/mintcore`). Any other 403, for example `role not allowed`, is a misconfiguration, not a scope denial. A workflow-host denial is a 401. The mint answers `authentication failed` both when the workflow host is not approved and when OIDC verification fails. To rule out the latter, the same run makes a **control** request: same role and level, the leased repository only, through the approved host. The control must mint a `selected` token for the leased repository with the role's canonical permissions, or the row fails whatever the subject request returned.
+
+The control rules out an OIDC failure common to both requests, but not one specific to the subject's token. So each probe job also verifies its own OIDC token before it calls the mint: the RS256 signature against GitHub's published signing keys, the issuer, the `fullsend-mint` audience, and `exp`/`nbf`. A token that fails is reported as an OIDC failure and the mint is not called. The result carries `oidc_verified`, and a 401 `authentication failed` counts as a host denial only when it is `true`. The mint's 401 stays generic on purpose, so no mint-side denial reason is needed. The step log prints only the outcome, error class, HTTP status and `oidc_verified`; the mint's message is kept in the artifact alone.
 
 A minted token's granted permissions are compared with the role's canonical set at the requested level. Permissions the mint may drop while an installation catches up (`coder`'s `packages:read`) may be absent. Nothing else may differ. The expected sets duplicate `canonicalRolePermissions` and `optionalRolePermissions` in `internal/mintcore/github.go`, because `pkg/behaviourtest` must not import mintcore (see [Version pinning](#version-pinning-for-fullsend-aiagents)). Change both together. `TestMintScopeFeature_RowsMatchSteps` checks that every Examples row matches the step patterns and that every role mints at both levels.
 

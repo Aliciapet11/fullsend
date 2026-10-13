@@ -43,8 +43,10 @@ import (
 // repository the job_workflow_ref claim, so the shim and the workflow
 // host are always different repositories. The control must mint for the
 // subject to count: a host denial answers 401 "authentication failed",
-// the same as an OIDC verification failure, and only a control minted
-// from the same shim in the same run rules the latter out. Probe errors
+// the same as an OIDC verification failure. A control minted from the same
+// shim in the same run rules out a failure common to both requests, and the
+// probe verifying each OIDC token itself (oidc_verified) rules out a failure
+// specific to the subject's token. Probe errors
 // (OIDC, transport, server, malformed or missing results, failed runs)
 // are reported as infrastructure failures and never satisfy an expected
 // denial.
@@ -142,6 +144,9 @@ var mintProbeScopeDenials = []string{
 
 // mintProbeAuthFailedMessage is the mint's 401 body for both a workflow-host
 // denial and an OIDC verification failure (handler.go in internal/mintcore).
+// The mint stays generic on purpose, so the probe workflow verifies the OIDC
+// token itself (signature, issuer, audience, time claims) and reports
+// oidc_verified; a 401 only counts as a host denial for a verified token.
 const mintProbeAuthFailedMessage = "authentication failed"
 
 // mintProbeRoleRe and mintProbeLevelRe bound the values interpolated into
@@ -591,6 +596,10 @@ func classifyMintProbeResult(res *world.MintProbeResult) mintProbeVerdict {
 		switch {
 		case res.HTTPStatus == 403 && slices.Contains(mintProbeScopeDenials, res.Message):
 			return mintProbeVerdict{outcome: mintProbeOutcomeScopeDenied, detail: detail}
+		case res.HTTPStatus == 401 && res.Message == mintProbeAuthFailedMessage && !res.OIDCVerified:
+			// The mint answers a host denial and an OIDC failure alike; only
+			// a token the probe verified itself makes this a host denial.
+			return mintProbeVerdict{infra: "oidc-unverified", detail: detail + " (the probe did not verify the OIDC token)"}
 		case res.HTTPStatus == 401 && res.Message == mintProbeAuthFailedMessage:
 			return mintProbeVerdict{outcome: mintProbeOutcomeHostDenied, detail: detail}
 		case res.HTTPStatus == 401:

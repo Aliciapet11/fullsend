@@ -287,6 +287,11 @@ type MintProbeResult struct {
 	Level string   `json:"level"`
 	Repos []string `json:"repos"`
 
+	// OIDCVerified is true when the probe verified the OIDC token's
+	// signature, issuer, audience and time claims before calling the mint.
+	// A host denial is only credible from a verified token.
+	OIDCVerified bool `json:"oidc_verified,omitempty"`
+
 	// Repository and JobWorkflowRef are the OIDC claims the probe sent.
 	Repository     string `json:"repository,omitempty"`
 	JobWorkflowRef string `json:"job_workflow_ref,omitempty"`

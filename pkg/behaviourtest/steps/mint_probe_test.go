@@ -3,17 +3,25 @@ package steps
 import (
 	"bufio"
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -193,6 +201,7 @@ func deniedResult(status int, message, host string) *world.MintProbeResult {
 		Outcome:        "denied",
 		HTTPStatus:     status,
 		Message:        message,
+		OIDCVerified:   true,
 		Repository:     "halfsend-03/test-repo-07",
 		JobWorkflowRef: "halfsend-03/" + host + "/.github/workflows/mint-probe.yml@refs/heads/main",
 	}
@@ -427,8 +436,9 @@ func TestClassifyMintProbeResult(t *testing.T) {
 		{"wildcard", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 403, Message: "same-org mint requires non-empty repos"}, mintProbeOutcomeScopeDenied, ""},
 		{"other repo", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 403, Message: "per-repo mint requires repos to be exactly the requesting repository"}, mintProbeOutcomeScopeDenied, ""},
 		{"role not allowed", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 403, Message: "role not allowed"}, "other-denied", ""},
-		{"host", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401, Message: "authentication failed"}, mintProbeOutcomeHostDenied, ""},
-		{"empty 401", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401}, "", "unexpected-401"},
+		{"host", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401, Message: "authentication failed", OIDCVerified: true}, mintProbeOutcomeHostDenied, ""},
+		{"401 for an unverified OIDC token", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401, Message: "authentication failed"}, "", "oidc-unverified"},
+		{"empty 401", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401, OIDCVerified: true}, "", "unexpected-401"},
 		{"non-mint 401", &world.MintProbeResult{Outcome: "denied", HTTPStatus: 401, Message: "Bad credentials"}, "", "unexpected-401"},
 		{"revoke", &world.MintProbeResult{Outcome: "error", Error: "revoke", HTTPStatus: 200}, "", "revoke"},
 		{"oidc", &world.MintProbeResult{Outcome: "error", Error: "oidc"}, "", "oidc"},
@@ -522,6 +532,16 @@ func TestThenMintProbeOutcome(t *testing.T) {
 			subject: &world.MintProbeResult{Outcome: "error", Error: "http", HTTPStatus: 503, Repository: "halfsend-03/test-repo-07",
 				JobWorkflowRef: "halfsend-03/" + approved + "/.github/workflows/mint-probe.yml@refs/heads/main"},
 			expected: "scope-denied", wantErr: "infrastructure failure (server)"},
+		{name: "a subject-only OIDC verification failure cannot satisfy a host denial", arrangement: "unapproved", control: control(),
+			subject: &world.MintProbeResult{Outcome: "error", Error: "oidc", Message: "the OIDC token failed verification: signature does not verify", Repository: "halfsend-03/test-repo-07",
+				JobWorkflowRef: "halfsend-03/" + unapproved + "/.github/workflows/mint-probe.yml@refs/heads/main"},
+			expected: "host-denied", wantErr: "infrastructure failure (oidc)"},
+		{name: "a 401 for a token the probe did not verify cannot satisfy a host denial", arrangement: "unapproved", control: control(),
+			subject: func() *world.MintProbeResult {
+				r := deniedResult(401, "authentication failed", unapproved)
+				r.OIDCVerified = false
+				return r
+			}(), expected: "host-denied", wantErr: "infrastructure failure (oidc-unverified)"},
 		{name: "an empty-message 401 cannot satisfy a host denial", arrangement: "unapproved", control: control(),
 			subject: deniedResult(401, "", unapproved), expected: "host-denied", wantErr: "infrastructure failure (unexpected-401)"},
 		{name: "a non-mint 401 cannot satisfy a host denial", arrangement: "unapproved", control: control(),
@@ -782,7 +802,12 @@ case "$url" in
   *audience=*)
     printf '%s' "${FAKE_OIDC_RESPONSE}"
     ;;
+  */.well-known/jwks)
+    [[ -n "${FAKE_JWKS}" ]] || exit 22
+    printf '%s' "${FAKE_JWKS}"
+    ;;
   */v1/token)
+    echo mint >>"${FAKE_LOG}"
     printf '%s' "${FAKE_MINT_BODY}" >"$out"
     printf '%s' "${FAKE_MINT_STATUS}"
     ;;
@@ -798,10 +823,98 @@ esac
 `
 
 type probeScriptRun struct {
-	oidcToken  string // value of the OIDC response; "" uses a well-formed JWT
+	oidcToken  string // value of the OIDC response; "" uses a signed, valid JWT
+	oidc       probeOIDC
 	mintStatus string
 	mintBody   string
 	revoke     string // ok, http-error or transport
+}
+
+// probeOIDC shapes the signed OIDC token and the signing keys the fake
+// GitHub serves to the probe workflow script.
+type probeOIDC struct {
+	claims   map[string]any // overrides of the valid claims; a nil value removes the claim
+	header   map[string]any // overrides of the valid header; a nil value removes the field
+	wrongKey bool           // sign with a key GitHub does not publish
+	noJWKS   bool           // the signing-key endpoint fails
+}
+
+type probeKeys struct {
+	published, other *rsa.PrivateKey
+	cert             []byte // DER certificate of the published key
+}
+
+var probeTestKeys = sync.OnceValue(func() *probeKeys {
+	gen := func() *rsa.PrivateKey {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			panic(err)
+		}
+		return k
+	}
+	k := &probeKeys{published: gen(), other: gen()}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "probe-test-signing-key"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.published.PublicKey, k.published)
+	if err != nil {
+		panic(err)
+	}
+	k.cert = der
+	return k
+})
+
+// signedProbeOIDC returns a GitHub-style RS256 OIDC token and the JWKS that
+// publishes its signing key.
+func signedProbeOIDC(t *testing.T, o probeOIDC) (token, jwks string) {
+	t.Helper()
+	keys := probeTestKeys()
+	now := time.Now().Unix()
+	claims := map[string]any{
+		"iss":              "https://token.actions.githubusercontent.com",
+		"aud":              "fullsend-mint",
+		"exp":              now + 300,
+		"nbf":              now - 10,
+		"iat":              now - 10,
+		"repository":       "o/r",
+		"job_workflow_ref": "o/h/.github/workflows/mint-probe.yml@refs/heads/main",
+	}
+	header := map[string]any{"alg": "RS256", "typ": "JWT", "kid": "probe-test-kid"}
+	for _, m := range []struct{ dst, src map[string]any }{{claims, o.claims}, {header, o.header}} {
+		for k, v := range m.src {
+			if v == nil {
+				delete(m.dst, k)
+			} else {
+				m.dst[k] = v
+			}
+		}
+	}
+	enc := func(v any) string {
+		b, err := json.Marshal(v)
+		require.NoError(t, err)
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	signingInput := enc(header) + "." + enc(claims)
+	key := keys.published
+	if o.wrongKey {
+		key = keys.other
+	}
+	digest := sha256.Sum256([]byte(signingInput))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	require.NoError(t, err)
+
+	if !o.noJWKS {
+		b, err := json.Marshal(map[string]any{"keys": []map[string]any{{
+			"kty": "RSA", "alg": "RS256", "use": "sig", "kid": "probe-test-kid",
+			"x5c": []string{base64.StdEncoding.EncodeToString(keys.cert)},
+		}}})
+		require.NoError(t, err)
+		jwks = string(b)
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), jwks
 }
 
 // runMintProbeScript runs the probe workflow's script with fake curl and
@@ -828,10 +941,9 @@ func runMintProbeScript(t *testing.T, tc probeScriptRun) (*world.MintProbeResult
 	scriptPath := filepath.Join(dir, "step.sh")
 	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o600))
 
-	oidc := tc.oidcToken
-	if oidc == "" {
-		claims := `{"repository":"o/r","job_workflow_ref":"o/h/.github/workflows/mint-probe.yml@refs/heads/main"}`
-		oidc = "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".c2ln"
+	oidc, jwks := signedProbeOIDC(t, tc.oidc)
+	if tc.oidcToken != "" {
+		oidc = tc.oidcToken
 	}
 	oidcResponse, err := json.Marshal(map[string]string{"value": oidc})
 	require.NoError(t, err)
@@ -846,6 +958,7 @@ func runMintProbeScript(t *testing.T, tc probeScriptRun) (*world.MintProbeResult
 		"ACTIONS_ID_TOKEN_REQUEST_TOKEN=request-token",
 		"ACTIONS_ID_TOKEN_REQUEST_URL=https://tokens.test/?api=1",
 		"FAKE_OIDC_RESPONSE="+string(oidcResponse),
+		"FAKE_JWKS="+jwks,
 		"FAKE_MINT_STATUS="+tc.mintStatus,
 		"FAKE_MINT_BODY="+tc.mintBody,
 		"FAKE_REVOKE="+tc.revoke,
@@ -869,8 +982,10 @@ func runMintProbeScript(t *testing.T, tc probeScriptRun) (*world.MintProbeResult
 const probeMintedBody = `{"token":"ghs_abc123","repository_selection":"selected","granted_repos":["o/r"],"granted_permissions":{"contents":"read"}}`
 
 func TestMintProbeWorkflowScript_Revocation(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq is not installed")
+	for _, tool := range []string{"jq", "openssl"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is not installed", tool)
+		}
 	}
 
 	t.Run("minted and revoked", func(t *testing.T) {
@@ -899,13 +1014,77 @@ func TestMintProbeWorkflowScript_Revocation(t *testing.T) {
 		assert.Equal(t, "denied", res.Outcome)
 		assert.Equal(t, 401, res.HTTPStatus)
 		assert.Equal(t, mintProbeAuthFailedMessage, res.Message)
+		assert.True(t, res.OIDCVerified, "the probe verified the OIDC token before the mint request")
+		assert.Equal(t, mintProbeOutcomeHostDenied, classifyMintProbeResult(res).outcome)
 		assert.Zero(t, revokes)
 	})
 }
 
+// TestMintProbeWorkflowScript_VerifiesOIDCToken covers a subject-only OIDC
+// failure: the probe must not call the mint with a token it cannot verify,
+// so the mint's identical 401 never reads as a workflow-host denial.
+func TestMintProbeWorkflowScript_VerifiesOIDCToken(t *testing.T) {
+	for _, tool := range []string{"jq", "openssl"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is not installed", tool)
+		}
+	}
+
+	now := time.Now().Unix()
+	for name, o := range map[string]probeOIDC{
+		"bad signature":      {wrongKey: true},
+		"expired":            {claims: map[string]any{"exp": now - 60}},
+		"missing exp":        {claims: map[string]any{"exp": nil}},
+		"not yet valid":      {claims: map[string]any{"nbf": now + 3600}},
+		"wrong audience":     {claims: map[string]any{"aud": "someone-else"}},
+		"wrong issuer":       {claims: map[string]any{"iss": "https://issuer.example"}},
+		"unknown kid":        {header: map[string]any{"kid": "other-kid"}},
+		"missing kid":        {header: map[string]any{"kid": nil}},
+		"unexpected alg":     {header: map[string]any{"alg": "none"}},
+		"signing keys fetch": {noJWKS: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, revokes, out := runMintProbeScript(t, probeScriptRun{oidc: o, mintStatus: "401", mintBody: `{"error":"authentication failed"}`, revoke: "ok"})
+			assert.Equal(t, "error", res.Outcome)
+			assert.Equal(t, "oidc", res.Error)
+			assert.Zero(t, res.HTTPStatus, "the mint is not called with an unverified token")
+			assert.False(t, res.OIDCVerified)
+			assert.Zero(t, revokes)
+			assert.Equal(t, "oidc", classifyMintProbeResult(res).infra)
+			assert.NotContains(t, out, `"message"`)
+		})
+	}
+
+	t.Run("audience list", func(t *testing.T) {
+		res, _, _ := runMintProbeScript(t, probeScriptRun{
+			oidc:       probeOIDC{claims: map[string]any{"aud": []string{"other", "fullsend-mint"}}},
+			mintStatus: "401", mintBody: `{"error":"authentication failed"}`, revoke: "ok"})
+		assert.Equal(t, "denied", res.Outcome)
+		assert.True(t, res.OIDCVerified)
+	})
+}
+
+// TestMintProbeWorkflowScript_DoesNotEchoResult keeps the mint's response
+// text out of the step log; only fixed-vocabulary fields are printed.
+func TestMintProbeWorkflowScript_DoesNotEchoResult(t *testing.T) {
+	for _, tool := range []string{"jq", "openssl"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is not installed", tool)
+		}
+	}
+
+	const hostile = "::error::injected ##[error]injected"
+	res, _, out := runMintProbeScript(t, probeScriptRun{mintStatus: "403", mintBody: `{"error":"` + hostile + `"}`, revoke: "ok"})
+	assert.Equal(t, hostile, res.Message, "the artifact keeps the mint's message")
+	assert.NotContains(t, out, "injected")
+	assert.Contains(t, out, "mint probe result: outcome=denied")
+}
+
 func TestMintProbeWorkflowScript_RejectsUnsafeTokens(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq is not installed")
+	for _, tool := range []string{"jq", "openssl"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is not installed", tool)
+		}
 	}
 
 	for name, token := range map[string]string{
