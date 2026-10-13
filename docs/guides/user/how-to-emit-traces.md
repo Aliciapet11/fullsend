@@ -130,7 +130,7 @@ local file and
 at the endpoint. A retry that carries validation feedback also records the
 prompt the runner composed. Content is redacted for secrets and bounded per iteration;
 a string that held a terminal colour or title code or tag characters, as most
-coloured CLI output does, or that was not valid UTF-8, is recorded as `***` whole, and so is a retry
+coloured CLI output does, or that was not valid UTF-8 or held the replacement character (U+FFFD), is recorded as `***` whole, and so is a retry
 prompt the runner sanitized or cut. Content may still contain proprietary code or PII — tool arguments carry the
 commands an agent ran and the paths and patterns it used, never a file body
 or an edit — so make sure your backend's
