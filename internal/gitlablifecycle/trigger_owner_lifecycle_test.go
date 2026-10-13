@@ -787,6 +787,61 @@ func TestGitLabPollerTriggerOwner_SuppliedSameNamedCredentialIsNotManaged(t *tes
 	}
 }
 
+// After a cutover the previous Poller exists only as retiring_user_id in the
+// generation document (abandoned replacements likewise). Install reconciles
+// them through ManagedPollerUserIDs, so an elevated retiring Poller is
+// demoted, but runtime identity selection still follows rotation state alone.
+func TestGitLabPollerTriggerOwner_ManagedPollerUserIDsIncludeGenerationAccounts(t *testing.T) {
+	ctx := context.Background()
+	const rotation = `{"roles":{"poller":{"phase":"idle","incoming_id":5,"managed_user_id":77,"distributed_at":"2026-01-01T00:00:00Z"}}}`
+	for _, tc := range []struct {
+		name       string
+		generation string
+		want       []int64
+	}{
+		{name: "no generation document", want: []int64{77}},
+		{name: "retiring and abandoned accounts", generation: `{"version":1,"current_user_id":77,"retiring_user_id":90,"abandoned_user_ids":[91]}`, want: []int64{77, 90, 91}},
+		{name: "pending replacement is left to the handoff reconciler", generation: `{"version":1,"current_user_id":77,"pending":{"user_id":95,"phase":"account_recorded"}}`, want: []int64{77}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v4/projects/group%2Fproject/variables/"+forge.SecretGitLabPollerToken, func(w http.ResponseWriter, r *http.Request) {
+				writeTestJSON(t, w, http.StatusOK, map[string]any{"key": forge.SecretGitLabPollerToken, "value": "glpat-runtime"})
+			})
+			mux.HandleFunc("/api/v4/projects/group%2Fproject/variables/"+forge.VarGitLabRoleRotation, func(w http.ResponseWriter, r *http.Request) {
+				writeTestJSON(t, w, http.StatusOK, map[string]any{"key": forge.VarGitLabRoleRotation, "value": rotation})
+			})
+			if tc.generation != "" {
+				mux.HandleFunc("/api/v4/projects/group%2Fproject/variables/"+forge.VarGitLabPollerGenerations, func(w http.ResponseWriter, r *http.Request) {
+					writeTestJSON(t, w, http.StatusOK, map[string]any{"key": forge.VarGitLabPollerGenerations, "value": tc.generation})
+				})
+			}
+			mux.HandleFunc("/api/v4/user", func(w http.ResponseWriter, r *http.Request) {
+				writeTestJSON(t, w, http.StatusOK, map[string]any{"id": 77})
+			})
+			mux.HandleFunc("/api/v4/projects/group%2Fproject/service_accounts", func(w http.ResponseWriter, r *http.Request) {
+				writeTestJSON(t, w, http.StatusOK, []map[string]any{{"id": 77, "name": gitlabroles.PollerTokenName}})
+			})
+			mux.HandleFunc("/api/v4/personal_access_tokens/self", func(w http.ResponseWriter, r *http.Request) {
+				writeTestJSON(t, w, http.StatusOK, map[string]any{"id": 5, "name": gitlabroles.PollerTokenName, "active": true, "user_id": 77})
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			admin, err := gitlab.New("admin-token", gitlab.WithBaseURL(srv.URL))
+			require.NoError(t, err)
+			to := NewTriggerOwner(admin)
+
+			ids, err := to.ManagedPollerUserIDs(ctx, "group", "project")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, ids)
+
+			uid, err := to.PollerUserID(ctx, "group", "project")
+			require.NoError(t, err)
+			assert.Equal(t, int64(77), uid, "the runtime identity is the rotation state's managed account only")
+		})
+	}
+}
+
 // A supplied Poller credential that GitLab rejects (expired, revoked, or
 // forbidden) cannot be attributed to its owner. Identification and managed
 // reconciliation fail closed instead of adopting a same-named

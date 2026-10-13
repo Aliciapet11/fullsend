@@ -61,6 +61,10 @@ func (h *handoffTriggerOwner) CreateReplacementPoller(context.Context, string, s
 	return h.accountUID, h.accountErr
 }
 
+func (h *handoffTriggerOwner) EnsureReplacementPollerAccess(context.Context, string, string, int64) error {
+	return nil
+}
+
 func (h *handoffTriggerOwner) VerifyReplacementPollerCredentialsRevoked(context.Context, string, string, int64) error {
 	return nil
 }

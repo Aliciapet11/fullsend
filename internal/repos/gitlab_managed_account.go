@@ -79,6 +79,28 @@ func ManagedGitLabPollerGenerationAccountIDs(ctx context.Context, client forge.C
 	return ids, nil
 }
 
+// GitLabPollerGenerationReconcileAccountIDs lists the recorded Poller accounts
+// whose project membership install must keep at Developer: the current Poller,
+// the superseded Poller still retiring, and the abandoned replacements. It
+// omits the pending replacement, which reconcilePendingPollerGeneration
+// handles with its handoff phase. Its runtime credentials stay valid until
+// retirement, so an elevated membership on any of these accounts must be
+// restored by an ordinary install (#8243). An absent document records none;
+// an unreadable one fails closed.
+func GitLabPollerGenerationReconcileAccountIDs(ctx context.Context, client forge.Client, owner, repo string) ([]int64, error) {
+	st, err := loadPollerGenerations(ctx, client, owner, repo)
+	if err != nil {
+		return nil, fmt.Errorf("reading recorded GitLab Poller generation accounts: %w", err)
+	}
+	var ids []int64
+	for _, id := range append([]int64{st.CurrentUserID, st.RetiringUserID}, st.AbandonedUserIDs...) {
+		if id > 0 && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // loadManagedAccountOwnership reads rotation state for the managed-account
 // readers. A negative recorded account ID is malformed ownership evidence and
 // fails closed rather than reading as "no managed account".

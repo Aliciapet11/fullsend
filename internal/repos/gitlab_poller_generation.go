@@ -409,6 +409,12 @@ type GitLabPollerHandoff interface {
 	// error wrapping forge.ErrNotFound means project service accounts are not
 	// supported and no account was created.
 	CreateReplacementPoller(ctx context.Context, owner, repo string) (int64, error)
+	// EnsureReplacementPollerAccess idempotently establishes the account's
+	// Developer membership and verifies, read-only, that the existing
+	// protected-branch policy lets it start pipelines on the default branch.
+	// It never changes the branch rule. A policy that does not admit the
+	// account is a *PollerGenerationUnsafeError, which defers the handoff.
+	EnsureReplacementPollerAccess(ctx context.Context, owner, repo string, userID int64) error
 	// VerifyReplacementPollerCredentialsRevoked requires that the account
 	// holds no active personal access token. Managed token names are not
 	// evidence of revocation. A *PollerGenerationUnsafeError carries an
@@ -720,6 +726,17 @@ func (g *pollerGenerationRun) attemptTrigger() (PollerHandoffResult, error) {
 		// The single create request may already have been sent: never send a
 		// second one, whatever phase the document claims.
 		return g.quarantine(fmt.Sprintf("its single pipeline trigger creation request was already attempted and is never retried; delete any %q pipeline trigger owned by user ID %d, remove the account, then %s", GitLabWebhookTriggerDescription, uid, pollerClearPendingAction))
+	}
+	// Preparing the recorded account (Developer membership and read-only
+	// protected-branch admission) is idempotent and runs on every attempt, so
+	// a membership or policy failure in an earlier run is retried here instead
+	// of leaving the generation stuck at account_recorded.
+	if prepErr := g.h.EnsureReplacementPollerAccess(g.ctx, g.owner, g.repo, uid); prepErr != nil {
+		var unsafe *PollerGenerationUnsafeError
+		if errors.As(prepErr, &unsafe) {
+			return PollerHandoffResult{Details: g.details, DeferReason: fmt.Sprintf("webhook fast-path blocked: the replacement GitLab Poller (user ID %d) was not raised because %s. The polling schedules remain in effect", uid, unsafe.Reason)}, nil
+		}
+		return PollerHandoffResult{Details: g.details}, safeAPIError(fmt.Sprintf("preparing the replacement GitLab Poller service account (user ID %d)", uid), prepErr)
 	}
 	level, err := g.client.GetProjectMemberAccessLevel(g.ctx, g.owner, g.repo, uid)
 	if err != nil {

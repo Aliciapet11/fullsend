@@ -508,9 +508,13 @@ and it rejects a generation document that is not exactly one JSON object
 It records each step in `FULLSEND_GITLAB_POLLER_GENERATIONS` before acting:
 
 1. Record the account request, create the fresh service account at Developer,
-   and record its numeric ID. The live adapter also gives the account
-   protected-default-branch pipeline access the same way provisioning does for
-   every Poller service account. A lost create response leaves no ID, so the
+   and record its numeric ID. Creation never touches branch protection. Before
+   every elevation attempt, including a resumed `account_recorded` generation
+   after an earlier membership failure, the handoff idempotently re-establishes
+   Developer membership and checks, read-only, that the existing
+   protected-default-branch rule lets the account start pipelines; a policy
+   that excludes it defers the handoff before any elevation, and fullsend never
+   writes a merge grant for a replacement account. A lost create response leaves no ID, so the
    generation needs manual reconciliation; fullsend never deletes an account
    it cannot positively identify. A refused (403) or unsupported (404) create
    made no account, so polling stays the only path.
@@ -651,7 +655,10 @@ lease:
    that cannot be read also refuses elevation. Credentials fullsend does
    not manage are never revoked. Require the optional
    `repos.GitLabPollerQuiescenceVerifier` capability before revoking runtime
-   credentials; the current live adapter lacks it and defers here.
+   credentials; a trigger owner that implements neither
+   `repos.GitLabPollerHandoff` nor `GitLabPollerQuiescenceVerifier` defers
+   here. The live adapter implements `GitLabPollerHandoff` and never reaches
+   this step.
 3. Invalidate the distributed credentials: remove
    `FULLSEND_GITLAB_POLLER_TOKEN`, revoke the account's managed runtime
    personal access tokens, and verify none is still active (removing the

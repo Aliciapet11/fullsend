@@ -19,10 +19,11 @@ import (
 var _ repos.GitLabPollerHandoff = (*TriggerOwner)(nil)
 
 // CreateReplacementPoller creates a fresh fullsend-poller project service
-// account with no personal access token, adds it to the project at Developer
-// access, and makes sure it may start pipelines on the protected default
-// branch, as provisioning does for every Poller service account. The account
-// ID is returned whenever the account was created, even when a later step
+// account with no personal access token and adds it to the project at
+// Developer access. It never changes the protected-branch rule: whether the
+// account may start pipelines on the default branch is checked read-only by
+// EnsureReplacementPollerAccess before the account is raised. The account ID
+// is returned whenever the account was created, even when a later step
 // failed. A refused or unsupported create means no account was created and is
 // reported as forge.ErrNotFound, so the handoff defers and polling continues.
 func (o *TriggerOwner) CreateReplacementPoller(ctx context.Context, owner, repo string) (int64, error) {
@@ -37,18 +38,46 @@ func (o *TriggerOwner) CreateReplacementPoller(ctx context.Context, owner, repo 
 		return 0, errors.New("GitLab returned no service account ID")
 	}
 	uid := int64(sa.ID)
-	if err := o.Admin.AddProjectMember(ctx, owner, repo, sa.ID, forge.GitLabAccessLevelDeveloper); err != nil {
-		if !forge.IsAlreadyExists(err) {
-			return uid, fmt.Errorf("adding the replacement Poller service account (user ID %d) as a Developer: %w", uid, err)
-		}
-		if err := o.Admin.UpdateProjectMemberAccessLevel(ctx, owner, repo, sa.ID, forge.GitLabAccessLevelDeveloper); err != nil {
-			return uid, fmt.Errorf("setting the replacement Poller service account (user ID %d) to Developer: %w", uid, err)
-		}
-	}
-	if err := repos.VerifyGitLabReplacementPipelineAccess(ctx, o.Admin, owner, repo, sa.ID); err != nil {
-		return uid, fmt.Errorf("establishing protected default-branch pipeline access for the replacement Poller service account (user ID %d): %w", uid, err)
+	if err := o.ensureReplacementMember(ctx, owner, repo, uid); err != nil {
+		return uid, err
 	}
 	return uid, nil
+}
+
+// EnsureReplacementPollerAccess idempotently establishes the replacement
+// account's Developer membership and verifies, read-only, that the existing
+// protected-branch policy lets it start pipelines on the default branch. The
+// handoff runs it before every elevation attempt, so a membership or policy
+// failure in an earlier run is retried rather than left to quarantine the
+// generation after a trigger was minted. A policy that does not admit the
+// account is reported as a *repos.PollerGenerationUnsafeError, which defers
+// the handoff; fullsend never writes the branch rule for a replacement.
+func (o *TriggerOwner) EnsureReplacementPollerAccess(ctx context.Context, owner, repo string, userID int64) error {
+	if err := o.ensureReplacementMember(ctx, owner, repo, userID); err != nil {
+		return err
+	}
+	if err := repos.VerifyGitLabPollerProtectedPipelineAccess(ctx, o.Admin, owner, repo, int(userID)); err != nil {
+		var denied *repos.PollerPipelineAccessDeniedError
+		if errors.As(err, &denied) {
+			return &repos.PollerGenerationUnsafeError{Reason: denied.Error() + "; fullsend does not broaden branch protection, so allow the Poller to start pipelines on that branch"}
+		}
+		return fmt.Errorf("reading protected default-branch pipeline access for the replacement Poller service account (user ID %d): %w", userID, err)
+	}
+	return nil
+}
+
+// ensureReplacementMember makes the account a direct project member at
+// Developer access, creating or lowering the membership as needed.
+func (o *TriggerOwner) ensureReplacementMember(ctx context.Context, owner, repo string, uid int64) error {
+	if err := o.Admin.AddProjectMember(ctx, owner, repo, int(uid), forge.GitLabAccessLevelDeveloper); err != nil {
+		if !forge.IsAlreadyExists(err) {
+			return fmt.Errorf("adding the replacement Poller service account (user ID %d) as a Developer: %w", uid, err)
+		}
+		if err := o.Admin.UpdateProjectMemberAccessLevel(ctx, owner, repo, int(uid), forge.GitLabAccessLevelDeveloper); err != nil {
+			return fmt.Errorf("setting the replacement Poller service account (user ID %d) to Developer: %w", uid, err)
+		}
+	}
+	return nil
 }
 
 // VerifyReplacementPollerCredentialsRevoked requires that the replacement

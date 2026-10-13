@@ -214,13 +214,74 @@ func TestCreateReplacementPoller_Failures(t *testing.T) {
 		require.Error(t, err)
 		assert.Equal(t, int64(77), uid)
 	})
-	t.Run("pipeline access", func(t *testing.T) {
+}
+
+// Creating the account never reads or writes the branch rule: admission is
+// checked read-only by EnsureReplacementPollerAccess before elevation.
+func TestCreateReplacementPoller_NeverTouchesBranchProtection(t *testing.T) {
+	s := newHandoffServer()
+	s.protectedStatus = http.StatusOK
+	s.protectedRule = map[string]any{"name": "main", "merge_access_levels": []map[string]any{{"access_level": 40}}, "push_access_levels": []map[string]any{{"access_level": 40}}}
+
+	uid, err := s.start(t).CreateReplacementPoller(context.Background(), "g", "p")
+	require.NoError(t, err)
+	assert.Equal(t, int64(77), uid)
+	assert.Zero(t, s.protectedReads)
+	assert.Zero(t, s.branchWrites)
+}
+
+func TestEnsureReplacementPollerAccess(t *testing.T) {
+	ctx := context.Background()
+	maintainerOnly := map[string]any{"name": "main", "merge_access_levels": []map[string]any{{"access_level": 40}}, "push_access_levels": []map[string]any{{"access_level": 40}}}
+
+	t.Run("adds a missing membership", func(t *testing.T) {
+		s := newHandoffServer()
+		require.NoError(t, s.start(t).EnsureReplacementPollerAccess(ctx, "g", "p", 77))
+		require.Len(t, s.members, 1)
+		assert.EqualValues(t, forge.GitLabAccessLevelDeveloper, s.members[0]["access_level"])
+		assert.Zero(t, s.branchWrites)
+	})
+	t.Run("existing membership is set to Developer", func(t *testing.T) {
+		s := newHandoffServer()
+		s.memberStatus = http.StatusConflict
+		require.NoError(t, s.start(t).EnsureReplacementPollerAccess(ctx, "g", "p", 77))
+		require.Len(t, s.updates, 1)
+		assert.EqualValues(t, forge.GitLabAccessLevelDeveloper, s.updates[0]["access_level"])
+	})
+	t.Run("membership failure is retried by the next call", func(t *testing.T) {
+		s := newHandoffServer()
+		s.memberStatus = http.StatusInternalServerError
+		to := s.start(t)
+		require.Error(t, to.EnsureReplacementPollerAccess(ctx, "g", "p", 77))
+		s.memberStatus = 0
+		require.NoError(t, to.EnsureReplacementPollerAccess(ctx, "g", "p", 77))
+		assert.Len(t, s.members, 2)
+	})
+	t.Run("membership update failure", func(t *testing.T) {
+		s := newHandoffServer()
+		s.memberStatus = http.StatusConflict
+		s.updateStatus = http.StatusInternalServerError
+		require.Error(t, s.start(t).EnsureReplacementPollerAccess(ctx, "g", "p", 77))
+	})
+	t.Run("branch policy that excludes the account defers without a grant", func(t *testing.T) {
+		s := newHandoffServer()
+		s.protectedStatus = http.StatusOK
+		s.protectedRule = maintainerOnly
+		err := s.start(t).EnsureReplacementPollerAccess(ctx, "g", "p", 77)
+		var unsafe *repos.PollerGenerationUnsafeError
+		require.ErrorAs(t, err, &unsafe)
+		assert.Contains(t, unsafe.Reason, "cannot start pipelines on protected branch")
+		assert.Contains(t, unsafe.Reason, "does not broaden branch protection")
+		assert.Zero(t, s.branchWrites, "a replacement is never granted merge access")
+	})
+	t.Run("unreadable branch policy is an error, not a deferral", func(t *testing.T) {
 		s := newHandoffServer()
 		s.protectedStatus = http.StatusInternalServerError
-		uid, err := s.start(t).CreateReplacementPoller(ctx, "g", "p")
+		err := s.start(t).EnsureReplacementPollerAccess(ctx, "g", "p", 77)
 		require.Error(t, err)
-		assert.Equal(t, int64(77), uid)
-		assert.Contains(t, err.Error(), "protected default-branch pipeline access")
+		var unsafe *repos.PollerGenerationUnsafeError
+		assert.False(t, errors.As(err, &unsafe))
+		assert.Zero(t, s.branchWrites)
 	})
 }
 

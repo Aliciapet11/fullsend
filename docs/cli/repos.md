@@ -265,7 +265,7 @@ The values, validation, WIF provider derivation, and the `FULLSEND_GCP_*` secret
 | `--gitlab-role-token` | | Administrator-provided GitLab role PAT (`role=token`, repeatable) for free-tier enrollment or a custom `own` credential. Values are never logged. |
 | `--rotate-gitlab-roles` | `false` | Force-rotate GitLab role credentials even if they are not near expiry. Auto-rotation of expiring, expired, revoked, or unverified own-credential roles runs during every `repos install`. |
 | `--rotate-gitlab-role` | | Rotate a specific GitLab role (repeatable). Default is all own-credential roles that are due. A `reuse` role follows its target. |
-| `--rotate-gitlab-trigger-token` | `false` | Force-rotate the GitLab webhook fast-path pipeline trigger token (`FULLSEND_TRIGGER_TOKEN`). The webhook is updated to the new token first; the previous token is revoked afterwards. While the Poller is a managed project service account, the new token is created by a fresh Poller generation; rotation defers and keeps the existing compliant token while a superseded Poller generation has not finished retiring, or when the project is ineligible (see [Poller-owned trigger token (deferred)](#poller-owned-trigger-token-deferred)). |
+| `--rotate-gitlab-trigger-token` | `false` | Force-rotate the GitLab webhook fast-path pipeline trigger token (`FULLSEND_TRIGGER_TOKEN`). The webhook is updated to the new token first; the previous token is revoked afterwards. While the Poller is a managed project service account, the new token is created by a fresh Poller generation; rotation defers and keeps the existing compliant token while a superseded Poller generation has not finished retiring, or when the project is ineligible (see [Poller-owned trigger token](#poller-owned-trigger-token)). |
 
 ### GitLab role credentials
 
@@ -458,7 +458,9 @@ are resolved before any provided credential is processed. To recover:
    `--rotate-gitlab-roles`; either runs even though install reports the hold,
    and the normal lifecycle resumes afterwards.
 
-#### Poller-owned trigger token (deferred)
+<a id="poller-owned-trigger-token-deferred"></a>
+
+#### Poller-owned trigger token
 
 > **Poller elevation safety:** Re-elevating a Poller identity that ever held a
 > distributed runtime credential requires a verified server-side guarantee
@@ -497,7 +499,12 @@ trigger, confirms by listing again that it is gone, never raises that account
 again, records it as abandoned (it stays at Developer without credentials and
 is deleted by uninstall), and finishes with a fresh account. If the cutover
 itself is interrupted, the next install finishes it without minting another
-trigger. A Poller that is still a project access token bot leaves the fast path
+trigger. Every install also reconciles the recorded current, retiring, and
+abandoned Poller accounts: one that drifted above Developer is restored and
+verified, and its credentials are contained when that cannot be verified. A
+replacement account whose project role or branch policy cannot be established
+before elevation is deferred, not raised; fullsend never writes a merge grant
+for it. A Poller that is still a project access token bot leaves the fast path
 deferred. See
 [Poller identity generations](../contributing/gitlab-role-credentials.md#poller-identity-generations).
 
