@@ -90,6 +90,19 @@ func TestWarnRepoSkillCollisions_RepoSkillDeclaredName(t *testing.T) {
 
 		assert.Empty(t, output.String())
 	})
+
+	t.Run("declared name is read from any marker spelling", func(t *testing.T) {
+		repoDir := t.TempDir()
+		repoSkillDir := filepath.Join(repoDir, ".claude", "skills", "custom-labels")
+		require.NoError(t, os.MkdirAll(repoSkillDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(repoSkillDir, "skill.md"),
+			[]byte("---\nname: issue-labels\n---\n# Repo labels"), 0o644))
+
+		var output bytes.Buffer
+		warnRepoSkillCollisions(repoDir, []string{harnessSkillDir}, ui.New(&output))
+
+		assert.Contains(t, output.String(), `Repo skill "issue-labels" is shadowed by a harness skill of the same name`)
+	})
 }
 
 func TestWarnRepoSkillCollisions_DoesNotWarnWithoutCollision(t *testing.T) {

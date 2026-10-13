@@ -406,6 +406,18 @@ func TestSandboxName(t *testing.T) {
 	if got := SandboxName(dotName); got != "review" {
 		t.Errorf("dot-prefixed declared name: SandboxName() = %q, want %q", got, "review")
 	}
+
+	// The other marker spellings the repo-skill scan accepts are read too.
+	altMarker := filepath.Join(dir, "alt")
+	if err := os.MkdirAll(altMarker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(altMarker, "skill.md"), []byte("---\nname: alt-name\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := SandboxName(altMarker); got != "alt-name" {
+		t.Errorf("skill.md marker: SandboxName() = %q, want %q", got, "alt-name")
+	}
 }
 
 // TestSandboxName_EmptyPath guards against SandboxName("") probing the

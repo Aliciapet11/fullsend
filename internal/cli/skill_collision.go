@@ -52,7 +52,7 @@ func isReadableSkillMarker(skillDir string) bool {
 }
 
 func isReadableSkillMarkerFS(skillFS fs.FS) bool {
-	for _, marker := range skillMarkerNames {
+	for _, marker := range skill.MarkerNames {
 		info, err := fs.Stat(skillFS, marker)
 		if err != nil || !info.Mode().IsRegular() {
 			continue

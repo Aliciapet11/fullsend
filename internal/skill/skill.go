@@ -25,6 +25,10 @@ var (
 	utf8BOM          = []byte("\xef\xbb\xbf")
 )
 
+// MarkerNames are the spellings of the file that marks a skill directory,
+// in lookup order; the first one present is read.
+var MarkerNames = [...]string{"SKILL.md", "skill.md", "Skill.md"}
+
 // ParseFrontmatter extracts the YAML frontmatter block (delimited by "---")
 // from SKILL.md content and unmarshals it into SkillMeta. Returns nil (no error)
 // if the content has no frontmatter. Returns an error only if frontmatter is
@@ -123,13 +127,16 @@ func SandboxName(skillPath string) string {
 }
 
 func declaredName(skillPath string) string {
-	data, err := os.ReadFile(filepath.Join(skillPath, "SKILL.md"))
-	if err != nil {
-		return ""
+	for _, marker := range MarkerNames {
+		data, err := os.ReadFile(filepath.Join(skillPath, marker))
+		if err != nil {
+			continue
+		}
+		meta, err := ParseFrontmatter(data)
+		if err != nil || meta == nil {
+			return ""
+		}
+		return strings.TrimSpace(meta.Name)
 	}
-	meta, err := ParseFrontmatter(data)
-	if err != nil || meta == nil {
-		return ""
-	}
-	return strings.TrimSpace(meta.Name)
+	return ""
 }
