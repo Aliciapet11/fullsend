@@ -656,17 +656,37 @@ func resolvePathWithin(baseDir, field, p string) (string, error) {
 	return resolved, nil
 }
 
+// realWithin reports whether p, with symlinks resolved, lies under root. A
+// path that does not exist yet counts as within: there is nothing to read.
+func realWithin(root, p string) bool {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return true
+	}
+	return strings.HasPrefix(real, filepath.Clean(realRoot)+string(filepath.Separator))
+}
+
 // resolveSkillSourcesWithin resolves the relative skill directories of the
 // top-level, forge and overlay lists against baseDir, the directory
 // ResolveRelativeTo resolves them against later. Skill identity is the
 // declared SKILL.md name, which skill.SandboxName reads only from an
 // absolute path, so this runs before any merge compares identities (#7830).
+// An entry whose directory is a symlink leaving baseDir stays relative: no
+// metadata is read through the link, and its identity is its basename.
+// Absolute entries are allowed anyway, so this is not an error.
 func (h *Harness) resolveSkillSourcesWithin(baseDir string) error {
 	resolveList := func(field string, skills []SkillEntry) error {
 		for i := range skills {
 			resolved, err := resolvePathWithin(baseDir, fmt.Sprintf("%s[%d]", field, i), skills[i].Source)
 			if err != nil {
 				return err
+			}
+			if resolved != skills[i].Source && !realWithin(baseDir, resolved) {
+				continue
 			}
 			skills[i].Source = resolved
 		}
