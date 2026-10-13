@@ -381,8 +381,9 @@ func TestLoadWithBase_LocalSkillPathOutsideRootIsRejected(t *testing.T) {
 
 // A relative skill entry that is a symlink leaving the root is not read
 // for its declared name: it keeps its basename identity and stays relative
-// for ResolveRelativeTo, as before the merge-time resolution. A symlink
-// inside the root resolves like a directory.
+// for ResolveRelativeTo, as before the merge-time resolution. A relative
+// symlink inside the root resolves like a directory (os.Root follows
+// relative link targets only).
 func TestLoadWithBase_LocalSkillSymlinkOutsideRootIsNotRead(t *testing.T) {
 	dir := t.TempDir()
 	baseSkill := writeSkill(t, filepath.Join(dir, "cache", "issue-labels", "github"), "issue-labels")
@@ -397,13 +398,42 @@ func TestLoadWithBase_LocalSkillSymlinkOutsideRootIsNotRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{baseSkill, "skills/link"}, SkillSources(h.Skills))
 
-	inside := writeSkill(t, filepath.Join(dir, "skills", "real"), "issue-labels")
-	require.NoError(t, os.Symlink(inside, filepath.Join(dir, "skills", "alias")))
+	writeSkill(t, filepath.Join(dir, "skills", "real"), "issue-labels")
+	require.NoError(t, os.Symlink("real", filepath.Join(dir, "skills", "alias")))
 	path = writeTestHarness(t, dir, "review2.yaml", "base: ./base.yaml\nrole: review\nskills:\n  - skills/alias\n")
 
 	h, _, err = LoadWithBase(context.Background(), path, ComposeOpts{WorkspaceRoot: dir})
 	require.NoError(t, err)
 	assert.Equal(t, []string{filepath.Join(dir, "skills", "alias")}, SkillSources(h.Skills))
+}
+
+// The containment check opens each marker spelling under an os.Root at the
+// workspace root, so no symlink leaving it is read for a declared name
+// wherever it sits: the marker file itself, a parent component, a `..`
+// entry routed through an in-root link, or a link with an absolute target.
+// Every entry keeps its basename identity and the base skill survives.
+func TestLoadWithBase_LocalSkillMarkerSymlinkOutsideRootIsNotRead(t *testing.T) {
+	dir := t.TempDir()
+	baseSkill := writeSkill(t, filepath.Join(dir, "cache", "issue-labels", "github"), "issue-labels")
+	writeTestHarness(t, dir, "base.yaml", fmt.Sprintf("agent: agents/base.md\nrole: review\nskills:\n  - %s\n", baseSkill))
+	outside := writeSkill(t, filepath.Join(t.TempDir(), "elsewhere"), "issue-labels")
+	skills := filepath.Join(dir, "skills")
+
+	marker := filepath.Join(skills, "marker")
+	require.NoError(t, os.MkdirAll(marker, 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "SKILL.md"), filepath.Join(marker, "SKILL.md")))
+	require.NoError(t, os.Symlink(filepath.Dir(outside), filepath.Join(skills, "parent")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(skills, "dir")))
+	require.NoError(t, os.Symlink("../cache", filepath.Join(skills, "alias")))
+	real := writeSkill(t, filepath.Join(skills, "real"), "issue-labels")
+	require.NoError(t, os.Symlink(real, filepath.Join(skills, "absalias")))
+	path := writeTestHarness(t, dir, "review.yaml", "base: ./base.yaml\nrole: review\nskills:\n"+
+		"  - skills/marker\n  - skills/parent/elsewhere\n  - skills/alias/../dir\n  - skills/absalias\n")
+
+	h, _, err := LoadWithBase(context.Background(), path, ComposeOpts{WorkspaceRoot: dir})
+	require.NoError(t, err)
+	assert.Equal(t, []string{baseSkill, "skills/marker", "skills/parent/elsewhere", "skills/alias/../dir", "skills/absalias"},
+		SkillSources(h.Skills))
 }
 
 func TestMergeSkills_RelativeChildCannotSpoofBaseIdentity(t *testing.T) {

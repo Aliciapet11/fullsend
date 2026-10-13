@@ -12,6 +12,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/skill"
 	"github.com/fullsend-ai/fullsend/internal/urlutil"
 )
 
@@ -656,18 +657,27 @@ func resolvePathWithin(baseDir, field, p string) (string, error) {
 	return resolved, nil
 }
 
-// realWithin reports whether p, with symlinks resolved, lies under root. A
-// path that does not exist yet counts as within: there is nothing to read.
-func realWithin(root, p string) bool {
-	realRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
+// markersWithin reports whether the relative skill directory rel can be
+// read for its declared name without leaving root. os.Root follows
+// symlinks but refuses any component that resolves outside it (the skill
+// directory, an ancestor or the marker file itself) and any symlink with
+// an absolute target, so every spelling of the marker must be reachable or
+// absent. Every spelling is checked, not just the first present one,
+// because declaredName moves on to the next spelling when a present one
+// cannot be read (a directory named SKILL.md). filepath.Join cleans `..`
+// in rel lexically, as the path opened later is cleaned, rather than
+// against a preceding link's target. A missing marker counts as within:
+// there is nothing to read. A nil root is never within.
+func markersWithin(root *os.Root, rel string) bool {
+	if root == nil {
 		return false
 	}
-	real, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return true
+	for _, marker := range skill.MarkerNames {
+		if _, err := root.Stat(filepath.Join(rel, marker)); err != nil && !os.IsNotExist(err) {
+			return false
+		}
 	}
-	return strings.HasPrefix(real, filepath.Clean(realRoot)+string(filepath.Separator))
+	return true
 }
 
 // resolveSkillSourcesWithin resolves the relative skill directories of the
@@ -675,7 +685,8 @@ func realWithin(root, p string) bool {
 // ResolveRelativeTo resolves them against later. Skill identity is the
 // declared SKILL.md name, which skill.SandboxName reads only from an
 // absolute path, so this runs before any merge compares identities (#7830).
-// An entry whose directory is a symlink leaving baseDir stays relative: no
+// An entry whose marker cannot be opened without a symlink leaving baseDir
+// (the directory, a parent or the marker file itself) stays relative: no
 // metadata is read through the link, and its identity is its basename.
 // Absolute entries are allowed anyway, so this is not an error.
 func (h *Harness) resolveSkillSourcesWithin(baseDir string) error {
@@ -684,13 +695,19 @@ func (h *Harness) resolveSkillSourcesWithin(baseDir string) error {
 	if abs, err := filepath.Abs(baseDir); err == nil {
 		baseDir = abs
 	}
+	// A root that cannot be opened resolves nothing: every relative entry
+	// keeps its basename identity, as before.
+	root, err := os.OpenRoot(baseDir)
+	if err == nil {
+		defer root.Close()
+	}
 	resolveList := func(field string, skills []SkillEntry) error {
 		for i := range skills {
 			resolved, err := resolvePathWithin(baseDir, fmt.Sprintf("%s[%d]", field, i), skills[i].Source)
 			if err != nil {
 				return err
 			}
-			if resolved != skills[i].Source && !realWithin(baseDir, resolved) {
+			if resolved != skills[i].Source && !markersWithin(root, skills[i].Source) {
 				continue
 			}
 			skills[i].Source = resolved
