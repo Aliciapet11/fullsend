@@ -104,5 +104,3 @@ but not redacted; and a script that receives a value can still leak it.
 - Known gap: until ADR 0112's guarded-field check exists, an event-guarded
   overlay can still swap `pre_script`, `post_script` or `validation_loop`, and
   so choose which script receives a referenced secret.
-- Named workflow secrets (`JIRA_TOKEN` on `harness-run`, the OTEL headers)
-  still reach every script unfiltered; #8154 tracks that.
