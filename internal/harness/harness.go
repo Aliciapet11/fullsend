@@ -679,6 +679,11 @@ func realWithin(root, p string) bool {
 // metadata is read through the link, and its identity is its basename.
 // Absolute entries are allowed anyway, so this is not an error.
 func (h *Harness) resolveSkillSourcesWithin(baseDir string) error {
+	// dispatch passes --config-dir as given, so the root may be relative;
+	// resolvePathWithin's prefix check needs it absolute.
+	if abs, err := filepath.Abs(baseDir); err == nil {
+		baseDir = abs
+	}
 	resolveList := func(field string, skills []SkillEntry) error {
 		for i := range skills {
 			resolved, err := resolvePathWithin(baseDir, fmt.Sprintf("%s[%d]", field, i), skills[i].Source)
