@@ -284,16 +284,20 @@ The STAGE and numbered test mints take these values as
 The setup script (`hack/setup-new-e2e-org.sh`) creates or verifies the
 team after it confirms test actor org membership:
 
-- When the team is missing, the script creates it. It then removes the
-  operator who created it, because GitHub adds a team's creator as a
-  maintainer.
-- When `fstest-write` is not an active team member, the script adds it.
-  The membership is active straight away because the earlier step made
-  `fstest-write` an active org member. The step uses the operator's `gh`
-  session, not the actor PAT.
-- The script then checks the team slug and that the membership is
-  `active`. It also checks that `fstest-triage` and `fstest-outsider`
-  are not on the team.
+- When the team is missing, the script creates it.
+- On every run, the script removes the operator whose `gh` session it
+  uses from the team, because GitHub adds a team's creator as a
+  maintainer. Doing this on every run also cleans up after a run that
+  stopped between creating the team and removing the creator.
+- When `fstest-write` is not an active team member with the `member`
+  role, the script adds it or sets it back to `member`. A maintainer
+  could add others and widen the allowlist. The membership is active
+  straight away because the earlier step made `fstest-write` an active
+  org member. The step uses the operator's `gh` session, not the actor
+  PAT.
+- The script then checks the team slug and lists every team member and
+  pending invitation. It stops with an error when anyone other than
+  `fstest-write` is on the team.
 - Any API error other than a "not found" 404 stops the script.
 
 Re-running the script makes no changes when the team and membership
