@@ -109,3 +109,61 @@ func TestDeleteManagedServiceAccounts_UnreadableGenerationDocumentFailsClosed(t 
 	assert.Zero(t, n)
 	assert.Empty(t, fc.DeletedProjectServiceAccounts)
 }
+
+// A generation document that records a Poller account makes cleanup require an
+// account-cleanup capability even when rotation state names no managed account,
+// so cleanup cannot report success while that account stays behind.
+func TestPreflightGitLabRoleCleanup_GenerationOnlyOwnershipRequiresCleaner(t *testing.T) {
+	for name, tokens := range map[string]ProjectAccessTokenClient{
+		"nil client":     nil,
+		"generic client": &fakeTokens{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fc := forge.NewFakeClient()
+			require.NoError(t, writePollerGenerations(ctx, fc, "g", "p", PollerGenerationState{CurrentUserID: 20, RetiringUserID: 10}))
+			fc.VariablesExist["g/p/"+forge.VarGitLabRoleRegistry] = true
+			before := fc.VariableValues["g/p/"+forge.VarGitLabPollerGenerations]
+
+			err := PreflightGitLabRoleCleanupOwnership(ctx, fc, "g", "p", tokens)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, forge.ErrNotSupported)
+			_, err = CleanupGitLabRoleIdentity(ctx, GitLabRoleCleanupConfig{Owner: "g", Repo: "p", Client: fc, Tokens: tokens})
+			require.Error(t, err)
+			assert.True(t, fc.VariablesExist["g/p/"+forge.VarGitLabRoleRegistry], "installation variables are untouched")
+			assert.Equal(t, before, fc.VariableValues["g/p/"+forge.VarGitLabPollerGenerations], "the generation document is untouched")
+		})
+	}
+}
+
+// Generation accounts named only by rotation-state exclusions need no cleaner.
+func TestPreflightGitLabRoleCleanup_ExcludedGenerationAccountNeedsNoCleaner(t *testing.T) {
+	ctx := context.Background()
+	fc := forge.NewFakeClient()
+	require.NoError(t, writeRotationState(ctx, fc, "g", "p", rotationStateFile{Roles: map[string]rotationRoleState{
+		"coder": {SuppliedUserID: 20},
+	}}))
+	require.NoError(t, writePollerGenerations(ctx, fc, "g", "p", PollerGenerationState{CurrentUserID: 20}))
+	require.NoError(t, PreflightGitLabRoleCleanupOwnership(ctx, fc, "g", "p", &fakeTokens{}))
+}
+
+// An unreadable generation document refuses cleanup for every token client.
+func TestPreflightGitLabRoleCleanup_UnreadableGenerationDocumentRefuses(t *testing.T) {
+	for name, tokens := range map[string]ProjectAccessTokenClient{
+		"nil client":     nil,
+		"generic client": &fakeTokens{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fc := forge.NewFakeClient()
+			fc.VariableValues["g/p/"+forge.VarGitLabPollerGenerations] = "{not json"
+			fc.VariablesExist["g/p/"+forge.VarGitLabRoleRegistry] = true
+
+			err := PreflightGitLabRoleCleanupOwnership(ctx, fc, "g", "p", tokens)
+			require.Error(t, err)
+			_, err = CleanupGitLabRoleIdentity(ctx, GitLabRoleCleanupConfig{Owner: "g", Repo: "p", Client: fc, Tokens: tokens})
+			require.Error(t, err)
+			assert.True(t, fc.VariablesExist["g/p/"+forge.VarGitLabRoleRegistry], "installation variables are untouched")
+		})
+	}
+}

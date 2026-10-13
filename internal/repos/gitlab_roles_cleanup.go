@@ -242,15 +242,17 @@ func preflightGitLabRoleCleanup(ctx context.Context, client forge.Client, owner,
 			excluded = appendExcludedID(excluded, id)
 		}
 	}
+	// Generation accounts (current, retiring, pending, abandoned) are owned
+	// too. The document is read for every token client, so a client without
+	// account cleanup cannot let cleanup succeed while a recorded Poller stays
+	// behind; an unreadable generation document fails closed.
+	generationIDs, genErr := ManagedGitLabPollerGenerationAccountIDs(ctx, client, owner, repo)
+	if genErr != nil {
+		return nil, genErr
+	}
 	if sa, ok := tokens.(ServiceAccountTokenClient); ok {
 		// Recorded ownership is applied first so inventory, revocation and
 		// account deletion all rely on the same ownership evidence.
-		// Generation accounts (current, retiring, pending, abandoned) are owned
-		// too; an unreadable generation document fails closed.
-		generationIDs, genErr := ManagedGitLabPollerGenerationAccountIDs(ctx, client, owner, repo)
-		if genErr != nil {
-			return nil, genErr
-		}
 		wrapped, frozen, exclErr := sa.withRecordedOwnership(state, generationIDs...).withProjectExclusions(ctx, owner, repo, state)
 		if exclErr != nil {
 			// The error is already redacted by suppliedOwnerIDs.
@@ -296,6 +298,11 @@ func preflightGitLabRoleCleanup(ctx context.Context, client forge.Client, owner,
 		for _, rs := range state.Roles {
 			if rs.ManagedUserID > 0 {
 				owned[rs.ManagedUserID] = true
+			}
+		}
+		for _, id := range generationIDs {
+			if id > 0 {
+				owned[id] = true
 			}
 		}
 		// excluded holds the recorded exclusions and every owner resolved above.
