@@ -552,12 +552,13 @@ func TestChildScriptEnv_StripsRunnerSecretsBundle(t *testing.T) {
 func newRunnerSecretHarnessDir(t *testing.T, harnessExtra, preScriptBody string) string {
 	t.Helper()
 	dir := t.TempDir()
+	writePolicyFixture(t, dir)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "agents", "code.md"), []byte("You are a coding agent."), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("agents:\n  - harness/code.yaml\n"), 0o644))
 	body := preScriptBody + `echo "skipped=true" >> "${FULLSEND_PRESCRIPT_OUTPUT}"` + "\n"
-	harnessYAML := "agent: agents/code.md\nrole: test\npre_script: " + writePreScript(t, body) + "\n" + harnessExtra
+	harnessYAML := "agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\npre_script: " + writePreScript(t, body) + "\n" + harnessExtra
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "code.yaml"), []byte(harnessYAML), 0o644))
 	return dir
 }
@@ -791,12 +792,13 @@ func TestRunAgent_RunnerSecretPreScriptParseErrorRedacted(t *testing.T) {
 	usePreScriptStub(t)
 	writeRunnerSecretsFile(t, `{"X":"x-secret-value-parse"}`)
 	dir := t.TempDir()
+	writePolicyFixture(t, dir)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "agents", "code.md"), []byte("You are a coding agent."), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("agents:\n  - harness/code.yaml\n"), 0o644))
 	script := writePreScript(t, `echo "skipped=${X}" >> "${FULLSEND_PRESCRIPT_OUTPUT}"`+"\n")
-	harnessYAML := "agent: agents/code.md\nrole: test\npre_script: " + script + "\nenv:\n  runner:\n    X: \"${X}\"\n"
+	harnessYAML := "agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\npre_script: " + script + "\nenv:\n  runner:\n    X: \"${X}\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "code.yaml"), []byte(harnessYAML), 0o644))
 
 	err := runRunnerSecretAgent(t, dir)
@@ -811,13 +813,14 @@ func TestRunAgent_RunnerSecretAcrossFailureDetailCap(t *testing.T) {
 	usePreScriptStub(t)
 	writeRunnerSecretsFile(t, `{"X":"x-secret-value-straddle"}`)
 	dir := t.TempDir()
+	writePolicyFixture(t, dir)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "agents", "code.md"), []byte("You are a coding agent."), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("agents:\n  - harness/code.yaml\n"), 0o644))
 	filler := strings.Repeat("a", 1015)
 	script := writePreScript(t, `echo "`+filler+`${X}" >&2`+"\nexit 1\n")
-	harnessYAML := "agent: agents/code.md\nrole: test\npre_script: " + script + "\nenv:\n  runner:\n    X: \"${X}\"\n"
+	harnessYAML := "agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\npre_script: " + script + "\nenv:\n  runner:\n    X: \"${X}\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "code.yaml"), []byte(harnessYAML), 0o644))
 
 	err := runRunnerSecretAgent(t, dir)
