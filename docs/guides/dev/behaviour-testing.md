@@ -472,7 +472,7 @@ Reference: [`awaitWorkflowReady`](../../../pkg/behaviourtest/drivers/install/ens
 
 Each lease of a pool repo adds approximately 3–5 minutes of overhead (delete leftover state + create + `github setup` + Actions settle; the first lease of each name also resolves inference WIF), including when a later scenario reuses the same `test-repo-NN` name. The behaviour job's `timeout-minutes` in `e2e.yml` and the `go test -timeout` in the Makefile must account for this overhead across all leases in the suite.
 
-Current budget: **45 minutes** for both the CI job timeout and `go test -timeout`. If adding scenarios that lease additional repos (or increase reuse of the 12-slot pool), verify that the total provisioning overhead plus test execution time fits within this budget. Adjust both values together — a `go test -timeout` higher than the CI `timeout-minutes` means the Go process is killed mid-test with no artifact collection. The same rule applies to the `playback-test` target (also 45 minutes) and to any CI job that runs it.
+Current budget: **45 minutes** for both the CI job timeout and `go test -timeout`. If adding scenarios that lease additional repos (or increase reuse of the 12-slot pool), verify that the total provisioning overhead plus test execution time fits within this budget. The [GitHub mint scope scenarios](#github-mint-scope-scenarios) lease one repo per Examples row. Adjust both values together — a `go test -timeout` higher than the CI `timeout-minutes` means the Go process is killed mid-test with no artifact collection. The same rule applies to the `playback-test` target (also 45 minutes) and to any CI job that runs it.
 
 Reference: [`.github/workflows/e2e.yml`](../../../.github/workflows/e2e.yml) behaviour job `timeout-minutes` and `Makefile` `behaviour-test` target.
 
@@ -518,6 +518,57 @@ URL-dispatch scenarios require a vendored CLI binary that includes `FetchPolicy`
 The install driver's internal ensurer always re-vendors the CLI binary (`github setup --vendor`) even when a prior install's post-install validation passes. This guarantees leased pool repos run the binary built from the current checkout rather than a stale binary from a previous CI run. Without re-vendoring, pool repos that passed validation would keep a pre-fix binary and silently fail to dispatch URL-sourced agents.
 
 `doEnsure` always resets (delete + recreate), installs, and settles: every lease starts from a freshly created repo, so there is no re-vendor path that skips the settle wait — the settle step runs on every ensure.
+
+## GitHub mint scope scenarios
+
+`e2e/behaviour/features/platform/mint-scope.feature` covers the GitHub per-repo mint request contract with real GitHub Actions OIDC tokens. It sends requests to the suite's own mint: the preview mint on `dev`, the stage mint on `stage`. A `Scenario Outline` holds the matrix, and each Examples row is one request and its expected result:
+
+| Column | Values |
+|--------|--------|
+| `forge` | `github` (the only supported forge; the feature is tagged `@skip:gitlab`) |
+| `role` | A `fullsend-test` role: `triage`, `coder`, `review`, `retro`, `prioritize`, `fullsend` |
+| `repos` | `shim repo` (the leased repository), `other repo` (another repository of the same org, see below) or `*` |
+| `level` | `read` or `write` |
+| `workflow host` | `approved` or `unapproved` |
+| `outcome` | `minted`, `scope-denied` or `host-denied` |
+| `target repo` | `shim repo` or `none` |
+| `selection` | The token's `repository_selection` (`selected`), or `none` |
+
+Every role mints at both levels for its own repository. Wildcard and other-repository scopes are denied (`scope-denied`), and an unapproved workflow host is denied (`host-denied`). Out of scope: the deprecated per-org installation mode, the infrastructure-only `e2e` role, cross-organization minting, and GitLab or Forgejo minting.
+
+### Probe topology
+
+The probe adds and changes no committed Fullsend workflow, and runs no harness or dummy runtime. For each row the steps:
+
+1. Create a temporary, public host repository in the pool org and commit the reusable probe workflow (`pkg/behaviourtest/steps/mint_probe_workflow.yml`) to it. The approved host is `test-repo-NN-mint-host`. Both CF mint drivers list that name in the mint's `WORKFLOW_HOST_REPOS`, next to the pool repos (see [Install driver (unified)](behaviour-drivers.md#install-driver-unified)). Unapproved-host rows also create `test-repo-NN-mint-unapproved`, which no list names.
+2. Push a shim workflow to a temporary branch (`behaviour/mint-probe-<nonce>`) of the leased repository. On that push, the shim calls the probe workflow twice in one run and passes the repository's `FULLSEND_MINT_URL` variable to both jobs.
+3. Wait for that run, download each job's result artifact and classify it.
+
+The leased repository is the OIDC `repository` claim (the shim) and the host repository is the `job_workflow_ref` claim, so the two are always different repositories. The probe reports both claims, and the outcome step checks them. `other repo` is the approved host itself: it is in the same org and covered by the role's App installation, so a denial cannot come from a missing repository. `CleanupScenario` deletes the shim branch and the host repositories, and the leased repository is deleted when it is deallocated.
+
+### Telling denials from failures
+
+Each probe job requests one token with the job's OIDC token, then masks and revokes any token it gets. It uploads a compact JSON result: the outcome (`minted`, `denied` or `error`), the mint's HTTP status and error message, the two claims, and a minted token's `repository_selection`, granted repositories and granted permissions. No token is kept. The job exits 0 whatever the mint answers, and the upload requires the result file, so a missing result fails the run.
+
+The steps report a policy denial separately from an infrastructure failure. These are infrastructure failures, and none can satisfy an expected denial:
+
+- an OIDC failure: no OIDC token was obtained, or the probe could not verify it (see below);
+- a transport failure: the mint request did not complete;
+- a server failure: an unexpected HTTP status, such as a 422 for a missing App permission, or a 5xx;
+- a malformed result: a 200 without a usable token;
+- a configuration failure: no `FULLSEND_MINT_URL`;
+- a workflow failure: the run did not succeed;
+- a result-artifact failure: the artifact is missing or holds an unknown outcome.
+
+A scope denial must be a 403 with one of the mint's repos-scope messages (`validateReposScope` in `internal/mintcore`). Any other 403, for example `role not allowed`, is a misconfiguration, not a scope denial. A workflow-host denial is a 401. The mint answers `authentication failed` both when the workflow host is not approved and when OIDC verification fails. To rule out the latter, the same run makes a **control** request: same role and level, the leased repository only, through the approved host. The control must mint a `selected` token for the leased repository with the role's canonical permissions, or the row fails whatever the subject request returned.
+
+The control rules out an OIDC failure common to both requests, but not one specific to the subject's token. So each probe job also verifies its own OIDC token before it calls the mint: the RS256 signature against GitHub's published signing keys, the issuer, the `fullsend-mint` audience, and `exp`/`nbf`. A token that fails is reported as an OIDC failure and the mint is not called. The result carries `oidc_verified`, and a 401 `authentication failed` counts as a host denial only when it is `true`. The mint's 401 stays generic on purpose, so no mint-side denial reason is needed. The step log prints only the outcome, error class, HTTP status and `oidc_verified`; the mint's message is kept in the artifact alone.
+
+A minted token's granted permissions are compared with the role's canonical set at the requested level. Permissions the mint may drop while an installation catches up (`coder`'s `packages:read`) may be absent. Nothing else may differ. The expected sets duplicate `canonicalRolePermissions` and `optionalRolePermissions` in `internal/mintcore/github.go`, because `pkg/behaviourtest` must not import mintcore (see [Version pinning](#version-pinning-for-fullsend-aiagents)). Change both together. `TestMintScopeFeature_RowsMatchSteps` checks that every Examples row matches the step patterns and that every role mints at both levels.
+
+### Budget
+
+Each row is a scenario that leases a pool repository, so the 18 rows add 18 leases (about 3–5 minutes of provisioning each) to the [CI timeout budget](#ci-timeout-budgeting-for-lazy-provisioning). Each probe run is short: two parallel jobs that each make one HTTP request. If the suite outgrows the budget, grow the pool through `DefaultPoolSize` (`pkg/behaviourtest/drivers/install/driver.go`). Update the pool-sized infrastructure in the same change, for example `POOL_REPOS` in the inference gateway setup script (see [e2e-testing.md](e2e-testing.md#who-runs-it-and-when)). Then rerun that infrastructure before the larger pool is used.
 
 ## Version pinning for `fullsend-ai/agents`
 
@@ -634,6 +685,10 @@ suiteRunner := godog.TestSuite{
 **`scm.Driver.CreateUserFork` addition (breaking change):** The `scm.Driver` interface now includes `CreateUserFork(ctx, owner, repo string) (forkOwner, forkRepo string, err error)`, which forks a repository into the authenticated user's own account, the way an outside contributor does. The forge picks the fork's name. The `owned by the <actor>` fork step uses it. The GitHub and GitLab reference implementations pass through to the existing `forge.Client.CreateFork` method. This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
 
 **`ci.RunLister` optional interface:** `ListRecentRuns(ctx, owner, repo string, limit int) ([]forge.WorkflowRun, error)` lists a repository's most recent workflow runs across all workflows. Failure log collection uses it to find runs that no step resolved. It is a separate interface, not a `ci.Driver` method, so external `ci.Driver` implementations keep compiling. Without it, failed scenarios still get a failure summary but only the run a step resolved has its logs collected. The GitHub Actions and GitLab CI reference drivers implement it.
+
+**`world.World.MintProbe` addition:** The new `MintProbe *world.MintProbe` field (with the `world.MintProbe` and `world.MintProbeResult` types) holds the state of the [GitHub mint scope scenarios](#github-mint-scope-scenarios). It is a non-breaking addition. The mint probe steps need a CI driver that implements the optional `ci.RunLister` interface, as the GitHub Actions driver does.
+
+**`install.MintProbeHostRepoSuffix` addition:** The suffix (`-mint-host`) of each pool slot's mint-probe host repository. The CF mint drivers add those names to the mint's `--workflow-host-repos`.
 
 **`ci.EmptyMatrixWaiter` optional interface:** `WaitForHarnessEmptyMatrix(ctx, owner, repo string, after time.Time) (*forge.WorkflowRun, error)` backs the `the harness dispatch completes with an empty matrix` step. It is a separate interface, not a `ci.Driver` method, so external `ci.Driver` implementations keep compiling; the step fails with an explanatory error on a driver without it. Only the GitHub Actions reference driver implements it.
 

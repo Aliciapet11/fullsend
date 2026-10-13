@@ -57,6 +57,8 @@ The Factory takes the allocated org name plus runtime dependencies (forge client
 
 Pool orgs must already have the six `fullsend-test-*` role apps and the production `fullsend-ai-e2e` app installed, plus per-repo mint enrollment for each numbered repo (one-time GCP admin step on the hosted mint project). The driver does not run `fullsend admin install` or `fullsend mint enroll`. See [e2e-testing.md](e2e-testing.md#behaviour-tests-and-per-repo-mint-enrollment).
 
+The two CF mint drivers compute the mint's allowlists from the org and pool size on every deploy: `--per-repo-wif-repos` lists the pool repos (`<org>/test-repo-NN`), and `--workflow-host-repos` lists the pool repos plus each slot's mint-probe host `<org>/test-repo-NN-mint-host` (`install.MintProbeHostRepoSuffix`). The probe hosts are workflow hosts only, never enrolled callers; the [GitHub mint scope scenarios](behaviour-testing.md#github-mint-scope-scenarios) create and delete them per scenario. Because both lists are deploy flags, a change takes effect on the next suite run's mint deploy, with no GCP enrollment step.
+
 `Finalize` (RepoPoolCFMintPreviews) abandons the preview alias via `fullsend mint delete --platform=cloudflare` and reclaims any outstanding leases with an error. The RepoPoolCFMintStage driver's teardown is a no-op (the durable Worker persists across runs). The RepoPoolExternalMint driver's teardown is a no-op.
 
 ## Adding an SCM driver

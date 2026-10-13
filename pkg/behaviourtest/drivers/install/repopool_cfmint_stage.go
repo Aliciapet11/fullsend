@@ -86,7 +86,7 @@ func NewRepoPoolCFMintStage(
 	cfg := stageMintConfig{
 		pemDir:            pemDir,
 		perRepoWIFRepos:   buildRepoList(StageOrg, poolSize),
-		workflowHostRepos: buildRepoList(StageOrg, poolSize),
+		workflowHostRepos: buildWorkflowHostRepoList(StageOrg, poolSize),
 		appSet:            envAppSet(),
 	}
 

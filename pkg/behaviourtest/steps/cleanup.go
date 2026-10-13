@@ -234,6 +234,26 @@ func CleanupScenario(w *world.World) {
 		}
 	}
 
+	// --- Mint probe host repo cleanup ---
+	// Probe host repos are ephemeral, like the hosting repos above. The
+	// probe's shim branch on the leased repo is in CreatedBranches and
+	// was deleted with the other branches.
+	if w.MintProbe != nil {
+		for _, repo := range w.MintProbe.CreatedRepos {
+			if repo == "" || repo == w.RepoName {
+				continue
+			}
+			desc := fmt.Sprintf("delete mint probe host repo %s/%s", w.Org, repo)
+			if err := cleanupRetry(w.Logf, desc, func() error {
+				return w.SCM.DeleteRepo(ctx, w.Org, repo)
+			}); err != nil {
+				if !forge.IsNotFound(err) {
+					worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
+				}
+			}
+		}
+	}
+
 	// --- Jira mock cleanup ---
 	if w.JiraMockServer != nil {
 		w.JiraMockServer.Close()
