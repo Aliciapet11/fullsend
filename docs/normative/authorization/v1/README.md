@@ -308,8 +308,50 @@ Fullsend MUST omit or minimize other unneeded untrusted fields where the
 normalized entity contract permits, while retaining the state, content, and
 actor provenance required by the harness. Further trust or injection filtering
 MAY run after CEL routing and before the harness pre-script. Retained content
-remains untrusted throughout. Any resulting agent run uses the harness's
-configured identity and permissions.
+remains untrusted for dispatch and CEL evaluation throughout. [ADR 0133](../../../ADRs/0133-actor-attributed-data-security-boundary.md)
+defines the separate model-bound admission gate: only filtered content whose
+source record and current actor authorization satisfy that ADR may be exposed
+to the model under bounded harness scope. Any resulting agent run uses the
+harness's configured identity and permissions.
+
+## Model-bound actor-attributed data admission
+
+The model-bound gate applies to every source-system record that Fullsend may
+expose to a model, regardless of whether the record arrived in an event, was
+found by polling or snapshotting, or was read through a proactive or
+Fullsend-controlled API. Fullsend MUST establish the record's current actor
+attribution through the source system and resolve that actor's current
+authorization against the applicable observation or mutation threshold. If
+attribution or authorization cannot be established, or the actor does not meet
+the threshold, the record MUST be redacted; there is no data-only fallback.
+
+The actor authorization MAY be co-fetched with the record, supplied in the
+same verified event payload, or lazily resolved when first needed. A lazy
+result MAY be cached only for the logical lifetime of the containing event or
+entity structure and agent invocation. Re-reading or re-fetching the data,
+creating a new structure for retry or requeue, or terminating and re-invoking
+the agent ends that lifetime and requires fresh resolution, even if the same
+in-memory structure is reused. The cache lifetime is not extended by object
+identity or by retaining the structure.
+
+Event-carried authorization evidence MAY support event admission and routing,
+but MUST NOT satisfy model-bound checks. Event-triggered runs MUST resolve
+record-actor authorization after event admission and before model admission,
+again immediately before sandbox initialization, and again immediately before
+first model exposure. If sandbox initialization and first exposure are
+contiguous, one fresh check MAY serve both. Non-event retrieval paths MUST
+perform the equivalent checks after retrieval admission. A
+Fullsend-controlled capability invoked after sandbox initialization MUST
+resolve authorization immediately before releasing each result to the model.
+That release check is the mid-run equivalent of the sandbox checkpoints.
+
+A cache entry MUST NOT cross any checkpoint. Implementations MAY coalesce
+contiguous checks and MAY batch or cache lookups for multiple records from the
+same actor, provided the cache remains within this logical lifetime. Failure,
+unavailability, or loss of authorization at any checkpoint MUST redact the
+record and, if no authorized records remain, deny the run. Revocation after
+first exposure cannot retract content already present in the model context,
+but every later retrieval result requires its own release check.
 
 ## Excluded fields
 
