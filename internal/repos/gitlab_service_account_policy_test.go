@@ -55,6 +55,7 @@ func TestServiceAccountCreationForwardsOnlyRoleMinimum(t *testing.T) {
 		return ServiceAccountTokenClient{
 			SA:                sa,
 			Now:               func() time.Time { return now },
+			VerifyToken:       acceptReplacementToken,
 			ManagedAccountIDs: func(context.Context, string, string) ([]int, error) { return owned, nil },
 			AccountCreated: func(_ context.Context, _, _ string, account GitLabServiceAccount) error {
 				owned = append(owned, account.ID)

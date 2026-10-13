@@ -194,6 +194,7 @@ func TestMissingSecretProvisioningAppliesRecordedExclusionsForPointerClient(t *t
 	sa.members[501] = 20
 	c := &ServiceAccountTokenClient{
 		SA:                sa,
+		VerifyToken:       acceptReplacementToken,
 		ManagedAccountIDs: func(context.Context, string, string) ([]int, error) { return []int{501}, nil },
 	}
 	result := &RoleProvisionResult{}
