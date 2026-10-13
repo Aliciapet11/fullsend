@@ -1137,13 +1137,15 @@ func TestRejectReservedProfileID(t *testing.T) {
 // fullsend-openai (already an error) and non-reserved ids are not (#7268).
 func TestWarnReservedProfileCopies(t *testing.T) {
 	var buf bytes.Buffer
-	listed := warnReservedProfileCopies([]resolve.ResolvedProfile{
+	resolved := dedupResolvedProfiles([]resolve.ResolvedProfile{
 		{ID: "fullsend-github-ro"},
 		{ID: "fullsend-gitleaks", FromURL: true},
 		{ID: "fullsend-github-ro"},
 		{ID: "fullsend-openai"},
 		{ID: "myorg-github-ro"},
-	}, ui.New(&buf))
+	})
+	warnReservedProfileCopies(resolved, ui.New(&buf))
+	listed := profileOverridePaths(resolved)
 	assert.Equal(t, map[string]string{"fullsend-github-ro": "", "fullsend-gitleaks": ""}, listed)
 	out := buf.String()
 	assert.Equal(t, 1, strings.Count(out, `"fullsend-github-ro" will be rejected`), "one warning per id")
@@ -1292,12 +1294,10 @@ display_name: repository copy
 	// The local provider takes precedence, so the hint should not point to
 	// the shadowed definition's file, which is not being used.
 	shadowedProviderPath := filepath.Join(dir, "providers", "shadowed.yaml")
-	providerOverrides := warnReservedProviderNameOverrides(
-		[]harness.ProviderDef{{Name: "github"}},
-		[]resolve.ResolvedProvider{
-			{Def: harness.ProviderDef{Name: provider.Name}, LocalPath: shadowedProviderPath},
-		}, ui.New(io.Discard),
-	)
+	localDefs := []harness.ProviderDef{{Name: "github"}}
+	resolvedProviders := []resolve.ResolvedProvider{{Def: harness.ProviderDef{Name: provider.Name}, LocalPath: shadowedProviderPath}}
+	_, selectedResolved, _ := mergeProviderDefs(localDefs, resolvedProviders)
+	providerOverrides := providerOverridePaths(localDefs, selectedResolved)
 	assert.Equal(t, map[string]string{provider.Name: ""}, providerOverrides)
 	localOnlyHint := providerMigrationHint(provider, providerOverrides, nil)
 	assert.Contains(t, localOnlyHint, fmt.Sprintf("provider %q", provider.Name))
@@ -1305,14 +1305,15 @@ display_name: repository copy
 	// URL overrides should identify the provider or profile, not point
 	// users at downloaded cache files that are not the sources to change.
 	urlProviderPath := filepath.Join(dir, "cache", "github.yaml")
-	urlProviderOverrides := warnReservedProviderNameOverrides(nil, []resolve.ResolvedProvider{
+	urlProviders := []resolve.ResolvedProvider{
 		{Def: harness.ProviderDef{Name: provider.Name}, LocalPath: urlProviderPath, FromURL: true},
-	}, ui.New(io.Discard))
+	}
+	urlProviderOverrides := providerOverridePaths(nil, urlProviders)
 	assert.Equal(t, map[string]string{provider.Name: ""}, urlProviderOverrides)
 	urlProfilePath := filepath.Join(dir, "cache", "fullsend-github.yaml")
-	urlProfileOverrides := warnReservedProfileCopies([]resolve.ResolvedProfile{
+	urlProfileOverrides := profileOverridePaths([]resolve.ResolvedProfile{
 		{ID: provider.Type, LocalPath: urlProfilePath, FromURL: true},
-	}, ui.New(io.Discard))
+	})
 	assert.Equal(t, map[string]string{provider.Type: ""}, urlProfileOverrides)
 	urlHint := providerMigrationHint(provider, urlProviderOverrides, urlProfileOverrides)
 	assert.Contains(t, urlHint, fmt.Sprintf("provider %q", provider.Name))

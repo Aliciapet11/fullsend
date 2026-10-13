@@ -1427,25 +1427,25 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			printer.StepFail("Failed to load provider definitions")
 			return fmt.Errorf("loading provider definitions: %w", err)
 		}
-		providerOverrides := warnReservedProviderNameOverrides(localDefs, result.Providers, printer)
-		profileOverrides := warnReservedProfileCopies(result.Profiles, printer)
 
 		// A bare provider name with no local or URL-resolved definition
 		// falls back to the definition the scaffold embeds in this binary
 		// (providers/<name>.yaml): workspace preparation layers providers/
 		// in CI, but a local per-repo checkout carries only a .gitkeep.
-		localDefs = appendEmbeddedProviderDefs(localDefs, result.Providers, h.Providers, printer)
-		allDefs, shadowedProviders := mergeProviderDefs(localDefs, result.Providers)
-		for _, name := range shadowedProviders {
+		providerDefs := appendEmbeddedProviderDefs(localDefs, result.Providers, h.Providers, printer)
+		allDefs, selectedResolved, shadowedResolved := mergeProviderDefs(providerDefs, result.Providers)
+		for _, name := range shadowedResolved {
 			printer.StepWarn(fmt.Sprintf("Local provider %q shadows URL-resolved provider of the same name", name))
 		}
-		urlProviderNames := make(map[string]bool, len(result.Providers))
-		for _, rp := range result.Providers {
+		urlProviderNames := make(map[string]bool, len(selectedResolved))
+		for _, rp := range selectedResolved {
 			urlProviderNames[rp.Def.Name] = true
 		}
-		for _, name := range shadowedProviders {
-			delete(urlProviderNames, name)
-		}
+
+		warnReservedProviderNameOverrides(localDefs, result.Providers, printer)
+		providerOverrides := providerOverridePaths(localDefs, selectedResolved)
+		warnReservedProfileCopies(result.Profiles, printer)
+		profileOverrides := profileOverridePaths(result.Profiles)
 
 		// Run-scoped providers are created synchronously, before the
 		// shared ones: their credential is resolved in process (a WIF
@@ -6652,37 +6652,37 @@ func dedupResolvedProfiles(profiles []resolve.ResolvedProfile) []resolve.Resolve
 	return deduped
 }
 
-// mergeProviderDefs merges local and URL-resolved provider definitions.
-// Local defs have highest precedence; among URL-resolved defs, last
-// occurrence wins (child over base). The returned slice is deterministically
-// ordered: local defs first, then URL-resolved names in sorted order.
-// shadowed returns the names of URL-resolved providers that were overridden
-// by a local provider of the same name.
-func mergeProviderDefs(localDefs []harness.ProviderDef, urlProviders []resolve.ResolvedProvider) (allDefs []harness.ProviderDef, shadowed []string) {
-	seen := make(map[string]bool, len(localDefs)+len(urlProviders))
-	allDefs = make([]harness.ProviderDef, 0, len(localDefs)+len(urlProviders))
+// mergeProviderDefs selects URL-resolved provider definitions not shadowed
+// by local definitions. Resolved providers must already be deduplicated by
+// the caller using dedupResolvedProviders. The selected slice is sorted by
+// provider name, and allDefs contains local definitions first, followed by
+// the selected resolved definitions in that order.
+func mergeProviderDefs(localDefs []harness.ProviderDef, resolvedProviders []resolve.ResolvedProvider) (allDefs []harness.ProviderDef, selectedResolved []resolve.ResolvedProvider, shadowed []string) {
+	localNames := make(map[string]struct{}, len(localDefs))
 	for _, ld := range localDefs {
-		seen[ld.Name] = true
-		allDefs = append(allDefs, ld)
+		localNames[ld.Name] = struct{}{}
 	}
-	lastByName := make(map[string]resolve.ResolvedProvider, len(urlProviders))
-	for _, rp := range urlProviders {
-		lastByName[rp.Def.Name] = rp
-	}
-	urlNames := make([]string, 0, len(lastByName))
-	for name := range lastByName {
-		if !seen[name] {
-			urlNames = append(urlNames, name)
+
+	sortedResolved := append([]resolve.ResolvedProvider(nil), resolvedProviders...)
+	sort.Slice(sortedResolved, func(i, j int) bool {
+		return sortedResolved[i].Def.Name < sortedResolved[j].Def.Name
+	})
+
+	selectedResolved = make([]resolve.ResolvedProvider, 0, len(sortedResolved))
+	for _, rp := range sortedResolved {
+		if _, isShadowed := localNames[rp.Def.Name]; isShadowed {
+			shadowed = append(shadowed, rp.Def.Name)
 		} else {
-			shadowed = append(shadowed, name)
+			selectedResolved = append(selectedResolved, rp)
 		}
 	}
-	sort.Strings(urlNames)
-	sort.Strings(shadowed)
-	for _, name := range urlNames {
-		allDefs = append(allDefs, lastByName[name].Def)
+
+	allDefs = make([]harness.ProviderDef, 0, len(localDefs)+len(selectedResolved))
+	allDefs = append(allDefs, localDefs...)
+	for _, rp := range selectedResolved {
+		allDefs = append(allDefs, rp.Def)
 	}
-	return allDefs, shadowed
+	return allDefs, selectedResolved, shadowed
 }
 
 // wrapEnsureProviderError preserves the existing provider context and error
@@ -6766,29 +6766,45 @@ func isReservedProfileID(id string) bool {
 // (what agent new wrote on v0.44.0), or a URL-resolved one. The name is
 // reserved so a stale copy can never silently shadow a fix shipped in the
 // binary (#7268, #7973). For one release the copy is still used and this
-// only warns; a later release makes it an error. It returns the warned
-// reserved names and their repository-local paths when available.
-func warnReservedProviderNameOverrides(localDefs []harness.ProviderDef, resolved []resolve.ResolvedProvider, printer *ui.Printer) map[string]string {
-	overrides := make(map[string]string, len(localDefs)+len(resolved))
-	warn := func(name, source, localPath string) {
+// only warns; a later release makes it an error.
+func warnReservedProviderNameOverrides(localDefs []harness.ProviderDef, resolved []resolve.ResolvedProvider, printer *ui.Printer) {
+	warn := func(name, source string) {
 		if isBuiltinProviderName(name) {
 			printer.StepWarn(fmt.Sprintf("provider %q: the name is reserved for the definition built into fullsend, and a future release rejects %s. It is still used for now. Declare the bare name %q and delete the copy, or rename it to a name fullsend does not ship", name, source, name))
-			if _, exists := overrides[name]; !exists {
-				overrides[name] = localPath
-			}
 		}
 	}
 	for _, d := range localDefs {
-		warn(d.Name, "the copy in the workspace providers/ directory", "")
+		warn(d.Name, "the copy in the workspace providers/ directory")
 	}
 	for _, rp := range resolved {
 		if rp.FromURL {
-			warn(rp.Def.Name, "the URL-resolved copy", "")
+			warn(rp.Def.Name, "the URL-resolved copy")
 		} else {
-			warn(rp.Def.Name, "the copy at "+quotePathForLog(rp.LocalPath), rp.LocalPath)
+			warn(rp.Def.Name, "the copy at "+quotePathForLog(rp.LocalPath))
 		}
 	}
-	return overrides
+}
+
+// providerOverridePaths records reserved local and selected resolved copies
+// for failure hints.
+func providerOverridePaths(localDefs []harness.ProviderDef, selectedResolved []resolve.ResolvedProvider) map[string]string {
+	paths := make(map[string]string, len(localDefs)+len(selectedResolved))
+	for _, def := range localDefs {
+		if isBuiltinProviderName(def.Name) {
+			paths[def.Name] = ""
+		}
+	}
+	for _, rp := range selectedResolved {
+		if !isBuiltinProviderName(rp.Def.Name) {
+			continue
+		}
+		localPath := ""
+		if !rp.FromURL {
+			localPath = rp.LocalPath
+		}
+		paths[rp.Def.Name] = localPath
+	}
+	return paths
 }
 
 // rejectReservedProfileID fails when the run resolved a provider profile
@@ -6803,19 +6819,30 @@ func rejectReservedProfileID(id string, resolved []resolve.ResolvedProfile) erro
 	return nil
 }
 
-// warnReservedProfileCopies warns once for each reserved profile id that
-// the harness lists its own copy of (openshell.profiles, by path or URL),
-// whether or not a provider in this run uses it, and returns ids with repository-local paths when available.
-// For one release the listed copy stays live: the caller does not import
-// the embedded profile over it. fullsend-openai is skipped here because it
-// is already an error (rejectReservedProfileID) (#7268).
-func warnReservedProfileCopies(resolved []resolve.ResolvedProfile, printer *ui.Printer) map[string]string {
-	overrides := make(map[string]string)
+// warnReservedProfileCopies warns for each reserved profile id that the
+// harness lists its own copy of (openshell.profiles, by path or URL), whether
+// or not a provider in this run uses it. Resolved profiles must already be
+// deduplicated by the caller using dedupResolvedProfiles. For one release the
+// listed copy stays live: the caller does not import the embedded profile over
+// it. fullsend-openai is skipped here because it is already an error
+// (rejectReservedProfileID) (#7268).
+func warnReservedProfileCopies(resolved []resolve.ResolvedProfile, printer *ui.Printer) {
 	for _, rp := range resolved {
 		if rp.ID == openAIProviderType || !isReservedProfileID(rp.ID) {
 			continue
 		}
-		if _, seen := overrides[rp.ID]; seen {
+		printer.StepWarn(fmt.Sprintf("provider profile %q will be rejected in a future release: the id is reserved for the copy built into fullsend. Your copy is still used for now. Remove it from openshell.profiles and declare the bare provider name %q instead", rp.ID, strings.TrimPrefix(rp.ID, "fullsend-")))
+	}
+}
+
+// profileOverridePaths collects reserved profiles for provider failure hints
+// and marks copies that should remain live for this run. Empty values are
+// retained for URL copies so map membership still prevents the embedded
+// profile from replacing a listed copy.
+func profileOverridePaths(resolved []resolve.ResolvedProfile) map[string]string {
+	overrides := make(map[string]string)
+	for _, rp := range resolved {
+		if rp.ID == openAIProviderType || !isReservedProfileID(rp.ID) {
 			continue
 		}
 		localPath := ""
@@ -6823,7 +6850,6 @@ func warnReservedProfileCopies(resolved []resolve.ResolvedProfile, printer *ui.P
 			localPath = rp.LocalPath
 		}
 		overrides[rp.ID] = localPath
-		printer.StepWarn(fmt.Sprintf("provider profile %q will be rejected in a future release: the id is reserved for the copy built into fullsend. Your copy is still used for now. Remove it from openshell.profiles and declare the bare provider name %q instead", rp.ID, strings.TrimPrefix(rp.ID, "fullsend-")))
 	}
 	return overrides
 }
