@@ -340,7 +340,8 @@ func TestInjectFrontmatterSkills_BOM(t *testing.T) {
 func TestInjectFrontmatterSkills_NoFrontmatterDedup(t *testing.T) {
 	t.Parallel()
 	src := "# Just a prompt\n"
-	// Two skill dirs with the same basename — should produce one entry.
+	// Two skill dirs with the same sandbox name (neither is on disk, so the
+	// basename) — should produce one entry.
 	result, err := injectFrontmatterSkills([]byte(src), []string{
 		"/a/skill-x",
 		"/b/skill-x",
@@ -348,7 +349,7 @@ func TestInjectFrontmatterSkills_NoFrontmatterDedup(t *testing.T) {
 	require.NoError(t, err)
 
 	got := string(result)
-	assert.Equal(t, 1, strings.Count(got, "skill-x"), "duplicate basenames should be deduplicated")
+	assert.Equal(t, 1, strings.Count(got, "skill-x"), "duplicate sandbox names should be deduplicated")
 	assert.Contains(t, got, "# Just a prompt")
 }
 

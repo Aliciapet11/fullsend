@@ -7529,8 +7529,9 @@ skills:
 
 func TestLoadWithBase_SourceURL_WithBase_SkillOverrideByBasename(t *testing.T) {
 	// mergeSkills (#5408) makes a child skill override a base skill in
-	// place when their basenames match, rather than appending it
-	// alongside. This locks in that this PR's post-merge SourceURL
+	// place when their identities match (here the basename, since neither
+	// SKILL.md declares a name), rather than appending it alongside. This
+	// locks in that this PR's post-merge SourceURL
 	// resolution composes correctly with that override: the surviving
 	// entry must resolve to the child's content from SourceURL, and
 	// there must be exactly one resulting skill, not two.
@@ -7541,8 +7542,9 @@ func TestLoadWithBase_SourceURL_WithBase_SkillOverrideByBasename(t *testing.T) {
 	cacheDir := filepath.Join(dir, "cache")
 
 	// The base's skill directory shares a basename ("pr-review") with the
-	// child's skill declaration below, so mergeSkills overrides it in
-	// place. It must also be a genuine cache path — isFullsendCachePath
+	// child's skill declaration below and neither SKILL.md declares a
+	// name, so mergeSkills overrides it in place. It must also be a genuine
+	// cache path — isFullsendCachePath
 	// rejects any other absolute path as untrusted — so it's nested under
 	// a cache-hash directory rather than a plain temp-dir path, with
 	// "pr-review" as its basename (mirroring how fetchBaseSkill names the
@@ -7583,9 +7585,10 @@ skills:
 
 	baseURL := server.URL + "/base.yaml#sha256=" + baseHash
 
-	// The child declares its own skill with the SAME basename as the
-	// base's, so mergeSkills replaces the base's entry instead of
-	// appending alongside it.
+	// The child declares its own skill with the SAME identity as the
+	// base's (the basename, since neither SKILL.md declares a name), so
+	// mergeSkills replaces the base's entry instead of appending alongside
+	// it.
 	childHarness := fmt.Sprintf(`
 base: %s
 role: review

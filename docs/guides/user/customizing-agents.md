@@ -321,8 +321,9 @@ are actually changing:
    schema, post-script, and any shipped skills under
    [fullsend-ai/agents](https://github.com/fullsend-ai/agents). Do not guess
    field names or roster lists from memory.
-2. **Unique skill names** — a repo skill with the same directory name as a
-   built-in is ignored and produces a warning (see
+2. **Unique skill names** — a repo skill whose identity (its declared
+   `SKILL.md` `name:`, or its directory name when none is declared) matches a
+   built-in's is ignored and produces a warning (see
    [skill precedence](customizing-with-skills.md#skill-precedence)).
 3. **Specificity wins** — vague augmentations lose to hard default
    instructions. Own exact fields; use word limits and templates.

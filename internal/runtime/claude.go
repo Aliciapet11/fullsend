@@ -308,12 +308,13 @@ var reservedPluginDestNames = []string{"marketplaces", "cache", "known_marketpla
 
 // duplicateDestinationNameError returns an error if two distinct paths in
 // paths share the same basename, or if a basename collides with one of
-// reserved. sandbox.UploadDir replaces its destination wholesale rather than
-// merging into it, so two different skills or plugins resolving to the same
-// sandbox directory name would otherwise upload one, then silently discard
-// it when the second overwrites it — the same "expected content silently
-// isn't there" failure mode as #5247, just reached through a naming
-// collision instead of a broken symlink.
+// reserved. Plugins and pi extensions use it; skills go through
+// skillDestNames, keyed on skill.SandboxName. sandbox.UploadDir replaces its
+// destination wholesale rather than merging into it, so two different plugins
+// resolving to the same sandbox directory name would otherwise upload one,
+// then silently discard it when the second overwrites it — the same "expected
+// content silently isn't there" failure mode as #5247, just reached through a
+// naming collision instead of a broken symlink.
 func duplicateDestinationNameError(kind string, paths []string, reserved ...string) error {
 	entries := make([]nameEntry, 0, len(paths))
 	for _, p := range paths {

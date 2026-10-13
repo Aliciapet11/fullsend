@@ -1876,7 +1876,7 @@ func fetchBaseSkill(ctx context.Context, field, baseURLDir, skillPath string, al
 			treePath, entry, err := fetch.CacheGetDir(opts.WorkspaceRoot, treeHash)
 			if err == nil && treePath != "" {
 				// Apply the same symlink renaming as fetchBaseSkillDir so
-				// cache-hit paths return the real skill name, not "tree".
+				// cache-hit paths carry the skill's directory name, not "tree".
 				treePath, err = fetch.CacheNamedSymlink(treePath, filepath.Base(skillPath))
 				if err != nil {
 					return Dependency{}, "", fmt.Errorf("base %s: %w", field, err)
@@ -1968,8 +1968,10 @@ func fetchBaseSkillDir(ctx context.Context, field, skillDirURL, skillFileURL, sk
 		return Dependency{}, "", fmt.Errorf("base %s: reading cached skill directory: %w", field, err)
 	}
 
-	// Create a symlink named after the skill directory so downstream consumers
-	// (sandbox upload, logging) see the real skill name instead of "tree".
+	// Create a symlink named after the skill directory so logging and the
+	// basename fallback of skill.SandboxName see the directory name instead
+	// of "tree"; the sandbox destination is the declared SKILL.md name when
+	// it is valid.
 	treePath, err = fetch.CacheNamedSymlink(treePath, filepath.Base(forgeInfo.Path))
 	if err != nil {
 		return Dependency{}, "", fmt.Errorf("base %s: %w", field, err)
@@ -2306,13 +2308,13 @@ func urlIndexPut(workspaceRoot, rawURL, hash string) error {
 // mergeSkills concatenates base and child skill entries, with child entries
 // overriding base entries that share a skill identity. Identity is
 // skill.SandboxName: a valid SKILL.md name when the directory is on disk,
-// otherwise filepath.Base. Child-vs-base override by basename (when files
-// are not yet resolved) is how a child harness replaces a built-in skill
-// via base: composition (#5408). Nested forge skills that share a leaf
-// directory (skills/issue-labels/github vs skills/pr-review/github) keep
-// distinct identities once SKILL.md is readable, and even before that they
-// do not collapse against each other: only a *base* entry is an override
-// target. True destination collisions fail at bootstrap via
+// otherwise filepath.Base. Child-vs-base override by that identity is how a
+// child harness replaces a built-in skill via base: composition (#5408);
+// LoadWithBase resolves relative entries before the merge, so the basename
+// is the key only for a path nothing resolved. Nested forge skills that
+// share a leaf directory (skills/issue-labels/github vs
+// skills/pr-review/github) keep distinct identities, and only a *base*
+// entry is an override target. True destination collisions fail at bootstrap via
 // uploadHarnessSkills (duplicateNameError) rather than silently dropping a
 // skill (#7830). Two child entries with one identity are both kept, whether
 // or not a base entry shares it, so the same bootstrap check rejects them.

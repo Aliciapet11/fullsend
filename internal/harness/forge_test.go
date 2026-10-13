@@ -85,8 +85,9 @@ func TestResolveForge_SkillsConcat(t *testing.T) {
 }
 
 // TestResolveForge_SkillsOverrideByBasename verifies that a forge skill
-// whose basename matches a top-level skill replaces it instead of producing
-// a duplicate (see #5408).
+// whose identity matches a top-level skill replaces it instead of producing
+// a duplicate (see #5408); neither path is on disk, so the identity is the
+// basename.
 func TestResolveForge_SkillsOverrideByBasename(t *testing.T) {
 	h := &Harness{
 		Agent:  "agents/test.md",
