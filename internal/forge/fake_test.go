@@ -957,6 +957,7 @@ func newThreadSafetyFake() *FakeClient {
 	fc.AuthenticatedUser = "bot"
 	fc.WorkflowRuns["o/r/ci.yml"] = &WorkflowRun{ID: 1, Status: "completed", Conclusion: "success"}
 	fc.Installations = []Installation{{ID: 1, AppSlug: "app"}}
+	fc.ProtectedBranchRules["o/r/main"] = &ProtectedBranchRule{Name: "main", MergeAccessLevels: []ProtectedBranchAccess{{ID: 1, UserID: 1}}}
 	fc.Secrets["o/r/n"] = true
 	fc.VariablesExist["o/r/n"] = true
 	fc.VariableValues["o/r/n"] = "v"
@@ -1138,7 +1139,7 @@ func threadSafetyCalls(ctx context.Context) map[string]func(fc *FakeClient) []an
 		"ListProtectedBranches": func(fc *FakeClient) []any { return pack(fc.ListProtectedBranches(ctx, "o", "r")) },
 		"ListProtectedTags":     func(fc *FakeClient) []any { return pack(fc.ListProtectedTags(ctx, "o", "r")) },
 		"GrantProtectedBranchMergeUser": func(fc *FakeClient) []any {
-			return pack(fc.GrantProtectedBranchMergeUser(ctx, "o", "r", "main", 1))
+			return pack(fc.GrantProtectedBranchMergeUser(ctx, "o", "r", "main", 2))
 		},
 		"RevokeProtectedBranchMergeUserEntry": func(fc *FakeClient) []any {
 			return pack(fc.RevokeProtectedBranchMergeUserEntry(ctx, "o", "r", "main", 1, 1))
