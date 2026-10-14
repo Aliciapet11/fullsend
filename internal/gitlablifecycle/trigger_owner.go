@@ -4,9 +4,12 @@
 //
 // The live TriggerOwner deliberately does not implement
 // repos.GitLabPollerQuiescenceVerifier: GitLab offers no server-side drain
-// barrier for requests accepted with revoked credentials, so the webhook fast
-// path keeps deferring trigger creation and rotation, and polling remains the
-// dispatch path.
+// barrier for requests accepted with revoked credentials, so the current
+// Poller is never re-elevated. It implements repos.GitLabPollerHandoff
+// instead (poller_handoff.go): a fresh service account mints the webhook
+// trigger, is demoted to Developer and verified, and only then receives a
+// runtime credential. Any ineligible or ambiguous state defers the fast path
+// and polling remains the dispatch path.
 package gitlablifecycle
 
 import (
@@ -552,9 +555,42 @@ func (o *TriggerOwner) noPollerMember(ctx context.Context, owner, repo string) e
 }
 
 // ManagedPollerUserIDs lists every managed Poller service account, lowest ID
-// first, so install reconciles duplicates as uninstall does.
+// first, so install reconciles duplicates as uninstall does. It also lists the
+// Poller accounts recorded in the generation document (the current, retiring,
+// and abandoned ones), because after a cutover the previous Poller is no
+// longer the rotation state's managed account yet its runtime credential stays
+// valid until retirement. Supplied-account exclusions apply to those as well.
+// This inventory is for reconciliation only: selecting the runtime Poller
+// identity still uses the rotation state's managed account alone (see
+// managedPollerIDs).
 func (o *TriggerOwner) ManagedPollerUserIDs(ctx context.Context, owner, repo string) ([]int64, error) {
-	return o.managedPollerIDs(ctx, owner, repo)
+	ids, err := o.managedPollerIDs(ctx, owner, repo)
+	if err != nil && !forge.IsNotFound(err) {
+		return nil, err
+	}
+	recorded, genErr := repos.GitLabPollerGenerationReconcileAccountIDs(ctx, o.Admin, owner, repo)
+	if genErr != nil {
+		return nil, genErr
+	}
+	if len(recorded) > 0 {
+		excluded, supErr := o.excludedAccountIDs(ctx, owner, repo)
+		if supErr != nil {
+			return nil, supErr
+		}
+		for _, id := range recorded {
+			if !slices.Contains(ids, id) && !slices.Contains(excluded, id) {
+				ids = append(ids, id)
+			}
+		}
+		slices.Sort(ids)
+	}
+	if len(ids) == 0 {
+		if err == nil {
+			err = fmt.Errorf("no %s project service account exists: %w", gitlabroles.PollerTokenName, forge.ErrNotFound)
+		}
+		return nil, err
+	}
+	return ids, nil
 }
 
 // lowestManagedPollerID returns the managed Poller account provisioning uses,

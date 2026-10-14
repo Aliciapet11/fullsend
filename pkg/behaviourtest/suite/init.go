@@ -155,6 +155,7 @@ func resetScenarioWorld(w *world.World) {
 	w.ConsumedHarnessRunIDs = nil
 	w.HarnessRunArtifactDirs = nil
 	w.StagePublishedSHA = nil
+	w.MintProbe = nil
 }
 
 func tagNames(tags []*messages.PickleTag) []string {

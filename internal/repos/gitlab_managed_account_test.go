@@ -72,6 +72,7 @@ func TestServiceAccountTokenClient_DurableOwnershipGatesReuseAndRevocation(t *te
 	owned := []int{}
 	c := ServiceAccountTokenClient{
 		SA:                sa,
+		VerifyToken:       acceptReplacementToken,
 		ManagedAccountIDs: func(context.Context, string, string) ([]int, error) { return owned, nil },
 		AccountCreated: func(_ context.Context, _, _ string, account GitLabServiceAccount) error {
 			owned = append(owned, account.ID)

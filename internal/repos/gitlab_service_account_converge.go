@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -48,9 +49,37 @@ func (c ServiceAccountTokenClient) AppendGitLabServiceAccountStatus(ctx context.
 		return serviceAccountStatusUnverified(status, "gitlab-service-accounts", safeAPIError("Supplied-account ownership could not be verified", exclErr).Error())
 	}
 	owned := map[int]bool{}
+	// backing holds managed accounts that may still back an installed
+	// credential. After a supplied enrollment completes, the historical
+	// managed account stays recorded as cleanup provenance only, so its
+	// positive absence from a complete inventory is not a readiness failure.
+	// During a supplied-to-managed replacement (IncomingID set while
+	// distributing or failed) the Supplied marker is still present but the new
+	// managed account may already back the installed credential, so it stays in
+	// backing until the replacement completes.
+	backing := map[int]bool{}
 	for _, rs := range state.Roles {
 		if rs.ManagedUserID > 0 {
 			owned[rs.ManagedUserID] = true
+			replacing := rs.IncomingID != 0 && (rs.Phase == rotationPhaseDistributing || rs.Phase == rotationPhaseFailed)
+			if !provenanceOf(rs).Supplied || replacing {
+				backing[rs.ManagedUserID] = true
+			}
+		}
+	}
+	// Generation-document accounts (current, retiring, pending, abandoned
+	// Pollers) are managed too: rotation state names only the current managed
+	// account, so without them a retiring Poller is reported managed=false and
+	// skips the effective-access drift check while its credential may still be
+	// usable. They are not in backing: a retiring or abandoned account may
+	// legitimately be gone.
+	generationIDs, genErr := ManagedGitLabPollerGenerationAccountIDs(ctx, client, owner, repo)
+	if genErr != nil {
+		return serviceAccountStatusUnverified(status, "gitlab-service-accounts", "Poller generation account ownership could not be verified")
+	}
+	for _, id := range generationIDs {
+		if _, ok := owned[id]; !ok {
+			owned[id] = true
 		}
 	}
 	for _, id := range frozen {
@@ -91,7 +120,7 @@ func (c ServiceAccountTokenClient) AppendGitLabServiceAccountStatus(ctx context.
 	}
 	var missing []int
 	for id, managed := range owned {
-		if managed && !present[id] {
+		if managed && backing[id] && !present[id] {
 			missing = append(missing, id)
 		}
 	}
@@ -117,6 +146,17 @@ func (c ServiceAccountTokenClient) AppendGitLabServiceAccountStatus(ctx context.
 		}
 	}
 	return changed
+}
+
+// AppendGitLabTokenInventoryUnverified reports that the project's token
+// inventory could not be listed, so credential health was never verified:
+// role readiness is cleared and the gap is recorded as drift, never as a
+// healthy status. It reports that an entry was added to status.Drifts.
+func AppendGitLabTokenInventoryUnverified(status *RepoStatus) bool {
+	if status == nil {
+		return false
+	}
+	return serviceAccountStatusUnverified(status, "gitlab-token-inventory", "Project access token inventory could not be listed to verify credential health")
 }
 
 // serviceAccountStatusUnverified keeps configured roles from appearing ready
@@ -243,6 +283,25 @@ func convergeInstalledServiceAccount(ctx context.Context, cfg RoleProvisionConfi
 					break
 				}
 			}
+			// A complete inventory that positively lacks the recorded account
+			// shows it was deleted. When the operator explicitly supplied a
+			// replacement for this role, leave recovery to the rotation pass that
+			// follows rather than failing provisioning, which makes the CLI skip
+			// that rotation. Once a supplied enrollment has completed, the
+			// historical managed account stays recorded as cleanup provenance but
+			// no longer backs the installed credential, so its positive absence
+			// must not block later ordinary installs or forced rotations either.
+			// Ownership stays recorded in rotation state, and an unreadable
+			// inventory or ownership error still fails closed below.
+			if err == nil && account == nil {
+				if operatorSuppliesRole(cfg, operatorRotationRoles(cfg), rec.Name) {
+					result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("%s: recorded managed service account is no longer present; the supplied credential is enrolled instead", rec.Name))
+					return
+				}
+				if provenanceOf(rs).Supplied {
+					return
+				}
+			}
 			if err != nil || account == nil {
 				result.Failed = append(result.Failed, RoleProvisionFailure{Role: rec.Name, Secret: rec.Credential.SecretName, Reason: "managed account inventory or ownership unverified; credentials left untouched"})
 				return
@@ -307,6 +366,24 @@ func convergeInstalledServiceAccount(ctx context.Context, cfg RoleProvisionConfi
 		}
 		return
 	}
+	// An ambiguous supplied publication is held against automatic convergence.
+	// When the operator explicitly requested recovery of this role in the same
+	// run (a supplied credential or a forced rotation), leave it to that
+	// rotation, which runs after provisioning, instead of failing the install
+	// before the requested recovery can run.
+	operatorRotation := operatorRotationRoles(cfg)
+	if providedPublicationUnresolved(rs) && operatorRecoversRole(cfg, operatorRotation, rec.Name) {
+		result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("%s: automatic replacement held; the requested recovery handles this role", rec.Name))
+		return
+	}
+	// An explicit supplied credential for this role wins over automatic
+	// service-account convergence: replacing the credential with a managed
+	// token here would publish a credential the administrator did not choose.
+	// The rotation pass that follows enrolls the supplied value.
+	if operatorSuppliesRole(cfg, operatorRotation, rec.Name) {
+		result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("%s: automatic service-account replacement skipped; the supplied credential is enrolled instead", rec.Name))
+		return
+	}
 	// A replacement is published and the working credential retired only after
 	// the new token's identity, scopes, expiry and protected-ref access (for the
 	// Poller, VerifyGitLabReplacementPipelineAccess) are verified. Without a
@@ -324,11 +401,40 @@ func convergeInstalledServiceAccount(ctx context.Context, cfg RoleProvisionConfi
 	// PAT when listing is supported but service-account creation is not.
 	c.requireServiceAccount = true
 	rotated := RoleRotateResult{}
-	rotateOneRole(ctx, RoleRotateConfig{Owner: cfg.Owner, Repo: cfg.Repo, Client: cfg.Client, Tokens: c, Force: true, ConvergeServiceAccounts: true, DryRun: cfg.DryRun}, rec,
+	rotateOneRole(ctx, RoleRotateConfig{Owner: cfg.Owner, Repo: cfg.Repo, Client: cfg.Client, Tokens: c, Force: true, ConvergeServiceAccounts: true, DryRun: cfg.DryRun,
+		requestedSuppliedTokenIDs: cfg.requestedSuppliedTokenIDs, deferOutgoingCleanup: cfg.deferOutgoingCleanup}, rec,
 		fmt.Sprintf("install-%d", now.UnixNano()), 2*time.Minute, now, gitlabroles.DefaultRotationLead, gitlabroles.DefaultRotationGrace, &listed, &rotated)
 	result.Created = append(result.Created, rotated.Rotated...)
 	result.Failed = append(result.Failed, rotated.Failed...)
 	result.Diagnostics = append(result.Diagnostics, rotated.Diagnostics...)
+}
+
+// operatorRotationRoles is the role set the install's rotation pass processes:
+// the --rotate-gitlab-role filter expanded through credential-reuse chains
+// exactly as RotateGitLabRoleCredentials does. A nil set means every role.
+func operatorRotationRoles(cfg RoleProvisionConfig) map[gitlabroles.Role]struct{} {
+	reg := cfg.Registry
+	if len(reg.Registrations()) == 0 {
+		reg = gitlabroles.BuiltinRegistry()
+	}
+	return wantedRoles(cfg.ForceRoles, reg)
+}
+
+// operatorSuppliesRole reports whether the operator supplied a credential for
+// a role the rotation pass will process, so that pass can enroll it. A supplied
+// credential for a role the rotation filter excludes is never processed.
+func operatorSuppliesRole(cfg RoleProvisionConfig, rotationRoles map[gitlabroles.Role]struct{}, role gitlabroles.Role) bool {
+	return strings.TrimSpace(cfg.ProvidedTokens[role]) != "" && roleWanted(rotationRoles, role)
+}
+
+// operatorRecoversRole reports whether the operator asked this run to replace
+// the role's credential: it supplied a credential for the role or forced a
+// rotation that covers it, both judged against the role set rotation uses.
+func operatorRecoversRole(cfg RoleProvisionConfig, rotationRoles map[gitlabroles.Role]struct{}, role gitlabroles.Role) bool {
+	if operatorSuppliesRole(cfg, rotationRoles, role) {
+		return true
+	}
+	return cfg.ForceRotation && roleWanted(rotationRoles, role)
 }
 
 // withPollerPipelineAccess returns a client whose VerifyToken also establishes
@@ -336,17 +442,18 @@ func convergeInstalledServiceAccount(ctx context.Context, cfg RoleProvisionConfi
 // identity (VerifyGitLabReplacementPipelineAccess) before it is published.
 // VerifyToken's own contract is credential authentication, so replacement paths
 // compose the access check here instead of trusting every verifier to include
-// it. The check is idempotent when the verifier already performs it.
+// it. The check is idempotent when the verifier already performs it. A client
+// with no authentication callback is returned unchanged so its nil-verifier
+// guards still refuse minting: composing the access check alone would make an
+// unauthenticated credential look verified.
 func (c ServiceAccountTokenClient) withPollerPipelineAccess(client forge.Client) ServiceAccountTokenClient {
-	if client == nil {
+	if client == nil || c.VerifyToken == nil {
 		return c
 	}
 	authenticate := c.VerifyToken
 	c.VerifyToken = func(ctx context.Context, owner, repo string, tok *ProjectAccessToken) error {
-		if authenticate != nil {
-			if err := authenticate(ctx, owner, repo, tok); err != nil {
-				return err
-			}
+		if err := authenticate(ctx, owner, repo, tok); err != nil {
+			return err
 		}
 		if tok == nil || tok.Name != gitlabroles.PollerTokenName {
 			return nil
@@ -399,7 +506,7 @@ func (c ServiceAccountTokenClient) withProjectExclusions(ctx context.Context, ow
 // withRecordedOwnership returns a client whose managed-account allowlist is
 // the durable ownership in state, already read under the project lease, when
 // no ownership resolver is configured. A configured resolver is kept.
-func (c ServiceAccountTokenClient) withRecordedOwnership(state rotationStateFile) ServiceAccountTokenClient {
+func (c ServiceAccountTokenClient) withRecordedOwnership(state rotationStateFile, extra ...int) ServiceAccountTokenClient {
 	if c.ManagedAccountIDs != nil {
 		return c
 	}
@@ -407,6 +514,11 @@ func (c ServiceAccountTokenClient) withRecordedOwnership(state rotationStateFile
 	for _, rs := range state.Roles {
 		if rs.ManagedUserID > 0 {
 			ids = append(ids, rs.ManagedUserID)
+		}
+	}
+	for _, id := range extra {
+		if id > 0 && !slices.Contains(ids, id) {
+			ids = append(ids, id)
 		}
 	}
 	c.ManagedAccountIDs = func(context.Context, string, string) ([]int, error) { return ids, nil }
@@ -476,6 +588,18 @@ func (c ServiceAccountTokenClient) DeleteManagedServiceAccounts(ctx context.Cont
 			owned[rs.ManagedUserID] = true
 		}
 	}
+	// The generation document also owns accounts that rotation state does not
+	// record: the superseded (retiring) Poller after a handoff, the pending
+	// replacement, and abandoned replacements (#8243). They are verified and
+	// deleted like any owned account, and the supplied-account exclusions below
+	// apply to them as well. An unreadable document fails closed.
+	generationIDs, err := ManagedGitLabPollerGenerationAccountIDs(ctx, client, owner, repo)
+	if err != nil {
+		return 0, err
+	}
+	for _, id := range generationIDs {
+		owned[id] = true
+	}
 	// Exclusions are project-wide even when a caller has no exclusion callback.
 	// excludedIDs holds recorded exclusions and resolved supplied owners.
 	for _, id := range excludedIDs {
@@ -490,7 +614,7 @@ func (c ServiceAccountTokenClient) DeleteManagedServiceAccounts(ctx context.Cont
 		}
 		return 0, nil
 	}
-	accounts, err := c.withRecordedOwnership(state).managedServiceAccountList(ctx, owner, repo, true)
+	accounts, err := c.withRecordedOwnership(state, generationIDs...).managedServiceAccountList(ctx, owner, repo, true)
 	if err != nil {
 		if serviceAccountsAbsent(err) && len(owned) == 0 {
 			return 0, nil

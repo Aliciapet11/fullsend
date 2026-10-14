@@ -122,6 +122,48 @@ type ServiceAccountTokenClient struct {
 	// nil, every supplied owner is treated as current. An error fails the
 	// operation closed.
 	CurrentSuppliedAccountIDs func(ctx context.Context, owner, repo string) ([]int, error)
+	// SuppliedCredentialIdentity authenticates an administrator-supplied
+	// credential value and returns the owner and token ID it belongs to, so
+	// enrollment can record them while the credential still authenticates. An
+	// error leaves the enrollment unrecorded, which later operations resolve
+	// by authenticating or fail closed.
+	SuppliedCredentialIdentity func(ctx context.Context, token string) (SuppliedIdentity, error)
+	// VerifySuppliedAccess, when set, checks that the owner of an authenticated
+	// administrator-supplied credential holds exactly the effective access the
+	// role needs on the target project (including inherited membership), as the
+	// verification of a minted replacement does. An error rejects the
+	// enrollment, so an elevated or unverifiable owner is never published.
+	VerifySuppliedAccess func(ctx context.Context, owner, repo string, id SuppliedIdentity) error
+	// VerifySuppliedPollerAccess, when set, checks without mutating anything
+	// that the authenticated owner of a supplied Poller credential (id.UserID)
+	// has or can be given protected-default-branch pipeline access. The grant
+	// itself is applied by EstablishSuppliedPollerAccess once enrollment is
+	// recorded, so a rejected enrollment leaves no grant behind. An error rejects the
+	// enrollment, so a supplied Poller that could not dispatch is never
+	// published. It is consulted only for the Poller role.
+	VerifySuppliedPollerAccess func(ctx context.Context, owner, repo string, userID int) error
+	// EstablishSuppliedPollerAccess, when set, grants the authenticated owner
+	// of a supplied Poller credential protected-default-branch pipeline access
+	// and rereads the rule to confirm it. Enrollment calls it only after the
+	// supplied owner is recorded in rotation state and immediately before the
+	// credential is published, so a rejected enrollment never leaves a grant
+	// behind and a credential that cannot dispatch is never published. An
+	// error leaves the previous credential in place. It is consulted only for
+	// the Poller role.
+	EstablishSuppliedPollerAccess func(ctx context.Context, owner, repo string, userID int) error
+	// InstalledRoleCredentialSelf authenticates the installed role secret and
+	// returns the metadata of the token it authenticates as. installed is false
+	// when the secret holds no value. An error wrapping
+	// ErrInstalledCredentialRejected means GitLab authoritatively refused the
+	// credential (revoked or expired); any other error means it could not be
+	// verified, and the installed credential must then be left untouched. A nil
+	// callback supplies no verification.
+	InstalledRoleCredentialSelf func(ctx context.Context, owner, repo, secretName string) (id SuppliedIdentity, installed bool, err error)
+	// AttributeSuppliedOwners attributes, by authenticating with the installed
+	// secrets, the owner of every supplied credential whose rotation entry
+	// records none, keyed by role, so rotation can persist them before it can
+	// replace the credential. An error fails the operation closed.
+	AttributeSuppliedOwners func(ctx context.Context, owner, repo string) (map[gitlabroles.Role]int, error)
 }
 
 // SuppliedTokenRef is an enrolled administrator-supplied credential's GitLab
@@ -277,15 +319,20 @@ func (e *managedServiceAccountNameDriftError) Error() string {
 
 // managedServiceAccounts returns the project's role service accounts by
 // name for provisioning. Duplicates (for example from a retried create)
-// resolve to the lowest ID so every caller picks the same account.
-func (c ServiceAccountTokenClient) managedServiceAccounts(ctx context.Context, owner, repo string) (map[string]GitLabServiceAccount, error) {
+// resolve to the lowest ID so every caller picks the same account, except that
+// an account whose ID is in current wins: rotation state's recorded managed
+// account is the runtime identity. After a Poller generation handoff the
+// superseded Poller shares its display name and is still in the ownership
+// inventory for cleanup, but its older ID must not win credential selection.
+func (c ServiceAccountTokenClient) managedServiceAccounts(ctx context.Context, owner, repo string, current []int) (map[string]GitLabServiceAccount, error) {
 	accounts, err := c.managedServiceAccountList(ctx, owner, repo, true)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]GitLabServiceAccount)
 	for _, sa := range accounts {
-		if _, ok := out[sa.Name]; !ok {
+		prior, ok := out[sa.Name]
+		if !ok || (slices.Contains(current, sa.ID) && !slices.Contains(current, prior.ID)) {
 			out[sa.Name] = sa
 		}
 	}
@@ -317,21 +364,33 @@ func (c ServiceAccountTokenClient) CreateProjectAccessToken(ctx context.Context,
 	if c.SA == nil {
 		return c.legacyCreate(ctx, owner, repo, name, scopes, accessLevel, expiresAt, nil)
 	}
+	// Without a verifier the minted credential's identity, scopes and effective
+	// access could never be checked, so refuse before any account or membership
+	// mutation, as legacyCreate does.
+	if c.VerifyToken == nil {
+		return nil, fmt.Errorf("refusing to create GitLab service-account token %q: credential verification unavailable", name)
+	}
 	// Durable project-wide exclusions are frozen before account selection or any
 	// membership or token operation, so a caller that did not wrap the client
 	// with withProjectExclusions still cannot touch an administrator-owned
 	// account. Wrapping an already frozen client is idempotent.
+	var currentManaged []int
 	if c.ContainmentClient != nil {
 		state, _, stateErr := loadRotationState(ctx, c.ContainmentClient, owner, repo)
 		if stateErr != nil {
 			return nil, fmt.Errorf("refusing to provision GitLab role identity %q: durable account exclusions unreadable: %w", name, safeAPIError("reading rotation state", stateErr))
+		}
+		for _, rs := range state.Roles {
+			if rs.ManagedUserID > 0 {
+				currentManaged = append(currentManaged, rs.ManagedUserID)
+			}
 		}
 		var exclErr error
 		if c, _, exclErr = c.withProjectExclusions(ctx, owner, repo, state); exclErr != nil {
 			return nil, exclErr
 		}
 	}
-	accounts, err := c.managedServiceAccounts(ctx, owner, repo)
+	accounts, err := c.managedServiceAccounts(ctx, owner, repo, currentManaged)
 	if err != nil {
 		if serviceAccountsUnavailable(err) {
 			return c.legacyCreate(ctx, owner, repo, name, scopes, accessLevel, expiresAt, err)
@@ -392,18 +451,36 @@ func (c ServiceAccountTokenClient) CreateProjectAccessToken(ctx context.Context,
 		return nil, fmt.Errorf("service account %q returned a token for a different identity", name)
 	}
 	tok.UserID = sa.ID
-	if tok.Name == "" {
-		tok.Name = name
+	// The authenticated token is judged against the request, not GitLab's
+	// creation response: a contradicting response is rejected and the request
+	// becomes the policy VerifyToken enforces.
+	verifyErr := pinRequestedTokenPolicy(tok, name, expiresAt)
+	if verifyErr == nil {
+		verifyErr = c.VerifyToken(ctx, owner, repo, tok)
 	}
-	if c.VerifyToken != nil {
-		if err := c.VerifyToken(ctx, owner, repo, tok); err != nil {
-			cleanupCtx, cancel := gitlabCleanupContext(ctx)
-			defer cancel()
-			revokeErr := c.SA.RevokeServiceAccountPAT(cleanupCtx, owner, repo, sa.ID, tok.ID)
-			return nil, errors.Join(safeAPIError("validating the replacement service-account credential", err), safeAPIError("revoking the invalid replacement credential", revokeErr))
-		}
+	if verifyErr != nil {
+		cleanupCtx, cancel := gitlabCleanupContext(ctx)
+		defer cancel()
+		revokeErr := c.SA.RevokeServiceAccountPAT(cleanupCtx, owner, repo, sa.ID, tok.ID)
+		return nil, errors.Join(safeAPIError("validating the replacement service-account credential", verifyErr), safeAPIError("revoking the invalid replacement credential", revokeErr))
 	}
 	return tok, nil
+}
+
+// pinRequestedTokenPolicy makes the requested role policy, not GitLab's
+// creation response, the reference an authenticated token is verified against.
+// A response that names a different token or reports a different expiry than
+// requested is rejected; an omitted name or expiry is filled from the request.
+func pinRequestedTokenPolicy(tok *ProjectAccessToken, name, expiresAt string) error {
+	if tok.Name != "" && tok.Name != name {
+		return fmt.Errorf("new role credential was created under a name other than the requested one")
+	}
+	if tok.ExpiresAt != "" && tok.ExpiresAt != expiresAt {
+		return fmt.Errorf("new role credential was created with an expiry other than the requested one")
+	}
+	tok.Name = name
+	tok.ExpiresAt = expiresAt
+	return nil
 }
 
 // authorizeRoleIdentity resolves name against the trusted role registry before
@@ -502,6 +579,11 @@ func (c ServiceAccountTokenClient) legacyCreate(ctx context.Context, owner, repo
 		}
 		return nil, fmt.Errorf("no GitLab token client configured for %q", name)
 	}
+	// Without a verifier the minted credential's identity, scopes and effective
+	// access could never be checked, so refuse before minting one.
+	if c.VerifyToken == nil {
+		return nil, fmt.Errorf("refusing to create legacy GitLab project access token %q: credential verification unavailable", name)
+	}
 	tok, err := c.Legacy.CreateProjectAccessToken(ctx, owner, repo, name, scopes, accessLevel, expiresAt)
 	if err != nil {
 		return nil, safeAPIError(fmt.Sprintf("creating legacy GitLab project access token %q", name), err)
@@ -515,6 +597,17 @@ func (c ServiceAccountTokenClient) legacyCreate(ctx context.Context, owner, repo
 			defer cancel()
 			return nil, errors.Join(safeAPIError("recording newly created legacy token ownership", err), safeAPIError("revoking unpublished legacy token", c.Legacy.RevokeProjectAccessToken(cleanupCtx, owner, repo, tok.ID)))
 		}
+	}
+	// A legacy replacement gets the same authentication and access checks as a
+	// service-account PAT before it is published; an unverified one is revoked.
+	verifyErr := pinRequestedTokenPolicy(tok, name, expiresAt)
+	if verifyErr == nil {
+		verifyErr = c.VerifyToken(ctx, owner, repo, tok)
+	}
+	if verifyErr != nil {
+		cleanupCtx, cancel := gitlabCleanupContext(ctx)
+		defer cancel()
+		return nil, errors.Join(safeAPIError("validating the replacement legacy credential", verifyErr), safeAPIError("revoking the invalid legacy replacement credential", c.Legacy.RevokeProjectAccessToken(cleanupCtx, owner, repo, tok.ID)))
 	}
 	return tok, nil
 }

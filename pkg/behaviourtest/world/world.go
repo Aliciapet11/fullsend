@@ -221,6 +221,85 @@ type World struct {
 	// to the branch) rather than the branch's live tip; a stage with no
 	// pinned entry falls back to live resolution.
 	StagePublishedSHA map[string]string
+
+	// MintProbe holds the GitHub mint-probe scenario state, set by the
+	// mint probe steps (steps/mint_probe.go). Nil when the scenario does
+	// not probe the mint. CleanupScenario deletes the repositories it
+	// lists; the probe's shim branch is tracked in CreatedBranches.
+	MintProbe *MintProbe
+}
+
+// MintProbe is the state of one mint-probe scenario: a reusable probe
+// workflow in a temporary host repository, called from a shim workflow
+// on a temporary branch of the leased repository. The host repository
+// appears in the OIDC job_workflow_ref claim, the leased repository in
+// the repository claim, so the two are always different repositories.
+type MintProbe struct {
+	// Forge is the forge the Examples row targets ("github").
+	Forge string
+	// HostArrangement is "approved" or "unapproved": whether the host
+	// of the subject request's workflow is on the mint's
+	// WORKFLOW_HOST_REPOS.
+	HostArrangement string
+	// ApprovedHostRepo hosts the control request's workflow, and the
+	// subject's when HostArrangement is "approved".
+	ApprovedHostRepo string
+	// SubjectHostRepo hosts the subject request's workflow.
+	SubjectHostRepo string
+	// CreatedRepos lists the host repositories this scenario created in
+	// the pool org, for CleanupScenario.
+	CreatedRepos []string
+
+	// Request of the subject probe; Repos is the mint request's repos.
+	Role  string
+	Level string
+	Repos []string
+
+	// Branch and WorkflowName identify the shim run.
+	Branch       string
+	WorkflowName string
+	Run          *forge.WorkflowRun
+
+	// Control is the same-repository request through the approved host
+	// for the same role and level, made in the same workflow run; it
+	// must mint for any subject outcome to count. Subject is the
+	// request under test.
+	Control *MintProbeResult
+	Subject *MintProbeResult
+}
+
+// MintProbeResult is the compact, token-free result a probe job
+// uploads as an artifact.
+type MintProbeResult struct {
+	// Outcome is "minted", "denied" (the mint answered 401/403) or
+	// "error" (the probe could not get a policy answer).
+	Outcome string `json:"outcome"`
+	// Error classifies an "error" outcome: "config", "oidc",
+	// "transport", "http", "response" or "revoke" (the minted token
+	// could not be revoked).
+	Error      string `json:"error,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+	// Message is the mint's error message, or the probe's own
+	// diagnostic for an "error" outcome.
+	Message string `json:"message,omitempty"`
+
+	Role  string   `json:"role"`
+	Level string   `json:"level"`
+	Repos []string `json:"repos"`
+
+	// OIDCVerified is true when the probe verified the OIDC token's
+	// signature, issuer, audience and time claims before calling the mint.
+	// A host denial is only credible from a verified token.
+	OIDCVerified bool `json:"oidc_verified,omitempty"`
+
+	// Repository and JobWorkflowRef are the OIDC claims the probe sent.
+	Repository     string `json:"repository,omitempty"`
+	JobWorkflowRef string `json:"job_workflow_ref,omitempty"`
+
+	// Scope of a minted token, as reported by the mint.
+	RepositorySelection string            `json:"repository_selection,omitempty"`
+	GrantedRepos        []string          `json:"granted_repos,omitempty"`
+	GrantedPermissions  map[string]string `json:"granted_permissions,omitempty"`
 }
 
 // Clone creates a shallow copy of w. Drivers and shared state (SCM,

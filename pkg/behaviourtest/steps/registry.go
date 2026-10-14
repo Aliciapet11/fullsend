@@ -22,4 +22,5 @@ func Register(sc *godog.ScenarioContext) {
 	registerOwnersSteps(sc)
 	registerPlaybackSteps(sc)
 	registerGatewaySteps(sc)
+	registerMintProbeSteps(sc)
 }

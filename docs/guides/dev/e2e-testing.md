@@ -125,7 +125,7 @@ Prefer **`wrangler versions upload --name=mint-test --preview-alias=…`** so ru
 
 Behaviour tests install fullsend in **per-repo** mode (`fullsend github setup`). Triage workflows mint same-org `triage` tokens from vendored reusable workflows; that requires per-repo mint enrollment (`PER_REPO_WIF_REPOS`). The install driver does **not** run `mint enroll` — pool org behaviour repos must be enrolled once by a GCP admin on the hosted mint project.
 
-Behaviour tests allocate numbered `halfsend-NN/test-repo-01` … `test-repo-12` names via the unified `install.Driver`; these repos are **lazily created and installed** on demand (see [behaviour-testing.md](behaviour-testing.md#repo-allocation-via-unified-driver)). Pre-provisioning numbered repos in the pool org is no longer required — mint enrollment for those names is still pre-provisioned so it is not on the critical path. Enroll base names only — do **not** enroll `*-fork` names (forks are ephemeral PR sources and mint against the enrolled base repo). GitHub repositories need not exist yet — enroll is a mint allowlist / WIF-provider update only.
+Behaviour tests allocate numbered `halfsend-NN/test-repo-01` … `test-repo-12` names via the unified `install.Driver`; these repos are **lazily created and installed** on demand (see [behaviour-testing.md](behaviour-testing.md#repo-allocation-via-unified-driver)). Pre-provisioning numbered repos in the pool org is no longer required — mint enrollment for those names is still pre-provisioned so it is not on the critical path. Enroll base names only — do **not** enroll `*-fork` names (forks are ephemeral PR sources and mint against the enrolled base repo), nor the `*-mint-host` and `*-mint-unapproved` probe hosts of the [GitHub mint scope scenarios](behaviour-testing.md#github-mint-scope-scenarios) (the CF mint drivers list `*-mint-host` as a workflow host only, at deploy time). GitHub repositories need not exist yet — enroll is a mint allowlist / WIF-provider update only.
 
 Inference (`E2E_GCP_PROJECT_ID`) and mint (`it-gcp-konflux-dev-fullsend` for the hosted mint) may be different GCP projects. The behaviour install driver resolves the repo-scoped WIF provider using CI credentials on the inference project and passes it to `github setup`. It runs `fullsend inference status <org>/test-repo-NN` first and runs `fullsend inference provision` only when the provider is not healthy, one provision at a time. The provider is cached per repo name for the rest of the run. `E2E_GCP_WIF_PROVIDER` authenticates the CI job itself; it is not written to pool org repos.
 
@@ -169,7 +169,7 @@ Each pool org must be provisioned before e2e can use it:
 1. Org exists with `botsend` as owner
 2. `test-repo` and `e2e-lock` repos (lock created at runtime)
 3. Test actor permissions granted (see [Test actor permissions](#test-actor-permissions) below)
-4. All role apps installed, including `fullsend-ai-e2e` with **Repository → Variables: Read and write** (`actions_variables`) and **Organization → Variables: Read and write** (`organization_actions_variables`)
+4. The six `fullsend-test-*` role apps are installed for the test mint. The production `fullsend-ai-e2e` app is also installed with **Repository → Variables: Read and write** (`actions_variables`) and **Organization → Variables: Read and write** (`organization_actions_variables`); there is no test replacement for the `e2e` role.
 5. `FULLSEND_FOREIGN_E2E_REPOS` includes `fullsend-ai/fullsend` with org-wide visibility (`visibility: all`)
 6. Mint enrolled: requesting repository `fullsend-ai/fullsend` in `PER_REPO_WIF_REPOS` (or public mode), `e2e` in `ROLE_APP_IDS`, e2e app PEM enrolled. The pool org is a foreign target, so its access is governed by the `FULLSEND_FOREIGN_E2E_REPOS` grant and App installation above rather than by requesting-repository enrollment
 
@@ -738,6 +738,23 @@ and test mints, including the Cloudflare Worker mint BT chain. There is **no
 `e2e` test app**. The `fix` role shares the coder test app and PEM (same as
 production).
 
+Pool organizations intentionally do not keep the production agent apps
+installed as baseline test infrastructure. The test mint uses the isolated
+`fullsend-test-*` identities, which limits the blast radius of test credentials
+and prevents ordinary behaviour runs from acting as production agents.
+
+The two credential paths serve different callers. The behaviour-test suite in
+this repository can point at the same hosted public mint used by
+`fullsend-ai/fullsend`, while workflows running in an enrolled test repository
+can point at that repository's dedicated per-run preview or durable stage mint.
+With the appropriate mint URL, credentials, and target-organization App
+installation/foreign-grant plumbing, a scenario can use either credential
+set. A scenario that emulates a third-party production agent must have an
+operator install the corresponding production app on the target organization
+and grant any required cross-organization access. Ordinary tests use the
+isolated test identities without permanently trusting production apps in every
+test organization.
+
 > **Warning:** Do **not** enroll these apps on the production community mint.
 > They are strictly for test infrastructure.
 
@@ -758,8 +775,13 @@ The `fix` role reuses the coder app (`fullsend-test-coder`) and
 
 ### Installation targets
 
-All six apps are installed with access to **all repositories** on
+All six test apps are installed with access to **all repositories** on
 `halfsend-01` through `halfsend-12` and on `halfsend` (used by the STAGE driver).
+The production `fullsend-ai-e2e` app is installed on the same organizations for
+cross-org suite control and minting. The other production agent apps are not
+required for the normal behaviour or playback suites and are intentionally not
+installed there; a scenario that needs a production identity must arrange that
+installation explicitly.
 
 ### App permission scopes
 
@@ -812,7 +834,8 @@ cover both Workers. Do not put the new value into site-deploy
 URL:
 
 ```bash
-# For each app slug in the inventory table above:
+# Install the six fullsend-test-* apps from the inventory table above, plus
+# the production fullsend-ai-e2e app required for cross-org suite control:
 # https://github.com/apps/<slug>/installations/new
 # Select the target pool org and grant access to "All repositories".
 ```

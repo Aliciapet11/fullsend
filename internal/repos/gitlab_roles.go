@@ -263,8 +263,21 @@ type RoleProvisionConfig struct {
 	// PAT (free-tier enrollment or a custom own credential). Values
 	// must never be logged.
 	ProvidedTokens map[gitlabroles.Role]string
-	Now            time.Time
-	DryRun         bool
+	// ForceRotation and ForceRoles mirror the operator's --rotate-gitlab-roles
+	// request for this run (empty ForceRoles means every role). Install
+	// convergence uses them only to leave a held ambiguous supplied publication
+	// to that explicitly requested rotation instead of failing the install
+	// before rotation can run.
+	ForceRotation bool
+	ForceRoles    []gitlabroles.Role
+	Now           time.Time
+	DryRun        bool
+
+	// requestedSuppliedTokenIDs and deferOutgoingCleanup carry the install's
+	// supplied-credential preflight into convergence's rotation calls, so grace
+	// cleanup for one role cannot revoke a credential supplied for another.
+	requestedSuppliedTokenIDs []int
+	deferOutgoingCleanup      bool
 }
 
 // RoleProvisionFailure is a per-role error. Reason and Secret are
@@ -367,6 +380,11 @@ var gitLabRoleUninstallVars = []string{
 // require manual cleanup.
 func ProvisionGitLabRoleCredentials(ctx context.Context, cfg RoleProvisionConfig) (_ RoleProvisionResult, err error) {
 	result := RoleProvisionResult{DryRun: cfg.DryRun}
+	// Registered before the lease release so it runs after it: a failure at any
+	// later point, including a failed release, still carries the operator
+	// warnings gathered so far (such as a retained protected-branch grant) in
+	// the returned error, because callers discard the result on error.
+	defer func() { err = attachDiagnosticsToError(err, result.Diagnostics) }()
 	if cfg.Client == nil {
 		return result, fmt.Errorf("GitLab role provisioning requires a forge client")
 	}
@@ -435,6 +453,15 @@ func provisionOwnRoles(ctx context.Context, cfg RoleProvisionConfig, reg gitlabr
 	}
 	expiresAt := GitLabPATExpiresAt(now)
 
+	// Resolve every supplied credential before any role is converged, so
+	// convergence's grace cleanup for an earlier-ordered role cannot revoke a
+	// credential the administrator supplied for another role.
+	if cfg.Tokens != nil && !cfg.DryRun {
+		ids, unresolved := resolveRequestedSuppliedTokenIDs(ctx, cfg.Tokens, cfg.ProvidedTokens, nil)
+		cfg.requestedSuppliedTokenIDs = ids
+		cfg.deferOutgoingCleanup = unresolved
+	}
+
 	for _, rec := range reg.Registrations() {
 		if rec.Credential.Kind == gitlabroles.CredentialReuse {
 			result.Reused = append(result.Reused, rec.Name)
@@ -467,7 +494,84 @@ func provisionOwnRoles(ctx context.Context, cfg RoleProvisionConfig, reg gitlabr
 				result.Enrolled = append(result.Enrolled, rec.Name)
 				continue
 			}
+			// Persist the supplied transition and the credential's owner
+			// exclusion before publishing it, and refuse to publish when that
+			// write fails: a published supplied credential whose state still
+			// describes the role as managed could let later cleanup treat it
+			// as fullsend-minted. The enrollment replaces any stale entry
+			// left for the role (the secret was removed but its rotation-state
+			// entry remained), moving a previous supplied owner into the
+			// permanent exclusions. The owner and token ID are recorded while
+			// the credential still authenticates. If publication then fails,
+			// the role secret stays absent. An entry with a recorded owner
+			// stays attributable, so the next run enrolls again; an ownerless
+			// entry could not be attributed without the installed secret and
+			// would make that retry fail closed, so it is rolled back.
+			// A credential that cannot be authenticated, or that does not
+			// satisfy the role's credential policy and access requirements,
+			// is rejected before any state is recorded or the secret is
+			// written.
+			identity, verifyErr := verifiedSuppliedIdentity(ctx, cfg.Tokens, cfg.Owner, cfg.Repo, provided, roleTokenName(rec), now)
+			if verifyErr != nil {
+				result.Failed = append(result.Failed, RoleProvisionFailure{
+					Role:   rec.Name,
+					Secret: secret,
+					Reason: "administrator-provided credential rejected: " + verifyErr.Error() + "; credential not stored",
+				})
+				continue
+			}
+			rollbackEnrollment, retainedManaged, err := recordSuppliedEnrollment(ctx, cfg.Client, cfg.Owner, cfg.Repo, rec.Name, identity, now)
+			if err != nil {
+				result.Failed = append(result.Failed, RoleProvisionFailure{
+					Role:   rec.Name,
+					Secret: secret,
+					Reason: "recording administrator-provided credential enrollment state failed; credential not stored",
+				})
+				continue
+			}
+			// A supplied Poller's owner is granted protected-branch pipeline
+			// access only now that enrollment is recorded, and the access is
+			// reread before the secret is published. The recorded owner keeps
+			// the entry attributable, so the next run enrolls again.
+			// A grant added here is rolled back, by the exact entry this
+			// enrollment added, when access cannot be confirmed or the
+			// credential is proven unpublished; a grant that cannot be safely
+			// removed is reported instead.
+			grantProbe := probeSuppliedPollerGrant(ctx, cfg.Client, cfg.Owner, cfg.Repo, roleTokenName(rec), identity)
+			if accessErr := establishSuppliedPollerAccess(ctx, cfg.Tokens, cfg.Owner, cfg.Repo, roleTokenName(rec), identity); accessErr != nil {
+				if note := grantProbe.rollback(ctx, cfg.Client, cfg.Owner, cfg.Repo, string(rec.Name), identity); note != "" {
+					result.Diagnostics = append(result.Diagnostics, note)
+				}
+				result.Failed = append(result.Failed, RoleProvisionFailure{
+					Role:   rec.Name,
+					Secret: secret,
+					Reason: "administrator-provided credential rejected: " + accessErr.Error() + "; credential not stored",
+				})
+				continue
+			}
 			if err := cfg.Client.CreateRepoSecret(ctx, cfg.Owner, cfg.Repo, secret, provided); err != nil {
+				// A write error does not prove the variable was not committed.
+				// The secret was absent before this write, so a read-back that
+				// positively shows it still absent proves the credential was not
+				// published: the merge grant is then rolled back, and so is an
+				// ownerless enrollment. If it is present or the read-back fails,
+				// the credential may be installed and still needs the access, so
+				// the grant is reported as retained and an ownerless supplied
+				// intent is kept: the next run attributes the installed
+				// credential or fails closed instead of treating it as managed.
+				absent := suppliedRoleSecretAbsent(ctx, cfg.Client, cfg.Owner, cfg.Repo, secret)
+				if note := grantProbe.settleSuppliedPollerGrant(ctx, cfg.Client, cfg.Owner, cfg.Repo, string(rec.Name), identity, absent); note != "" {
+					result.Diagnostics = append(result.Diagnostics, note)
+				}
+				if identity.UserID <= 0 {
+					if !absent {
+						result.Diagnostics = append(result.Diagnostics, fmt.Sprintf(
+							"%s: publication of the administrator-provided credential may have been committed; the supplied enrollment state is retained and the next install attributes the installed credential or fails closed", rec.Name))
+					} else if rbErr := rollbackEnrollment(ctx); rbErr != nil {
+						result.Diagnostics = append(result.Diagnostics, fmt.Sprintf(
+							"%s: rolling back the unpublished enrollment state failed; the next install may fail closed until the role's rotation state is repaired", rec.Name))
+					}
+				}
 				result.Failed = append(result.Failed, RoleProvisionFailure{
 					Role:   rec.Name,
 					Secret: secret,
@@ -477,18 +581,9 @@ func provisionOwnRoles(ctx context.Context, cfg RoleProvisionConfig, reg gitlabr
 			}
 			present[secret] = true
 			result.Enrolled = append(result.Enrolled, rec.Name)
-			// Record rotation-state proof of this administrator-provided
-			// enrollment, mirroring the freshly-minted-PAT path below, so
-			// a later RotateGitLabRoleCredentials run does not treat this
-			// healthy provided credential as an unproven orphan and
-			// immediately re-mint a replacement for it. There is no
-			// GitLab token ID to record here (only the secret value was
-			// supplied); tokenID=0 with phase=idle and DistributedAt set
-			// is the same not-due proof rotateProvided records for a
-			// later administrator-provided replacement.
-			if err := recordInitialDistribution(ctx, cfg.Client, cfg.Owner, cfg.Repo, rec.Name, 0, "", now); err != nil {
+			if retainedManaged > 0 {
 				result.Diagnostics = append(result.Diagnostics, fmt.Sprintf(
-					"%s: recording rotation-state distribution proof failed; a future rotation run will treat this credential as unproven and replace it", rec.Name))
+					"%s: %d previously distributed managed credential(s) remain recorded but are not retired automatically by this enrollment; they stay usable until they expire or are revoked manually", rec.Name, retainedManaged))
 			}
 			continue
 		}
@@ -548,9 +643,49 @@ func provisionOwnRoles(ctx context.Context, cfg RoleProvisionConfig, reg gitlabr
 			})
 			continue
 		}
-		if err := cfg.Client.CreateRepoSecret(ctx, cfg.Owner, cfg.Repo, secret, tok.Token); err != nil {
+		// A role entry that still describes a removed supplied credential gets a
+		// recoverable intent before the managed replacement is published, so a
+		// failed completion write below is resolved by recovery on a later run
+		// instead of being retained as the supplied credential.
+		rollbackIntent, intentErr := recordProvisioningIntent(ctx, cfg.Client, cfg.Owner, cfg.Repo, rec.Name, tok.ID)
+		if intentErr != nil {
 			if tok.ID != 0 {
 				_ = cfg.Tokens.RevokeProjectAccessToken(ctx, cfg.Owner, cfg.Repo, tok.ID)
+			}
+			result.Failed = append(result.Failed, RoleProvisionFailure{
+				Role:   rec.Name,
+				Secret: secret,
+				Reason: "recording the provisioning intent failed; credential not published",
+			})
+			continue
+		}
+		if err := cfg.Client.CreateRepoSecret(ctx, cfg.Owner, cfg.Repo, secret, tok.Token); err != nil {
+			// A write error does not prove the variable was not committed.
+			// The secret was absent before this write, so revoke the
+			// replacement and roll back the provisioning intent only when a
+			// read-back positively shows it is still absent. If it is present
+			// or the read-back fails, keep the incoming-token intent and the
+			// replacement token: ordinary recovery then replaces the possibly
+			// installed credential instead of leaving it as unknown
+			// provenance or as the old supplied credential.
+			if exists, existsErr := cfg.Client.RepoSecretExists(ctx, cfg.Owner, cfg.Repo, secret); existsErr != nil || exists {
+				result.Diagnostics = append(result.Diagnostics, fmt.Sprintf(
+					"%s: publication of the role credential may have been committed; the provisioning intent is retained and a later install or rotation run replaces the possibly installed credential", rec.Name))
+				result.Failed = append(result.Failed, RoleProvisionFailure{
+					Role:   rec.Name,
+					Secret: secret,
+					Reason: "storing role credential failed",
+				})
+				continue
+			}
+			if tok.ID != 0 {
+				_ = cfg.Tokens.RevokeProjectAccessToken(ctx, cfg.Owner, cfg.Repo, tok.ID)
+			}
+			if rollbackIntent != nil {
+				if rbErr := rollbackIntent(ctx); rbErr != nil {
+					result.Diagnostics = append(result.Diagnostics, fmt.Sprintf(
+						"%s: restoring the rotation-state entry after a failed publication failed; a later rotation run recovers it", rec.Name))
+				}
 			}
 			result.Failed = append(result.Failed, RoleProvisionFailure{
 				Role:   rec.Name,
@@ -565,7 +700,7 @@ func provisionOwnRoles(ctx context.Context, cfg RoleProvisionConfig, reg gitlabr
 		// later RotateGitLabRoleCredentials run does not treat this
 		// healthy, just-provisioned PAT as an unproven orphan and
 		// immediately mint a replacement for it.
-		if err := recordInitialDistribution(ctx, cfg.Client, cfg.Owner, cfg.Repo, rec.Name, tok.ID, expiresAt, now); err != nil {
+		if err := recordProvisionedDistribution(ctx, cfg.Client, cfg.Owner, cfg.Repo, rec.Name, tok.ID, expiresAt, now); err != nil {
 			result.Diagnostics = append(result.Diagnostics, fmt.Sprintf(
 				"%s: recording rotation-state distribution proof failed; a future rotation run will treat this credential as unproven and replace it", rec.Name))
 		}
@@ -644,9 +779,9 @@ func extraGitLabRoleUninstallVars(ctx context.Context, client forge.Client, owne
 		}
 		// The Poller generation document records quarantine and retirement
 		// obligations for replacement Poller accounts and triggers.
-		// Deleting it would forget them, so uninstall retains it until an
-		// operator has reconciled those obligations; the live handoff
-		// (#8243) and uninstall cleanup (#8210) may revisit this.
+		// Deleting it here would forget them, so it is not in the generic
+		// variable list. CleanupGitLabRoleIdentityLocked retires it only after
+		// every account it records was cleaned up, and keeps it otherwise.
 		if name == forge.VarGitLabPollerGenerations {
 			return
 		}
@@ -700,6 +835,21 @@ func isGitLabRoleSecretName(name string) bool {
 		return true
 	}
 	return strings.HasPrefix(name, "FULLSEND_GITLAB_ROLE_") && strings.HasSuffix(name, "_TOKEN")
+}
+
+// attachDiagnosticsToError appends operator diagnostics gathered before a
+// failure to err, so a warning such as a retained protected-branch merge grant
+// reaches the operator even though callers discard the partial result when an
+// error is returned. It leaves err unchanged when there is nothing to report,
+// and drops diagnostics that look like they carry token material.
+func attachDiagnosticsToError(err error, diagnostics []string) error {
+	if err == nil || len(diagnostics) == 0 {
+		return err
+	}
+	if secretLeak(RoleProvisionResult{Diagnostics: diagnostics}) != "" {
+		return err
+	}
+	return fmt.Errorf("%w; diagnostics gathered before the failure: %s", err, strings.Join(diagnostics, "; "))
 }
 
 func secretLeak(result RoleProvisionResult) string {

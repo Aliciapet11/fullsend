@@ -1431,6 +1431,7 @@ func (c *LiveClient) IsProtectedBranch(ctx context.Context, owner, repo, branch 
 }
 
 type gitlabProtectedAccess struct {
+	ID          int  `json:"id"`
 	AccessLevel int  `json:"access_level"`
 	UserID      *int `json:"user_id"`
 	GroupID     *int `json:"group_id"`
@@ -1439,7 +1440,7 @@ type gitlabProtectedAccess struct {
 func convertProtectedAccess(levels []gitlabProtectedAccess) []forge.ProtectedBranchAccess {
 	out := make([]forge.ProtectedBranchAccess, 0, len(levels))
 	for _, l := range levels {
-		a := forge.ProtectedBranchAccess{AccessLevel: l.AccessLevel}
+		a := forge.ProtectedBranchAccess{ID: l.ID, AccessLevel: l.AccessLevel}
 		if l.UserID != nil {
 			a.UserID = *l.UserID
 		}
@@ -1699,6 +1700,49 @@ func (c *LiveClient) GrantProtectedBranchMergeUser(ctx context.Context, owner, r
 	resp, err := c.patch(ctx, path, body)
 	if err != nil {
 		return fmt.Errorf("grant protected branch merge: %w", err)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// RevokeProtectedBranchMergeUserEntry removes one user merge-access entry,
+// identified by its entry ID, from the branch's exact-name protected-branch
+// rule. The entry is looked up first: it is removed only when it is a user
+// grant for userID on the exact-name rule, so a stale or mismatched ID can never
+// remove an administrator's entry or a wildcard rule's access. A missing rule or
+// entry is already the desired state and succeeds without a request.
+func (c *LiveClient) RevokeProtectedBranchMergeUserEntry(ctx context.Context, owner, repo, branch string, entryID, userID int) error {
+	if entryID <= 0 || userID <= 0 {
+		return fmt.Errorf("revoke protected branch merge: invalid entry ID %d or user ID %d", entryID, userID)
+	}
+	exact, err := c.getProtectedBranchExact(ctx, owner, repo, branch)
+	if err != nil {
+		return fmt.Errorf("revoke protected branch merge: %w", err)
+	}
+	if exact == nil {
+		return nil
+	}
+	found := false
+	for _, l := range exact.MergeAccessLevels {
+		if l.ID != entryID {
+			continue
+		}
+		if l.UserID != userID {
+			return fmt.Errorf("revoke protected branch merge: entry %d is not a grant for user %d", entryID, userID)
+		}
+		found = true
+	}
+	if !found {
+		return nil
+	}
+	path := fmt.Sprintf("/projects/%s/protected_branches/%s",
+		projectPath(owner, repo), url.PathEscape(branch))
+	body := map[string]any{
+		"allowed_to_merge": []map[string]any{{"id": entryID, "_destroy": true}},
+	}
+	resp, err := c.patch(ctx, path, body)
+	if err != nil {
+		return fmt.Errorf("revoke protected branch merge: %w", err)
 	}
 	resp.Body.Close()
 	return nil
