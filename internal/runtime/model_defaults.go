@@ -21,7 +21,8 @@ var claudeAliasDefaults = map[string]string{
 
 // claudeAliasFallbacks is the built-in fallback chain per alias, tried in
 // order when the default id is not served in the run's Vertex project
-// (isVertexModelUnavailable) and the run sets no FULLSEND_FALLBACK_MODELS.
+// (isVertexModelUnavailable, and on Claude Code also
+// claudeSelectedModelUnavailable) and the run sets no FULLSEND_FALLBACK_MODELS.
 // Each entry is the previous default, so a project that has not enabled
 // the 5.5 models keeps running on what it ran on before the bump.
 var claudeAliasFallbacks = map[string][]string{
