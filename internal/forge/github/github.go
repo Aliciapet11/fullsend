@@ -4656,6 +4656,11 @@ func (c *LiveClient) GrantProtectedBranchMergeUser(_ context.Context, _, _, _ st
 	return forge.ErrNotSupported
 }
 
+// GrantProtectedBranchMergeUserEntry is not supported on GitHub.
+func (c *LiveClient) GrantProtectedBranchMergeUserEntry(_ context.Context, _, _, _ string, _ int) (int, bool, error) {
+	return 0, false, forge.ErrNotSupported
+}
+
 // RevokeProtectedBranchMergeUserEntry is not supported on GitHub.
 func (c *LiveClient) RevokeProtectedBranchMergeUserEntry(_ context.Context, _, _, _ string, _, _ int) error {
 	return forge.ErrNotSupported

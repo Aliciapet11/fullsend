@@ -1245,7 +1245,7 @@ func TestHandoffPollerGeneration_AccountRecordedDefersUntilBranchPolicyAdmitsIt(
 	assert.Nil(t, res.Trigger)
 	assert.Contains(t, res.DeferReason, "cannot start pipelines on protected branch")
 	assert.Contains(t, res.DeferReason, "polling schedules remain in effect")
-	assert.Equal(t, []string{"create-account"}, f.events, "no elevation, bootstrap credential, or trigger")
+	assert.Equal(t, []string{"create-account", "inventory"}, f.events, "no elevation, bootstrap credential, or trigger")
 	assert.Zero(t, f.triggerCreates)
 	st := f.state(t)
 	require.NotNil(t, st.Pending)

@@ -1148,6 +1148,14 @@ type Client interface {
 	// returns ErrNotSupported.
 	GrantProtectedBranchMergeUser(ctx context.Context, owner, repo, branch string, userID int) error
 
+	// GrantProtectedBranchMergeUserEntry is GrantProtectedBranchMergeUser that
+	// also reports whether this call mutated the rule and, when it can be
+	// identified, the ID of the user entry it added. A call that found the user
+	// already admitted reports mutated=false, so a caller never takes ownership
+	// of an entry it did not create. mutated is true when the request was sent,
+	// even if it then failed. GitHub returns ErrNotSupported.
+	GrantProtectedBranchMergeUserEntry(ctx context.Context, owner, repo, branch string, userID int) (entryID int, mutated bool, err error)
+
 	// RevokeProtectedBranchMergeUserEntry removes the single user merge-access
 	// entry identified by entryID from the exact-name protected-branch rule for
 	// branch. It exists so a caller that added a grant (and learned its entry ID

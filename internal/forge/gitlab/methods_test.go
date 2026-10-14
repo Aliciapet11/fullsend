@@ -2935,6 +2935,95 @@ func TestGrantProtectedBranchMergeUser(t *testing.T) {
 	assert.True(t, patched)
 }
 
+// GrantProtectedBranchMergeUserEntry reports the entry its own PATCH created,
+// and reports no mutation when the user is already admitted.
+func TestGrantProtectedBranchMergeUserEntry(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+	patches := 0
+	admitted := false
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`))
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches/main", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			levels := []map[string]any{{"id": 1, "access_level": 40}}
+			if admitted {
+				levels = append(levels, map[string]any{"id": 8, "user_id": 99})
+			}
+			writeJSON(t, w, http.StatusOK, map[string]any{"name": "main", "merge_access_levels": levels})
+		case http.MethodPatch:
+			patches++
+			writeJSON(t, w, http.StatusOK, map[string]any{"name": "main", "merge_access_levels": []map[string]any{
+				{"id": 1, "access_level": 40},
+				{"id": 9, "user_id": 99},
+			}})
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	})
+
+	id, mutated, err := client.GrantProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 99)
+	require.NoError(t, err)
+	assert.True(t, mutated)
+	assert.Equal(t, 9, id)
+	assert.Equal(t, 1, patches)
+
+	admitted = true
+	id, mutated, err = client.GrantProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 99)
+	require.NoError(t, err)
+	assert.False(t, mutated)
+	assert.Zero(t, id)
+	assert.Equal(t, 1, patches, "no PATCH when already admitted")
+}
+
+// A PATCH response with any other new entry beside the user's (a concurrent
+// administrator edit, or a second entry for the same user) is not attributable
+// to the request, so no entry ID is reported.
+func TestGrantProtectedBranchMergeUserEntry_AmbiguousResponseReportsNoID(t *testing.T) {
+	cases := map[string][]map[string]any{
+		"administrator entry for another user": {
+			{"id": 1, "access_level": 40},
+			{"id": 8, "user_id": 98},
+			{"id": 9, "user_id": 99},
+		},
+		"competing entry for the same user": {
+			{"id": 1, "access_level": 40},
+			{"id": 8, "user_id": 99},
+			{"id": 9, "user_id": 99},
+		},
+		"no new entry": {
+			{"id": 1, "access_level": 40},
+		},
+	}
+	for name, response := range cases {
+		t.Run(name, func(t *testing.T) {
+			client, mux := setupTest(t)
+			mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`[]`))
+			})
+			mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches/main", func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					writeJSON(t, w, http.StatusOK, map[string]any{"name": "main", "merge_access_levels": []map[string]any{{"id": 1, "access_level": 40}}})
+				case http.MethodPatch:
+					writeJSON(t, w, http.StatusOK, map[string]any{"name": "main", "merge_access_levels": response})
+				default:
+					t.Fatalf("unexpected method %s", r.Method)
+				}
+			})
+			id, mutated, err := client.GrantProtectedBranchMergeUserEntry(context.Background(), "myorg", "myrepo", "main", 99)
+			require.NoError(t, err)
+			assert.True(t, mutated)
+			assert.Zero(t, id)
+		})
+	}
+}
+
 // revokeServer serves the exact-name protected-branch record and records any
 // PATCH body, so revoke tests can assert exactly what was destroyed.
 func revokeServer(t *testing.T, mux *http.ServeMux, exact map[string]any) (patches *[]map[string]any) {

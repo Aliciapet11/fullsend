@@ -127,7 +127,8 @@ func handoffPollerOwnedTrigger(ctx context.Context, client forge.Client, to GitL
 // attempted), the account is demoted, verified, and returned to a fresh
 // account_recorded generation. When it may have been distributed (a secret
 // store or webhook failure, including a write with an unknown outcome), the
-// account is never raised again: it is demoted, recorded as abandoned, and the
+// account is never raised again: it is demoted, the protected-branch merge
+// access fullsend granted it is removed, it is recorded as abandoned, and the
 // pending slot is cleared so a genuinely fresh account replaces it. It returns
 // false when the generation is not in that state and changes nothing.
 func resetUnwiredVerifiedPollerGeneration(ctx context.Context, client forge.Client, h GitLabPollerHandoff, owner, repo string, st PollerGenerationState, managedUID, wiredTriggerID int64) (PollerGenerationState, []string, bool, error) {
@@ -157,13 +158,18 @@ func resetUnwiredVerifiedPollerGeneration(ctx context.Context, client forge.Clie
 		if demoteErr := g.demote(p.UserID); demoteErr != nil {
 			return st, nil, false, fmt.Errorf("abandoning the replacement GitLab Poller generation (user ID %d) whose trigger may have been distributed: %w", p.UserID, demoteErr)
 		}
+		// The abandoned account never starts pipelines again: remove the
+		// merge access fullsend granted it before its record is dropped.
+		if grantErr := g.revokeBranchGrant(p.UserID, p.BranchGrant); grantErr != nil {
+			return st, nil, false, fmt.Errorf("abandoning the replacement GitLab Poller generation (user ID %d) whose trigger may have been distributed: %w", p.UserID, grantErr)
+		}
 		next := g.st
 		next.Pending = nil
 		next.AbandonedUserIDs = append(slices.Clone(next.AbandonedUserIDs), p.UserID)
 		if err := g.write(next); err != nil {
 			return st, nil, false, err
 		}
-		return g.st, []string{fmt.Sprintf("Abandoned the replacement GitLab Poller generation (user ID %d): its trigger may have been distributed, so it was revoked, the account stays at Developer access without credentials, and a fresh account replaces it", p.UserID)}, true, nil
+		return g.st, append(g.details, fmt.Sprintf("Abandoned the replacement GitLab Poller generation (user ID %d): its trigger may have been distributed, so it was revoked, the account stays at Developer access without credentials, and a fresh account replaces it", p.UserID)), true, nil
 	}
 	if demoteErr := g.demote(p.UserID); demoteErr != nil {
 		return st, nil, false, fmt.Errorf("resuming the unwired replacement GitLab Poller generation (user ID %d): %w", p.UserID, demoteErr)

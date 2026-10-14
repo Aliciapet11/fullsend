@@ -95,6 +95,11 @@ type PendingPollerGeneration struct {
 	// never re-elevated. It is retired instead (AbandonedUserIDs) and a
 	// genuinely fresh account takes its place.
 	TriggerDistributed bool `json:"trigger_distributed,omitempty"`
+	// BranchGrant is the protected-default-branch merge-access entry the
+	// installer added for this account (#8409). It is carried to
+	// CurrentBranchGrant at cutover and revoked when the generation is
+	// quarantined or abandoned.
+	BranchGrant *PollerBranchGrant `json:"branch_grant,omitempty"`
 	// Reason explains a quarantine. It is authored by fullsend and carries no
 	// credential material.
 	Reason string `json:"reason,omitempty"`
@@ -105,12 +110,19 @@ type PollerGenerationState struct {
 	// CurrentUserID is the Poller account whose runtime credential is
 	// published (zero when not yet recorded).
 	CurrentUserID int64 `json:"current_user_id,omitempty"`
+	// CurrentBranchGrant is the installer-owned protected-branch merge-access
+	// entry of the current Poller, if fullsend added one.
+	CurrentBranchGrant *PollerBranchGrant `json:"current_branch_grant,omitempty"`
 	// Pending is the generation being handed off, if any.
 	Pending *PendingPollerGeneration `json:"pending,omitempty"`
 	// RetiringUserID is the superseded Poller account whose schedules,
 	// credentials, triggers, and account are still being retired. It stays at
 	// Developer until retirement completes.
 	RetiringUserID int64 `json:"retiring_user_id,omitempty"`
+	// RetiringBranchGrant is the installer-owned protected-branch merge-access
+	// entry of the retiring Poller. Retirement removes only this entry, never
+	// another grant for the same user.
+	RetiringBranchGrant *PollerBranchGrant `json:"retiring_branch_grant,omitempty"`
 	// AbandonedUserIDs are replacement accounts whose trigger credential may
 	// have been distributed but whose publication did not complete. Each was
 	// verified at Developer without credentials and is never re-elevated; they
@@ -133,7 +145,7 @@ const gitLabPollerGenerationStateVersion = 1
 // blocked or quarantined generation. It removes only the pending generation:
 // clearing the whole document would also drop current_user_id, so a later
 // cutover would not record the running Poller as retiring.
-const pollerClearPendingAction = "remove only the \"pending\" generation from " + forge.VarGitLabPollerGenerations + ", keeping its version, current_user_id, retiring_user_id and abandoned_user_ids"
+const pollerClearPendingAction = "remove only the \"pending\" generation from " + forge.VarGitLabPollerGenerations + ", keeping its version, current_user_id, current_branch_grant, retiring_user_id, retiring_branch_grant and abandoned_user_ids"
 
 // errPollerGenerationsBlank reports a generation variable that exists but
 // holds no document. The handoff writes this variable, so a blank value means
@@ -248,6 +260,12 @@ func decodePollerGenerations(raw string) (PollerGenerationState, error) {
 	if st.CurrentUserID != 0 && st.CurrentUserID == st.RetiringUserID {
 		return PollerGenerationState{}, fmt.Errorf("invalid %s: current and retiring Poller account IDs must differ", forge.VarGitLabPollerGenerations)
 	}
+	if err := validatePollerBranchGrant("current_branch_grant", st.CurrentBranchGrant, st.CurrentUserID, false); err != nil {
+		return PollerGenerationState{}, fmt.Errorf("invalid %s: %w", forge.VarGitLabPollerGenerations, err)
+	}
+	if err := validatePollerBranchGrant("retiring_branch_grant", st.RetiringBranchGrant, st.RetiringUserID, false); err != nil {
+		return PollerGenerationState{}, fmt.Errorf("invalid %s: %w", forge.VarGitLabPollerGenerations, err)
+	}
 	for i, id := range st.AbandonedUserIDs {
 		if id <= 0 || id == st.CurrentUserID || id == st.RetiringUserID || slices.Contains(st.AbandonedUserIDs[:i], id) {
 			return PollerGenerationState{}, fmt.Errorf("invalid %s: abandoned account IDs must be positive, distinct, and differ from the current and retiring Poller accounts", forge.VarGitLabPollerGenerations)
@@ -265,6 +283,9 @@ func decodePollerGenerations(raw string) (PollerGenerationState, error) {
 		}
 		if p.UserID != 0 && (p.UserID == st.CurrentUserID || p.UserID == st.RetiringUserID || slices.Contains(st.AbandonedUserIDs, p.UserID)) {
 			return PollerGenerationState{}, fmt.Errorf("invalid %s: pending account ID %d must differ from the current and retiring Poller accounts", forge.VarGitLabPollerGenerations, p.UserID)
+		}
+		if err := validatePollerBranchGrant("pending branch_grant", p.BranchGrant, p.UserID, true); err != nil {
+			return PollerGenerationState{}, fmt.Errorf("invalid %s: %w", forge.VarGitLabPollerGenerations, err)
 		}
 		if err := validatePendingConsistency(p); err != nil {
 			return PollerGenerationState{}, fmt.Errorf("invalid %s: %w", forge.VarGitLabPollerGenerations, err)
@@ -341,7 +362,8 @@ func pollerHandoffBlocked(st PollerGenerationState) string {
 }
 
 // beginPollerCutover makes the verified pending generation newUserID the
-// current Poller and moves the previous current Poller to retiring. It
+// current Poller and moves the previous current Poller to retiring. Each
+// account's installer-owned branch grant moves with it. It
 // refuses when the pending generation is not that verified account or when a
 // previous retirement is unresolved, so at most one old/new pair exists.
 func beginPollerCutover(st PollerGenerationState, newUserID int64) (PollerGenerationState, error) {
@@ -352,17 +374,27 @@ func beginPollerCutover(st PollerGenerationState, newUserID int64) (PollerGenera
 	if st.RetiringUserID != 0 {
 		return st, fmt.Errorf("GitLab Poller cutover refused: the superseded Poller (user ID %d) has not finished retiring", st.RetiringUserID)
 	}
-	return PollerGenerationState{CurrentUserID: newUserID, RetiringUserID: st.CurrentUserID, AbandonedUserIDs: st.AbandonedUserIDs}, nil
+	if p.BranchGrant.unresolved() {
+		return st, fmt.Errorf("GitLab Poller cutover refused: the protected-branch merge grant attempt for user ID %d is unresolved", newUserID)
+	}
+	return PollerGenerationState{
+		CurrentUserID:       newUserID,
+		CurrentBranchGrant:  p.BranchGrant,
+		RetiringUserID:      st.CurrentUserID,
+		RetiringBranchGrant: st.CurrentBranchGrant,
+		AbandonedUserIDs:    st.AbandonedUserIDs,
+	}, nil
 }
 
-// finishPollerRetirement clears the retiring Poller once its schedules,
-// credentials, triggers, and account were removed. retiredUserID must match
-// the recorded retiring account.
+// finishPollerRetirement clears the retiring Poller, and its installer-owned
+// branch grant, once its schedules, credentials, triggers, grant, and account
+// were removed. retiredUserID must match the recorded retiring account.
 func finishPollerRetirement(st PollerGenerationState, retiredUserID int64) (PollerGenerationState, error) {
 	if retiredUserID <= 0 || st.RetiringUserID != retiredUserID {
 		return st, fmt.Errorf("GitLab Poller retirement refused: user ID %d is not the recorded retiring Poller", retiredUserID)
 	}
 	st.RetiringUserID = 0
+	st.RetiringBranchGrant = nil
 	return st, nil
 }
 
@@ -410,10 +442,12 @@ type GitLabPollerHandoff interface {
 	// supported and no account was created.
 	CreateReplacementPoller(ctx context.Context, owner, repo string) (int64, error)
 	// EnsureReplacementPollerAccess idempotently establishes the account's
-	// Developer membership and verifies, read-only, that the existing
-	// protected-branch policy lets it start pipelines on the default branch.
-	// It never changes the branch rule. A policy that does not admit the
-	// account is a *PollerGenerationUnsafeError, which defers the handoff.
+	// Developer membership and verifies, read-only, that the protected-branch
+	// policy lets it start pipelines on the default branch. It never changes
+	// the branch rule. A policy that does not admit the account is a
+	// *PollerGenerationUnsafeError; the handoff then adds a per-user merge
+	// grant for the account (grantReplacementBranchAccess) and verifies
+	// again, or defers when the grant cannot be made narrowly.
 	EnsureReplacementPollerAccess(ctx context.Context, owner, repo string, userID int64) error
 	// VerifyReplacementPollerCredentialsRevoked requires that the account
 	// holds no active personal access token. Managed token names are not
@@ -553,9 +587,12 @@ func (g *pollerGenerationRun) quarantine(reason string) (PollerHandoffResult, er
 
 // quarantineTrigger is quarantine for a generation whose created trigger ID is
 // known: the ID is recorded on the quarantined document, so the exact trigger
-// to delete survives even when its revocation failed.
+// to delete survives even when its revocation failed. The protected-branch
+// merge access fullsend granted the account is revoked; when that fails the
+// grant stays recorded and the reason names the exact entry to remove.
 func (g *pollerGenerationRun) quarantineTrigger(triggerID int64, reason string) (PollerHandoffResult, error) {
-	p := *g.st.Pending
+	p, grantNote := g.releasePendingBranchGrant(*g.st.Pending)
+	reason += grantNote
 	if triggerID > 0 {
 		p.TriggerID = triggerID
 	}
@@ -727,16 +764,35 @@ func (g *pollerGenerationRun) attemptTrigger() (PollerHandoffResult, error) {
 		// second one, whatever phase the document claims.
 		return g.quarantine(fmt.Sprintf("its single pipeline trigger creation request was already attempted and is never retried; delete any %q pipeline trigger owned by user ID %d, remove the account, then %s", GitLabWebhookTriggerDescription, uid, pollerClearPendingAction))
 	}
-	// Preparing the recorded account (Developer membership and read-only
-	// protected-branch admission) is idempotent and runs on every attempt, so
-	// a membership or policy failure in an earlier run is retried here instead
-	// of leaving the generation stuck at account_recorded.
-	if prepErr := g.h.EnsureReplacementPollerAccess(g.ctx, g.owner, g.repo, uid); prepErr != nil {
-		var unsafe *PollerGenerationUnsafeError
+	// Preparing the recorded account (Developer membership and protected-branch
+	// admission) is idempotent and runs on every attempt, so a membership or
+	// policy failure in an earlier run is retried here instead of leaving the
+	// generation stuck at account_recorded. A policy that does not admit the
+	// fresh account gets one installer-owned per-user merge grant for it, but
+	// only after every credential and trigger safety check below has passed,
+	// so an unsafe account is never given merge access. The grant is recorded
+	// before it is made and the account is verified again afterwards.
+	//
+	// A grant attempt left unresolved by an earlier run blocks the handoff: it is
+	// never cleared on inference (an entry that appeared may be an
+	// administrator's, and a request that was sent may still commit), so the
+	// operator reconciles it.
+	if p.BranchGrant.unresolved() {
+		revErr := g.revokeBranchGrant(uid, p.BranchGrant)
+		return PollerHandoffResult{Details: g.details}, fmt.Errorf("%w; check the protected branch for entries of that user, remove the account, then %s", revErr, pollerClearPendingAction)
+	}
+	prepErr := g.h.EnsureReplacementPollerAccess(g.ctx, g.owner, g.repo, uid)
+	var unsafe *PollerGenerationUnsafeError
+	needGrant := errors.As(prepErr, &unsafe)
+	// prepFailure reports a preparation failure that still stands.
+	prepFailure := func(prepErr error) (PollerHandoffResult, error) {
 		if errors.As(prepErr, &unsafe) {
 			return PollerHandoffResult{Details: g.details, DeferReason: fmt.Sprintf("webhook fast-path blocked: the replacement GitLab Poller (user ID %d) was not raised because %s. The polling schedules remain in effect", uid, unsafe.Reason)}, nil
 		}
 		return PollerHandoffResult{Details: g.details}, safeAPIError(fmt.Sprintf("preparing the replacement GitLab Poller service account (user ID %d)", uid), prepErr)
+	}
+	if prepErr != nil && !needGrant {
+		return prepFailure(prepErr)
 	}
 	level, err := g.client.GetProjectMemberAccessLevel(g.ctx, g.owner, g.repo, uid)
 	if err != nil {
@@ -777,6 +833,27 @@ func (g *pollerGenerationRun) attemptTrigger() (PollerHandoffResult, error) {
 			return PollerHandoffResult{Details: g.details}, safetyErr
 		}
 		return PollerHandoffResult{Details: g.details, DeferReason: reason + ". The polling schedules remain in effect"}, nil
+	}
+
+	// Every pre-elevation check passed: only now may the account be given the
+	// protected-branch merge access it needs.
+	if needGrant {
+		granted, grantDefer, grantErr := g.grantReplacementBranchAccess(uid)
+		if grantErr != nil {
+			return PollerHandoffResult{Details: g.details}, grantErr
+		}
+		if grantDefer != "" {
+			return PollerHandoffResult{Details: g.details, DeferReason: fmt.Sprintf("webhook fast-path blocked: the replacement GitLab Poller (user ID %d) was not raised because %s. The polling schedules remain in effect", uid, grantDefer)}, nil
+		}
+		if granted {
+			prepErr = g.h.EnsureReplacementPollerAccess(g.ctx, g.owner, g.repo, uid)
+		}
+		if prepErr != nil {
+			return prepFailure(prepErr)
+		}
+		// The grant step may have recorded or cleared the installer-owned
+		// grant: later phase writes must carry it.
+		p = *g.st.Pending
 	}
 
 	// The elevated phase is recorded before the bootstrap credential exists,

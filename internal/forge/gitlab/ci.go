@@ -1676,21 +1676,31 @@ func gitlabWildcardMatchesBranch(pattern, branch string) bool {
 // poller would grant merge access far beyond the single default branch
 // this call is scoped to.
 func (c *LiveClient) GrantProtectedBranchMergeUser(ctx context.Context, owner, repo, branch string, userID int) error {
+	_, _, err := c.GrantProtectedBranchMergeUserEntry(ctx, owner, repo, branch, userID)
+	return err
+}
+
+// GrantProtectedBranchMergeUserEntry is GrantProtectedBranchMergeUser that also
+// reports whether this call sent the PATCH (mutated) and, when the response
+// lets it be identified, the ID of the user entry the PATCH added. A no-op
+// because the user was already admitted reports mutated=false, so a caller
+// never takes ownership of an entry it did not create.
+func (c *LiveClient) GrantProtectedBranchMergeUserEntry(ctx context.Context, owner, repo, branch string, userID int) (entryID int, mutated bool, err error) {
 	if userID <= 0 {
-		return fmt.Errorf("grant protected branch merge: invalid user ID %d", userID)
+		return 0, false, fmt.Errorf("grant protected branch merge: invalid user ID %d", userID)
 	}
 	rule, err := c.GetProtectedBranch(ctx, owner, repo, branch)
 	if err != nil {
-		return fmt.Errorf("grant protected branch merge: %w", err)
+		return 0, false, fmt.Errorf("grant protected branch merge: %w", err)
 	}
 	if rule == nil {
-		return fmt.Errorf("grant protected branch merge: %s is not protected", branch)
+		return 0, false, fmt.Errorf("grant protected branch merge: %s is not protected", branch)
 	}
 	if userHasProtectedBranchAccess(rule, userID) {
-		return nil
+		return 0, false, nil
 	}
 	if rule.Name != branch {
-		return fmt.Errorf("grant protected branch merge: %s is only protected via wildcard rule %q, which also covers other branches; add an exact-name protection rule for %s that includes the poller in allowed_to_merge, or grant Developer-level merge access on %s directly", branch, rule.Name, branch, branch)
+		return 0, false, fmt.Errorf("grant protected branch merge: %s is only protected via wildcard rule %q, which also covers other branches; add an exact-name protection rule for %s that includes the poller in allowed_to_merge, or grant Developer-level merge access on %s directly", branch, rule.Name, branch, branch)
 	}
 	path := fmt.Sprintf("/projects/%s/protected_branches/%s",
 		projectPath(owner, repo), url.PathEscape(branch))
@@ -1699,10 +1709,32 @@ func (c *LiveClient) GrantProtectedBranchMergeUser(ctx context.Context, owner, r
 	}
 	resp, err := c.patch(ctx, path, body)
 	if err != nil {
-		return fmt.Errorf("grant protected branch merge: %w", err)
+		return 0, true, fmt.Errorf("grant protected branch merge: %w", err)
 	}
-	resp.Body.Close()
-	return nil
+	prior := map[int]struct{}{}
+	for _, l := range rule.MergeAccessLevels {
+		prior[l.ID] = struct{}{}
+	}
+	// GitLab's PATCH response lists the rule's entries and carries no
+	// creation receipt, so the entry is identified only when the response is
+	// unambiguous: exactly one entry is new relative to the snapshot, and it is
+	// this user's. Any other new entry (an administrator editing the rule
+	// concurrently, or a second entry for this user) makes the request
+	// unattributable, and the caller keeps the unresolved obligation instead of
+	// owning, and later revoking, an entry it may not have created.
+	var raw gitlabProtectedBranchRaw
+	if decodeErr := decodeJSON(resp, &raw); decodeErr == nil {
+		var added []forge.ProtectedBranchAccess
+		for _, l := range raw.toRule().MergeAccessLevels {
+			if _, existed := prior[l.ID]; !existed {
+				added = append(added, l)
+			}
+		}
+		if len(added) == 1 && added[0].UserID == userID && added[0].ID > 0 {
+			return added[0].ID, true, nil
+		}
+	}
+	return 0, true, nil
 }
 
 // RevokeProtectedBranchMergeUserEntry removes one user merge-access entry,

@@ -159,7 +159,7 @@ references, never secret values.
 | `FULLSEND_GITLAB_ROLE_<NAME>_TOKEN` | masked secret | Custom role PAT when `credential` is `own`. Provisioned when the role is registered. |
 | `FULLSEND_GITLAB_ROLE_REGISTRY` | unmasked variable | Administrator registry JSON. Absent or empty = built-ins only. |
 | `FULLSEND_GITLAB_ROLE_ROTATION` | unmasked variable | Per-role rotation state (lock, token IDs, expiry dates, phase). Never stores token values. |
-| `FULLSEND_GITLAB_POLLER_GENERATIONS` | unmasked variable | Version 1 Poller identity-generation state (current, pending, and retiring Poller account IDs and the pending generation's handoff phase). Never stores token values. Written by `repos install` when it creates or rotates the webhook trigger. Absent = empty state; present but blank fails closed. See [Poller identity generations](#poller-identity-generations). |
+| `FULLSEND_GITLAB_POLLER_GENERATIONS` | unmasked variable | Version 1 Poller identity-generation state (current, pending, and retiring Poller account IDs, the pending generation's handoff phase, and the installer-owned protected-branch merge-grant records `pending.branch_grant`, `current_branch_grant` and `retiring_branch_grant`, each a `PollerBranchGrant` with `branch`, `entry_id` and, for an unresolved attempt, `prior_entry_ids`). Never stores token values. Written by `repos install` when it creates or rotates the webhook trigger. Absent = empty state; present but blank fails closed. See [Poller identity generations](#poller-identity-generations). |
 
 Canonical constants live in [`internal/forge/forge.go`](../../internal/forge/forge.go)
 (`SecretForgeToken`, `SecretGitLabPollerToken`,
@@ -512,9 +512,30 @@ It records each step in `FULLSEND_GITLAB_POLLER_GENERATIONS` before acting:
    every elevation attempt, including a resumed `account_recorded` generation
    after an earlier membership failure, the handoff idempotently re-establishes
    Developer membership and checks, read-only, that the existing
-   protected-default-branch rule lets the account start pipelines; a policy
-   that excludes it defers the handoff before any elevation, and fullsend never
-   writes a merge grant for a replacement account. A lost create response leaves no ID, so the
+   protected-default-branch rule lets the account start pipelines. When the
+   rule excludes it, the handoff (`grantReplacementBranchAccess`, #8409) adds
+   one per-user merge-access entry for that account on the exact-name rule. It
+   records the entry as `pending.branch_grant` (branch and entry ID) before
+   the account is raised, then checks again. It never grants a role,
+   never edits a wildcard rule, and never records a user entry it did not
+   add. A wildcard-only rule or a refused grant (403/404) defers the handoff
+   before any elevation, after removing any entry the refused request added.
+   The recorded entry moves to `current_branch_grant` at cutover and to
+   `retiring_branch_grant` when superseded. It is revoked by entry ID when the
+   generation is quarantined or abandoned. Retirement removes only that
+   entry. Before the request is sent, the attempt is recorded with the prior
+   entry IDs (`prior_entry_ids`) and no entry ID. The entry is identified only
+   when the forge reports the entry its own request created; it is never
+   inferred from an entry-ID difference, because an administrator may have
+   added it. When that entry is known but cannot be confirmed or recorded,
+   it is recorded as the cleanup obligation, or revoked by its exact ID.
+   An unresolved attempt is never cleared by inference: not because another
+   entry for the account appeared, and not because time passed (a request that
+   was sent may still commit, and no server-side bound exists). It stays
+   recorded, blocks the handoff and the cutover, and names any entries that
+   appeared (left in place, never claimed or revoked) in the error or the
+   quarantine text. The operator reconciles it by removing the account and
+   clearing the pending generation. A lost create response leaves no ID, so the
    generation needs manual reconciliation; fullsend never deletes an account
    it cannot positively identify. A refused (403) or unsupported (404) create
    made no account, so polling stays the only path.

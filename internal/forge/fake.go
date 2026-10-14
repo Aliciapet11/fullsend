@@ -2506,7 +2506,12 @@ func (f *FakeClient) ListProtectedTags(_ context.Context, owner, repo string) ([
 	return out, nil
 }
 
-func (f *FakeClient) GrantProtectedBranchMergeUser(_ context.Context, owner, repo, branch string, userID int) error {
+func (f *FakeClient) GrantProtectedBranchMergeUser(ctx context.Context, owner, repo, branch string, userID int) error {
+	_, _, err := f.GrantProtectedBranchMergeUserEntry(ctx, owner, repo, branch, userID)
+	return err
+}
+
+func (f *FakeClient) GrantProtectedBranchMergeUserEntry(_ context.Context, owner, repo, branch string, userID int) (int, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -2515,10 +2520,10 @@ func (f *FakeClient) GrantProtectedBranchMergeUser(_ context.Context, owner, rep
 	})
 
 	if e := f.err("GrantProtectedBranchMergeUser"); e != nil {
-		return e
+		return 0, false, e
 	}
 	if userID <= 0 {
-		return fmt.Errorf("grant protected branch merge: invalid user ID %d", userID)
+		return 0, false, fmt.Errorf("grant protected branch merge: invalid user ID %d", userID)
 	}
 
 	key := owner + "/" + repo + "/" + branch
@@ -2530,24 +2535,25 @@ func (f *FakeClient) GrantProtectedBranchMergeUser(_ context.Context, owner, rep
 		}
 	}
 	if rule == nil {
-		return fmt.Errorf("grant protected branch merge: %s is not protected", branch)
+		return 0, false, fmt.Errorf("grant protected branch merge: %s is not protected", branch)
 	}
 	for _, l := range rule.MergeAccessLevels {
 		if l.UserID == userID {
 			f.ProtectedBranchRules[key] = rule
-			return nil
+			return 0, false, nil
 		}
 	}
 	for _, l := range rule.PushAccessLevels {
 		if l.UserID == userID {
 			f.ProtectedBranchRules[key] = rule
-			return nil
+			return 0, false, nil
 		}
 	}
 	f.nextProtectedAccessID++
-	rule.MergeAccessLevels = append(rule.MergeAccessLevels, ProtectedBranchAccess{ID: 9000 + f.nextProtectedAccessID, UserID: userID})
+	entryID := 9000 + f.nextProtectedAccessID
+	rule.MergeAccessLevels = append(rule.MergeAccessLevels, ProtectedBranchAccess{ID: entryID, UserID: userID})
 	f.ProtectedBranchRules[key] = rule
-	return nil
+	return entryID, true, nil
 }
 
 func (f *FakeClient) RevokeProtectedBranchMergeUserEntry(ctx context.Context, owner, repo, branch string, entryID, userID int) error {

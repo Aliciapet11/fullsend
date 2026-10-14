@@ -570,11 +570,24 @@ no drain barrier for requests accepted before revocation. Install:
 
 1. Creates the replacement Poller service account at Developer and records
    its ID in `FULLSEND_GITLAB_POLLER_GENERATIONS` before acting. Creating the
-   replacement account never changes branch protection. Fullsend checks
-   default-branch pipeline access read-only and defers the handoff before
-   elevation when the existing policy (for example a protected default branch
-   that only lists individual users) excludes the replacement Poller; it never
-   writes a merge grant for the replacement account.
+   replacement account never changes branch protection. When the existing
+   policy (for example a protected default branch that only lists individual
+   users) excludes the replacement Poller, install adds one merge-access entry
+   for that user on the default branch's exact-name rule. It records the
+   entry ID as fullsend's, then checks access again. It never grants access to
+   all Developers and never edits a wildcard rule. If only a wildcard rule
+   protects the branch, or the installer token may not edit the rule, install
+   explains why and defers the handoff before elevation. A user entry an
+   administrator already added is left alone and never removed. Fullsend
+   removes only the entry it recorded: when the generation is quarantined or
+   abandoned, or when a later generation retires it. If an install is
+   interrupted while the entry is being added, or the outcome of the request
+   is unknown, fullsend cannot tell whether the entry exists or who added it.
+   It never removes such an entry or assumes none exists, and it does not
+   time out: a later install stops with an error that names any entry that
+   appeared. Check the branch's merge access for that user, remove the
+   replacement account, and clear the pending generation as the error
+   describes before running install again.
 2. Creates an installer-only bootstrap personal access token for the
    replacement account. The bootstrap token is never stored in a CI/CD
    variable, log, or agent environment.
@@ -612,7 +625,8 @@ blocks any new generation until an administrator reviews
 `FULLSEND_GITLAB_POLLER_GENERATIONS`, deletes any pipeline trigger the
 replacement account owns, removes the replacement account, and then removes
 only the `pending` generation, keeping `version`, `current_user_id`,
-`retiring_user_id` and `abandoned_user_ids` so the running Poller is still
+`current_branch_grant`, `retiring_user_id`, `retiring_branch_grant` and
+`abandoned_user_ids` so the running Poller is still
 recorded and retired at the next cutover. Removing `pending` forgets the
 account and its trigger, so do it only after both are gone.
 

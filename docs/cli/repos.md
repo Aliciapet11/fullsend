@@ -501,10 +501,14 @@ is deleted by uninstall), and finishes with a fresh account. If the cutover
 itself is interrupted, the next install finishes it without minting another
 trigger. Every install also reconciles the recorded current, retiring, and
 abandoned Poller accounts: one that drifted above Developer is restored and
-verified, and its credentials are contained when that cannot be verified. A
-replacement account whose project role or branch policy cannot be established
-before elevation is deferred, not raised; fullsend never writes a merge grant
-for it. A Poller that is still a project access token bot leaves the fast path
+verified, and its credentials are contained when that cannot be verified. When the
+protected default branch does not admit a replacement account, install adds a
+single merge-access entry for that user on the exact-name rule. It records the
+entry as fullsend's and removes only that entry later. It never widens access
+to Developers or edits a wildcard rule. A replacement account whose project
+role or branch access cannot be established before elevation (a wildcard-only
+rule, or an installer token that may not edit the rule) is deferred, not
+raised. A Poller that is still a project access token bot leaves the fast path
 deferred. See
 [Poller identity generations](../contributing/gitlab-role-credentials.md#poller-identity-generations).
 

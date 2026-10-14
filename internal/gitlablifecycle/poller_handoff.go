@@ -22,7 +22,8 @@ var _ repos.GitLabPollerHandoff = (*TriggerOwner)(nil)
 // account with no personal access token and adds it to the project at
 // Developer access. It never changes the protected-branch rule: whether the
 // account may start pipelines on the default branch is checked read-only by
-// EnsureReplacementPollerAccess before the account is raised. The account ID
+// EnsureReplacementPollerAccess before the account is raised, and the handoff
+// policy adds the account's own merge grant when needed. The account ID
 // is returned whenever the account was created, even when a later step
 // failed. A refused or unsupported create means no account was created and is
 // reported as forge.ErrNotFound, so the handoff defers and polling continues.
@@ -50,8 +51,10 @@ func (o *TriggerOwner) CreateReplacementPoller(ctx context.Context, owner, repo 
 // handoff runs it before every elevation attempt, so a membership or policy
 // failure in an earlier run is retried rather than left to quarantine the
 // generation after a trigger was minted. A policy that does not admit the
-// account is reported as a *repos.PollerGenerationUnsafeError, which defers
-// the handoff; fullsend never writes the branch rule for a replacement.
+// account is reported as a *repos.PollerGenerationUnsafeError. This method
+// never writes the branch rule: the handoff policy then adds a per-user merge
+// grant for the account on an exact-name rule, records it as installer-owned,
+// and calls this again, or defers when the grant cannot be made narrowly.
 func (o *TriggerOwner) EnsureReplacementPollerAccess(ctx context.Context, owner, repo string, userID int64) error {
 	if err := o.ensureReplacementMember(ctx, owner, repo, userID); err != nil {
 		return err
