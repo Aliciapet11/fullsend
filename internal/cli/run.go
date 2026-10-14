@@ -1377,7 +1377,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			}
 			// Redact before the message reaches the CLI error, the trace and
 			// the completion comment: the command runs with env.runner.
-			return fmt.Errorf("validation_loop.preflight_check failed: %s\n%s\nInstall the missing dependency before running this agent", h.ValidationLoop.PreflightCheck, redactFeedback(validationFailMessage(preflightOut, preflightErr), h.RunnerEnv))
+			// Redact the raw capture first, because validationFailMessage
+			// trims it and a padded secret would then miss the literal match.
+			redactedOut := []byte(redactFeedback(string(preflightOut), h.RunnerEnv))
+			return fmt.Errorf("validation_loop.preflight_check failed: %s\n%s\nInstall the missing dependency before running this agent", h.ValidationLoop.PreflightCheck, redactFeedback(validationFailMessage(redactedOut, preflightErr), h.RunnerEnv))
 		}
 		printer.StepDone("Preflight dependency check passed")
 	}

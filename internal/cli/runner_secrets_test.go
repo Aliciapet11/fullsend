@@ -786,6 +786,22 @@ func TestRunAgent_RunnerSecretPreflightFailureRedacted(t *testing.T) {
 	assert.NotContains(t, err.Error(), "x-secret-value-pre")
 }
 
+// A padded runner secret printed by a failing preflight_check is redacted
+// before the output is trimmed, so the padding cannot defeat the match.
+func TestRunAgent_RunnerSecretPaddedPreflightFailureRedacted(t *testing.T) {
+	usePreScriptStub(t)
+	writeRunnerSecretsFile(t, `{"X":"  x-secret-padded  "}`)
+	validate := writePreScript(t, "exit 0\n")
+	dir := newRunnerSecretHarnessDir(t,
+		"env:\n  runner:\n    X: \"${X}\"\nvalidation_loop:\n  script: "+validate+"\n  preflight_check: \"printenv X; exit 1\"\n",
+		"")
+
+	err := runRunnerSecretAgent(t, dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preflight_check failed")
+	assert.NotContains(t, err.Error(), "x-secret-padded")
+}
+
 // A pre-script output line that fails to parse is quoted in the error;
 // a runner secret in it must not reach the run error.
 func TestRunAgent_RunnerSecretPreScriptParseErrorRedacted(t *testing.T) {
