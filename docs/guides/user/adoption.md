@@ -84,6 +84,8 @@ The most common and lightweight mechanisms:
 
 **Configure agent behavior** — environment variables offer quick behavioral tuning. For example, `REVIEW_FINDING_SEVERITY_THRESHOLD=medium` to adjust review sensitivity. See [configuring agent behavior](customizing-agents.md) for the full set of options.
 
+**Tune models and effort per agent** — each agent can set its own runtime, model and effort (see [per-agent settings](../../runtimes.md#per-agent-runtime-model-and-effort)); the completion status comment shows the model, effort and (where the runtime reports it) cost used. Choose models for the pipeline as a whole, not one agent at a time: agents check each other's work, so weak output from a cheaper `code` model can trigger extra review and fix rounds that cost more than it saved. Save on agents whose output doesn't change code, such as `prioritize`. `effort` tunes cost within a model, but raising it doesn't make a cheaper model match a stronger one on complex tasks.
+
 For teams with specific needs, fullsend offers deeper configuration:
 
 - **Skills** — extend agents with repo-specific capabilities, or replace built-in skills with your own. See [configuring with skills](customizing-with-skills.md).
