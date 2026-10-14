@@ -1009,3 +1009,63 @@ func TestSetManifestValue_RejectsMergeKeyInValue(t *testing.T) {
 		assert.Equal(t, base, readFile(t, path), name)
 	}
 }
+
+func TestSetManifestValue_LocalSourceValidatedAgainstRequestedPath(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "store")
+	fleet := filepath.Join(dir, "fleet")
+	require.NoError(t, os.Mkdir(store, 0o755))
+	require.NoError(t, os.Mkdir(fleet, 0o755))
+	const base = "version: 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(store, "repos.yaml"), []byte(base), 0o644))
+	link := filepath.Join(fleet, "repos.yaml")
+	require.NoError(t, os.Symlink(filepath.Join(store, "repos.yaml"), link))
+
+	// A source inside the symlink target's directory but outside the
+	// requested manifest's directory is rejected, since LoadManifest through
+	// the same path would reject it.
+	changed, err := SetManifestValue(link, "defaults.config_base.source", filepath.Join(store, "preset.yaml"))
+	require.Error(t, err)
+	assert.False(t, changed)
+	assert.Contains(t, err.Error(), "escapes manifest directory")
+	assert.Equal(t, base, readFile(t, filepath.Join(store, "repos.yaml")))
+
+	// A source inside the requested manifest's directory is accepted and the
+	// result loads and validates through the same path.
+	changed, err = SetManifestValue(link, "defaults.config_base.source", filepath.Join(fleet, "preset.yaml"))
+	require.NoError(t, err)
+	assert.True(t, changed)
+	loadSetManifest(t, link)
+}
+
+func TestSetManifestValue_RejectsEditThroughExistingMergeKey(t *testing.T) {
+	const base = `version: 1
+defaults:
+  <<:
+    config:
+      kill_switch: true
+      allowed_remote_resources: []
+github:
+  repos: []
+`
+	for name, tc := range map[string]struct{ path, value string }{
+		"insert nested key": {"defaults.config.runtime", "pi"},
+		"insert sibling":    {"defaults.inference.auth", "vertex-wif"},
+	} {
+		path := writeSetManifest(t, base)
+		changed, err := SetManifestValue(path, tc.path, tc.value)
+		require.Error(t, err, name)
+		assert.False(t, changed, name)
+		assert.Contains(t, err.Error(), "merge key", name)
+		assert.Equal(t, base, readFile(t, path), name)
+	}
+
+	// Removing a literal key beside a merge key would surface the merged one.
+	const withKey = "version: 1\ndefaults:\n  <<:\n    config: {kill_switch: true}\n  config:\n    runtime: pi\n"
+	path := writeSetManifest(t, withKey)
+	changed, err := UnsetManifestValue(path, "defaults.config")
+	require.Error(t, err)
+	assert.False(t, changed)
+	assert.Contains(t, err.Error(), "merge key")
+	assert.Equal(t, withKey, readFile(t, path))
+}

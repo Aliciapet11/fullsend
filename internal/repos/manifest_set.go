@@ -137,7 +137,10 @@ func editManifestValue(manifestPath, path string, value *string) (bool, error) {
 	if err := parseManifestBytes(out, &m); err != nil {
 		return false, fmt.Errorf("%s: resulting manifest is invalid: %w", path, err)
 	}
-	if abs, absErr := filepath.Abs(manifestPath); absErr == nil {
+	// Validate local config_base sources against the directory of the path the
+	// caller passed in, as LoadManifest does, not the symlink target's
+	// directory: consumers load the manifest through the requested path.
+	if abs, absErr := filepath.Abs(requested); absErr == nil {
 		m.sourceDir = filepath.Dir(abs)
 	}
 	if err := m.Validate(); err != nil {
@@ -959,6 +962,16 @@ func detectIndent(root *yaml.Node) int {
 	return 2
 }
 
+// hasMergeKey reports whether the mapping m has a literal YAML merge key (<<).
+func hasMergeKey(m *yaml.Node) bool {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Kind == yaml.ScalarNode && m.Content[i].Tag == "!!merge" {
+			return true
+		}
+	}
+	return false
+}
+
 func mappingKey(m *yaml.Node, key string) int {
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		if m.Content[i].Value == key {
@@ -1072,6 +1085,13 @@ func (e *manifestEditor) plan(path string, steps []pathStep, newVal *yaml.Node) 
 		}
 
 		ki := mappingKey(cur, st.key)
+		if hasMergeKey(cur) && (ki < 0 && !unset || ki >= 0 && last && unset) {
+			// Adding or removing a literal key next to a merge key changes
+			// how the merged fields combine with it (an explicit mapping
+			// replaces a merged one as a whole), and mappingKey sees literal
+			// keys only, so inherited settings could be lost silently.
+			return nil, fmt.Errorf("%s: %s passes through a YAML merge key (<<) in the manifest; list the merged fields explicitly before editing it", path, describeSteps(steps[:i+1]))
+		}
 		if last {
 			switch {
 			case ki < 0 && unset:
