@@ -179,15 +179,19 @@ threshold does not apply. A bot with no recognized role, or with an unavailable
 or unverifiable lookup, is omitted and counted in the same authorization gap.
 This is the intentional v1 trust boundary: users who may invoke the agent, and
 Fullsend-registered bots admitted by ADR 0107, may provide its command inputs.
-The required entity body is always staged; this admission rule applies to
-conversation comments and reviews. Label-transition and bot-review event
-exceptions authorize an event path only; they do not by themselves authorize
-arbitrary bot-authored comment content. An omitted formal review is counted in
-the `reviews` scope's `authorization_failed` gap by the same rule; it is not
-charged only to `comments`. Every admitted comment or review still passes the
-complete filter pipeline below, including Unicode safety that removes invisible
-text and unnecessary control characters, secret redaction, prompt-injection
-scanning, and byte bounds.
+The handled entity body is actor-attributed content and MUST pass the same
+current-revision attribution and authorization rule before it is staged. A
+missing, unverifiable, unauthorized, or unsafe entity body emits an
+entity-scope `authorization_failed` or filtering gap and aborts assembly; the
+required entity body is required only after successful admission and filtering.
+Label-transition and bot-review event exceptions authorize an event path only;
+they do not by themselves authorize arbitrary bot-authored comment content. An
+omitted formal review is counted in the `reviews` scope's
+`authorization_failed` gap by the same rule; it is not charged only to
+`comments`. Every admitted entity, comment, or review still passes the complete
+filter pipeline below, including Unicode safety that removes invisible text and
+unnecessary control characters, secret redaction, prompt-injection scanning,
+and byte bounds.
 
 The initial issue or change-proposal body uses the same layout with
 `Fullsend-Record: "entity"`, the entity's stable ID, immutable author ID, and
@@ -405,7 +409,11 @@ that does not expose edit history.
 
 `collection.json` is the exact collection configuration and conforms to
 `collection.schema.json`. Its source-kind array sorts by ASCII byte order.
-`entity_kind` must match the entity metadata kind. For `work_item`, the only
+The required `admission.human_min_role` records the effective per-record human
+threshold (`triage` for observation or `write` for mutation); registered bot
+roles follow ADR 0107 and do not use that human threshold. The producer derives
+this value from the selected harness before serializing and hashing
+`collection.json`. `entity_kind` must match the entity metadata kind. For `work_item`, the only
 valid non-entity sources are `comments` and `agent_runs`; reviews, checks, and
 check logs are inapplicable and cannot be selected. A profile that violates
 these entity-kind rules is invalid before fetching or assembly and aborts
@@ -582,8 +590,11 @@ configured provider trust boundary, not by this cleanup guarantee.
 
 Structural strings are not rewritten because doing so could change identity or
 target a different resource. Canonical IDs use the mappings above. Repository
-paths and review file paths first undergo the Unicode-safety scan and then strict
-structural validation. The `repository_path` and `source.host` schema patterns
+paths and review file paths MUST undergo the complete source-value filter
+pipeline, including Unicode safety, secret redaction, and prompt-injection
+scanning, before strict structural validation. An unsafe path is never rewritten:
+the producer omits the affected optional record or relationship, and aborts when
+a required singleton depends on it. The `repository_path` and `source.host` schema patterns
 use only RE2-compatible syntax and enforce their printable alphabet; producers
 additionally enforce the documented segment, leading-slash, trailing-slash,
 port-range, and default-port rules. A validator that cannot compile or
@@ -649,6 +660,14 @@ source has a record but no content path or file entry and adds an
 aborts snapshot assembly, and Fullsend must not launch scripts or an agent with
 that snapshot.
 
+Verification, upload, and cleanup MUST reject symlinks and special files at the
+context root and every path component, and MUST require regular files beneath
+real directories. They use no-follow, containment-preserving directory-handle
+operations and upload the bytes from the verified handles (or retain an
+equivalent exclusive root handle) so a path cannot be replaced between digest
+verification and sandbox upload. If this guarantee cannot be enforced,
+assembly aborts before scripts or the agent launch.
+
 Findings contain codes and counts, not rejected source text. Filters and bounds
 are identified by `filter_version`; changing emitted bytes for the same input
 requires a new filter version. Removing or reinterpreting a status requires v2.
@@ -674,9 +693,12 @@ state their ordering in their owning schema before being added to v1.
 `generated_at` or another runner-clock value is forbidden anywhere under the
 context root. Acquisition timing belongs in run telemetry outside the staged
 tree. Source-provided timestamps, entity update time, Git object IDs used as
-relationship values, and forge check record IDs are permitted. With identical
-forge responses, `collection_profile`, size bounds, and `filter_version`, the
-complete tree has identical paths and bytes.
+relationship values, and forge check record IDs are permitted. Determinism is
+defined over the complete normalized acquisition inputs: forge responses,
+authorization-provider results, effective admission policy, collection
+profile, size bounds, filter version, and the active credential-redaction
+registry. With those inputs identical, the complete tree has identical paths
+and bytes; stale authorization or filtering state MUST NOT be reused.
 
 ## Lifecycle and access
 

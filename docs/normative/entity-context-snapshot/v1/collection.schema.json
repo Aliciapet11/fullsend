@@ -3,11 +3,22 @@
   "$id": "https://fullsend.ai/normative/entity-context-snapshot/v1/collection.schema.json",
   "title": "EntityContextSnapshotCollection",
   "type": "object",
-  "required": ["entity_kind", "included_sources", "record_selection", "check_log_selection", "bounds"],
+  "required": ["entity_kind", "admission", "included_sources", "record_selection", "check_log_selection", "bounds"],
   "properties": {
     "entity_kind": {
       "enum": ["work_item", "change_proposal"],
       "description": "The forge entity kind being collected; source selection is constrained by this value."
+    },
+    "admission": {
+      "type": "object",
+      "required": ["human_min_role"],
+      "properties": {
+        "human_min_role": {
+          "enum": ["triage", "write"],
+          "description": "The effective minimum current forge role for human entity, comment, and review authors: triage for observation runs or write for mutation runs. Registered bot roles follow ADR 0107 and do not use this human threshold."
+        }
+      },
+      "additionalProperties": false
     },
     "included_sources": {
       "type": "array",

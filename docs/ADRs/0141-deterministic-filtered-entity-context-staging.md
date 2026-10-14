@@ -76,6 +76,12 @@ this ADR does not invent a second bot-role mechanism. Successful authorization
 is therefore an admission prerequisite, not a claim that the record is
 trustworthy or can change platform authority.
 
+The handled entity's body is actor-attributed content and follows the same
+current-revision attribution and authorization rule. If its author is missing,
+unverifiable, unauthorized, or fails filtering, Fullsend records an
+entity-scope gap and aborts snapshot assembly; "required entity body" means
+required only after successful admission and filtering.
+
 The snapshot is written outside the repository clone. Host-side pre- and
 post-scripts receive `FULLSEND_CONTEXT_DIR` pointing to an access-restricted
 temporary directory outside the retained run-output tree; inside the sandbox
