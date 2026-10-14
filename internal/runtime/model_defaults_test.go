@@ -179,7 +179,7 @@ func TestClaudeShouldFallBack_ClaudeCodeSelectedModelMessage(t *testing.T) {
 	for _, model := range []string{"claude-opus-4-1", "claude-3-5-sonnet-20240620", "claude-opus-9-9"} {
 		assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: model, exitCode: 1, lastResult: errResult(msg(model))}), model)
 	}
-	assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: "Claude-Opus-5-5", lastResult: errResult(msg("claude-opus-5-5"))}),
+	assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: "Claude-Opus-9-9", lastResult: errResult(msg("claude-opus-9-9"))}),
 		"the model id is compared case-insensitively")
 	assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5-5", lastResult: errResult(strings.Replace(msg("claude-opus-5-5"), "'", "’", 1))}),
 		"a typographic apostrophe does not break the match")
@@ -196,7 +196,31 @@ func TestClaudeShouldFallBack_ClaudeCodeSelectedModelMessage(t *testing.T) {
 		"the model already answered")
 }
 
+// For an id in its own model list — every default and fallback id except
+// claude-haiku-4-5 — Claude Code 2.1.296 writes "The model <id> is not
+// available on your vertex deployment" instead.
+func TestClaudeShouldFallBack_ClaudeCodeModelNotAvailableMessage(t *testing.T) {
+	msg := func(model string) string {
+		return "The model " + model + " is not available on your vertex deployment. Try --model to switch to claude-opus-5, or ask your admin to enable this model."
+	}
+	errResult := func(m string) *ResultEvent { return &ResultEvent{IsError: true, ErrorMessage: m} }
+
+	for _, model := range []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-4-6", "claude-sonnet-4-6"} {
+		assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: model, exitCode: 1, lastResult: errResult(msg(model))}), model)
+	}
+	assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: "Claude-Opus-5-5", lastResult: errResult(msg("claude-opus-5-5"))}),
+		"the model id is compared case-insensitively")
+	assert.False(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5-5", lastResult: errResult(msg("claude-opus-4-6"))}),
+		"the message must name the attempt's own model")
+	assert.False(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5", lastResult: errResult(msg("claude-opus-5-5"))}),
+		"a prefix of the named model is not the attempt's model")
+	assert.False(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5-5", lastResult: &ResultEvent{IsError: true, ErrorMessage: msg("claude-opus-5-5"), OutputTokens: 1}}),
+		"output tokens were spent")
+}
+
 func TestClaudeAttemptOutput(t *testing.T) {
+	assert.False(t, claudeAttemptOutput(TextEvent{Text: "The model claude-opus-5-5 is not available on your vertex deployment. Try --model to switch to claude-opus-5, or ask your admin to enable this model."}),
+		"Claude Code's model-not-available message for a listed id is not output")
 	assert.False(t, claudeAttemptOutput(TextEvent{Text: "There's an issue with the selected model (claude-opus-4-1). It may not exist or you may not have access to it. Run --model to pick a different model."}),
 		"Claude Code's own model-not-available message is not output")
 	assert.False(t, claudeAttemptOutput(TextEvent{Text: "There’s an issue with the selected model (claude-opus-4-1)."}))
@@ -323,8 +347,52 @@ const claudeSelectedModelStream = `{"type":"system","subtype":"init","model":"%[
 {"type":"result","subtype":"success","is_error":true,"result":"There's an issue with the selected model (%[1]s). It may not exist or you may not have access to it. Run --model to pick a different model.","num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},"terminal_reason":"api_error"}
 `
 
-// The fallback fires on the stream Claude Code actually writes on Vertex,
-// and none of the abandoned attempt's synthetic text reaches the run.
+// claudeModelNotAvailableStream is what the pinned Claude Code (2.1.296)
+// writes when Vertex answers 404 for an id in Claude Code's own model list,
+// reproduced against a stub Vertex endpoint. %[1]s is the model id.
+const claudeModelNotAvailableStream = `{"type":"system","subtype":"init","model":"%[1]s","claude_code_version":"2.1.296","session_id":"5b0c7d3e-2222-4f1a-9a77-0d8e1c2b3a44"}
+{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"The model %[1]s is not available on your vertex deployment. Try --model to switch to claude-opus-5, or ask your admin to enable this model."}]},"error":"model_not_found","is_api_error_message":true}
+{"type":"result","subtype":"success","is_error":true,"api_error_status":404,"result":"The model %[1]s is not available on your vertex deployment. Try --model to switch to claude-opus-5, or ask your admin to enable this model.","num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},"terminal_reason":"api_error"}
+`
+
+// The shipped default (claude-opus-5-5) is in Claude Code's model list, so
+// an unserved default reports "The model ... is not available"; the run
+// still falls back to claude-opus-4-6.
+func TestClaudeRuntime_Run_FallsBackOnClaudeCodeModelNotAvailableMessage(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openshell.log")
+	fakeOpenshellClaude(t, logPath, map[string]string{
+		"claude-opus-5-5": fmt.Sprintf(claudeModelNotAvailableStream, "claude-opus-5-5"),
+		"claude-opus-4-6": claudeServedStream,
+	})
+
+	var events []AgentEvent
+	var metrics RunMetrics
+	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
+		SandboxName: "fs-claude-fallback-na", AgentBaseName: "code", RepoDir: "/r", Model: "opus",
+		Timeout: 30 * time.Second, OnEvent: func(e AgentEvent) { events = append(events, e) },
+	}, ui.New(io.Discard), time.Now(), &metrics)
+	require.NoError(t, err)
+	assert.Equal(t, 0, exit)
+	assert.Equal(t, "claude-opus-4-6", metrics.Model)
+	assert.Equal(t, []string{"claude-opus-5-5"}, metrics.FallbackFrom)
+	for _, e := range events {
+		if txt, ok := e.(TextEvent); ok {
+			assert.NotContains(t, txt.Text, "is not available on your", "the abandoned attempt's events are discarded")
+		}
+		if res, ok := e.(ResultEvent); ok {
+			assert.False(t, res.IsError, "only the served attempt's result is rendered")
+		}
+	}
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(log), "--model 'claude-opus-4-6'")
+	assert.Contains(t, string(log), "5b0c7d3e-2222-4f1a-9a77-0d8e1c2b3a44.jsonl", "the abandoned transcript is removed")
+}
+
+// The fallback fires on the stream Claude Code writes for an id outside its
+// model list, and none of the abandoned attempt's synthetic text reaches
+// the run.
 func TestClaudeRuntime_Run_FallsBackOnClaudeCodeSelectedModelMessage(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "openshell.log")
 	fakeOpenshellClaude(t, logPath, map[string]string{

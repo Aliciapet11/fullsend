@@ -258,10 +258,19 @@ const claudeSyntheticModel = "<synthetic>"
 // break the match.
 const claudeSelectedModelIssue = "issue with the selected model ("
 
+// claudeModelNotAvailablePrefix and claudeModelNotAvailableSuffix wrap the
+// model id in Claude Code's other "model not available" message, the one it
+// writes for an id in its own model list (see claudeShouldFallBack).
+const (
+	claudeModelNotAvailablePrefix = "the model "
+	claudeModelNotAvailableSuffix = " is not available on your "
+)
+
 // claudeAttemptOutput reports whether evt shows that the model was served.
 // A failed API call reaches the stream as a synthetic assistant message —
-// text starting with "API Error", or Claude Code's "There's an issue with
-// the selected model (...)" — which is not output. runAttempt also refuses
+// text starting with "API Error", Claude Code's "There's an issue with the
+// selected model (...)", or its "The model ... is not available on your
+// ... deployment" — which is not output. runAttempt also refuses
 // any text on a message whose model is claudeSyntheticModel.
 func claudeAttemptOutput(evt AgentEvent) bool {
 	if t, ok := evt.(TextEvent); ok {
@@ -270,42 +279,56 @@ func claudeAttemptOutput(evt AgentEvent) bool {
 			return false
 		}
 		lower := strings.ToLower(text)
+		if strings.HasPrefix(lower, claudeModelNotAvailablePrefix) && strings.Contains(lower, claudeModelNotAvailableSuffix) {
+			return false
+		}
 		return !strings.HasPrefix(lower, "there") || !strings.Contains(lower, claudeSelectedModelIssue)
 	}
 	return piAttemptOutput(evt)
 }
 
-// claudeSelectedModelUnavailable reports whether errMsg is Claude Code's own
-// "model not available" message for model: the attempt's --model id must
-// be the one in the parenthesis, compared case-insensitively, so the
-// message about some other model does not count.
+// claudeSelectedModelUnavailable reports whether errMsg is one of Claude
+// Code's own "model not available" messages for model: the attempt's
+// --model id must be the one the message names, compared
+// case-insensitively, so the message about some other model does not count.
 func claudeSelectedModelUnavailable(errMsg, model string) bool {
-	model = strings.TrimSpace(model)
+	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" {
 		return false
 	}
-	return strings.Contains(strings.ToLower(errMsg), claudeSelectedModelIssue+strings.ToLower(model)+")")
+	lower := strings.ToLower(errMsg)
+	return strings.Contains(lower, claudeSelectedModelIssue+model+")") ||
+		strings.Contains(lower, claudeModelNotAvailablePrefix+model+claudeModelNotAvailableSuffix)
 }
 
 // claudeShouldFallBack reports whether an attempt failed only because the
 // run's Vertex project does not serve its model: the result is an error
 // with no output tokens, the model produced nothing, and the message is
 // either one of the two Vertex "not served" shapes
-// (isVertexModelUnavailable) or Claude Code's own message naming the
-// attempt's model (claudeSelectedModelUnavailable). Any other failure —
+// (isVertexModelUnavailable) or one of Claude Code's own messages naming
+// the attempt's model (claudeSelectedModelUnavailable). Any other failure —
 // auth, quota, a PERMISSION_DENIED that is not the data-sharing one, a
 // model that already answered — is final.
 //
 // The pinned Claude Code (2.1.296) on Vertex (CLAUDE_CODE_USE_VERTEX=1)
-// does not surface Vertex's text for a model the project does not serve.
-// Probed live with three such ids (claude-opus-4-1,
-// claude-3-5-sonnet-20240620, claude-opus-9-9), each produced the same
-// stream: an assistant message with "model":"<synthetic>", zero output
-// tokens and the text "There's an issue with the selected model (<id>).
-// It may not exist or you may not have access to it. Run --model to pick
-// a different model.", then a result event with "is_error":true, that
-// text as "result", "terminal_reason":"api_error" and zero output tokens.
-// The Vertex shapes are kept for a version that passes them through.
+// does not surface Vertex's 404 text for a model the project does not
+// serve. It writes an assistant message with "model":"<synthetic>",
+// "error":"model_not_found" and zero output tokens, then a result event
+// with "is_error":true, "api_error_status":404 and
+// "terminal_reason":"api_error", whose text depends on the id:
+//
+//   - an id in Claude Code's own model list (every default and fallback id
+//     except claude-haiku-4-5): "The model <id> is not available on your
+//     vertex deployment. Try --model to switch to ..., or ask your admin
+//     to enable this model."
+//   - any other id: "There's an issue with the selected model (<id>). It
+//     may not exist or you may not have access to it. Run --model to pick a
+//     different model."
+//
+// Both were reproduced against a stub Vertex endpoint returning the 404,
+// and the second also live. Auth, permission and quota failures produce
+// other text. The 403 data-sharing error does reach the result text, so
+// isVertexModelUnavailable still matters here.
 //
 // The runner does this itself because Claude Code's --fallback-model does
 // not cover these shapes: its CLI (2.1.296) switches models on a 404 only
