@@ -14,8 +14,8 @@ is what changes once you are on it.
 
 A model on pi is `provider/id`. Aliases and bare ids still work — `opus`/`sonnet`/`haiku`/`fable`
 resolve through fullsend's pinned alias table (`opus` → `claude-opus-5-5`, `sonnet` →
-`claude-sonnet-5-5`, `haiku` → `claude-haiku-5-5`, `fable` → `claude-fable-5-1`, each falling back
-to the previous default when your project does not serve it; see
+`claude-sonnet-5-5`, `haiku` → `claude-haiku-5-5`, each falling back to the previous default when
+your project does not serve it; `fable` → `claude-fable-5-1`, with no built-in fallback; see
 [Per-repo alias overrides](#per-repo-alias-overrides)), and a bare id gets the provider from
 `FULLSEND_PI_PROVIDER` (default `anthropic-vertex`).
 

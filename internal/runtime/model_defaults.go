@@ -19,6 +19,14 @@ var claudeAliasDefaults = map[string]string{
 	"haiku":  "claude-haiku-5-5",
 }
 
+// claudeExplicitChainAliases are aliases with no built-in chain that still
+// take an explicit FULLSEND_FALLBACK_MODELS list on Claude Code. The id is
+// the one pi resolves the alias to, so the attempt names a concrete model
+// that Claude Code's "model not available" message can be matched against.
+var claudeExplicitChainAliases = map[string]string{
+	"fable": "claude-fable-5-1",
+}
+
 // claudeAliasFallbacks is the built-in fallback chain per alias, tried in
 // order when the default id is not served in the run's Vertex project
 // (isVertexModelUnavailable, and on Claude Code also

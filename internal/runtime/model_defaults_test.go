@@ -108,6 +108,8 @@ func TestClaudeModelChain(t *testing.T) {
 		{"pinned id", RunParams{Model: "claude-opus-5-5", FallbackModels: []string{"claude-opus-4-6"}}, false, []string{"claude-opus-5-5"}},
 		{"provider/id", RunParams{Model: "anthropic-vertex/claude-opus-5-5"}, false, []string{"anthropic-vertex/claude-opus-5-5"}},
 		{"fable has no chain", RunParams{Model: "fable"}, false, []string{"fable"}},
+		{"fable takes an explicit list", RunParams{Model: "fable", FallbackModels: []string{"opus"}}, false,
+			[]string{"claude-fable-5-1", "claude-opus-5-5"}},
 		{"gateway runs never fall back", RunParams{Model: "opus"}, true, []string{"opus"}},
 		{"no model", RunParams{}, false, []string{""}},
 	}

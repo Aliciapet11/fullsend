@@ -195,7 +195,7 @@ func claudeAgentModelFor(sandboxName string) string {
 // followed by its fallback chain — FallbackModels when set, else the
 // built-in chain (ImplicitFallbackModels) — each resolved by claudeModelID
 // and deduplicated. A pinned id, a provider/id spec, an alias with no
-// chain, and any gateway run yield a single entry: the model as the run
+// chain (fable without an explicit list), and any gateway run yield a single entry: the model as the run
 // gave it, which buildRunCommand resolves as before (#7026). The one
 // exception is an alias that only the agent definition names (the run
 // names none): its single entry is the alias's resolved id, so a
@@ -207,12 +207,18 @@ func claudeModelChain(params RunParams, gateway bool) []string {
 	if gateway || model == "" || strings.Contains(model, "/") {
 		return single
 	}
+	primary := claudeModelID(model, params.ModelAliases)
 	if _, ok := params.ModelAliases[model]; !ok {
 		if _, ok := claudeAliasDefaults[model]; !ok {
-			return single
+			// An alias with no built-in chain (fable) still takes an
+			// explicit FULLSEND_FALLBACK_MODELS list.
+			id, explicit := claudeExplicitChainAliases[model]
+			if !explicit || len(params.FallbackModels) == 0 {
+				return single
+			}
+			primary = id
 		}
 	}
-	primary := claudeModelID(model, params.ModelAliases)
 	if params.Model == "" {
 		single = []string{primary}
 	}
