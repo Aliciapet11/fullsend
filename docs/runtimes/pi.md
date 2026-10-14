@@ -115,23 +115,22 @@ models:
 
 **If it goes wrong.** A key or value the block does not accept stops `fullsend run` before the
 sandbox is created, naming the key (`models.aliases: unknown alias key "grok"`). A model your
-project cannot serve is not caught here. Aliased models (opus, sonnet, etc.) fall back when
-Vertex answers that it does not serve the model: the 404 `Publisher model ... not found` or the
-403 `... data sharing to be enabled for publisher ...`. The chain is `FULLSEND_FALLBACK_MODELS`
-when set, else the alias's built-in chain above. An alias retargeted with `models.aliases` has no
-built-in chain. Any other error, including a 403 `PERMISSION_DENIED`, fails the run. Pinned ids
-fail at the first model call. A fallback must resolve to the same pi provider as the primary
-model; others are ignored with a warning. The plan block lists the built-in chain, the run prints
-`model claude-opus-5-5 is not available in this project; falling back to claude-opus-4-6`, and
-`metrics.json` records the models tried before the one that ran as `fallback_from`.
+project cannot serve is not caught here; at run time:
 
-Sub-agent children fall back too, along the alias's built-in chain. This covers a child whose
-`model` argument is an alias, a persona whose model (`subagents.<persona>`, frontmatter, or
-`subagents.default`) is an alias, and a child that takes an alias `subagents.default`. The
-`[fullsend-agent]` log line says which model was not available and which one the child moved to.
-A child that pins an id or a `provider/id`, or that inherits the parent's live model (already
-fallen back if it had to), does not fall back. `FULLSEND_FALLBACK_MODELS` applies to the parent
-run only.
+- **Alias on its default:** falls back along the built-in chain above when Vertex answers that it
+  does not serve the model. `FULLSEND_FALLBACK_MODELS`, when set, replaces the chain.
+- **Retargeted alias, pinned id or `provider/id`:** no fallback (unless `FULLSEND_FALLBACK_MODELS`
+  is set for a retargeted alias); the run fails at the first model call.
+- **Any other error** (auth, quota, `PERMISSION_DENIED`): fails the run.
+- **A fallback on another pi provider** is ignored with a warning.
+- **What you see:** the plan block lists the chain, the run prints `model claude-opus-5-5 is not
+  available in this project; falling back to claude-opus-4-6`, and `metrics.json` records
+  `fallback_from`.
+
+**Sub-agent children** that ask for an alias (directly, through a persona, or through
+`subagents.default`) fall back along the same built-in chain; the `[fullsend-agent]` log line names
+both models. A child that pins an id or inherits the parent's live model does not.
+`FULLSEND_FALLBACK_MODELS` applies to the parent run only.
 
 ### Each provider has its own GCP project
 

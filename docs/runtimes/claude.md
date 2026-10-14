@@ -33,7 +33,8 @@ call. The one other supported route is the
 
 **Per-repo alias overrides.** Point an alias at a different model for this repo with
 `models.aliases` in `.fullsend/config.yaml` (`sonnet: claude-sonnet-5`); the run then passes that id
-to `--model` and `--fallback-model`, and the alias has no built-in fallback chain. Syntax, rules
+to `--model` and `--fallback-model`, and the alias has no built-in fallback chain. A repo that
+pinned the 5.5 ids here before they became the default can drop the pin to get the fallback. Syntax, rules
 and what the plan block shows are on the [pi page](pi.md#per-repo-alias-overrides) — it is the
 same block. It covers the run's own model only.
 
@@ -43,28 +44,37 @@ fullsend does not set `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`: a pinned 5.
 fail every sub-agent on a project that does not serve it. A sub-agent that needs a specific
 generation names the id.
 
-**Fallback chains.** A run on an alias tries the alias's chain in order when the project does not
-serve the model. The pinned Claude Code (2.1.296) on Vertex does not pass Vertex's 404 through. It
-reports an error result with no output, naming the model: `The model <id> is not available on your
-vertex deployment` for an id in its own model list (every default and fallback id except
-`claude-haiku-4-5`), or `There's an issue with the selected model (<id>)` for any other id. The runner
-falls back when `<id>` is the attempt's own model. It also matches Vertex's own shapes, a 404
-`Publisher model ... not found` or a 403 `... data sharing to be enabled for publisher ...`; Claude
-Code passes the 403 text through. The chain is `FULLSEND_FALLBACK_MODELS` when set, else the alias's
-built-in chain from the table above. The runner does the retry itself, because the built-in chain is
-never passed to Claude Code as `--fallback-model`. A retry happens only when the model produced nothing. The abandoned
-attempt's events and transcript are discarded, and every attempt shares the run's timeout. The
-plan block lists the built-in chain (`Fallback models: claude-opus-4-6 (built-in for opus, when
-not served)`). A fallback prints `model claude-opus-5-5 is not available in this project; falling
-back to claude-opus-4-6` and is recorded in `metrics.json` as `fallback_from`. Pinned ids,
-`provider/id` specs, `models.aliases` retargets without `FULLSEND_FALLBACK_MODELS`, the inference
-gateway route, and any other error (auth, quota, `PERMISSION_DENIED`) never get a runner retry.
-`FULLSEND_FALLBACK_MODELS=a,b` is also passed as `--fallback-model a,b` on every route, the gateway
-included, and Claude Code then switches models within the session on its own triggers: overload,
-server errors, and (2.1.296) a Vertex 404 as `last_resort`. The run prints `model <id> failed;
-Claude Code fell back to <next> (<trigger>)` and records the model that took over as `model` and the
-one it left in `fallback_from`. pi runs the same chain, sub-agent children
-included; see [pi](pi.md#at-a-glance).
+### When your project does not serve the model
+
+A run on `opus`, `sonnet` or `haiku` retries on the next model when Vertex says the project does
+not serve the one it asked for. Nothing to configure:
+
+| Situation | What happens |
+|---|---|
+| Alias on its default, project serves 5.5 | Runs on 5.5 |
+| Alias on its default, project does not serve 5.5 | Falls back along the built-in chain (table above) |
+| `FULLSEND_FALLBACK_MODELS=a,b` set | That list replaces the built-in chain |
+| Alias retargeted in `models.aliases` | No fallback, unless `FULLSEND_FALLBACK_MODELS` is set |
+| Pinned id (`claude-opus-5-5`) or `provider/id` | No fallback: the run fails at the first model call |
+| Any other error (auth, quota, `PERMISSION_DENIED`) | No fallback: the run fails |
+| Inference gateway route | No runner fallback |
+
+What you see:
+
+```text
+Fallback models: claude-opus-4-6 (built-in for opus, when not served)    # plan block
+! model claude-opus-5-5 is not available in this project; falling back to claude-opus-4-6
+```
+
+`metrics.json` then records the model that answered as `model` and the one it left in
+`fallback_from`. A retry happens only when the model produced nothing, and every attempt shares the
+run's timeout.
+
+An explicit `FULLSEND_FALLBACK_MODELS` list is also passed to Claude Code as `--fallback-model`, on
+every route. Claude Code may then switch models itself within the session (overload, server errors,
+or a Vertex 404), which prints `! model <id> failed; Claude Code fell back to <next> (<trigger>)` and
+is recorded the same way. How the runner detects "not served" is in
+[Runtime implementation](../contributing/runtime-implementation.md).
 
 ## At a glance
 
