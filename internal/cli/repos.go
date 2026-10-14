@@ -36,33 +36,93 @@ managing fullsend across many repositories and organizations.`,
 	cmd.AddCommand(newReposInstallCmd())
 	cmd.AddCommand(newReposUninstallCmd())
 	cmd.AddCommand(newReposStatusCmd())
-	cmd.AddCommand(newReposSetDefaultCmd())
+	cmd.AddCommand(newReposSetCmd())
 	return cmd
 }
 
-func newReposSetDefaultCmd() *cobra.Command {
+func newReposSetCmd() *cobra.Command {
 	var manifest string
+	var unset bool
 
 	cmd := &cobra.Command{
-		Use:   "set-default <key> <value>",
-		Short: "Set a platform-level default in the manifest",
-		Long: fmt.Sprintf(`Set or remove a platform-level default in repos.yaml.
+		Use:   "set <path> <value>",
+		Short: "Set or remove any field in the repos.yaml manifest",
+		Long: `Set or remove a field anywhere in repos.yaml: defaults, the github and
+gitlab sections, and individual repository entries, including nested config
+fields and structured values. Paths are checked against the manifest schema,
+and the whole resulting manifest is validated before it is written. A failed
+edit leaves the file unchanged; a successful edit keeps unrelated values,
+comments, and ordering. A missing manifest is created with version: 1.
 
-An empty value removes the key. Creates the manifest with version: 1 if it does not exist.
+Path syntax:
+  Dot-separated YAML field names, for example defaults.config.runtime,
+  github.mint_url, or gitlab.agent_runner_tags. Select a repository entry by
+  its exact name with a double-quoted selector: github.repos["acme/api"].
+  Glob entries are selected by their literal pattern (github.repos["acme/*"]).
+  Quote the whole path in your shell.
 
-Valid keys:
-  %s
+  Setting a nested path under a repository entry requires the entry to exist.
+  Setting the whole entry path creates or replaces the entry; the selector
+  supplies its name.
 
-Per-repo config fields, including runtime and allowed_remote_resources, are
-not set here: edit defaults.config, github.config, gitlab.config, or a
-repository entry's config in repos.yaml instead.`, strings.Join(repos.ValidDefaultKeys, "\n  ")),
-		Args: cobra.ExactArgs(2),
+Values:
+  Strings are taken literally, so none and "" are stored as strings.
+  Booleans must be true or false. Lists and objects take YAML or JSON, for
+  example '[gpu, linux]' or '{"auth": "vertex-wif"}'. An empty argument
+  never deletes a key; use --unset <path> to remove it.`,
+		Example: `  # Set a fleet-wide default and a forge-wide config value
+  fullsend repos set defaults.inference.auth vertex-wif
+  fullsend repos set github.config.runtime claude
+
+  # Set a list value
+  fullsend repos set gitlab.agent_runner_tags '[fullsend-agent, gpu]'
+
+  # Add (or replace) a repository entry
+  fullsend repos set 'github.repos["acme/api"]' '{"app_set": "acme"}'
+
+  # Change a field on an existing repository entry
+  fullsend repos set 'github.repos["acme/api"].config.runtime' claude
+
+  # Delete a key
+  fullsend repos set --unset github.mint_url`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if unset {
+				if len(args) != 1 {
+					return fmt.Errorf("--unset takes exactly one argument (the path), received %d", len(args))
+				}
+				return nil
+			}
+			return cobra.ExactArgs(2)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return repos.SetDefault(manifest, args[0], args[1])
+			out := cmd.OutOrStdout()
+			if unset {
+				changed, err := repos.UnsetManifestValue(manifest, args[0])
+				if err != nil {
+					return err
+				}
+				if changed {
+					fmt.Fprintf(out, "Removed %s from %s\n", args[0], manifest)
+				} else {
+					fmt.Fprintf(out, "%s is not set in %s; nothing changed\n", args[0], manifest)
+				}
+				return nil
+			}
+			changed, err := repos.SetManifestValue(manifest, args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if changed {
+				fmt.Fprintf(out, "Set %s in %s\n", args[0], manifest)
+			} else {
+				fmt.Fprintf(out, "%s already has that value in %s; nothing changed\n", args[0], manifest)
+			}
+			return nil
 		},
 	}
 
 	cmd.Flags().StringVarP(&manifest, "manifest", "f", "repos.yaml", "path to repos.yaml")
+	cmd.Flags().BoolVar(&unset, "unset", false, "remove the key at <path> instead of setting it")
 
 	return cmd
 }
@@ -702,7 +762,7 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			if forgeName == "" {
 				// Infer forge from platform sections that contain repos,
 				// falling back to section existence for empty manifests
-				// bootstrapped via set-default.
+				// bootstrapped via repos set.
 				ghHasRepos := manifest.GitHub != nil && len(manifest.GitHub.Repos) > 0
 				glHasRepos := manifest.GitLab != nil && len(manifest.GitLab.Repos) > 0
 				if ghHasRepos && !glHasRepos {
@@ -954,7 +1014,7 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			if opts.dryRun {
 				announceGitLabURLDryRun(printer, opts.gitlabURL)
 			} else {
-				if err := repos.SetDefault(opts.manifest, "gitlab.url", opts.gitlabURL); err != nil {
+				if _, err := repos.SetManifestValue(opts.manifest, "gitlab.url", opts.gitlabURL); err != nil {
 					return fmt.Errorf("writing gitlab.url to manifest: %w", err)
 				}
 				printer.StepDone(fmt.Sprintf("Set gitlab.url=%s in manifest", opts.gitlabURL))
@@ -1154,7 +1214,7 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 					}
 				}
 				if hasGH && ghEmpty {
-					if wbErr := repos.SetDefault(opts.manifest, "github.fullsend_ref", writebackRef); wbErr == nil {
+					if _, wbErr := repos.SetManifestValue(opts.manifest, "github.fullsend_ref", writebackRef); wbErr == nil {
 						manifest.EnsurePlatform(repos.ForgeGitHub).FullsendRef = writebackRef
 						printer.StepDone(fmt.Sprintf("Wrote fullsend_ref=%s to manifest (GitHub)", writebackRef))
 					} else {
@@ -1162,7 +1222,7 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 					}
 				}
 				if hasGL && glEmpty {
-					if wbErr := repos.SetDefault(opts.manifest, "gitlab.fullsend_ref", writebackRef); wbErr == nil {
+					if _, wbErr := repos.SetManifestValue(opts.manifest, "gitlab.fullsend_ref", writebackRef); wbErr == nil {
 						manifest.EnsurePlatform(repos.ForgeGitLab).FullsendRef = writebackRef
 						printer.StepDone(fmt.Sprintf("Wrote fullsend_ref=%s to manifest (GitLab)", writebackRef))
 					} else {

@@ -1119,7 +1119,7 @@ unknown_section: true
 func TestParseManifestBytes_EmptyAndCommentOnlyInput(t *testing.T) {
 	// yaml.Decoder.Decode returns io.EOF for empty or comment-only input.
 	// parseManifestBytes must treat this as a no-op (matching the old
-	// yaml.Unmarshal behavior) so callers like SetDefault can handle
+	// yaml.Unmarshal behavior) so callers can handle
 	// empty manifest files as zero-value manifests.
 	tests := []struct {
 		name  string

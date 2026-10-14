@@ -94,7 +94,8 @@ func TestReposCommand_HasSubcommands(t *testing.T) {
 	assert.True(t, names["install"], "expected install subcommand")
 	assert.True(t, names["uninstall"], "expected uninstall subcommand")
 	assert.True(t, names["status"], "expected status subcommand")
-	assert.True(t, names["set-default"], "expected set-default subcommand")
+	assert.True(t, names["set"], "expected set subcommand")
+	assert.False(t, names["set-default"], "set-default was replaced by set")
 	assert.Equal(t, 4, len(names), "expected exactly 4 subcommands")
 }
 
