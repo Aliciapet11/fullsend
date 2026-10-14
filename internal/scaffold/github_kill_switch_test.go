@@ -183,6 +183,21 @@ func TestCheckKillSwitchStep_ConsultsConfigBaseYAML(t *testing.T) {
 			configYAML: "kill_switch: n\n",
 			wantHalt:   false,
 		},
+		{
+			name:       `overlay kill_switch: "true" (double-quoted) halts dispatch`,
+			configYAML: "kill_switch: \"true\"\n",
+			wantHalt:   true,
+		},
+		{
+			name:       "overlay kill_switch: 'true' (single-quoted) halts dispatch",
+			configYAML: "kill_switch: 'true'\n",
+			wantHalt:   true,
+		},
+		{
+			name:           `base kill_switch: "true" (double-quoted) halts dispatch when overlay is silent`,
+			configBaseYAML: "kill_switch: \"true\"\n",
+			wantHalt:       true,
+		},
 	}
 
 	for _, tc := range cases {

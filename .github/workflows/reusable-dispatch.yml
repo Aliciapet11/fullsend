@@ -506,10 +506,15 @@ jobs:
           # case variants (True, FALSE, ...) to lowercase. It does not
           # normalize the YAML 1.1 word booleans yq treats as plain
           # strings (yes/no/on/off print as quoted JSON strings, e.g.
-          # "yes"), so yes/"yes" is matched explicitly below, where
+          # "yes"), so yes is matched explicitly below, where
           # go-yaml's lenient *bool decoding also treats it as active.
           # on/off and the single-letter y/n forms are deliberately
-          # not matched.
+          # not matched. -o=json also keeps surrounding quotes on any
+          # scalar that was itself quoted in the source YAML (e.g.
+          # kill_switch: "true" prints as the JSON string "true", not
+          # the JSON boolean true), so those quotes are stripped below
+          # before comparing, matching go-yaml's lenient *bool
+          # decoding of a quoted "true"/"yes" scalar.
           KILL_SWITCH="false"
           OVERLAY_KS="null"
           if [[ -f .fullsend/config.yaml ]]; then
@@ -523,7 +528,10 @@ jobs:
               KILL_SWITCH="$BASE_KS"
             fi
           fi
-          if [[ "${KILL_SWITCH,,}" == "true" || "${KILL_SWITCH,,}" == '"yes"' ]]; then
+          KILL_SWITCH="${KILL_SWITCH,,}"
+          KILL_SWITCH="${KILL_SWITCH#\"}"
+          KILL_SWITCH="${KILL_SWITCH%\"}"
+          if [[ "$KILL_SWITCH" == "true" || "$KILL_SWITCH" == "yes" ]]; then
             echo "::error::Kill switch is active — all agent dispatch halted"
             echo "::error::Set kill_switch: false in .fullsend/config.yaml or .fullsend/config.base.yaml to resume"
             exit 1
