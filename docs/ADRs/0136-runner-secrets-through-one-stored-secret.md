@@ -48,12 +48,12 @@ and overlays may set guarded fields ([ADR 0112](0112-overlays-may-set-any-harnes
 
 ## Decision
 
-Until #6359 settles a provider-based route for user credentials, on GitHub a
-custom harness's own secrets reach host-side scripts through one optional
-stored secret, `FULLSEND_RUNNER_SECRETS`, a JSON object of name → string value.
-This channel is interim, covers host-side scripts only, never sandbox
-credentials, and does not replace named secrets for integrations fullsend
-owns. The reusable workflow passes it to each stage's composite action; a
+As an interim adoption of #6359's passthrough-map option, until #6359 settles
+the long-term route, on GitHub a custom harness's own secrets reach host-side
+scripts through one optional stored secret, `FULLSEND_RUNNER_SECRETS`, a JSON
+object of name → string value. It covers host-side scripts only, never
+sandbox credentials, and does not replace named secrets for integrations
+fullsend owns. The reusable workflow passes it to each stage's composite action; a
 staging step writes it to a mode 0600 file under `RUNNER_TEMP` and hands
 `fullsend run` only the path. `fullsend run` deletes the file and unsets the path before any
 child starts, then resolves `${NAME}` in the resolved `env.runner` (after
@@ -98,8 +98,9 @@ that receives a value can still leak it.
   secret the called workflow does not declare, so a shim rendered with an
   older `--fullsend-ref` fails; it needs the CLI from that release. #7872
   tracks detecting the mismatch.
-- #6359's provider-based design supersedes this channel; the secret name and
-  staging stay supported until that ADR announces a migration.
+- #6359's long-term route (an `api_servers` proxy, endpoint-bound provider
+  placeholders or an OIDC-backed broker) supersedes this channel; the secret
+  name and staging stay supported until that ADR announces a migration.
 - Known gap: until ADR 0112's guarded-field check exists, an event-guarded
   overlay can still swap `pre_script`, `post_script` or `validation_loop`, and
   so choose which script receives a referenced secret.
