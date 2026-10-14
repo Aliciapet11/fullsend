@@ -50,9 +50,14 @@ func replaceShimRef(content []byte, newRef, newTag string, fc ForgeConfig, forge
 
 	safe := strings.ReplaceAll(suffix, "$", "$$")
 	replaced := fc.ShimRefPattern.ReplaceAllString(string(content), "${1}"+safe)
-	changed := replaced != string(content)
+	// Spacing before "#" alone is not a change: pre-#7902 one-space installs
+	// pick up two spaces on their next real ref bump.
+	changed := commentSpacingPattern.ReplaceAllString(replaced, " #") !=
+		commentSpacingPattern.ReplaceAllString(string(content), " #")
 	return []byte(replaced), changed
 }
+
+var commentSpacingPattern = regexp.MustCompile(`[ \t]+#`)
 
 // formatRefAnnotation formats a ref with its human-readable annotation.
 // GitHub uses YAML comment syntax ("sha # tag") since annotations appear

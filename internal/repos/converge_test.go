@@ -1573,6 +1573,49 @@ func TestConverge_DryRunSHAPinnedUpgrade(t *testing.T) {
 	}
 }
 
+// Installs from before #7902 have one space before "# tag". Converging to the
+// same SHA and tag must not rewrite them or report an upgrade (#8339 review).
+func TestConverge_SameVersionSingleSpaceCommentIsNoop(t *testing.T) {
+	sha := "abc123def456789012345678901234567890abcd"
+	for _, dryRun := range []bool{true, false} {
+		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
+			repoNames := []string{"acme/api"}
+			fc := newFakeClientForBatch(repoNames...)
+			markFullyInstalled(fc, "acme", "api")
+
+			fc.FileContents["acme/api/.github/workflows/fullsend.yaml"] = makeWorkflowSHAPinned(sha, "v2.0.0")
+			for _, tcPath := range scaffold.PerRepoThinCallerPaths() {
+				fc.FileContents["acme/api/"+tcPath] = makeWorkflowSHAPinned(sha, "v2.0.0")
+			}
+			fc.Refs["fullsend-ai/fullsend/tags/v2.0.0"] = sha
+
+			m := newConvergeManifest(repoNames...)
+			m.GitHub.FullsendRef = "v2.0.0"
+
+			cfg := convergeCfgWithDefaults(m)
+			cfg.DryRun = dryRun
+
+			result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), (&fakeScaffoldCommit{}).fn(), noopProgress)
+			if err != nil {
+				t.Fatalf("Converge() error: %v", err)
+			}
+
+			var refActions []ComponentAction
+			for _, cr := range result.Results {
+				for _, a := range cr.Actions {
+					if a.Component == "ref" {
+						refActions = append(refActions, a)
+					}
+				}
+			}
+			// On the real path "none" also means convergeRefFiles returned no files.
+			if len(refActions) != 1 || refActions[0].Action != "none" {
+				t.Errorf("ref actions = %+v, want a single \"none\"", refActions)
+			}
+		})
+	}
+}
+
 func TestConverge_VariableAddNotPresent(t *testing.T) {
 	repoNames := []string{"acme/api"}
 	fc := newFakeClientForBatch(repoNames...)

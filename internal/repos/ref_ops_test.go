@@ -505,3 +505,10 @@ func TestReplaceShimRef_FixesSingleSpaceComment(t *testing.T) {
 		t.Errorf("replaceShimRef() = %q (changed=%v), want %q", got, changed, want)
 	}
 }
+
+func TestReplaceShimRef_SpacingOnlyIsNotAChange(t *testing.T) {
+	input := "    uses: fullsend-ai/fullsend/.github/workflows/reusable-dispatch.yml@abc123 # v2.1.0\n"
+	if _, changed := replaceShimRef([]byte(input), "abc123", "v2.1.0", GitHubForgeConfig(), ForgeGitHub); changed {
+		t.Error("replaceShimRef() reported a change for a spacing-only difference")
+	}
+}
