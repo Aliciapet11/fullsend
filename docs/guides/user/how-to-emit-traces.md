@@ -138,8 +138,9 @@ A `Write`, `Edit` or `NotebookEdit` body, an `Agent` or `WebFetch` prompt and th
 input of MCP tools are not recorded as arguments, though a tool's result can quote
 what it wrote and a call's summary keeps the first 120 characters of its input;
 a `Bash` command is recorded whole (up to 8 KiB) and can embed the file content
-it writes. A URL anywhere in the record has its userinfo, query and fragment
-masked. Make sure your backend's
+it writes. A URL in the record has its userinfo, query and fragment masked, as
+written in a command, text or JSON; the developer guide's tracing page lists the
+forms it does not read. Make sure your backend's
 access controls fit before enabling it.
 
 ```bash

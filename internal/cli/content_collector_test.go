@@ -257,6 +257,9 @@ func TestContentCollector_AURLsUserinfoQueryAndFragmentAreMasked(t *testing.T) {
 		"a password quoted for the shell":      {"Bash", `{"command":"git clone https://deploy:'` + pw + `'@git.example.com/o/r"}`, `{"command":"git clone https://***@git.example.com/o/r"}`},
 		"a query quoted half-way":              {"Bash", `{"command":"curl 'https://h.example.com/x'?token=` + pw + `"}`, `{"command":"curl 'https://h.example.com/x'?***"}`},
 		"a URL nested in another's path":       {"Bash", `{"command":"curl https://proxy.example.com/https://u:` + pw + `@h.example.com/x"}`, `{"command":"curl https://***@h.example.com/x"}`},
+		"a password holding a '/'":             {"Bash", `{"command":"git clone https://x-access-token:ab+c/` + pw + `=@github.com/o/r"}`, `{"command":"git clone https://***@github.com/o/r"}`},
+		"a query holding a quote":              {"Bash", `{"command":"curl 'https://h.example.com/?q=\"a\"&token=` + pw + `'"}`, `{"command":"curl 'https://h.example.com/?***"}`},
+		"a query after a closing quote":        {"Bash", `{"command":"curl \"https://h.example.com/x\"?token=` + pw + `"}`, `{"command":"curl \"https://h.example.com/x\"?***"}`},
 		"a fullwidth question mark":            {"Bash", `{"command":"curl https://api.example.com/v1/me` + fw(0xff1f) + `access_token=` + pw + `"}`, `{"command":"curl https://api.example.com/v1/me?***"}`},
 		"a fullwidth at sign":                  {"Bash", `{"command":"git clone https://x-access-token` + fw(0xff1a) + pw + fw(0xff20) + `github.com/o/r"}`, `{"command":"git clone https://***@github.com/o/r"}`},
 		"a zero-width split scheme":            {"Bash", `{"command":"curl https:` + fw(0x200b) + `//h.example.com/p?access_token=` + pw + `"}`, `{"command":"curl https://h.example.com/p?***"}`},
@@ -302,8 +305,22 @@ func TestContentCollector_AURLsUserinfoQueryAndFragmentAreMasked(t *testing.T) {
 		res := c.Result("stop")
 		assert.Contains(t, res.OutputMessages, `"content":"pushing to https://***@git.example.com/o/r now"`)
 		assert.Contains(t, res.OutputMessages, `"response":"origin\thttps://***@git.example.com/o/r (fetch)"`)
-		assert.Contains(t, res.OutputMessages, `/v1?***"`, "a JSON encoder's escaped slashes")
+		assert.Contains(t, res.OutputMessages, `/v1?***\"}`, "a JSON encoder's escaped slashes")
 		assert.NotContains(t, res.OutputMessages, pw)
+	})
+	t.Run("a URL in minified JSON masks nothing past its closing quote", func(t *testing.T) {
+		c := newContentCollector(4096)
+		c.Handle(agentruntime.ToolResultEvent{ID: "toolu_01", Result: `{"html_url":"https://github.com/o/r/pull/1?x=1","title":"Fix the parser"}`})
+		c.Handle(agentruntime.ToolResultEvent{ID: "toolu_02", Result: `{"url":"https://github.com/o/r","author":{"email":"dev@example.com"}}`})
+		c.Handle(agentruntime.ToolResultEvent{ID: "toolu_03", Result: `{"url":"https://github.com","email":"dev@example.com"}`})
+
+		res := c.Result("stop")
+		parts := decodeOutputMessages(t, res.OutputMessages)[0]["parts"].([]any)
+		require.Len(t, parts, 3)
+		assert.Equal(t, `{"html_url":"https://github.com/o/r/pull/1?***","title":"Fix the parser"}`, parts[0].(map[string]any)["response"])
+		assert.Equal(t, `{"url":"https://github.com/o/r","author":{"email":"dev@example.com"}}`, parts[1].(map[string]any)["response"], "the quote ends the URL before the email")
+		assert.Equal(t, `{"url":"https://github.com","email":"dev@example.com"}`, parts[2].(map[string]any)["response"], "the quote ends the URL")
+		assert.Len(t, res.Findings, 1, "only the query was masked")
 	})
 	t.Run("a URL with none of them is kept as written", func(t *testing.T) {
 		c := newContentCollector(4096)

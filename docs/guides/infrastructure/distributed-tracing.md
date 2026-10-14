@@ -142,12 +142,18 @@ marked, since the list is the policy and the markers mean loss. A `Bash`
 `command` is recorded whole, up to 8 KiB, so a heredoc or an inline
 script records what it writes. A URL anywhere in the record — a
 member, text, a result, a summary, the input message, a name — has
-everything from its `://` (or `:\/\/`, escaped for a shell or JSON) to its last `@` (userinfo, or a URL nested in
-another's path) and everything after its first `?` or `#` masked `***`,
-after the patterns ran, and counted in `fullsend.content.sanitizations`;
-the URL runs to the next white space, so in compact JSON the mask can
-take the rest of the line. A token carried in the path itself, as a
-webhook URL's is, matches no pattern and is kept. The kept
+everything from its `://` (or `:\/\/`, escaped for a shell or JSON) to its last `@`
+(userinfo, a password holding a `/` or a URL nested in another's path
+included; an `@` in a path is masked with it) and everything after its
+first `?` or `#` masked `***`, after the patterns ran, and counted in
+`fullsend.content.sanitizations`. The URL runs to white space or to a
+double quote that could close a JSON string — one followed by white
+space, `,`, `:`, `}`, `]` or the end — so one inside JSON ends with its
+string and the fields after it are kept; inside JSON escaped in another
+string (`\"`) it runs on. Kept as well, under the named limit for a
+secret no pattern matches: a token carried in the path itself, as a
+webhook URL's is; what follows a quote that ends a URL; a URL written
+percent-encoded or with an escaped colon. The kept
 members are decoded, redacted one by one and encoded again, so key
 order, spacing and escapes are not the stream's; a string a terminal
 escape sequence or tag characters were
