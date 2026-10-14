@@ -92,22 +92,28 @@ func TestListProjectDeployKeys_RejectsMalformedInventory(t *testing.T) {
 	for _, body := range []string{`null`, `[{}]`, `[{"id":-1}]`, `{`} {
 		t.Run(body, func(t *testing.T) {
 			client, mux := setupTest(t)
+			called := false
 			mux.HandleFunc(deployKeysPath, func(w http.ResponseWriter, r *http.Request) {
+				called = true
 				w.Header().Set("Content-Type", "application/json")
 				_, err := io.WriteString(w, body)
 				require.NoError(t, err)
 			})
 			_, err := client.ListProjectDeployKeys(context.Background(), "myorg", "myrepo")
 			assert.Error(t, err)
+			assert.True(t, called, "handler was not called — URL path mismatch")
 		})
 	}
 
 	client, mux := setupTest(t)
+	called := false
 	mux.HandleFunc(deployKeysPath, func(w http.ResponseWriter, r *http.Request) {
+		called = true
 		w.WriteHeader(http.StatusBadRequest)
 	})
 	_, err := client.ListProjectDeployKeys(context.Background(), "myorg", "myrepo")
 	assert.Error(t, err)
+	assert.True(t, called, "handler was not called — URL path mismatch")
 }
 
 func TestListProjectDeployKeys_PaginationLimit(t *testing.T) {
@@ -210,6 +216,29 @@ func TestGrantProtectedBranchPushDeployKey_FailsClosedWithoutExactRule(t *testin
 	assert.Empty(t, *patches)
 
 	assert.Error(t, client.GrantProtectedBranchPushDeployKey(context.Background(), "myorg", "myrepo", "main", 0))
+}
+
+func TestProtectedBranchDeployKey_RejectsWildcardBranch(t *testing.T) {
+	for _, branch := range []string{"*", "release/*", "feature-*-x"} {
+		t.Run(branch, func(t *testing.T) {
+			client, mux := setupTest(t)
+			requests := 0
+			mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches/", func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				writeJSON(t, w, http.StatusOK, map[string]any{"name": branch})
+			})
+
+			err := client.GrantProtectedBranchPushDeployKey(context.Background(), "myorg", "myrepo", branch, 12)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "wildcard")
+
+			err = client.RevokeProtectedBranchPushDeployKeyEntry(context.Background(), "myorg", "myrepo", branch, 5, 12)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "wildcard")
+
+			assert.Zero(t, requests, "wildcard branch must not send any request")
+		})
+	}
 }
 
 func TestGrantProtectedBranchPushDeployKey_Errors(t *testing.T) {

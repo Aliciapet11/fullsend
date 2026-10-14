@@ -124,6 +124,9 @@ func (c *LiveClient) GrantProtectedBranchPushDeployKey(ctx context.Context, owne
 	if deployKeyID <= 0 {
 		return fmt.Errorf("grant protected branch deploy key push: invalid deploy key ID %d", deployKeyID)
 	}
+	if strings.Contains(branch, "*") {
+		return fmt.Errorf("grant protected branch deploy key push: branch %q is a wildcard pattern, not an exact branch name", branch)
+	}
 	exact, err := c.getProtectedBranchExact(ctx, owner, repo, branch)
 	if err != nil {
 		return fmt.Errorf("grant protected branch deploy key push: %w", err)
@@ -158,6 +161,9 @@ func (c *LiveClient) GrantProtectedBranchPushDeployKey(ctx context.Context, owne
 func (c *LiveClient) RevokeProtectedBranchPushDeployKeyEntry(ctx context.Context, owner, repo, branch string, entryID, deployKeyID int) error {
 	if entryID <= 0 || deployKeyID <= 0 {
 		return fmt.Errorf("revoke protected branch deploy key push: invalid entry ID %d or deploy key ID %d", entryID, deployKeyID)
+	}
+	if strings.Contains(branch, "*") {
+		return fmt.Errorf("revoke protected branch deploy key push: branch %q is a wildcard pattern, not an exact branch name", branch)
 	}
 	exact, err := c.getProtectedBranchExact(ctx, owner, repo, branch)
 	if err != nil {
