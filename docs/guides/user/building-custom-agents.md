@@ -673,21 +673,23 @@ The example below is a review harness whose pre-script fetches the Jira issue na
 
    A name the harness does not reference reaches no script. The name may not be runner-owned (`GH_TOKEN`, `GITHUB_*`, `FULLSEND_*`, `OTEL_*`, `PATH`, ...) or one the reusable workflow already sets, such as `JIRA_TOKEN` or `JIRA_USER_EMAIL`, so pick your own names, and it may appear only in `env.runner`. A reference from `env.sandbox`, a provider credential, an expanded `host_files` entry, or an overlay guarded by anything other than `runtime.forge` or `config` fails the run. The full rules are in the [harness reference](../../reference/harness-reference.md#field-details).
 
-3. Read the variables in the pre-script as usual. `JIRA_API_TOKEN`, `JIRA_API_EMAIL` and `JIRA_BASE_URL` come from `env.runner`. `REPO_FULL_NAME` and `PR_NUMBER` are set by the review stage of the reusable workflow, and `GH_TOKEN` is the token `fullsend run` mints for the agent. The Jira key is read from the pull request title (for example `PROJ-123: fix login`):
+3. Read the variables in the pre-script as usual. `JIRA_API_TOKEN`, `JIRA_API_EMAIL` and `JIRA_BASE_URL` come from `env.runner`. `REPO_FULL_NAME` and `PR_NUMBER` are set by the review stage of the reusable workflow, and `GH_TOKEN` is the token `fullsend run` mints for the agent. This example uses the token for a decision: it skips the review when the Jira issue named in the pull request title (for example `PROJ-123: fix login`) is already done. It hands the agent nothing, because raw forge or Jira content must not reach the model ([ADR 0133](../../ADRs/0133-actor-attributed-data-security-boundary.md)):
 
    ```bash
    #!/usr/bin/env bash
    set -euo pipefail
 
-   WORKSPACE="/tmp/workspace"
-   mkdir -p "$WORKSPACE"
-
    TITLE=$(gh pr view "$PR_NUMBER" --repo "$REPO_FULL_NAME" --json title --jq .title)
    JIRA_KEY=$(grep -oE '[A-Z][A-Z0-9]+-[0-9]+' <<<"$TITLE" | head -n 1 || true)
-   if [[ -n "$JIRA_KEY" ]]; then
-     curl --fail-with-body --silent \
-       --user "${JIRA_API_EMAIL}:${JIRA_API_TOKEN}" \
-       "${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_KEY}" > "$WORKSPACE/jira.json"
+   [[ -n "$JIRA_KEY" ]] || exit 0
+
+   STATUS=$(curl --fail-with-body --silent \
+     --user "${JIRA_API_EMAIL}:${JIRA_API_TOKEN}" \
+     "${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_KEY}?fields=status" |
+     jq -r '.fields.status.statusCategory.key')
+   if [[ "$STATUS" == "done" ]]; then
+     echo "reason=${JIRA_KEY} is already done" >> "$FULLSEND_PRESCRIPT_OUTPUT"
+     echo "skipped=true" >> "$FULLSEND_PRESCRIPT_OUTPUT"
    fi
    ```
 
@@ -706,18 +708,7 @@ If you run `fullsend run` from your own workflow instead of the installed shim, 
 
 On GitLab, skip the object. Add each secret as its own masked CI/CD variable (for example `JIRA_API_TOKEN`) and reference it from `env.runner` the same way. The rules above (refused names, host side only, overlays) apply to names in the GitHub object only; GitLab behaves as before, and every CI/CD variable in the job except `JIRA_TOKEN`, `JIRA_USER_EMAIL` and the OTLP headers still reaches host-side scripts.
 
-**Pre-script context is a snapshot.** The pre-script sees the work item as it was when the run started. Changes made after that (a new push, an edited title or body) arrive only through a later run ([ADR 0106](../../ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md)). Read the head SHA, title and body from the forge API (for example `gh pr view "$PR_NUMBER" --repo "$REPO_FULL_NAME" --json headRefOid,title,body`), not from the event payload, which can be older still. Stamp any head-dependent context with the SHA it describes, so the agent and the post-script can tell when it is stale. For example, to hand the agent the pull request diff:
-
-```bash
-# One call reads both commits, and the diff is pinned to them, so a push
-# landing mid-script cannot pair a newer diff with an older SHA.
-read -r BASE_SHA HEAD_SHA < <(gh pr view "$PR_NUMBER" --repo "$REPO_FULL_NAME" \
-  --json baseRefOid,headRefOid --jq '"\(.baseRefOid) \(.headRefOid)"')
-gh api -H "Accept: application/vnd.github.diff" \
-  "repos/$REPO_FULL_NAME/compare/$BASE_SHA...$HEAD_SHA" > "$WORKSPACE/pr.diff"
-jq --null-input --arg sha "$HEAD_SHA" --rawfile diff "$WORKSPACE/pr.diff" \
-  '{head_sha: $sha, diff: $diff}' > "$WORKSPACE/pr-context.json"
-```
+**Pre-script context is a snapshot.** The pre-script sees the work item as it was when the run started. Changes made after that (a new push, an edited title or body) arrive only through a later run ([ADR 0106](../../ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md)). When a script decides something from the work item, read the head SHA, title and body from the forge API (for example `gh pr view "$PR_NUMBER" --repo "$REPO_FULL_NAME" --json headRefOid,title,body`), not from the event payload, which can be older still. Do not stage that content where the agent reads it: [ADR 0133](../../ADRs/0133-actor-attributed-data-security-boundary.md) forbids exposing unfiltered source content to the model, and forge context for the agent will come from the runner's filtered snapshot ([ADR 0141](../../ADRs/0141-deterministic-filtered-entity-context-staging.md), not yet implemented).
 
 ### Bringing your own identity
 

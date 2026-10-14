@@ -28,9 +28,9 @@ which only the `harness-run` job forwards, from a caller the user writes (the
 Jira poller). Any other secret, or Jira on another stage, cannot reach
 `fullsend run`, and the shim is a generated file that setup and
 `repos install` overwrite (#7689, #6359). Once the runner's filtered entity
-snapshot ([ADR 0141](0141-deterministic-filtered-entity-context-staging.md),
-accepted but not yet implemented) supplies forge context, the remaining need
-is tools the user picks, such as a third-party review CLI.
+snapshot ([ADR 0141](0141-deterministic-filtered-entity-context-staging.md))
+supplies forge context, the remaining need is tools the user picks, such as a
+third-party review CLI.
 
 Constraints: credentials stay out of the sandbox ([ADR 0017](0017-credential-isolation-for-sandboxed-agents.md)),
 workflow `env:` is infrastructure only ([ADR 0081](0081-reserve-workflow-env-for-infra-plumbing.md)),
@@ -54,9 +54,8 @@ stored secret, `FULLSEND_RUNNER_SECRETS`, a JSON object of name → string value
 This channel is interim, covers host-side scripts only, never sandbox
 credentials, and does not replace named secrets for integrations fullsend
 owns. The reusable workflow passes it to each stage's composite action; a
-staging step
-writes it to a mode 0600 file under `RUNNER_TEMP` and hands `fullsend run`
-only the path. `fullsend run` deletes the file and unsets the path before any
+staging step writes it to a mode 0600 file under `RUNNER_TEMP` and hands
+`fullsend run` only the path. `fullsend run` deletes the file and unsets the path before any
 child starts, then resolves `${NAME}` in the resolved `env.runner` (after
 overlays) from the object. The object is never in the environment of
 `fullsend run` or its children; unreferenced keys reach no script, and
