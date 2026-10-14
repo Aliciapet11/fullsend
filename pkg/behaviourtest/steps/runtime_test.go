@@ -171,6 +171,31 @@ func TestAssertRunMetricsReportTokensUnless(t *testing.T) {
 	}
 }
 
+func TestAssertRunUsedModelWithoutFallback(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, metrics, wantErr string
+	}{
+		{"served model passes", `{"model":"claude-haiku-5-5","num_turns":2}`, ""},
+		{"other model fails", `{"model":"anthropic-vertex/claude-haiku-5-5","num_turns":2}`, `want "claude-haiku-5-5"`},
+		{"fallback fails", `{"model":"claude-haiku-5-5","fallback_from":["claude-haiku-6"],"num_turns":2}`, "want none"},
+		{"no turn fails", `{"model":"claude-haiku-5-5","num_turns":0}`, "never answered"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeArtifact(t, root, "metrics.json", tc.metrics)
+			err := assertRunUsedModelWithoutFallback(&world.World{ArtifactDir: root}, "claude-haiku-5-5")
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
 func TestAssertPiTranscriptHasToolCall(t *testing.T) {
 	t.Parallel()
 	const header = `{"type":"session","version":3,"id":"abc","timestamp":"2026-08-22T10:00:00.000Z","cwd":"/r"}` + "\n"
