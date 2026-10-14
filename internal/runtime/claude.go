@@ -336,12 +336,12 @@ func claudeSelectedModelUnavailable(errMsg, model string) bool {
 // other text. The 403 data-sharing error does reach the result text, so
 // isVertexModelUnavailable still matters here.
 //
-// The runner does this itself because Claude Code's --fallback-model does
-// not cover these shapes: its CLI (2.1.296) switches models on a 404 only
-// when the body carries "type":"not_found_error" and on a 403 only for
-// "type":"permission_error", which are Anthropic API error types that
-// Vertex's "Publisher model ... not found" and "data sharing" errors do
-// not carry, and it excludes 404 and 403 from its last-resort fallback.
+// The runner does this itself because the built-in chain is never passed
+// as --fallback-model. An explicit FULLSEND_FALLBACK_MODELS list is: on a
+// Vertex 404, Claude Code 2.1.296 then switches to the next entry inside
+// the same session (a "model_fallback" system event, "trigger":
+// "last_resort", observed live), which recordClaudeMetrics records as a
+// fallback; this check only runs when Claude Code gave up instead.
 func claudeShouldFallBack(res claudeAttemptResult) bool {
 	if res.execErr != nil || res.answered || res.lastResult == nil {
 		return false

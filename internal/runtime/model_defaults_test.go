@@ -716,3 +716,31 @@ func TestPiBootstrap_PinnedPreviousGenerationChildModels(t *testing.T) {
 		assert.Contains(t, err.Error(), `resolved model "claude-sonnet-4-20250514" is not available in this run`)
 	})
 }
+
+// With an explicit FULLSEND_FALLBACK_MODELS list, Claude Code 2.1.296 moves
+// to the next --fallback-model entry within the session on a Vertex 404 and
+// reports it as a "model_fallback" system event (observed live); the init
+// event still names the model that failed. The metrics must name the model
+// that answered and record the one that did not.
+func TestRecordClaudeMetrics_InSessionModelFallback(t *testing.T) {
+	stream := `{"type":"system","subtype":"init","model":"claude-opus-4-5","claude_code_version":"2.1.296","session_id":"7c1d2e3f-3333-4a5b-8c9d-0e1f2a3b4c5d"}
+{"type":"system","subtype":"model_fallback","trigger":"last_resort","original_model":"claude-opus-4-5","fallback_model":"claude-haiku-5-5","content":"Switched to Haiku 5.5 because claude-opus-4-5 returned an error that could not be retried (404 Publisher model ... not found)"}
+{"type":"assistant","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":10,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"done","num_turns":1,"usage":{"input_tokens":10,"output_tokens":2}}
+`
+	var metrics RunMetrics
+	var events []AgentEvent
+	require.NoError(t, parseClaudeStream(strings.NewReader(stream), func(e AgentEvent) {
+		recordClaudeMetrics(&metrics, e)
+		events = append(events, e)
+	}))
+	assert.Equal(t, "claude-haiku-5-5", metrics.Model)
+	assert.Equal(t, []string{"claude-opus-4-5"}, metrics.FallbackFrom)
+	assert.Contains(t, events, AgentEvent(ModelFallbackEvent{From: "claude-opus-4-5", To: "claude-haiku-5-5", Trigger: "last_resort"}))
+	assert.False(t, claudeAttemptOutput(ModelFallbackEvent{}), "a fallback notice is not model output")
+
+	// A runner-level fallback already recorded is kept and not duplicated.
+	metrics = RunMetrics{FallbackFrom: []string{"claude-opus-4-5"}}
+	recordClaudeMetrics(&metrics, ModelFallbackEvent{From: "claude-opus-4-5", To: "claude-haiku-5-5"})
+	assert.Equal(t, []string{"claude-opus-4-5"}, metrics.FallbackFrom)
+}

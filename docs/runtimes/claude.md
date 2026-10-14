@@ -61,7 +61,10 @@ back to claude-opus-4-6` and is recorded in `metrics.json` as `fallback_from`. P
 `provider/id` specs, `models.aliases` retargets without `FULLSEND_FALLBACK_MODELS`, the inference
 gateway route, and any other error (auth, quota, `PERMISSION_DENIED`) never fall back.
 `FULLSEND_FALLBACK_MODELS=a,b` is also passed as `--fallback-model a,b`, which Claude Code tries
-when the primary model is overloaded or retired. pi runs the same chain, sub-agent children
+when the primary model is overloaded or retired. With that flag, Claude Code 2.1.296 also handles a
+Vertex 404 itself, moving to the next entry within the same session; the run then prints `model
+<id> failed; Claude Code fell back to <next> (last_resort)` and records the same `model` and
+`fallback_from` as a runner fallback. pi runs the same chain, sub-agent children
 included; see [pi](pi.md#at-a-glance).
 
 ## At a glance

@@ -129,6 +129,17 @@ type RetryEvent struct {
 
 func (RetryEvent) agentEvent() {}
 
+// ModelFallbackEvent reports that the runtime itself switched models
+// mid-session: Claude Code's --fallback-model chain answering for a model
+// that failed. From is the model that failed, To the one that took over.
+type ModelFallbackEvent struct {
+	From    string
+	To      string
+	Trigger string
+}
+
+func (ModelFallbackEvent) agentEvent() {}
+
 // PluginErrorEvent reports a plugin the runtime failed to load at startup.
 // Only the Claude parser emits it, once per entry of the init event's
 // plugin_errors. Type is the runtime's error category (an open set);

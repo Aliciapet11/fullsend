@@ -193,6 +193,18 @@ func TestRendererErrorEvent(t *testing.T) {
 	}
 }
 
+func TestRendererModelFallbackEvent(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTestRenderer(&buf)
+
+	r.Handle(ModelFallbackEvent{From: "claude-opus-4-5", To: "claude-haiku-5-5", Trigger: "last_resort"})
+
+	output := buf.String()
+	if !strings.Contains(output, "model claude-opus-4-5 failed; Claude Code fell back to claude-haiku-5-5 (last_resort)") {
+		t.Errorf("expected the fallback warning, got: %s", output)
+	}
+}
+
 func TestRendererRetryEvent(t *testing.T) {
 	var buf bytes.Buffer
 	r := newTestRenderer(&buf)

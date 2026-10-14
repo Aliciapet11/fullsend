@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -104,6 +105,11 @@ type systemEvent struct {
 	MaxRetries        int    `json:"max_retries"`
 	RetryDelayMs      int    `json:"retry_delay_ms"`
 	Error             string `json:"error"`
+	// OriginalModel, FallbackModel and Trigger are set on a
+	// "model_fallback" event.
+	OriginalModel string `json:"original_model"`
+	FallbackModel string `json:"fallback_model"`
+	Trigger       string `json:"trigger"`
 	// PluginErrors stays raw so a malformed value cannot fail decoding of
 	// the whole init event; decodePluginErrors reads it entry by entry.
 	PluginErrors json.RawMessage `json:"plugin_errors"`
@@ -342,6 +348,12 @@ func parseClaudeStream(r io.Reader, onEvent func(AgentEvent)) error {
 				for _, pe := range decodePluginErrors(se.PluginErrors) {
 					onEvent(pe)
 				}
+			case "model_fallback":
+				// Claude Code moved to the next --fallback-model entry
+				// within the session (2.1.296 does so on a Vertex 404 as
+				// "trigger":"last_resort"); the init event still names
+				// the model that failed.
+				onEvent(ModelFallbackEvent{From: se.OriginalModel, To: se.FallbackModel, Trigger: se.Trigger})
 			case "api_retry":
 				onEvent(RetryEvent{
 					Attempt:    se.Attempt,
@@ -641,6 +653,13 @@ func recordClaudeMetrics(metrics *RunMetrics, evt AgentEvent) {
 	case InitEvent:
 		if metrics.Model == "" {
 			metrics.Model = e.Model
+		}
+	case ModelFallbackEvent:
+		if e.To != "" {
+			metrics.Model = e.To
+		}
+		if e.From != "" && !slices.Contains(metrics.FallbackFrom, e.From) {
+			metrics.FallbackFrom = append(metrics.FallbackFrom, e.From)
 		}
 	case TokensEvent:
 		// Capture cumulative token usage from the stream so cancelled
