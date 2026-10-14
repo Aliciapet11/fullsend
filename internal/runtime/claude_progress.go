@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"regexp"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -658,9 +657,7 @@ func recordClaudeMetrics(metrics *RunMetrics, evt AgentEvent) {
 		if e.To != "" {
 			metrics.Model = e.To
 		}
-		if e.From != "" && !slices.Contains(metrics.FallbackFrom, e.From) {
-			metrics.FallbackFrom = append(metrics.FallbackFrom, e.From)
-		}
+		metrics.recordFallback(e.From, claudeCodeFallbackReason(e.Trigger))
 	case TokensEvent:
 		// Capture cumulative token usage from the stream so cancelled
 		// runs (no ResultEvent) retain non-zero telemetry (#6905).

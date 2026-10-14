@@ -1102,7 +1102,7 @@ func TestPiVertexNotServedThroughStream(t *testing.T) {
 		}
 
 		var forwarded []AgentEvent
-		gate := &piAttemptGate{next: func(evt AgentEvent) { forwarded = append(forwarded, evt) }, hold: true}
+		gate := &attemptGate{next: func(evt AgentEvent) { forwarded = append(forwarded, evt) }, hold: true}
 		var last *ResultEvent
 		_, err := parsePiStream(strings.NewReader(strings.Join(lines, "\n")+"\n"), func(evt AgentEvent) {
 			if e, ok := evt.(ResultEvent); ok {
@@ -1221,7 +1221,7 @@ func TestPiAttemptGate(t *testing.T) {
 
 	// Holding: a Vertex "model not served" answer carries no output, so
 	// nothing reaches the handler.
-	g := &piAttemptGate{next: next, hold: true}
+	g := &attemptGate{next: next, hold: true}
 	g.handle(ErrorEvent{ErrorType: "error", Message: "Publisher model not found"})
 	g.handle(TokensEvent{InputTokens: 1})
 	assert.Empty(t, got, "held events must not be forwarded")
@@ -1230,7 +1230,7 @@ func TestPiAttemptGate(t *testing.T) {
 
 	// The first output event flushes what was held, in order, and
 	// everything after it passes straight through.
-	g = &piAttemptGate{next: next, hold: true}
+	g = &attemptGate{next: next, hold: true}
 	got = nil
 	g.handle(RetryEvent{Attempt: 1})
 	g.handle(TextEvent{Text: "hi"})
@@ -1240,7 +1240,7 @@ func TestPiAttemptGate(t *testing.T) {
 	assert.Equal(t, []AgentEvent{RetryEvent{Attempt: 1}, TextEvent{Text: "hi"}, ToolUseEvent{Name: "bash"}}, got)
 
 	// Not holding: pass-through, but answered is still tracked.
-	g = &piAttemptGate{next: next}
+	g = &attemptGate{next: next}
 	got = nil
 	g.handle(ErrorEvent{Message: "x"})
 	g.handle(ThinkingEvent{Text: "t"})
@@ -1283,8 +1283,8 @@ func TestPiFallbackLoop(t *testing.T) {
 			return res
 		}
 		res := piFallbackLoop(chain, timeout, now, attempt, func(prev, next string, budget time.Duration) bool {
-			assert.GreaterOrEqual(t, deadlineLeft(*clock, timeout, budget), piMinAttemptTimeout,
-				"cleanup budget leaves the next attempt piMinAttemptTimeout")
+			assert.GreaterOrEqual(t, deadlineLeft(*clock, timeout, budget), minFallbackAttemptTimeout,
+				"cleanup budget leaves the next attempt minFallbackAttemptTimeout")
 			fallbacks = append(fallbacks, [2]string{prev, next})
 			for _, c := range cleanup {
 				if !c() {
@@ -1347,7 +1347,7 @@ func TestPiFallbackLoop(t *testing.T) {
 	res, calls, _ = run(map[string]piRunResult{"p/a": notServed, "p/b": ok}, time.Minute, &clock, 50*time.Second,
 		func() bool { clock = clock.Add(9500 * time.Millisecond); return true })
 	assert.Equal(t, "p/a", res.modelSpec)
-	assert.Len(t, calls, 1, "no attempt is started with less than piMinAttemptTimeout left")
+	assert.Len(t, calls, 1, "no attempt is started with less than minFallbackAttemptTimeout left")
 }
 
 // deadlineLeft is what a fallback attempt would have left if onFallback

@@ -36,6 +36,7 @@ import defaultExport, {
   isAssistantMessageEndPrefix,
   isVertexModelUnavailable,
   resolveModel,
+  sanitizeLogLine,
   vertexChildAuthenticated,
   vertexCredentialsUsable,
 } from "./fullsend-agent.js";
@@ -486,6 +487,29 @@ test("run: success returns the child's final text, trimmed, and records usage", 
   assert.equal(logs.length, 2);
   assert.match(logs[0], /^\[fullsend-agent\] #1 anthropic-vertex\/claude-sonnet-4-6 start "unit child"$/);
   assert.match(logs[1], /^\[fullsend-agent\] #1 done \d+ms stop$/);
+});
+
+test("sanitizeLogLine strips escapes and control characters and breaks ::", () => {
+  assert.equal(sanitizeLogLine("plain line"), "plain line");
+  assert.equal(sanitizeLogLine("a\x1b[31mred\x1b[0m b"), "ared b");
+  assert.equal(sanitizeLogLine("osc\x1b]0;title\x07 end"), "osc end");
+  assert.equal(sanitizeLogLine("x\n::error::boom"), "x : :error: :boom");
+  assert.equal(sanitizeLogLine(":::"), ": : :", "no :: survives at a replacement seam");
+  assert.ok(!sanitizeLogLine("::::::").includes("::"));
+  assert.equal(sanitizeLogLine("a%0Ab%0dc"), "a b c");
+  assert.equal(sanitizeLogLine("tab\there\x7f\x9fend"), "tab here  end");
+  assert.equal(sanitizeLogLine("über ✓"), "über ✓", "printable non-ASCII is kept");
+});
+
+test("run: values in log lines are sanitized", async () => {
+  const { manifest } = fixture();
+  const logs = [];
+  const tool = createAgentTool(manifest, { log: (l) => logs.push(l) });
+  await tool.run({ prompt: "ok", description: "evil\n::error::injected\x1b[2J", model: "sonnet" }, {});
+  assert.match(logs[0], /^\[fullsend-agent\] #1 anthropic-vertex\/claude-sonnet-4-6 start "evil : :error: :injected"$/);
+  for (const l of logs) {
+    assert.ok(!l.includes("::") && !/[\x00-\x1f]/.test(l), JSON.stringify(l));
+  }
 });
 
 test("run: error stopReason → isError with the child's message", async () => {
@@ -1783,7 +1807,7 @@ test("run: a child asking for an alias falls back when the project does not serv
   assert.equal(res.isError, false, res.error);
   assert.equal(res.text, "served");
   assert.equal(res.model, "anthropic-vertex/claude-sonnet-4-6");
-  assert.ok(logs.some((l) => l.includes("model anthropic-vertex/claude-sonnet-5-5 is not available in this project; falling back to anthropic-vertex/claude-sonnet-4-6")), logs.join("\n"));
+  assert.ok(logs.some((l) => l.includes("model anthropic-vertex/claude-sonnet-5-5 is not available (not served in this project); falling back to anthropic-vertex/claude-sonnet-4-6")), logs.join("\n"));
   const usage = readFileSync(manifest.agent.usageFile, "utf8").trim().split("\n");
   assert.equal(usage.length, 1, "one usage record per dispatch");
   assert.equal(JSON.parse(usage[0]).model, "anthropic-vertex/claude-sonnet-4-6");

@@ -248,7 +248,7 @@ type claudeAttemptResult struct {
 	// sessionID is the session the init event reported, used to remove an
 	// abandoned attempt's transcript.
 	sessionID string
-	// held and answered: see piAttemptGate.
+	// held and answered: see attemptGate.
 	held     []AgentEvent
 	answered bool
 }
@@ -290,7 +290,7 @@ func claudeAttemptOutput(evt AgentEvent) bool {
 		}
 		return !strings.HasPrefix(lower, "there") || !strings.Contains(lower, claudeSelectedModelIssue)
 	}
-	return piAttemptOutput(evt)
+	return attemptOutput(evt)
 }
 
 // claudeSelectedModelUnavailable reports whether errMsg is one of Claude
@@ -404,7 +404,7 @@ func (r ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pr
 		return res
 	}
 	onFallback := func(prev, next string, budget time.Duration) bool {
-		printer.StepWarn(fmt.Sprintf("model %s is not available in this project; falling back to %s", sanitizeOutput(prev), sanitizeOutput(next)))
+		printer.StepWarn(modelFallbackWarning(prev, next, fallbackReasonNotServed))
 		r.claudeRemoveTranscript(params.SandboxName, lastSession, min(10*time.Second, budget), printer)
 		return true
 	}
@@ -413,18 +413,19 @@ func (r ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pr
 	if len(chain) == 1 {
 		result = attempt(chain[0], params.Timeout, false)
 	} else {
-		result, served = modelFallbackLoop(chain, params.Timeout, piMinAttemptTimeout, time.Now, attempt, claudeShouldFallBack, onFallback)
+		result, served = modelFallbackLoop(chain, params.Timeout, minFallbackAttemptTimeout, time.Now, attempt, claudeShouldFallBack, onFallback)
 		if served > 0 {
 			// The served attempt's own in-session fallback (a
 			// ModelFallbackEvent, already recorded) comes after the
 			// models the runner abandoned.
-			from := slices.Clone(chain[:served])
-			for _, m := range metrics.FallbackFrom {
-				if !slices.Contains(from, m) {
-					from = append(from, m)
-				}
+			inSessionFrom, inSessionReasons := metrics.FallbackFrom, metrics.FallbackReasons
+			metrics.FallbackFrom, metrics.FallbackReasons = nil, nil
+			for _, m := range chain[:served] {
+				metrics.recordFallback(m, fallbackReasonNotServed)
 			}
-			metrics.FallbackFrom = from
+			for i, m := range inSessionFrom {
+				metrics.recordFallback(m, inSessionReasons[i])
+			}
 		}
 	}
 	// Replay the final attempt's withheld events so metrics are captured
@@ -443,7 +444,7 @@ func (r ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pr
 
 // runAttempt runs one Claude Code invocation with params.Model and
 // params.Timeout. When mayFallBack is set, its events are withheld until
-// the model produces output (see piAttemptGate), so an attempt abandoned
+// the model produces output (see attemptGate), so an attempt abandoned
 // for a fallback leaves nothing behind in the run's output.
 func (r ClaudeRuntime) runAttempt(ctx context.Context, params RunParams, mayFallBack bool, handler func(AgentEvent), printer *ui.Printer) (res claudeAttemptResult) {
 	// synthetic is set while the assistant message being read is one
@@ -457,7 +458,7 @@ func (r ClaudeRuntime) runAttempt(ctx context.Context, params RunParams, mayFall
 		}
 		return claudeAttemptOutput(evt)
 	}
-	gate := &piAttemptGate{next: handler, hold: mayFallBack, output: output}
+	gate := &attemptGate{next: handler, hold: mayFallBack, output: output}
 	defer func() { res.model, res.held, res.answered = params.Model, gate.held, gate.answered }()
 
 	cmd := buildRunCommand(params)
