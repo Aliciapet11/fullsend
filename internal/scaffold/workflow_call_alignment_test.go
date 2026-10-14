@@ -883,12 +883,8 @@ func TestDispatchPerStageAuthorization(t *testing.T) {
 				"human PR auto-fix requires write+ on the PR author")
 			assert.Regexp(t, `(?s)PR_USER_LOGIN.*\[bot\].*STAGE="fix".*fullsend-fix.*has_repo_permission "\$\{PR_USER_LOGIN\}" write`, s)
 
-			// Fix iteration count: API-published fix commits carry the identity in
-			// an Authored-by trailer (fullsend-ai/agents#1675); both forms count,
-			// the trailer only from the message's last paragraph.
-			assert.Contains(t, s, `select(.commit.author.name == "fullsend-fix"`)
-			assert.Contains(t, s, `split("\n\n") | last | split("\n")[]`)
-			assert.Contains(t, s, `startswith("Authored-by: fullsend-fix <")`)
+			// Fix iteration count comes from the tested filter in .github/scripts.
+			assert.Contains(t, s, `jq -s -f .defaults/.github/scripts/count-fix-commits.jq`)
 
 			// ready-to-code is a mutation path: bot handoff OR write+ (default min)
 			assert.Regexp(t, `(?s)ready-to-code".*\\\[bot\\\]\$.*is_event_actor_authorized "\$\{EVENT_SENDER_LOGIN\}"`, s,
