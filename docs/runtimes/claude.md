@@ -43,12 +43,16 @@ fullsend does not set `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`: a pinned 5.
 fail every sub-agent on a project that does not serve it. A sub-agent that needs a specific
 generation names the id.
 
-**Fallback chains.** A run on an alias tries the alias's chain in order when Vertex answers that it
-does not serve the model. That answer is a 404 `Publisher model ... not found` or a 403 `... data
-sharing to be enabled for publisher ...`. The chain is `FULLSEND_FALLBACK_MODELS` when set, else
-the alias's built-in chain from the table above. The runner does the retry itself: Claude Code's
-`--fallback-model` switches models on a 404 or 403 only for Anthropic API error types, which these
-Vertex errors do not carry. A retry happens only when the model produced nothing. The abandoned
+**Fallback chains.** A run on an alias tries the alias's chain in order when the project does not
+serve the model. The pinned Claude Code (2.1.296) on Vertex does not pass Vertex's error through:
+it reports `There's an issue with the selected model (<id>). It may not exist or you may not have
+access to it.` as an error result with no output, and the runner falls back when `<id>` is the
+attempt's own model. It also matches Vertex's own shapes, a 404 `Publisher model ... not found` or
+a 403 `... data sharing to be enabled for publisher ...`, for a version that surfaces them. The
+chain is `FULLSEND_FALLBACK_MODELS` when set, else the alias's built-in chain from the table above.
+The runner does the retry itself: Claude Code's `--fallback-model` switches models on a 404 or 403
+only for Anthropic API error types, which Vertex's errors do not carry, and it does not cover its
+own "issue with the selected model" result. A retry happens only when the model produced nothing. The abandoned
 attempt's events and transcript are discarded, and every attempt shares the run's timeout. The
 plan block lists the built-in chain (`Fallback models: claude-opus-4-6 (built-in for opus, when
 not served)`). A fallback prints `model claude-opus-5-5 is not available in this project; falling

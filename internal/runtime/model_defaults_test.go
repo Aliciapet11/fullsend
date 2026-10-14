@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -125,6 +126,28 @@ func TestClaudeModelChain(t *testing.T) {
 		assert.Equal(t, []string{"claude-opus-4-6"}, claudeModelChain(RunParams{SandboxName: sb, Model: "claude-opus-4-6"}, false),
 			"the run's model wins over the frontmatter")
 	})
+
+	// A frontmatter alias the repo retargets has no fallback chain, but its
+	// retarget must still reach --model: left empty, Claude Code would
+	// resolve the alias with its own table and ignore models.aliases.
+	t.Run("retargeted frontmatter alias resolves to the retarget", func(t *testing.T) {
+		const sb = "fs-model-chain-frontmatter-retarget"
+		claudeAgentModels.Store(sb, "sonnet")
+		t.Cleanup(func() { claudeAgentModels.Delete(sb) })
+		aliases := map[string]string{"sonnet": "claude-sonnet-5"}
+		assert.Equal(t, []string{"claude-sonnet-5"}, claudeModelChain(RunParams{SandboxName: sb, ModelAliases: aliases}, false))
+		assert.Equal(t, []string{"claude-sonnet-5", "claude-sonnet-4-6"},
+			claudeModelChain(RunParams{SandboxName: sb, ModelAliases: aliases, FallbackModels: []string{"claude-sonnet-4-6"}}, false))
+		assert.Equal(t, []string{""}, claudeModelChain(RunParams{SandboxName: sb, ModelAliases: aliases}, true),
+			"the gateway route resolves the frontmatter model itself")
+	})
+
+	t.Run("frontmatter fable stays on Claude Code's own table", func(t *testing.T) {
+		const sb = "fs-model-chain-frontmatter-fable"
+		claudeAgentModels.Store(sb, "fable")
+		t.Cleanup(func() { claudeAgentModels.Delete(sb) })
+		assert.Equal(t, []string{""}, claudeModelChain(RunParams{SandboxName: sb}, false))
+	})
 }
 
 func TestClaudeShouldFallBack(t *testing.T) {
@@ -145,7 +168,38 @@ func TestClaudeShouldFallBack(t *testing.T) {
 	assert.False(t, claudeShouldFallBack(claudeAttemptResult{}), "no result")
 }
 
+// Claude Code 2.1.296 on Vertex never surfaces Vertex's text for a model the
+// project does not serve; it reports its own message naming the model.
+func TestClaudeShouldFallBack_ClaudeCodeSelectedModelMessage(t *testing.T) {
+	msg := func(model string) string {
+		return "There's an issue with the selected model (" + model + "). It may not exist or you may not have access to it. Run --model to pick a different model."
+	}
+	errResult := func(m string) *ResultEvent { return &ResultEvent{IsError: true, ErrorMessage: m} }
+
+	for _, model := range []string{"claude-opus-4-1", "claude-3-5-sonnet-20240620", "claude-opus-9-9"} {
+		assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: model, exitCode: 1, lastResult: errResult(msg(model))}), model)
+	}
+	assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: "Claude-Opus-5-5", lastResult: errResult(msg("claude-opus-5-5"))}),
+		"the model id is compared case-insensitively")
+	assert.True(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5-5", lastResult: errResult(strings.Replace(msg("claude-opus-5-5"), "'", "’", 1))}),
+		"a typographic apostrophe does not break the match")
+
+	assert.False(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5-5", lastResult: errResult(msg("claude-opus-4-6"))}),
+		"the message must name the attempt's own model")
+	assert.False(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5", lastResult: errResult(msg("claude-opus-5-5"))}),
+		"a prefix of the named model is not the attempt's model")
+	assert.False(t, claudeShouldFallBack(claudeAttemptResult{lastResult: errResult(msg("claude-opus-5-5"))}),
+		"no attempt model, no match")
+	assert.False(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5-5", lastResult: &ResultEvent{IsError: true, ErrorMessage: msg("claude-opus-5-5"), OutputTokens: 1}}),
+		"output tokens were spent")
+	assert.False(t, claudeShouldFallBack(claudeAttemptResult{model: "claude-opus-5-5", answered: true, lastResult: errResult(msg("claude-opus-5-5"))}),
+		"the model already answered")
+}
+
 func TestClaudeAttemptOutput(t *testing.T) {
+	assert.False(t, claudeAttemptOutput(TextEvent{Text: "There's an issue with the selected model (claude-opus-4-1). It may not exist or you may not have access to it. Run --model to pick a different model."}),
+		"Claude Code's own model-not-available message is not output")
+	assert.False(t, claudeAttemptOutput(TextEvent{Text: "There’s an issue with the selected model (claude-opus-4-1)."}))
 	assert.False(t, claudeAttemptOutput(TextEvent{Text: "API Error: 404 not found"}), "the synthetic API error message is not output")
 	assert.True(t, claudeAttemptOutput(TextEvent{Text: "Looking at the issue"}))
 	assert.True(t, claudeAttemptOutput(ToolUseEvent{Name: "Bash"}))
@@ -258,6 +312,166 @@ func TestClaudeRuntime_Run_OtherErrorsDoNotFallBack(t *testing.T) {
 	assert.NotContains(t, string(log), "--model 'claude-opus-4-6'")
 }
 
+// claudeSelectedModelStream is what the pinned Claude Code (2.1.296) on
+// Vertex (CLAUDE_CODE_USE_VERTEX=1) writes for a model the project does not
+// serve, as probed live: a synthetic assistant message and an error result
+// with "terminal_reason":"api_error", both with zero output tokens and
+// Claude Code's own text rather than Vertex's. Only the observed fields
+// are reproduced. %[1]s is the model id in the message.
+const claudeSelectedModelStream = `{"type":"system","subtype":"init","model":"%[1]s","claude_code_version":"2.1.296","session_id":"2d9e8f0a-1111-4750-89b9-3129edaa5ccf"}
+{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"There's an issue with the selected model (%[1]s). It may not exist or you may not have access to it. Run --model to pick a different model."}]}}
+{"type":"result","subtype":"success","is_error":true,"result":"There's an issue with the selected model (%[1]s). It may not exist or you may not have access to it. Run --model to pick a different model.","num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},"terminal_reason":"api_error"}
+`
+
+// The fallback fires on the stream Claude Code actually writes on Vertex,
+// and none of the abandoned attempt's synthetic text reaches the run.
+func TestClaudeRuntime_Run_FallsBackOnClaudeCodeSelectedModelMessage(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openshell.log")
+	fakeOpenshellClaude(t, logPath, map[string]string{
+		"claude-opus-5-5": fmt.Sprintf(claudeSelectedModelStream, "claude-opus-5-5"),
+		"claude-opus-4-6": claudeServedStream,
+	})
+
+	var events []AgentEvent
+	var metrics RunMetrics
+	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
+		SandboxName: "fs-claude-fallback-cc", AgentBaseName: "code", RepoDir: "/r", Model: "opus",
+		Timeout: 30 * time.Second, OnEvent: func(e AgentEvent) { events = append(events, e) },
+	}, ui.New(io.Discard), time.Now(), &metrics)
+	require.NoError(t, err)
+	assert.Equal(t, 0, exit)
+	assert.Equal(t, "claude-opus-4-6", metrics.Model)
+	assert.Equal(t, []string{"claude-opus-5-5"}, metrics.FallbackFrom)
+	for _, e := range events {
+		if txt, ok := e.(TextEvent); ok {
+			assert.NotContains(t, txt.Text, "issue with the selected model", "the abandoned attempt's events are discarded")
+		}
+		if res, ok := e.(ResultEvent); ok {
+			assert.False(t, res.IsError, "only the served attempt's result is rendered")
+		}
+		if ini, ok := e.(InitEvent); ok {
+			assert.NotEqual(t, claudeSyntheticModel, ini.Model)
+		}
+	}
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(log), "--model 'claude-opus-4-6'")
+	assert.Contains(t, string(log), "2d9e8f0a-1111-4750-89b9-3129edaa5ccf.jsonl", "the abandoned transcript is removed")
+}
+
+// The same message naming a model other than the attempt's is final.
+func TestClaudeRuntime_Run_SelectedModelMessageForAnotherModelIsFinal(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openshell.log")
+	fakeOpenshellClaude(t, logPath, map[string]string{
+		"claude-opus-5-5": fmt.Sprintf(claudeSelectedModelStream, "claude-haiku-4-5"),
+		"claude-opus-4-6": claudeServedStream,
+	})
+
+	var metrics RunMetrics
+	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
+		SandboxName: "fs-claude-fallback-cc-other", AgentBaseName: "code", RepoDir: "/r", Model: "opus",
+		Timeout: 30 * time.Second, OnEvent: func(AgentEvent) {},
+	}, ui.New(io.Discard), time.Now(), &metrics)
+	require.NoError(t, err)
+	assert.Equal(t, 1, exit)
+	assert.Empty(t, metrics.FallbackFrom)
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(log), "--model 'claude-opus-4-6'")
+	assert.NotContains(t, string(log), "-delete", "the final attempt's transcript is kept")
+}
+
+// Text on a <synthetic> assistant message is never taken as output, whatever
+// it says, so it cannot mark the attempt answered and block the fallback.
+func TestClaudeRuntime_Run_SyntheticTextIsNotOutput(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openshell.log")
+	stream := strings.Replace(claudeNotServedStream,
+		`"text":"API Error: 404 Publisher model`, `"text":"Request failed: 404 Publisher model`, 1)
+	require.NotEqual(t, claudeNotServedStream, stream)
+	fakeOpenshellClaude(t, logPath, map[string]string{"claude-opus-5-5": stream, "claude-opus-4-6": claudeServedStream})
+
+	var metrics RunMetrics
+	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
+		SandboxName: "fs-claude-fallback-synthetic", AgentBaseName: "code", RepoDir: "/r", Model: "opus",
+		Timeout: 30 * time.Second, OnEvent: func(AgentEvent) {},
+	}, ui.New(io.Discard), time.Now(), &metrics)
+	require.NoError(t, err)
+	assert.Equal(t, 0, exit)
+	assert.Equal(t, []string{"claude-opus-5-5"}, metrics.FallbackFrom)
+}
+
+// When no fallback can start (the budget left is under a second past the
+// minimum attempt), the not-served attempt is final and its transcript is
+// kept: cleanup runs only once a retry actually starts.
+func TestClaudeRuntime_Run_NoBudgetKeepsFinalTranscript(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openshell.log")
+	fakeOpenshellClaude(t, logPath, map[string]string{
+		"claude-opus-5-5": claudeNotServedStream,
+		"claude-opus-4-6": claudeServedStream,
+	})
+
+	var metrics RunMetrics
+	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
+		SandboxName: "fs-claude-fallback-nobudget", AgentBaseName: "code", RepoDir: "/r", Model: "opus",
+		Timeout: piMinAttemptTimeout + 500*time.Millisecond, OnEvent: func(AgentEvent) {},
+	}, ui.New(io.Discard), time.Now(), &metrics)
+	require.NoError(t, err)
+	assert.Equal(t, 1, exit)
+	assert.Empty(t, metrics.FallbackFrom)
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(log), "--model 'claude-opus-4-6'", "no fallback starts")
+	assert.NotContains(t, string(log), "0b7b6c8a-930e-4750-89b9-3129edaa5ccf.jsonl", "the final attempt's transcript is kept")
+}
+
+// Removing an abandoned transcript is best effort: a failure is reported,
+// and a session id that is not one is never put in a sandbox command.
+func TestClaudeRemoveTranscript(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "openshell.log")
+	script := "#!/bin/sh\necho \"$*\" >> '" + logPath + "'\necho 'find: permission denied' >&2\nexit 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var out strings.Builder
+	ClaudeRuntime{}.claudeRemoveTranscript("fs-rm", "0b7b6c8a-930e-4750-89b9-3129edaa5ccf", time.Second, ui.New(&out))
+	assert.Contains(t, out.String(), "Could not remove the abandoned attempt's transcript")
+	assert.Contains(t, out.String(), "permission denied")
+
+	require.NoError(t, os.Remove(logPath))
+	out.Reset()
+	ClaudeRuntime{}.claudeRemoveTranscript("fs-rm", "x; rm -rf /", time.Second, ui.New(&out))
+	ClaudeRuntime{}.claudeRemoveTranscript("fs-rm", "", time.Second, ui.New(&out))
+	assert.NoFileExists(t, logPath, "an invalid session id runs nothing")
+	assert.Empty(t, out.String())
+}
+
+// A frontmatter alias the repo retargets reaches Claude Code as the
+// retarget's id, not as the bare alias Claude Code would map itself.
+func TestClaudeRuntime_Run_FrontmatterAliasRetarget(t *testing.T) {
+	const sb = "fs-claude-frontmatter-retarget"
+	claudeAgentModels.Store(sb, "sonnet")
+	t.Cleanup(func() { claudeAgentModels.Delete(sb) })
+	logPath := filepath.Join(t.TempDir(), "openshell.log")
+	fakeOpenshellClaude(t, logPath, map[string]string{"claude-sonnet-5": claudeServedStream})
+
+	var metrics RunMetrics
+	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
+		SandboxName: sb, AgentBaseName: "code", RepoDir: "/r",
+		ModelAliases: map[string]string{"sonnet": "claude-sonnet-5"},
+		Timeout:      30 * time.Second, OnEvent: func(AgentEvent) {},
+	}, ui.New(io.Discard), time.Now(), &metrics)
+	require.NoError(t, err)
+	assert.Equal(t, 0, exit)
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(log), "--model 'claude-sonnet-5'")
+}
+
 // pi Run applies the alias's built-in chain with no FULLSEND_FALLBACK_MODELS
 // set, and records the fallback in the metrics.
 func TestPiRuntimeRun_ImplicitFallbackWhenNotServed(t *testing.T) {
@@ -349,4 +563,86 @@ func TestPiApplyChildFallbacks(t *testing.T) {
 	pinnedDefault := &piAgentManifest{ModelFallbacks: piAgentModelFallbacks(nil), SubagentDefault: "anthropic-vertex/claude-sonnet-5-5"}
 	piApplyChildFallbacks(pinnedDefault, nil, map[string]*string{"default": strp("anthropic-vertex/claude-sonnet-5-5")})
 	assert.Nil(t, pinnedDefault.SubagentDefaultFallbacks)
+}
+
+// The fallback-chain ids were the alias defaults before #8426; a child
+// pinned to one, bare or qualified, keeps resolving and stays trusted.
+func TestPiTrustedSpecs_KeepFallbackChainIDs(t *testing.T) {
+	t.Setenv(piProviderEnv, "")
+	models := piAgentModels("opus", nil)
+	fallbacks := piAgentModelFallbacks(nil)
+	trusted := piTrustedSpecs(models, fallbacks, nil, "", nil)
+	resolve := piChildSpecResolver(models, fallbacks)
+	for _, id := range []string{"claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"} {
+		spec := "anthropic-vertex/" + id
+		assert.Contains(t, trusted, spec)
+		assert.Equal(t, spec, resolve(id), "the bare id resolves to its Vertex spec")
+		assert.Equal(t, spec, resolve(strings.ToUpper(id)+"@default"))
+	}
+	assert.Equal(t, "anthropic-vertex/claude-sonnet-5-5", resolve("sonnet"), "an alias still resolves to its own default")
+	assert.Equal(t, "claude-sonnet-4-20250514", resolve("claude-sonnet-4-20250514"), "an id in no table is returned as written")
+	assert.NotContains(t, trusted, "anthropic-vertex/claude-sonnet-4-20250514")
+
+	retargeted := map[string]string{"sonnet": "claude-sonnet-5"}
+	trusted = piTrustedSpecs(piAgentModels("opus", retargeted), piAgentModelFallbacks(retargeted), nil, "", retargeted)
+	assert.NotContains(t, trusted, "anthropic-vertex/claude-sonnet-4-6",
+		"a retargeted alias has no chain, so its old default is not trusted (as before #8426)")
+	assert.Contains(t, trusted, "anthropic-vertex/claude-opus-4-6")
+}
+
+// Bootstrap accepts a persona or subagents entry pinned to a previous
+// default, bare or qualified, and still rejects an id it cannot serve.
+func TestPiBootstrap_PinnedPreviousGenerationChildModels(t *testing.T) {
+	t.Setenv("FULLSEND_PI_MODEL", "")
+	t.Setenv(piProviderEnv, "")
+	cfg := PiRuntime{}.ConfigDir()
+	bootstrap := func(t *testing.T, personaModel string, subagents map[string]*string, aliases map[string]string) (*piManifest, error) {
+		t.Helper()
+		forgetPiManifestHash(t, "sb")
+		work := t.TempDir()
+		store := filepath.Join(work, "store")
+		fakeOpenshellPi(t, filepath.Join(work, "openshell.log"), store, "/dev/null")
+		skill := t.TempDir()
+		frontmatter := "---\nname: checker\n---\nCheck something.\n"
+		if personaModel != "" {
+			frontmatter = "---\nname: checker\nmodel: " + personaModel + "\n---\nCheck something.\n"
+		}
+		writePersonaFile(t, skill, "checker", frontmatter)
+		err := PiRuntime{}.Bootstrap(bootstrapInput{
+			sandboxName:    "sb",
+			agentPath:      writeAgentFile(t, "---\nname: review\nmodel: opus\n---\nReview the PR."),
+			agentName:      "review",
+			skillDirs:      []string{skill},
+			agentSubagents: subagents,
+			modelAliases:   aliases,
+		})
+		if err != nil {
+			return nil, err
+		}
+		var m piManifest
+		require.NoError(t, json.Unmarshal(storedUpload(t, store, cfg+"/fullsend-manifest.json"), &m))
+		require.NotNil(t, m.Agent)
+		return &m, nil
+	}
+
+	for _, model := range []string{"claude-sonnet-4-6", "anthropic-vertex/claude-sonnet-4-6"} {
+		t.Run("subagents entry "+model, func(t *testing.T) {
+			m, err := bootstrap(t, "", map[string]*string{"checker": strp(model), "default": strp(model)}, nil)
+			require.NoError(t, err)
+			assert.Equal(t, "anthropic-vertex/claude-sonnet-4-6", m.Agent.Personas["checker"].Model)
+			assert.Equal(t, "anthropic-vertex/claude-sonnet-4-6", m.Agent.SubagentDefault)
+			assert.Empty(t, m.Agent.Personas["checker"].Fallbacks, "a pinned id never falls back")
+		})
+		t.Run("persona frontmatter "+model, func(t *testing.T) {
+			m, err := bootstrap(t, model, nil, nil)
+			require.NoError(t, err)
+			assert.Equal(t, "anthropic-vertex/claude-sonnet-4-6", m.Agent.Personas["checker"].Model)
+		})
+	}
+
+	t.Run("an id in no table is still rejected", func(t *testing.T) {
+		_, err := bootstrap(t, "", map[string]*string{"checker": strp("claude-sonnet-4-20250514")}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `resolved model "claude-sonnet-4-20250514" is not available in this run`)
+	})
 }

@@ -53,6 +53,9 @@ const STDERR_TAIL_BYTES = 4 * 1024;
 const LOG_PREFIX = "[fullsend-agent]";
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_TIMEOUT_SECONDS = 900;
+// MIN_FALLBACK_MS is the least a child fallback attempt is started with
+// (the runner's piMinAttemptTimeout).
+export const MIN_FALLBACK_MS = 1000;
 const DEFAULT_THINKING = "medium";
 const DEFAULT_EXPLORE_TOOLS = ["read", "grep", "find", "ls"];
 // Claude Code's built-in agent types, as the fleet's pinned CLI (2.1.258)
@@ -247,12 +250,18 @@ export function childFallbacks(agent, params, persona) {
 }
 
 // childModelNotServed reports whether a child's run failed only because its
-// model is not served in this project: pi exited 0 with a stream error of
-// one of the two "not served" shapes, and the model produced nothing. Any
-// other outcome — a timeout, a kill, a non-zero exit, output — is final.
+// model is not served in this project: pi exited 0 with a complete stream
+// (agent_end read, no line dropped) whose error is one of the two "not
+// served" shapes, and the model produced nothing — no output tokens, no
+// text, no tool or thinking activity. Any other outcome — a timeout, a
+// kill, a non-zero exit, an incomplete stream, an assistant message lost
+// to the line cap, any output — is final, so a retry never repeats work a
+// first model may already have done.
 export function childModelNotServed(outcome) {
   if (!outcome || outcome.spawnError || outcome.timedOut || outcome.exitCode !== 0) return false;
+  if ((Number(outcome.droppedLines) || 0) > 0) return false;
   const state = outcome.state ?? {};
+  if (state.assistantLost || state.ended !== true || state.activity) return false;
   if (state.stopReason !== "error" || !isVertexModelUnavailable(state.errorMessage)) return false;
   return (Number(state.usage?.output) || 0) === 0 && (typeof state.text !== "string" || state.text.trim() === "");
 }
@@ -306,6 +315,14 @@ export function resolveModel(agent, spec, parentSpec) {
     if (name !== "default") aliases[name.toLowerCase()] = value;
     byBareID[cut(value, "/")[2] ? cut(value, "/")[1].toLowerCase() : value.toLowerCase()] = value;
   }
+  // The alias fallback chains' specs (#8426) were the alias defaults
+  // before; a child pinned to one by bare id keeps resolving, as Bootstrap's
+  // piChildSpecResolver does. An alias entry's own spec wins.
+  for (const value of fallbackSpecs(agent)) {
+    known.add(value);
+    const key = cut(value, "/")[2] ? cut(value, "/")[1].toLowerCase() : value.toLowerCase();
+    if (!byBareID[key]) byBareID[key] = value;
+  }
   const reject = (what) => {
     const names = Object.keys(aliases).join(", ");
     throw new Error(`model "${spec}": ${what}; use ${names || "the parent's model"}, or one of ${[...known].join(", ")}`);
@@ -354,16 +371,36 @@ export function resolveModel(agent, spec, parentSpec) {
   return reject(`"${rest}" is not a model this run serves on "${provider}"`);
 }
 
+// fallbackSpecs lists every spec in the manifest's modelFallbacks table once,
+// in sorted alias order then chain order (Go's piFallbackSpecs).
+function fallbackSpecs(agent) {
+  const table = agent?.modelFallbacks;
+  if (!table || typeof table !== "object") return [];
+  const out = [];
+  for (const alias of Object.keys(table).sort()) {
+    const chain = table[alias];
+    if (!Array.isArray(chain)) continue;
+    for (const spec of chain) {
+      if (typeof spec !== "string") continue;
+      const s = spec.trim();
+      if (s !== "" && !out.includes(s)) out.push(s);
+    }
+  }
+  return out;
+}
+
 // servableSpecs maps the lowercased form of every full "provider/id" spec
-// this run can serve to the spec as written: the manifest's model table,
-// the parent's own model (whose credentials this iteration demonstrably
-// has), and each provider id listed in the manifest's providerModels.
+// this run can serve to the spec as written: the manifest's model table and
+// its alias fallback chains (modelFallbacks), the parent's own model (whose
+// credentials this iteration demonstrably has), and each provider id listed
+// in the manifest's providerModels.
 function servableSpecs(agent, parentSpec) {
   const out = new Map();
   const add = (spec) => {
     if (typeof spec === "string" && spec.includes("/")) out.set(spec.trim().toLowerCase(), spec.trim());
   };
   for (const spec of Object.values(agent?.models ?? {})) add(spec);
+  for (const spec of fallbackSpecs(agent)) add(spec);
   add(typeof parentSpec === "string" ? parentSpec.trim() : "");
   for (const [prov, ids] of Object.entries(agent?.providerModels ?? {})) {
     if (!Array.isArray(ids)) continue;
@@ -547,6 +584,10 @@ function newStreamState() {
     // being over the line cap, and cleared by the next assistant message
     // that is read. While set, text and stopReason may be stale.
     assistantLost: false,
+    // activity is set once the stream shows the model did anything: a tool
+    // call or result, or an assistant message carrying a tool call or
+    // thinking. A child with activity is never retried on another model.
+    activity: false,
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
   };
 }
@@ -554,6 +595,7 @@ function newStreamState() {
 function noteAssistant(state, msg) {
   if (!msg || msg.role !== "assistant") return;
   state.assistantLost = false;
+  if (Array.isArray(msg.content) && msg.content.some((b) => b && (b.type === "toolCall" || b.type === "thinking"))) state.activity = true;
   const text = joinText(msg.content);
   if (text.trim() !== "") state.text = text;
   if (typeof msg.stopReason === "string") state.stopReason = msg.stopReason;
@@ -576,8 +618,13 @@ export function consumeLine(state, line) {
     return;
   }
   if (!evt || typeof evt !== "object") return;
+  if (typeof evt.type === "string" && evt.type.startsWith("tool_execution_")) {
+    state.activity = true;
+    return;
+  }
   if (evt.type === "message_end") {
     const msg = evt.message;
+    if (msg && msg.role === "toolResult") state.activity = true;
     if (msg && msg.role === "assistant") {
       const u = msg.usage ?? {};
       state.usage.input += Number(u.input) || 0;
@@ -852,10 +899,11 @@ export function createAgentTool(manifest, { spawn = nodeSpawn, log = (m) => cons
     }
   };
 
-  // runChild spawns one child and resolves when it is gone. It resolves a
-  // handle synchronously through `out` so the caller can terminate the
-  // child on abort or shutdown while it is still running.
-  const runChild = (id, params, modelSpec, tools, out, personaName) =>
+  // runChild spawns one child and resolves when it is gone, stopping it as
+  // timed out after limitMs. It resolves a handle synchronously through
+  // `out` so the caller can terminate the child on abort or shutdown while
+  // it is still running.
+  const runChild = (id, params, modelSpec, tools, out, personaName, limitMs) =>
     new Promise((resolve) => {
       const state = newStreamState();
       const startedAt = now();
@@ -911,7 +959,7 @@ export function createAgentTool(manifest, { spawn = nodeSpawn, log = (m) => cons
       const timer = setTimeout(() => {
         timedOut = true;
         terminate();
-      }, timeoutMs);
+      }, Math.max(1, limitMs));
       // The prompt is written and the pipe closed at once: pi reads stdin
       // to EOF before it starts. A child that dies first (or never drains a
       // prompt larger than the pipe buffer) makes this EPIPE, which is an
@@ -1075,13 +1123,21 @@ export function createAgentTool(manifest, { spawn = nodeSpawn, log = (m) => cons
         }
         log(`${LOG_PREFIX} #${id}${persona ? ` [${subagentType}]` : ""} ${modelSpec} start "${capBytes(description, MAX_DESCRIPTION_BYTES)}"`);
         const personaName = persona ? subagentType.trim().toLowerCase() : "";
-        outcome = await runChild(id, params, modelSpec, tools, ticket, personaName);
+        // One deadline for the whole dispatch, set once it holds a slot:
+        // every attempt of the fallback chain shares it, so a chain never
+        // runs longer than a single child could.
+        const deadline = now() + timeoutMs;
+        outcome = await runChild(id, params, modelSpec, tools, ticket, personaName, timeoutMs);
         // Walk the alias's fallback chain while the project does not serve
         // the model (#8426). The abandoned attempt's session is removed so
-        // it is not extracted as an error on a dispatch that succeeded.
+        // it is not extracted as an error on a dispatch that succeeded. A
+        // fallback is not started with less than MIN_FALLBACK_MS left; the
+        // abandoned attempt is then final.
         const chain = childFallbacks(agent, params, persona).filter((s) => s !== modelSpec);
         for (const next of chain) {
           if (!childModelNotServed(outcome) || cancelled()) break;
+          const remainingMs = deadline - now();
+          if (remainingMs < MIN_FALLBACK_MS) break;
           const nextDrift = manifestDrift();
           if (nextDrift) {
             return { seq: id, isError: true, error: nextDrift, text: "", stopReason: "rejected", model: modelSpec };
@@ -1093,7 +1149,7 @@ export function createAgentTool(manifest, { spawn = nodeSpawn, log = (m) => cons
             log(`${LOG_PREFIX} #${id} cannot remove the abandoned attempt's session: ${err.message}`);
           }
           modelSpec = next;
-          outcome = await runChild(id, params, modelSpec, tools, ticket, personaName);
+          outcome = await runChild(id, params, modelSpec, tools, ticket, personaName, remainingMs);
         }
       } finally {
         release();

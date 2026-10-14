@@ -21,6 +21,7 @@ import defaultExport, {
   GATEWAY_LOCAL_CONFIG_FILE,
   MAX_DESCRIPTION_BYTES,
   MAX_STDOUT_LINE_CHARS,
+  MIN_FALLBACK_MS,
   OVERSIZED_PREFIX_CHARS,
   RESULT_MAX_BYTES,
   childArgs,
@@ -29,6 +30,7 @@ import defaultExport, {
   childModelNotServed,
   childSessionDir,
   childTools,
+  consumeLine,
   createAgentTool,
   isAgentEndPrefix,
   isAssistantMessageEndPrefix,
@@ -1745,8 +1747,13 @@ test("childFallbacks: aliases, personas and subagents.default; pinned specs and 
 });
 
 test("childModelNotServed: only a silent not-served error on a clean exit", () => {
-  const state = (over) => ({ stopReason: "error", errorMessage: NOT_SERVED, text: "", usage: { output: 0 }, ...over });
+  const state = (over) => ({ stopReason: "error", errorMessage: NOT_SERVED, text: "", usage: { output: 0 }, ended: true, assistantLost: false, activity: false, ...over });
   assert.equal(childModelNotServed({ exitCode: 0, state: state() }), true);
+  assert.equal(childModelNotServed({ exitCode: 0, state: state({ assistantLost: true }) }), false, "an assistant message was lost to the line cap");
+  assert.equal(childModelNotServed({ exitCode: 0, state: state({ ended: false }) }), false, "the stream did not reach agent_end");
+  assert.equal(childModelNotServed({ exitCode: 0, state: state({ ended: undefined }) }), false, "the stream did not reach agent_end");
+  assert.equal(childModelNotServed({ exitCode: 0, state: state({ activity: true }) }), false, "a tool ran or the model thought");
+  assert.equal(childModelNotServed({ exitCode: 0, droppedLines: 1, state: state() }), false, "a line was dropped unread");
   assert.equal(childModelNotServed({ exitCode: 0, state: state({ errorMessage: "quota exhausted" }) }), false);
   assert.equal(childModelNotServed({ exitCode: 0, state: state({ usage: { output: 4 } }) }), false, "the model answered");
   assert.equal(childModelNotServed({ exitCode: 0, state: state({ text: "partial" }) }), false, "the model answered");
@@ -1828,5 +1835,145 @@ test("run: a persona configured with an alias falls back along its chain", async
   const res = await pending;
   assert.equal(res.isError, false, res.error);
   assert.equal(res.model, "anthropic-vertex/claude-opus-4-6");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// The fallback-chain ids were the alias defaults before #8426, so a child
+// pinned to one by the orchestrator is still served.
+test("resolveModel: the alias fallback-chain ids stay servable", () => {
+  const { dir, manifest } = fallbackFixture();
+  const agent = manifest.agent;
+  for (const spec of ["claude-sonnet-4-6", "Claude-Sonnet-4-6", "claude-sonnet-4-6@default", "anthropic/claude-sonnet-4-6", "anthropic-vertex/claude-sonnet-4-6"]) {
+    assert.equal(resolveModel(agent, spec, ""), "anthropic-vertex/claude-sonnet-4-6", spec);
+  }
+  assert.equal(resolveModel(agent, "claude-opus-4-6", ""), "anthropic-vertex/claude-opus-4-6");
+  assert.equal(resolveModel(agent, "claude-haiku-4-5", ""), "anthropic-vertex/claude-haiku-4-5");
+  assert.equal(resolveModel(agent, "sonnet", ""), "anthropic-vertex/claude-sonnet-5-5", "an alias still resolves to its own default");
+  assert.throws(() => resolveModel(agent, "claude-sonnet-4-20250514", ""), /is not available in this sandbox/);
+  assert.throws(() => resolveModel(agent, "anthropic-vertex/claude-sonnet-4-20250514", ""), /is not a model this run serves/);
+  const { modelFallbacks: _drop, ...noChains } = agent;
+  assert.throws(() => resolveModel(noChains, "claude-sonnet-4-6", ""), /is not available in this sandbox/,
+    "a manifest whose alias was retargeted (no chain) does not serve the old default");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("run: a child pinned to a fallback-chain id dispatches on its Vertex spec", async () => {
+  const { dir, manifest } = fallbackFixture();
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { ...quiet, spawn });
+  const pending = tool.run({ prompt: "p", model: "claude-sonnet-4-6" }, {});
+  await untilChildren(children, 1);
+  assert.equal(modelArg(children[0]), "anthropic-vertex/claude-sonnet-4-6");
+  children[0].child.finish(okStream("ok"));
+  const res = await pending;
+  assert.equal(res.isError, false, res.error);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("consumeLine: tool executions, tool results and tool-call or thinking blocks count as activity", () => {
+  const fresh = () => ({ text: "", stopReason: "", errorMessage: "", ended: false, assistantLost: false, activity: false, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } });
+  for (const evt of [
+    { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: {} },
+    { type: "tool_execution_end", toolCallId: "c1", toolName: "bash", result: {}, isError: false },
+    { type: "message_end", message: { role: "toolResult", toolCallId: "c1", content: [] } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash" }], usage: {} } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }], usage: {} } },
+  ]) {
+    const s = fresh();
+    consumeLine(s, JSON.stringify(evt));
+    assert.equal(s.activity, true, evt.type + " " + (evt.message?.role ?? ""));
+  }
+  const s = fresh();
+  for (const evt of notServedStream()) consumeLine(s, JSON.stringify(evt));
+  assert.equal(s.activity, false, "a not-served error is no activity");
+  assert.equal(s.ended, true);
+});
+
+test("run: no fallback once the child showed tool activity", async () => {
+  const { dir, manifest } = fallbackFixture();
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { ...quiet, spawn });
+  const pending = tool.run({ prompt: "p", model: "sonnet" }, {});
+  await untilChildren(children, 1);
+  const [start, ...rest] = notServedStream();
+  children[0].child.finish([start, { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: {} }, ...rest]);
+  const res = await pending;
+  assert.equal(res.isError, true);
+  assert.match(res.error, /Publisher model/);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(children.length, 1, "no second model is tried");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("run: no fallback when the stream did not reach agent_end", async () => {
+  const { dir, manifest } = fallbackFixture();
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { ...quiet, spawn });
+  const pending = tool.run({ prompt: "p", model: "sonnet" }, {});
+  await untilChildren(children, 1);
+  children[0].child.finish(notServedStream().filter((e) => e.type !== "agent_end"));
+  const res = await pending;
+  assert.equal(res.isError, true);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(children.length, 1, "no second model is tried");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("run: no fallback when an assistant message was dropped, and the dispatch still fails closed", async () => {
+  const { dir, manifest } = fallbackFixture();
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { ...quiet, spawn });
+  const pending = tool.run({ prompt: "p", model: "sonnet" }, {});
+  await untilChildren(children, 1);
+  const [start, notServedEnd, agentEnd] = notServedStream();
+  const bigAssistant = { type: "message_end", message: finalMessage("stop", "x".repeat(MAX_STDOUT_LINE_CHARS + 10)) };
+  await finishRaw(children[0].child, [jsonLine(start), jsonLine(notServedEnd), jsonLine(bigAssistant), jsonLine(agentEnd)]);
+  const res = await pending;
+  assert.equal(res.isError, true);
+  assert.equal(res.stopReason, "incomplete");
+  assert.match(res.error, /exceeded .* chars and was dropped/);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(children.length, 1, "no second model is tried");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// The fallback chain shares one dispatch deadline: a fallback gets what is
+// left of it, not a fresh timeout, and none starts with too little left.
+test("run: a fallback gets the time left of the dispatch, not a fresh timeout", async () => {
+  const { dir, manifest } = fallbackFixture();
+  manifest.agent.timeoutSeconds = 3;
+  let clock = 0;
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { ...quiet, spawn, now: () => clock, killGraceMs: 50 });
+  const pending = tool.run({ prompt: "p", model: "sonnet" }, {});
+  await untilChildren(children, 1);
+  clock = 3000 - MIN_FALLBACK_MS - 200; // 1.2 s of the 3 s budget left
+  children[0].child.finish(notServedStream());
+  await untilChildren(children, 2);
+  // A fresh 3 s timeout would not have fired yet; the 1.2 s left has.
+  await new Promise((r) => setTimeout(r, 1600));
+  assert.ok(children[1].child.signals.includes("SIGTERM"), "the fallback is stopped at the dispatch deadline");
+  children[1].child.finish([], 143);
+  const res = await pending;
+  assert.equal(res.isError, true);
+  assert.equal(res.stopReason, "timeout");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("run: no fallback starts with less than the minimum attempt time left", async () => {
+  const { dir, manifest } = fallbackFixture();
+  manifest.agent.timeoutSeconds = 3;
+  let clock = 0;
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { ...quiet, spawn, now: () => clock });
+  const pending = tool.run({ prompt: "p", model: "sonnet" }, {});
+  await untilChildren(children, 1);
+  clock = 3000 - MIN_FALLBACK_MS + 1;
+  children[0].child.finish(notServedStream());
+  const res = await pending;
+  assert.equal(res.isError, true);
+  assert.match(res.error, /Publisher model/, "the abandoned attempt is final");
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(children.length, 1);
   rmSync(dir, { recursive: true, force: true });
 });

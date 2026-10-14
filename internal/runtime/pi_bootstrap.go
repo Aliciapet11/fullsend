@@ -584,9 +584,9 @@ func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools
 	// resolved persona specs are checked against this set and only then
 	// written into the manifest, so a persona can never widen the set that
 	// admits it.
-	trustedSpecs := piTrustedSpecs(manifest.Models, manifest.ProviderModels, parentModel, configAliases)
+	trustedSpecs := piTrustedSpecs(manifest.Models, manifest.ModelFallbacks, manifest.ProviderModels, parentModel, configAliases)
 
-	resolved, defaultSpec, skippedOut, err := resolvePersonaModels(personas, skipped, subagentsCfg, manifest.Models, trustedSpecs)
+	resolved, defaultSpec, skippedOut, err := resolvePersonaModels(personas, skipped, subagentsCfg, manifest.Models, manifest.ModelFallbacks, trustedSpecs)
 	if err != nil {
 		return nil, fmt.Errorf("resolving persona models: %w", err)
 	}

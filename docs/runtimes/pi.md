@@ -417,13 +417,14 @@ For a run that reaches all three Vertex providers:
 | `model` | The child runs on |
 |---|---|
 | `sonnet` (also `opus`, `haiku`) | Claude on Vertex, whatever provider the parent runs on |
-| `claude-sonnet-4-6` | the same — a bare Claude id resolves through that alias table, and a persona-style `@default` suffix is dropped |
+| `claude-sonnet-5-5`, `claude-sonnet-4-6` | the same — a bare Claude id resolves through the alias table or, for a previous default, the alias's built-in fallback chain; a persona-style `@default` suffix is dropped |
 | `google-vertex/gemini-3.8-flash` | Gemini, on pi's built-in provider |
 | `xai/grok-4.6` | Grok on Vertex — normalized to `xai-vertex/xai/grok-4.6`, as the runner does for the parent |
 
 Anything else is **rejected, with the accepted forms listed in the error**, so the orchestrator can
 correct itself instead of losing the dispatch. The accepted set is closed — the run's model table,
-the parent's own spec, and the ids registered for a provider that has no table entry — rather than a
+the built-in fallback chains of the aliases the repo does not retarget, the parent's own spec, and
+the ids registered for a provider that has no table entry — rather than a
 provider-prefix check, so an id the model invented (`google-vertex/gemini-9`,
 `anthropic-vertex/claude-sonnet-4-20250514`) is refused even under a provider the run can reach. A
 trailing `:<thinking level>` is dropped rather than passed through.
