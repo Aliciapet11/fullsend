@@ -268,11 +268,6 @@ func CheckOrphanVars(ctx context.Context, client forge.Client,
 		if cfg.Forge == ForgeGitLab && name == GitLabProjectLeaseVar {
 			continue
 		}
-		// The unverified-variable-scope acceptance is set by a project
-		// Maintainer and only read by Fullsend, so it is never an orphan.
-		if cfg.Forge == ForgeGitLab && name == GitLabAcceptUnverifiedVariableScopesVar {
-			continue
-		}
 		orphans = append(orphans, OrphanVar{Name: name})
 	}
 	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Name < orphans[j].Name })
