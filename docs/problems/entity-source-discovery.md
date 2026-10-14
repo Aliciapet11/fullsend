@@ -106,13 +106,21 @@ options are cheap to adopt:
   failed per-item read holds the GitLab watermark back. But the GitLab poll
   client's list loops stop after 100 pages, and Jira `SearchIssues` stops
   after 200 pages. In both cases the client returns what it has with no error
-  and no truncation signal. That is acceptable for event reconstruction
-  backed by a watermark. It is exactly the "partial result looks complete"
-  failure that entity-first discovery must not inherit.
-- **Permission lookups are uncached, one call each.** GitHub uses the
-  collaborator-permission endpoint, GitLab uses `members/all`, and Jira uses
-  project roles and groups. ADR 0107 bot-role recognition is not yet
-  implemented.
+  and no truncation signal. This is an existing correctness gap, not an
+  acceptable trade-off, and a watermark does not cover it. GitLab note lists
+  always start at page 1 in ascending order, so once a thread passes the cap
+  its newer notes are never seen on any later poll. The poll client contract
+  also requires list methods to exhaust pagination. The gap therefore affects
+  event reconstruction as well as entity-first discovery. It is exactly the
+  "partial result looks complete" failure that entity-first discovery must
+  not inherit.
+- **Permission lookups differ by provider.** GitHub uses the
+  collaborator-permission endpoint and GitLab uses `members/all`, one call
+  per actor with no cross-call caching. Jira reads the project role
+  structure (a role-list request plus one detail request per role) and
+  resolves per-actor group membership, with per-cycle maps that reuse role
+  and group resolution across issues. ADR 0107 bot-role recognition is not
+  yet implemented.
 - **The snapshot is specified but not built.** Entity-context-snapshot v1
   already specifies bounded acquisition with explicit `gaps[]` (`profile_bound`
   and `history_unavailable` are partial; `fetch_failed`, `unsupported`,
@@ -195,12 +203,20 @@ scheduled evaluation.
 | **C3. Enumerate action-indicating history** completely for each category the entity kind supports: body, comments, reviews, and label applications *with the applying actor*. | ADR 0098 pre-CEL gate; S1 and S2 | Entity denied (ADR 0098) |
 | **C4. Current-revision attribution.** The creator, or the latest authenticated editor where the source records edits ([ADR 0133](../ADRs/0133-actor-attributed-data-security-boundary.md)). | Pre-CEL gate and later model admission | The element cannot trigger execution; for model admission the record is redacted |
 | **C5. Current actor authorization.** Repository permission for humans; provider-backed exact bot-role recognition for bots ([ADR 0107](../ADRs/0107-bot-identity-resolution-for-dispatch-authorization.md)). | Pre-CEL gate | The element cannot trigger execution |
-| **C6. Change hints.** An updated-since filter or comparable cursor to skip unchanged candidates. | Cost control for every scenario | Full re-enumeration every cycle; correctness is unaffected if C1 is complete |
-| **C7. Budget visibility.** Rate-limit or quota state for the credentials in use. | Bounding a cycle (invariant I6) | Budget exhaustion surfaces only as request failures. These must still be classified as incomplete, not empty. |
+| **C6. Change hints.** An updated-since filter or comparable cursor to skip unchanged candidates. | Cost control, where skipping is safe (see below) | Full re-enumeration every cycle |
+| **C7. Budget visibility.** Rate-limit or quota state for the credentials in use. | Bounding a cycle (invariant I10) | Budget exhaustion surfaces only as request failures. These must still be classified as incomplete, not empty. |
 | **C8. Batched reads.** Several identities or several collections in one request. | Sharing reads across candidates and harnesses | More round-trips; correctness is unaffected |
 
 C1 through C5 are correctness requirements. C6 through C8 are efficiency
 requirements and can be absent in a first slice.
+
+C6 is predicate-aware. A complete C1 result does not show that the entities
+a change hint excludes need no work. Unchanged entities may be skipped only
+when time, handled state, authorization changes, and retry obligations cannot
+change their eligibility. S3 can cross an age or staleness threshold with no
+provider update, and S1 covers a failed dispatch where the entity may never
+change again. Periodic rescans and explicit next-evaluation scheduling are
+unresolved alternatives for such cases.
 
 ## Data that must be fetched regardless of CEL field use
 
@@ -260,8 +276,12 @@ through custom activations or type providers.
   `true || <error>` is `true`). Whether a failed read changes the result
   therefore depends on operand values, not textual order. This is the
   intended CEL semantics, but the platform must not convert a load failure
-  into a value. A failed load must surface as an evaluation error that denies,
-  and #8420 must decide whether any partial state is CEL-observable.
+  into a value. A failed load must never be converted to a value. Because
+  CEL's error absorption means a result can be `true` even when a read
+  failed (for example `entity.optional_field == 'x' || true`), the
+  evaluation result alone cannot enforce denial. Acquisition failures must be
+  tracked separately from the CEL result and checked before a match is
+  accepted. #8420 must decide whether any partial state is CEL-observable.
 - **Nested collections.** Macros such as `exists` or `all` over a collection
   force the whole collection, so the savings vanish exactly where history is
   large.
@@ -340,8 +360,9 @@ validation rejects predicates that access fields outside the profile.
 | Savings vs. mandatory floor | Fields outside floor | Fields outside floor | Fields outside floor, plus early decisions | None |
 
 All four options share the same safety rule. A field the predicate accesses
-must resolve, or evaluation fails closed. None may treat "not loaded" as
-"absent".
+must resolve, or the candidate is denied. A failed load is tracked outside
+CEL's result, so error-absorbing operators cannot mask it. None may treat
+"not loaded" as "absent".
 
 ## Safety invariants
 
@@ -435,7 +456,8 @@ once the ADR is decided):
 - The audit record for a scheduled evaluation: which reads were made, their
   coverage, and which elements were retained or removed.
 - Conformance examples covering complete-empty, incomplete, unsupported, and
-  authorization-failure cases.
+  authorization-failure cases, plus an error-absorbing `||` or `&&`
+  predicate that reads a field whose load failed.
 
 **Belongs in normalized entity v1 (#8420):**
 
