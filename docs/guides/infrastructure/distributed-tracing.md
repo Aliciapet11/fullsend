@@ -96,9 +96,9 @@ or spelled that way which a pattern also recognises — in one of those
 contexts, in a connection string, or by its own prefix — is masked by
 that pattern, and shows what the pattern's mask shows. A tool call loses
 its `summary` when redaction found a secret in its arguments, the dropped
-members included, stripped an escape sequence or tag characters from
-them, or could not judge them at all (invalid UTF-8 or the replacement
-character): the parser cut the summary out of them before anything scanned it,
+members included, masked a URL's userinfo, query or fragment in them,
+stripped an escape sequence or tag characters from them, or could not
+judge them at all (invalid UTF-8 or the replacement character): the parser cut the summary out of them before anything scanned it,
 so the secret could be there as a beginning. Where a runtime reports a summary and no
 arguments (pi, codex, OpenCode), its parser has already run the patterns
 over the summary and, for pi and codex, cut it: a value that straddles a
@@ -126,17 +126,31 @@ only when the runtime's stream provides them: Claude runs do; the pi and
 codex parsers emit none of the three yet
 ([#7414](https://github.com/fullsend-ai/fullsend/issues/7414)).
 `arguments` holds the members of the call's input that name what was
-called, each redacted as text: `file_path`, `notebook_path`, `path`,
-`pattern`, `glob`, `command`, `description`, `url`, `output_mode`,
-`model`, `subagent_type`, `skill`, `cell_id`, `cell_type`, `edit_mode`,
-`replace_all`, `multiline`, `type`, `limit`, `offset`, `head_limit`,
-`timeout`, `context`, `-A`, `-B`, `-C`, `-i`, `-n`. Nothing else of the
-input is recorded: a file body, an edit, a prompt, a notebook source, a
-todo list, and any member whose value is an object or an array are
-dropped — scanned first, so a secret in them still counts — and the part
-is marked `fullsend.truncated`. The kept members are decoded, redacted
-one by one and encoded again, so key order, spacing and escapes are not
-the stream's; a string a terminal escape sequence or tag characters were
+called, listed by tool, each redacted as text: `Bash` — `command`,
+`description`, `timeout`; `Read` — `file_path`, `limit`, `offset`;
+`Write` — `file_path`; `Edit` — `file_path`, `replace_all`;
+`NotebookEdit` — `notebook_path`, `cell_id`, `cell_type`, `edit_mode`;
+`Grep` — `pattern`, `path`, `glob`, `type`, `output_mode`, `context`,
+`head_limit`, `multiline`, `-A`, `-B`, `-C`, `-i`, `-n`; `Glob` —
+`pattern`, `path`; `WebFetch` — `url`; `Agent` — `description`, `model`,
+`subagent_type`; `Skill` — `skill`. Nothing else of the input is
+recorded: a file body, an edit, a prompt, a notebook source, a todo list,
+any member whose value is an object or an array, and the whole input of
+a tool not listed here (every `mcp__` tool among them) are dropped —
+scanned first, so a secret in them still counts, but neither charged nor
+marked, since the list is the policy and the markers mean loss. A `Bash`
+`command` is recorded whole, up to 8 KiB, so a heredoc or an inline
+script records what it writes. A URL anywhere in the record — a
+member, text, a result, a summary, the input message, a name — has
+everything from `://` to its last `@` (userinfo, or a URL nested in
+another's path) and everything after its first `?` or `#` masked `***`,
+after the patterns ran, and counted in `fullsend.content.sanitizations`;
+the URL runs to the next white space, so in compact JSON the mask can
+take the rest of the line. A token carried in the path itself, as a
+webhook URL's is, matches no pattern and is kept. The kept
+members are decoded, redacted one by one and encoded again, so key
+order, spacing and escapes are not the stream's; a string a terminal
+escape sequence or tag characters were
 stripped from, or that holds invalid UTF-8 or the replacement character
 a lossy decode leaves (U+FFFD), is masked whole, since the
 stripping can leave most of a token, a later write would join the
@@ -169,7 +183,7 @@ each call's arguments at 8 KiB —
 kept as an ordered suffix; overflow drops the oldest content first. Those
 bounds count raw bytes, except that arguments count as the
 re-encoded JSON described above, against their own bound and against the
-total (as redacted text when a member was dropped by name or the arguments were not one JSON object). That encoding writes `<`, `>` and `&` as six bytes each, so
+total (as redacted text when the arguments were not one JSON object). That encoding writes `<`, `>` and `&` as six bytes each, so
 arguments dense in those characters reach their bound at about a sixth of
 that size on the stream. The exported JSON string is bounded as well, at
 255,000 bytes, because encoding adds 8–10% at these bounds on real runs
@@ -180,14 +194,15 @@ Truncation is marked via `fullsend.content.truncated` on the span and
 its tail; arguments over theirs, or not a complete JSON object, are
 dropped whole — a cut object is not JSON — and the marked `tool_call`
 part keeps its `id`, name and summary — not the summary when redaction
-found a secret in the arguments, stripped an escape sequence or tag
-characters from them, or could not judge them at all. A member outside the recorded list (above) is
-dropped and the part marked the same way, its listed members kept.
-Arguments also go, charged and marked, when the call's name redacts to
-nothing; that part survives only if it has a summary. So
+found a secret in the arguments, masked a URL's userinfo, query or
+fragment in them, stripped an escape sequence or tag characters from
+them, or could not judge them at all. A member outside the recorded list (above) is
+dropped without a mark, its listed members kept. A name that redacts to
+nothing never had arguments: they are kept only under a tool's exact
+name, plain words no scan touches. So
 `fullsend.truncated` means different things by part type: on a tool
-result, part of the response is kept; on a tool call, some or all of the
-input is not. Read it together with the part's `type`. The input message is not cut at this stage:
+result, part of the response is kept; on a tool call, the arguments were
+dropped whole. Read it together with the part's `type`. The input message is not cut at this stage:
 the validation output inside it is cut at 10 KiB when the prompt is
 composed (the prompt then says `[truncated]`), and the two markers above
 do not describe it. The recorded copy is the redacted one, so it can
@@ -338,9 +353,10 @@ The `agent` span's provider identity reflects only the parent run's serving endp
 | `fullsend.transcript_error` | `agent` | Present (`true`) when the agent exited 0 but its transcript reported an error — the span's status is Error while `exit_code` keeps the raw process exit |
 | `gen_ai.input.messages` | `agent` | Level 3 only, on a retry iteration that carries validation feedback: the prompt the runner composed, as a JSON string (see Content capture) |
 | `gen_ai.output.messages` | `agent` | Level 3 only: the iteration's conversation content as a JSON string (see Content capture) |
-| `fullsend.content.truncated` | `agent` | Level 3 only: present (`true`) when the size budget cut or dropped content, a tool call lost its arguments, or a kept tool result is a parser-side fragment or an oversized line's empty stand-in (`fullsend.truncated` on the part; no byte count for the last two) |
-| `fullsend.content.dropped_bytes` | `agent` | Level 3 only: exact part bytes removed by the size budget — content, ids, dropped arguments (counted as re-encoded JSON when the bound drops them, or as redacted text when a member was dropped by name or the arguments were not one JSON object), and the fixed footprint of an errored-empty or oversized stand-in part — otherwise in raw bytes, whichever bound made the cut; the bytes of a skipped oversized line were never decoded and are not counted |
-| `fullsend.content.redactions` | `agent` | Level 3 only: number of security findings raised while redacting content at assembly, the input message included (and findings from parts the size budget later dropped) |
+| `fullsend.content.truncated` | `agent` | Level 3 only: present (`true`) when the size budget cut or dropped content, a tool call's arguments were dropped whole, or a kept tool result is a parser-side fragment or an oversized line's empty stand-in (`fullsend.truncated` on the part; no byte count for the last two) |
+| `fullsend.content.dropped_bytes` | `agent` | Level 3 only: exact part bytes removed by the size budget — content, ids, arguments dropped whole (counted as re-encoded JSON when the bound drops them, or as redacted text when the arguments were not one JSON object; a member the recorded list leaves out is not counted), and the fixed footprint of an errored-empty or oversized stand-in part — otherwise in raw bytes, whichever bound made the cut; the bytes of a skipped oversized line were never decoded and are not counted |
+| `fullsend.content.redactions` | `agent` | Level 3 only: number of known secrets matched while redacting content at assembly — the secret redactor's patterns and the runner-env literal pass — the input message included (and findings from parts the size budget later dropped) |
+| `fullsend.content.sanitizations` | `agent` | Level 3 only: number of strings masked or rewritten for their shape rather than for a secret they matched — compatibility characters folded, invisible characters removed, an escape sequence or tag characters stripped or invalid UTF-8 or U+FFFD present (each such string is `***` whole, since it can hide a secret), a retry prompt altered upstream (`***` whole), a URL's userinfo, query or fragment masked |
 | `fullsend.tool.unmatched` | `execute_tool` | Present (`true`) when a result arrived for a call the stream never reported; the span has near-zero duration |
 | `fullsend.tool.result_oversized` | `execute_tool` | Present (`true`) when the result's stream line exceeded the parser's 1 MiB bound: the call was answered but nothing of the result was decoded, so the span has no status and no `error.type` |
 | `fullsend.tool_spans.dropped` | `agent` | Present when the iteration hit the 1,024-span cap and at least one id-bearing call was refused a span: the number of `tool_use` events with a usable id that arrived past the cap, each counted once whatever its result later does; a result with no open span past the cap is not counted |

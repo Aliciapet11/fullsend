@@ -134,7 +134,7 @@ func TestContentCapture_SecretsAcrossArgumentsNeverReachTheRecord(t *testing.T) 
 	}
 	require.Len(t, calls, 4, "every call is in the record, arguments or not")
 	assert.Equal(t, map[string]any{"notebook_path": "notes.ipynb"}, calls["NotebookEdit"]["arguments"], "the cells are not recorded; the path is")
-	assert.Equal(t, true, calls["NotebookEdit"]["fullsend.truncated"])
+	assert.NotContains(t, calls["NotebookEdit"], "fullsend.truncated", "a member the list leaves out is policy, not loss")
 	assert.NotContains(t, calls["NotebookEdit"], "summary", "a secret in the dropped cells still costs the summary")
 	assert.Equal(t, map[string]any{"file_path": "cfg.json"}, calls["Write"]["arguments"], "the file body is not recorded; the path is")
 	assert.Equal(t, "cfg.json", calls["Write"]["summary"], "no secret was found in it")
@@ -142,7 +142,6 @@ func TestContentCapture_SecretsAcrossArgumentsNeverReachTheRecord(t *testing.T) 
 	assert.Equal(t, map[string]any{"file_path": "README.md"}, calls["Read"]["arguments"], "the clean call's arguments are recorded")
 	assert.Equal(t, "README.md", calls["Read"]["summary"])
 
-	truncated, ok := recordAttribute(t, dir, "fullsend.content.truncated")
-	assert.True(t, ok, "the dropped arguments are marked on the span")
-	assert.Equal(t, "true", truncated)
+	_, marked := recordAttribute(t, dir, "fullsend.content.truncated")
+	assert.False(t, marked, "nothing was cut or dropped whole, so the span is not marked")
 }

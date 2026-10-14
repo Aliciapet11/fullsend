@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	agentruntime "github.com/fullsend-ai/fullsend/internal/runtime"
+	"github.com/fullsend-ai/fullsend/internal/security"
 	"github.com/fullsend-ai/fullsend/internal/telemetry"
 )
 
@@ -149,77 +150,75 @@ func TestContentCollector_RedactsSecretsInArguments(t *testing.T) {
 }
 
 func TestContentCollector_RecordsOnlyListedArguments(t *testing.T) {
-	// The record keeps the members recordedArguments names — paths,
-	// patterns, commands, modes and bounds — and nothing else of a call's
-	// input: a file body, an edit, a prompt, a notebook source or a todo
-	// list is dropped, charged and marked, with no finding and the
-	// summary kept, since nothing found a secret.
+	// The record keeps the members recordedArguments names for the tool —
+	// paths, patterns, commands, modes and bounds — and nothing else of a
+	// call's input: a file body, an edit, a prompt, a notebook source or
+	// a todo list is dropped with no finding and the summary kept, since
+	// nothing found a secret, and neither charged nor marked, since the
+	// list is the documented policy, not a loss. A tool the list does not
+	// name — an MCP tool, a tool of another name — records nothing.
 	const opaque = "opaque-credential-123"
 	for name, tc := range map[string]struct {
-		args, want string
-		dropped    bool
+		tool, args, want string
 	}{
-		"Write keeps the path":              {`{"file_path":"/x/a.json","content":"{\"credentials\":{\"value\":\"` + opaque + `\"}}"}`, `{"file_path":"/x/a.json"}`, true},
-		"Edit keeps the path":               {`{"file_path":"/x/a.go","old_string":"` + opaque + `","new_string":"x","replace_all":true}`, `{"file_path":"/x/a.go","replace_all":true}`, true},
-		"MultiEdit keeps the path":          {`{"file_path":"/x/a.go","edits":[{"old_string":"` + opaque + `","new_string":"x"}]}`, `{"file_path":"/x/a.go"}`, true},
-		"NotebookEdit keeps the path":       {`{"notebook_path":"n.ipynb","cell_id":"c1","new_source":"print('` + opaque + `')"}`, `{"cell_id":"c1","notebook_path":"n.ipynb"}`, true},
-		"Agent keeps its description":       {`{"description":"scan","prompt":"the token is ` + opaque + `","model":"sonnet","subagent_type":"Explore"}`, `{"description":"scan","model":"sonnet","subagent_type":"Explore"}`, true},
-		"Grep keeps everything":             {`{"pattern":"TODO","path":"src","output_mode":"content","-n":true,"context":2}`, `{"-n":true,"context":2,"output_mode":"content","path":"src","pattern":"TODO"}`, false},
-		"Read keeps everything":             {`{"file_path":"/x","offset":10,"limit":50}`, `{"file_path":"/x","limit":50,"offset":10}`, false},
-		"a listed member holding an object": {`{"path":{"dir":"` + opaque + `"},"pattern":"x"}`, `{"pattern":"x"}`, true},
-		"a listed member holding an array":  {`{"pattern":["` + opaque + `"],"path":"src"}`, `{"path":"src"}`, true},
-		"no members":                        {`{}`, `{}`, false},
+		"Write keeps the path":                   {"Write", `{"file_path":"/x/a.json","content":"{\"credentials\":{\"value\":\"` + opaque + `\"}}"}`, `{"file_path":"/x/a.json"}`},
+		"Edit keeps the path":                    {"Edit", `{"file_path":"/x/a.go","old_string":"` + opaque + `","new_string":"x","replace_all":true}`, `{"file_path":"/x/a.go","replace_all":true}`},
+		"NotebookEdit keeps the path":            {"NotebookEdit", `{"notebook_path":"n.ipynb","cell_id":"c1","new_source":"print('` + opaque + `')"}`, `{"cell_id":"c1","notebook_path":"n.ipynb"}`},
+		"Agent keeps its description":            {"Agent", `{"description":"scan","prompt":"the token is ` + opaque + `","model":"sonnet","subagent_type":"Explore"}`, `{"description":"scan","model":"sonnet","subagent_type":"Explore"}`},
+		"WebFetch keeps the url":                 {"WebFetch", `{"url":"https://example.com/doc","prompt":"find ` + opaque + `"}`, `{"url":"https://example.com/doc"}`},
+		"Bash keeps the command":                 {"Bash", `{"command":"ls","description":"list","timeout":5000,"run_in_background":true}`, `{"command":"ls","description":"list","timeout":5000}`},
+		"Grep keeps everything":                  {"Grep", `{"pattern":"TODO","path":"src","output_mode":"content","-n":true,"context":2}`, `{"-n":true,"context":2,"output_mode":"content","path":"src","pattern":"TODO"}`},
+		"Read keeps everything":                  {"Read", `{"file_path":"/x","offset":10,"limit":50}`, `{"file_path":"/x","limit":50,"offset":10}`},
+		"a listed member holding an object":      {"Grep", `{"path":{"dir":"` + opaque + `"},"pattern":"x"}`, `{"pattern":"x"}`},
+		"a listed member holding an array":       {"Grep", `{"pattern":["` + opaque + `"],"path":"src"}`, `{"path":"src"}`},
+		"no members":                             {"Bash", `{}`, `{}`},
+		"an MCP tool records nothing":            {"mcp__gh__create_issue", `{"title":"bug","description":"the token is ` + opaque + `"}`, ""},
+		"a tool of another name records nothing": {"MultiEdit", `{"file_path":"/x/a.go","edits":[{"old_string":"` + opaque + `","new_string":"x"}]}`, ""},
+		"TodoWrite records nothing":              {"TodoWrite", `{"todos":[{"content":"` + opaque + `","status":"pending"}]}`, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newContentCollector(4096)
-			c.Handle(agentruntime.ToolUseEvent{Name: "Tool", Summary: "s", Arguments: tc.args})
+			c.Handle(agentruntime.ToolUseEvent{Name: tc.tool, Summary: "s", Arguments: tc.args})
 
 			res := c.Result("stop")
-			assert.Contains(t, res.OutputMessages, `"arguments":`+tc.want)
+			part := partAt(t, decodeOutputMessages(t, res.OutputMessages), 0)
+			if tc.want == "" {
+				assert.NotContains(t, part, "arguments")
+			} else {
+				assert.Contains(t, res.OutputMessages, `"arguments":`+tc.want)
+			}
 			assert.NotContains(t, res.OutputMessages, opaque)
-			assert.Contains(t, res.OutputMessages, `"summary":"s"`, "nothing found a secret")
+			assert.Equal(t, "s", part["summary"], "nothing found a secret")
 			assert.Empty(t, res.Findings)
-			assert.Equal(t, tc.dropped, res.Truncated)
-			assert.Equal(t, tc.dropped, strings.Contains(res.OutputMessages, `"fullsend.truncated":true`))
-			assert.Equal(t, tc.dropped, res.DroppedBytes > 0, "a dropped member is charged")
+			assert.False(t, res.Truncated, "a member the list leaves out is policy, not loss")
+			assert.NotContains(t, part, "fullsend.truncated")
+			assert.Zero(t, res.DroppedBytes)
 		})
 	}
-	t.Run("nothing listed records no arguments", func(t *testing.T) {
-		c := newContentCollector(4096)
-		c.Handle(agentruntime.ToolUseEvent{Name: "TodoWrite", Summary: "s", Arguments: `{"todos":[{"content":"` + opaque + `","status":"pending"}]}`})
-
-		res := c.Result("stop")
-		part := partAt(t, decodeOutputMessages(t, res.OutputMessages), 0)
-		assert.NotContains(t, part, "arguments")
-		assert.Equal(t, "s", part["summary"])
-		assert.Equal(t, true, part["fullsend.truncated"])
-		assert.NotContains(t, res.OutputMessages, opaque)
-	})
 }
 
-func TestContentCollector_DroppedArgumentsAreScannedAndCharged(t *testing.T) {
+func TestContentCollector_DroppedMembersAreScannedAndNotCharged(t *testing.T) {
 	// Discarded content is redacted first, so a secret in a member that
 	// is not recorded still counts — and costs the summary, as a secret
-	// found anywhere in the arguments does — and the member is charged as
-	// the redacted text it was scanned as.
+	// found anywhere in the arguments does — but the member is neither
+	// charged nor marked: leaving it out is the list's policy, and the
+	// markers mean loss.
 	token := "ghp_" + strings.Repeat("r", 36)
-	for name, tc := range map[string]struct {
-		args    string
-		charged int
-	}{
-		"a file body":                       {`{"file_path":"/x","content":"echo ` + token + `"}`, len("echo ghp_...")},
-		"a listed member holding an object": {`{"file_path":"/x","path":{"t":"` + token + `"}}`, len(`{"t":"ghp_..."}`)},
-		"a number outside the list":         {`{"file_path":"/x","pin":12345678}`, len("12345678")},
+	for name, args := range map[string]string{
+		"a file body":                       `{"file_path":"/x","content":"echo ` + token + `"}`,
+		"a listed member holding an object": `{"file_path":"/x","path":{"t":"` + token + `"}}`,
+		"a number outside the list":         `{"file_path":"/x","pin":12345678}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newContentCollector(4096)
-			c.Handle(agentruntime.ToolUseEvent{Name: "Write", Summary: "/x", Arguments: tc.args})
+			c.Handle(agentruntime.ToolUseEvent{Name: "Write", Summary: "/x", Arguments: args})
 
 			res := c.Result("stop")
 			assert.NotContains(t, res.OutputMessages, token[4:])
 			assert.Contains(t, res.OutputMessages, `"arguments":{"file_path":"/x"}`)
-			assert.Equal(t, tc.charged, res.DroppedBytes)
-			assert.True(t, res.Truncated)
+			assert.Zero(t, res.DroppedBytes)
+			assert.False(t, res.Truncated)
+			assert.NotContains(t, res.OutputMessages, `"fullsend.truncated"`)
 			if strings.Contains(name, "number") {
 				assert.Empty(t, res.Findings)
 				assert.Contains(t, res.OutputMessages, `"summary":"/x"`)
@@ -229,6 +228,101 @@ func TestContentCollector_DroppedArgumentsAreScannedAndCharged(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestContentCollector_AURLsUserinfoQueryAndFragmentAreMasked(t *testing.T) {
+	// No pattern is written for a password before a host, a presigned
+	// signature or an access token in a query string, or a token behind a
+	// fragment, and the semantic conventions say url.full must not carry
+	// userinfo and should redact signature query values. redactText masks
+	// them in every recorded string, last — after the normalizer folds a
+	// compatibility '？' or '＠' and the patterns mask a token in the path —
+	// counts one finding, which costs a call its summary, and re-encodes
+	// nothing.
+	const pw = "hunter2hunter2"
+	fw := func(r rune) string { return string(r) }
+	ghp := "ghp_" + strings.Repeat("a", 36)
+	var ghpFull strings.Builder
+	for _, r := range ghp[4:] {
+		ghpFull.WriteRune(r + 0xfee0)
+	}
+	for name, tc := range map[string]struct {
+		tool, args, want string
+	}{
+		"a password before the host":      {"WebFetch", `{"url":"https://alice:` + pw + `@example.com/repo"}`, `{"url":"https://***@example.com/repo"}`},
+		"a presigned query":               {"WebFetch", `{"url":"https://b.s3.amazonaws.com/k?X-Amz-Credential=AKIA` + pw + `&X-Amz-Signature=` + pw + `"}`, `{"url":"https://b.s3.amazonaws.com/k?***"}`},
+		"an access token in the query":    {"Bash", `{"command":"curl 'https://api.example.com/v1/me?access_token=` + pw + `' -s"}`, `{"command":"curl 'https://api.example.com/v1/me?*** -s"}`},
+		"a token in a clone URL":          {"Bash", `{"command":"git clone https://x-access-token:` + pw + `@github.com/o/r.git /tmp/r"}`, `{"command":"git clone https://***@github.com/o/r.git /tmp/r"}`},
+		"a token behind the fragment":     {"Bash", `{"command":"open https://app.example.com/cb#access_token=` + pw + `"}`, `{"command":"open https://app.example.com/cb#***"}`},
+		"a password quoted for the shell": {"Bash", `{"command":"git clone https://deploy:'` + pw + `'@git.example.com/o/r"}`, `{"command":"git clone https://***@git.example.com/o/r"}`},
+		"a query quoted half-way":         {"Bash", `{"command":"curl 'https://h.example.com/x'?token=` + pw + `"}`, `{"command":"curl 'https://h.example.com/x'?***"}`},
+		"a URL nested in another's path":  {"Bash", `{"command":"curl https://proxy.example.com/https://u:` + pw + `@h.example.com/x"}`, `{"command":"curl https://***@h.example.com/x"}`},
+		"a fullwidth question mark":       {"Bash", `{"command":"curl https://api.example.com/v1/me` + fw(0xff1f) + `access_token=` + pw + `"}`, `{"command":"curl https://api.example.com/v1/me?***"}`},
+		"a fullwidth at sign":             {"Bash", `{"command":"git clone https://x-access-token` + fw(0xff1a) + pw + fw(0xff20) + `github.com/o/r"}`, `{"command":"git clone https://***@github.com/o/r"}`},
+		"a zero-width split scheme":       {"Bash", `{"command":"curl https:` + fw(0x200b) + `//h.example.com/p?access_token=` + pw + `"}`, `{"command":"curl https://h.example.com/p?***"}`},
+		"a fullwidth token in the path":   {"Bash", `{"command":"curl https://h.example.com/ghp_` + ghpFull.String() + `?x=1"}`, `{"command":"curl https://h.example.com/ghp_...?***"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newContentCollector(4096)
+			c.Handle(agentruntime.ToolUseEvent{Name: tc.tool, Summary: "s", Arguments: tc.args})
+
+			res := c.Result("stop")
+			assert.Contains(t, res.OutputMessages, `"arguments":`+tc.want)
+			assert.NotContains(t, res.OutputMessages, pw)
+			assert.NotContains(t, res.OutputMessages, ghp[4:])
+			assert.NotContains(t, res.OutputMessages, "%EF", "nothing is re-encoded")
+			assert.NotContains(t, res.OutputMessages, `"summary"`, "the summary was cut from the same member")
+			urls := 0
+			for _, f := range res.Findings {
+				if f.Scanner == "url" {
+					urls++
+				}
+			}
+			assert.Equal(t, 1, urls, "one finding for the string")
+		})
+	}
+	t.Run("an Agent prompt's URL costs the summary cut from it", func(t *testing.T) {
+		c := newContentCollector(4096)
+		c.Handle(agentruntime.ToolUseEvent{Name: "Agent", Summary: "Clone https://deploy:" + pw + "@git.example.com/o/r and",
+			Arguments: `{"description":"clone","prompt":"Clone https://deploy:` + pw + `@git.example.com/o/r and read it"}`})
+
+		res := c.Result("stop")
+		assert.Contains(t, res.OutputMessages, `"arguments":{"description":"clone"}`)
+		assert.NotContains(t, res.OutputMessages, pw)
+		assert.NotContains(t, res.OutputMessages, `"summary"`)
+	})
+	t.Run("a URL in a tool result or in text", func(t *testing.T) {
+		c := newContentCollector(4096)
+		c.Handle(agentruntime.TextEvent{Text: "pushing to https://deploy:" + pw + "@git.example.com/o/r now"})
+		c.Handle(agentruntime.ToolResultEvent{ID: "toolu_01", Result: "origin\thttps://deploy:" + pw + "@git.example.com/o/r (fetch)"})
+
+		res := c.Result("stop")
+		assert.Contains(t, res.OutputMessages, `"content":"pushing to https://***@git.example.com/o/r now"`)
+		assert.Contains(t, res.OutputMessages, `"response":"origin\thttps://***@git.example.com/o/r (fetch)"`)
+		assert.NotContains(t, res.OutputMessages, pw)
+	})
+	t.Run("a URL with none of them is kept as written", func(t *testing.T) {
+		c := newContentCollector(4096)
+		c.Handle(agentruntime.ToolUseEvent{Name: "WebFetch", Summary: "s", Arguments: `{"url":"https://example.com/docs/a.html"}`})
+
+		res := c.Result("stop")
+		assert.Contains(t, res.OutputMessages, `"arguments":{"url":"https://example.com/docs/a.html"}`)
+		assert.Contains(t, res.OutputMessages, `"summary":"s"`)
+		assert.Empty(t, res.Findings)
+	})
+}
+
+func TestContentCollector_AToolTheListDoesNotNameRecordsNoEmptyObject(t *testing.T) {
+	// `{}` under a name the list does not name is still nothing of that
+	// tool's input, and a name that redacts away is never one the list
+	// names: neither part carries arguments.
+	c := newContentCollector(4096)
+	c.Handle(agentruntime.ToolUseEvent{Name: "mcp__x__y", Summary: "s", Arguments: `{}`})
+	c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: string(rune(0x200B)), Arguments: `{}`})
+
+	res := c.Result("stop")
+	assert.NotContains(t, res.OutputMessages, "arguments")
+	assert.NotContains(t, res.OutputMessages, "toolu_01", "a nameless part with no summary is not kept")
 }
 
 func TestContentCollector_AStringTheNormalizerStrippedIsMaskedWhole(t *testing.T) {
@@ -445,13 +539,13 @@ func TestContentCollector_ReplacesRunnerEnvValues(t *testing.T) {
 		"API_KEY":    "short",               // under minRedactableSecretLen
 	})
 	c.Handle(agentruntime.TextEvent{Text: "pushing " + secret + " to feature-branch-name, short"})
-	c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: "Bash", Arguments: `{"command":"git push https://x:` + secret + `@host/repo"}`})
+	c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: "Bash", Arguments: `{"command":"deploy --token ` + secret + ` origin"}`})
 	c.Handle(agentruntime.ToolResultEvent{ID: "toolu_" + secret, Result: "remote: " + secret})
 
 	res := c.Result("stop")
 	assert.NotContains(t, res.OutputMessages, secret)
 	assert.Contains(t, res.OutputMessages, `"content":"pushing [REDACTED:PUSH_TOKEN] to feature-branch-name, short"`)
-	assert.Contains(t, res.OutputMessages, `"arguments":{"command":"git push https://x:[REDACTED:PUSH_TOKEN]@host/repo"}`)
+	assert.Contains(t, res.OutputMessages, `"arguments":{"command":"deploy --token [REDACTED:PUSH_TOKEN] origin"}`)
 	assert.Contains(t, res.OutputMessages, `{"type":"tool_call_response","response":"remote: [REDACTED:PUSH_TOKEN]"}`, "an id that holds a value is dropped")
 	assert.Equal(t, 4, runnerEnvFindings(res), "one per replaced key per pass per scanned string")
 	assert.Len(t, res.Findings, 4)
@@ -550,14 +644,14 @@ func TestContentCollector_DropsTheSummaryWhenTheArgumentsHeldARunnerEnvValue(t *
 	c := newContentCollectorIfEnabled(map[string]string{"PUSH_TOKEN": secret})
 	c.Handle(agentruntime.ToolUseEvent{
 		Name:      "Bash",
-		Summary:   "git push https://x:" + secret[:20] + "…",
-		Arguments: `{"command":"git push https://x:` + secret + `@host/repo"}`,
+		Summary:   "deploy --token " + secret[:20] + "…",
+		Arguments: `{"command":"deploy --token ` + secret + ` origin"}`,
 	})
 	c.Handle(agentruntime.ToolUseEvent{Name: "Bash", Summary: "ls", Arguments: `{"command":"ls"}`})
 
 	res := c.Result("stop")
 	assert.NotContains(t, res.OutputMessages, secret[:5])
-	assert.Contains(t, res.OutputMessages, `{"type":"tool_call","name":"Bash","arguments":{"command":"git push https://x:[REDACTED:PUSH_TOKEN]@host/repo"}}`)
+	assert.Contains(t, res.OutputMessages, `{"type":"tool_call","name":"Bash","arguments":{"command":"deploy --token [REDACTED:PUSH_TOKEN] origin"}}`)
 	assert.Contains(t, res.OutputMessages, `"summary":"ls"`, "a call whose arguments held no value keeps its summary")
 }
 
@@ -637,31 +731,26 @@ func TestContentCollector_ReplacesARunnerEnvValueSentAsANumber(t *testing.T) {
 	assert.Contains(t, res.OutputMessages, `"arguments":{"timeout":42}`)
 	assert.NotContains(t, res.OutputMessages, digits)
 	assert.Equal(t, 1, runnerEnvFindings(res))
-	assert.Equal(t, len("[REDACTED:DEPLOY_PASSWORD]"), res.DroppedBytes)
+	assert.Zero(t, res.DroppedBytes, "a member the list leaves out is not charged")
 }
 
-func TestContentCollector_ANameRedactedAwayTakesItsArgumentsAlong(t *testing.T) {
-	const args = `{"command":"ls"}`
+func TestContentCollector_ANameRedactedAwayNeverHadArguments(t *testing.T) {
+	// Arguments are kept only under a tool's exact name, and those names
+	// are plain words no scan touches: a name that redacts to nothing was
+	// never one of them, so nothing is lost with it — the part survives
+	// with its summary, unmarked and uncharged.
+	name := string(rune(0x200B))
 	c := newContentCollector(4096)
-	c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: "\u200B", Arguments: args})
+	c.Handle(agentruntime.ToolUseEvent{Name: name, Summary: "ls", Arguments: `{"command":"ls"}`})
+	c.Handle(agentruntime.ToolUseEvent{ID: "toolu_01", Name: name, Arguments: `{"command":"ls"}`})
 
 	res := c.Result("stop")
-	assert.Empty(t, res.OutputMessages, "nothing is left of the part")
-	assert.Len(t, res.Findings, 1)
-	assert.True(t, res.Truncated)
-	assert.Equal(t, len(args), res.DroppedBytes)
-}
-
-func TestContentCollector_ANameRedactedAwayMarksTheCallItsSummaryKeeps(t *testing.T) {
-	const args = `{"command":"ls"}`
-	c := newContentCollector(4096)
-	c.Handle(agentruntime.ToolUseEvent{Name: "\u200B", Summary: "ls", Arguments: args})
-
-	res := c.Result("stop")
-	assert.Contains(t, res.OutputMessages, `"summary":"ls","fullsend.truncated":true`)
+	assert.Contains(t, res.OutputMessages, `{"type":"tool_call","summary":"ls"}`)
 	assert.NotContains(t, res.OutputMessages, "arguments")
-	assert.True(t, res.Truncated)
-	assert.Equal(t, len(args), res.DroppedBytes)
+	assert.NotContains(t, res.OutputMessages, "toolu_01", "nothing is left of the part without a summary")
+	assert.Len(t, res.Findings, 2)
+	assert.False(t, res.Truncated)
+	assert.Zero(t, res.DroppedBytes)
 }
 
 func TestContentCollector_DroppedBytesCountArgumentsOnEveryDropPath(t *testing.T) {
@@ -699,13 +788,13 @@ func TestContentCollector_ADroppedResultIsReportedWithNoPartsLeft(t *testing.T) 
 }
 
 func TestContentCollector_ArgumentsAreScannedOnce(t *testing.T) {
-	// A masked connection string still matches its own pattern, so a second
-	// pass over redacted arguments would count the same secret twice.
+	// A connection string counts the pattern's finding and the URL mask's,
+	// once each, though the call is evicted before Result.
 	c := newContentCollector(64)
 	c.Handle(agentruntime.ToolUseEvent{Name: "Bash", Arguments: `{"command":"psql postgres://u:hunter2hunter2@db/x"}`})
 	c.Handle(agentruntime.TextEvent{Text: strings.Repeat("x", 200)}) // evicts the call
 
-	assert.Len(t, c.Result("stop").Findings, 1)
+	assert.Equal(t, []string{"db_connection_password", "url_masked"}, findingNames(c.Result("stop").Findings))
 }
 
 func TestContentCollector_FullwidthQuotesCannotAddAMember(t *testing.T) {
@@ -1208,9 +1297,9 @@ func TestContentCollector_RedactionUnderCapDoesNotMarkTruncated(t *testing.T) {
 
 func TestContentCollector_CappedResultScannedOnce(t *testing.T) {
 	// The cap path already scans the response; Result must not scan the
-	// same bytes again — a re-scan re-matches masked db-URL passwords
-	// (supe... still fits the 4+-char capture) and double-counts the
-	// finding.
+	// same bytes again. The URL mask leaves nothing a second pass would
+	// match, so this pins the count: the pattern's finding and the URL
+	// mask's, once each.
 	c := newContentCollector(maxContentBytes)
 	c.Handle(agentruntime.ToolResultEvent{
 		ID:     "toolu_db",
@@ -1219,8 +1308,7 @@ func TestContentCollector_CappedResultScannedOnce(t *testing.T) {
 
 	res := c.Result("stop")
 	assert.NotContains(t, res.OutputMessages, "supersecret")
-	assert.Len(t, res.Findings, 1,
-		"one secret must yield exactly one finding, not one per scan")
+	assert.Equal(t, []string{"db_connection_password", "url_masked"}, findingNames(res.Findings))
 }
 
 func TestContentCollector_CoalescedAfterPreTrimStillScanned(t *testing.T) {
@@ -1859,4 +1947,12 @@ func TestAttachInput_WorstCaseFeedbackSharesTheEncodedCeiling(t *testing.T) {
 		"both attributes ride one span; together they stay within the proven size")
 	assert.Greater(t, len(in)+len(out), maxEncodedContentBytes-100,
 		"the output keeps everything the input left")
+}
+
+func findingNames(fs []security.Finding) []string {
+	names := make([]string, 0, len(fs))
+	for _, f := range fs {
+		names = append(names, f.Name)
+	}
+	return names
 }

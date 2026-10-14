@@ -19,8 +19,9 @@ import (
 // a span exports, no 12-byte run of a known secret's body appears, read
 // three ways — as raw bytes, after the normalizer, and after decoding the
 // record's JSON with every string walked. A known secret is one a
-// SecretRedactor pattern matches, or a runner env / provider-only env
-// value the literal pass holds.
+// SecretRedactor pattern matches, a runner env / provider-only env
+// value the literal pass holds, or what a URL carries before its host or
+// after its path — userinfo, a query, a fragment.
 //
 // Named exclusions, skipped below with the reason beside them and listed
 // in docs/guides/dev/tracing.md ("Guarantee and limits"): an env value
@@ -88,6 +89,20 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 				out[i] = secret{name, "AWS_SECRET_ACCESS_KEY=" + b, b, false}
 			case "auth_header":
 				out[i] = secret{name, "Authorization: Bearer " + b[:32], b[:32], false}
+			case "url_userinfo":
+				out[i] = secret{name, "https://deploy:" + b[:16] + "@git.example.com/o/r", b[:16], false}
+			case "url_userinfo_quoted": // shell quoting around the password
+				out[i] = secret{name, "https://deploy:'" + b[:16] + "'@git.example.com/o/r", b[:16], false}
+			case "url_userinfo_fullwidth": // a colon and an at sign the normalizer folds
+				out[i] = secret{name, "https://deploy" + string(rune(0xff1a)) + b[:16] + string(rune(0xff20)) + "git.example.com/o/r", b[:16], false}
+			case "url_query":
+				out[i] = secret{name, "https://h.example.com/x?access_token=" + b[:16], b[:16], false}
+			case "url_query_fullwidth": // a question mark the normalizer folds
+				out[i] = secret{name, "https://h.example.com/x" + string(rune(0xff1f)) + "access_token=" + b[:16], b[:16], false}
+			case "url_fragment":
+				out[i] = secret{name, "https://app.example.com/cb#access_token=" + b[:16], b[:16], false}
+			case "url_nested": // a URL in another's path
+				out[i] = secret{name, "https://proxy.example.com/https://u:" + b[:16] + "@h.example.com/x", b[:16], false}
 			}
 		}
 		return out
@@ -96,6 +111,8 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 		mk("github_pat", 100), mk("aws_access_key", 200), mk("runner_env", 300), mk("provider_env", 400),
 		mk("private_key", 500), mk("db_connection_password", 600), mk("json_field", 700),
 		mk("env_assignment", 800), mk("auth_header", 900),
+		mk("url_userinfo", 1000), mk("url_userinfo_quoted", 1100), mk("url_userinfo_fullwidth", 1200),
+		mk("url_query", 1300), mk("url_query_fullwidth", 1400), mk("url_fragment", 1500), mk("url_nested", 1600),
 	}
 
 	// Wrappings over the secret text; the ones that insert a character

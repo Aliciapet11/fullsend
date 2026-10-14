@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -152,8 +153,20 @@ func attachContent(span trace.Span, res contentResult) {
 	if res.DroppedBytes > 0 {
 		attrs = append(attrs, attribute.Int("fullsend.content.dropped_bytes", res.DroppedBytes))
 	}
-	if n := len(res.Findings); n > 0 {
+	// What was masked or rewritten for its shape — the normalizer's folds,
+	// removals, strippings and invalid UTF-8, a URL's userinfo, query or
+	// fragment — is counted apart from what matched a known secret.
+	sanitized := 0
+	for _, f := range res.Findings {
+		if f.Scanner == "unicode_normalizer" || f.Scanner == "url" {
+			sanitized++
+		}
+	}
+	if n := len(res.Findings) - sanitized; n > 0 {
 		attrs = append(attrs, attribute.Int("fullsend.content.redactions", n))
+	}
+	if sanitized > 0 {
+		attrs = append(attrs, attribute.Int("fullsend.content.sanitizations", sanitized))
 	}
 	if len(attrs) > 0 {
 		span.SetAttributes(attrs...)
@@ -237,7 +250,7 @@ type contentPart struct {
 	// content-bearing (an errored empty result is signal, not absence)
 	// and accounts a fixed footprint. Truncated marks a part whose bulk
 	// field was cut, so a consumer never reads a fragment as a whole
-	// result, and a tool_call whose arguments were dropped; it is set by
+	// result, and a tool_call whose arguments were dropped whole; it is set by
 	// the collector's own cuts and by parser-side loss (Partial,
 	// Oversized), and stays outside the accounting except for an oversized
 	// stand-in's fixed footprint (see oversized).
@@ -349,15 +362,17 @@ type contentResult struct {
 	OutputMessages string
 	// DroppedBytes counts raw part bytes removed by the size budget
 	// (content, tool name, summary, tool response, and id bytes alike) and
-	// the bytes of dropped tool arguments: as re-encoded JSON (on a key
+	// the bytes of arguments dropped whole: as re-encoded JSON (on a key
 	// collision, without the member the later key in sorted order
-	// replaced), or as
-	// redacted text when they were not one JSON value.
+	// replaced) when the bound dropped them, or
+	// as redacted text when they were not one JSON object. A member the
+	// list leaves out is policy, not loss, and is not counted.
 	DroppedBytes int
 	// Truncated reports whether the budget cut or dropped anything, a tool
-	// call's arguments were dropped (toolArguments, or Result when the name
-	// redacted away; a kept part is marked), or a kept tool result was a
-	// parser-side fragment (its part is marked).
+	// call's arguments were dropped whole (toolArguments; a kept part is
+	// marked), or a kept tool
+	// result was a parser-side fragment (its part is marked). A member
+	// the list leaves out does not set it.
 	Truncated bool
 	// Findings are the security findings raised during redaction.
 	Findings []security.Finding
@@ -383,7 +398,7 @@ type contentCollector struct {
 	total     int
 	// evicted counts bytes discarded before Result's budget runs: old
 	// parts and a lone oversized part's head (evictOverflow), the head a
-	// tool result loses to maxToolResultBytes, and dropped tool arguments
+	// tool result loses to maxToolResultBytes, and arguments dropped whole
 	// (toolArguments).
 	// Eviction keeps memory bounded on long sessions by approximating the
 	// Result budget on sizes as accumulated — pre-redaction — so it can
@@ -423,7 +438,7 @@ func (c *contentCollector) Handle(evt agentruntime.AgentEvent) {
 			// alone must not keep a nameless call, nor charge for one that
 			// appendPart then refuses.
 			scanned := len(c.findings)
-			p.Arguments, p.Truncated = c.toolArguments(e.Arguments)
+			p.Arguments, p.Truncated = c.toolArguments(e.Name, e.Arguments)
 			if slices.ContainsFunc(c.findings[scanned:], revealing) {
 				// The parser cut the summary out of these arguments
 				// before anything scanned it, so a secret found in them,
@@ -593,15 +608,10 @@ func (c *contentCollector) Result(finishReason string) contentResult {
 		if bulk != &p.Response {
 			p.Response = c.redact(p.Response, &res.Findings)
 		}
+		// A name that redacts to nothing never had arguments: they are
+		// kept only under a tool's exact name (recordedArguments), plain
+		// words no scan touches.
 		p.Name = c.redact(p.Name, &res.Findings)
-		if p.Name == "" && p.Arguments != nil {
-			// As in Handle, for a name that redacts to nothing — but these
-			// arguments were accepted, so losing them is charged and
-			// marked. Ones Handle had already dropped stay as they were.
-			res.DroppedBytes += len(p.Arguments)
-			res.Truncated = true
-			p.Arguments, p.Truncated = nil, true
-		}
 		p.Summary = c.redact(p.Summary, &res.Findings)
 		p.ID = c.redactID(p.ID, &res.Findings)
 		if contentBytes(p) == 0 {
@@ -758,7 +768,8 @@ func (c *contentCollector) redact(text string, findings *[]security.Finding) str
 // the env has it. An empty result with findings means fully redacted. A
 // string the normalizer stripped an escape sequence or tag characters
 // from (stripped), or that holds invalid UTF-8 or the replacement
-// character a lossy decode leaves, is masked *** whole.
+// character a lossy decode leaves, is masked *** whole. Last, every URL
+// loses its userinfo, query and fragment (maskURLs).
 func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text string, findings *[]security.Finding) string {
 	if text == "" {
 		return text
@@ -791,45 +802,84 @@ func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text s
 		return "***"
 	}
 	if scanned.Sanitized != "" {
-		return replaceEnv(runnerEnv, scanned.Sanitized, findings)
-	}
-	if len(scanned.Findings) > 0 {
+		text = replaceEnv(runnerEnv, scanned.Sanitized, findings)
+	} else if len(scanned.Findings) > 0 {
 		return ""
+	}
+	return maskURLs(text, findings)
+}
+
+// urlRun matches a URL as a scheme, "://" and the rest of the run up to
+// white space — the only end it has, so a quote inside it (a password
+// quoted for the shell, a query quoted half-way) never ends it early.
+var urlRun = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://\S+`)
+
+// maskURLs masks what a URL carries that no pattern is written for:
+// everything after its first '?' or '#' (a presigned signature, an access
+// token, a token in a fragment) and everything from "://" to its last
+// '@' (userinfo, or a URL nested in another's path), as ***, with one
+// finding for a string that had any. It runs last in redactText, on text
+// the normalizer has folded and the patterns have masked, so a
+// compatibility '？' or '＠' is a plain one here, and nothing is
+// re-encoded: the mask only replaces bytes. A token carried in the path
+// itself, as a webhook URL's is, matches no pattern and is kept.
+func maskURLs(text string, findings *[]security.Finding) string {
+	masked := false
+	text = urlRun.ReplaceAllStringFunc(text, func(run string) string {
+		out := run
+		if i := strings.IndexAny(out, "?#"); i >= 0 {
+			out = out[:i+1] + "***"
+		}
+		if s, a := strings.Index(out, "://"), strings.LastIndex(out, "@"); a > s {
+			out = out[:s+3] + "***" + out[a:]
+		}
+		masked = masked || out != run
+		return out
+	})
+	if masked {
+		*findings = append(*findings, security.Finding{Scanner: "url", Name: "url_masked", Severity: "medium",
+			Detail: "a URL's userinfo, query or fragment; masked", Position: -1})
 	}
 	return text
 }
 
-// recordedArguments names the members of a tool call's arguments that
-// the record keeps: paths, patterns, commands, modes and bounds — what a
-// trace needs to say which call was made — and never a file body, an
-// edit, a prompt, a notebook source or a todo list, the members that
-// carry what the agent read or wrote. A member outside the list, or one
-// whose value is an object or an array, is dropped: scanned as text so
-// its findings count, charged and marked, like any other discarded
-// content. Each kept string goes through the text pipeline on its own.
-// The guarantee is then one sentence: the record holds these members of
-// a call, each redacted as text, and nothing else of its input. Claude
-// Code's tools today: Bash (command, description, timeout), Read
-// (file_path, limit, offset), Write, Edit and NotebookEdit (file_path,
-// notebook_path, cell_id, replace_all), Grep and Glob (pattern, path,
-// glob, output_mode, the context flags), WebFetch (url), Agent
-// (description, model, subagent_type), Skill (skill). The reference
-// lists them; a tool that names its path or pattern otherwise records
-// nothing of its input, which is the safe default.
-var recordedArguments = map[string]bool{
-	"-A": true, "-B": true, "-C": true, "-i": true, "-n": true,
-	"cell_id": true, "cell_type": true, "command": true, "context": true,
-	"description": true, "edit_mode": true, "file_path": true, "glob": true,
-	"head_limit": true, "limit": true, "model": true, "multiline": true,
-	"notebook_path": true, "offset": true, "output_mode": true, "path": true,
-	"pattern": true, "replace_all": true, "skill": true, "subagent_type": true,
-	"timeout": true, "type": true, "url": true,
+// recordedArguments names, tool by tool, the members of a call's input
+// that the record keeps: paths, patterns, commands, modes and bounds —
+// what a trace needs to say which call was made. A Write, Edit or
+// NotebookEdit body, an Agent or WebFetch prompt and a todo list are not
+// listed; a member outside the list, or one whose value is an object or
+// an array, is dropped: scanned as text so a secret in it still counts,
+// then left out — the documented policy, so neither charged nor marked;
+// the tool's name says what was not recorded. A tool the list does not
+// name, every mcp__ tool among them, records nothing of its input: on
+// those, description, url or path carry bulk content as often as not.
+// Each kept string goes through the text pipeline on its own. A Bash command is
+// kept whole, up to maxToolArgumentsBytes, so a heredoc or an inline
+// script records what it writes. The guarantee is then one sentence:
+// the record holds these members of these tools, each redacted as text,
+// and nothing else of any call's input. The reference lists them.
+var recordedArguments = map[string]map[string]bool{
+	"Agent": {"description": true, "model": true, "subagent_type": true},
+	"Bash":  {"command": true, "description": true, "timeout": true},
+	"Edit":  {"file_path": true, "replace_all": true},
+	"Glob":  {"path": true, "pattern": true},
+	"Grep": {
+		"-A": true, "-B": true, "-C": true, "-i": true, "-n": true, "context": true, "glob": true,
+		"head_limit": true, "multiline": true, "output_mode": true, "path": true, "pattern": true, "type": true,
+	},
+	"NotebookEdit": {"cell_id": true, "cell_type": true, "edit_mode": true, "notebook_path": true},
+	"Read":         {"file_path": true, "limit": true, "offset": true},
+	"Skill":        {"skill": true},
+	"WebFetch":     {"url": true},
+	"Write":        {"file_path": true},
 }
 
 // toolArguments returns the recorded members of a tool call's arguments
-// (recordedArguments), redacted and encoded again, and whether any of
-// the input was dropped instead. There are none to return when the event
-// carries none, white space only, or JSON null.
+// (recordedArguments, by the tool's name), redacted and encoded again,
+// and whether the input was dropped whole instead. There are none to
+// return when the event carries none, white space only, or JSON null —
+// and none, unmarked, when the list keeps no member of this call or does
+// not name its tool.
 //
 // The input is decoded and each kept string is redacted on its own: the
 // redactor's patterns are written for plain text, and run over serialised
@@ -843,9 +893,8 @@ var recordedArguments = map[string]bool{
 // the replacement character, cannot be walked that way: it is scanned as
 // text so its findings count, then dropped whole and charged.
 // So are arguments whose encoding exceeds maxToolArgumentsBytes, charged
-// as encoded. A dropped member is charged as the redacted text it was
-// scanned as.
-func (c *contentCollector) toolArguments(args string) (json.RawMessage, bool) {
+// as encoded. A member the list leaves out is scanned and not charged.
+func (c *contentCollector) toolArguments(name, args string) (json.RawMessage, bool) {
 	if strings.TrimSpace(args) == "" {
 		return nil, false
 	}
@@ -867,20 +916,21 @@ func (c *contentCollector) toolArguments(args string) (json.RawMessage, bool) {
 		c.evicted += len(c.redact(args, &c.findings))
 		return nil, true
 	}
-	out, dropped := make(map[string]any, len(obj)), false
+	listed := recordedArguments[name]
+	out, filtered := make(map[string]any, len(obj)), false
 	for _, k := range slices.Sorted(maps.Keys(obj)) {
 		switch t := obj[k].(type) {
 		case string:
-			if recordedArguments[k] {
+			if listed[k] {
 				out[k] = c.redact(t, &c.findings)
 				continue
 			}
-			c.evicted += len(c.redact(t, &c.findings))
+			c.redact(t, &c.findings)
 		case map[string]any, []any:
 			enc, _ := json.Marshal(t) // decoded JSON values marshal unconditionally
-			c.evicted += len(c.redact(string(enc), &c.findings))
+			c.redact(string(enc), &c.findings)
 		case json.Number:
-			if recordedArguments[k] {
+			if listed[k] {
 				if r := c.redact(string(t), &c.findings); r != string(t) {
 					out[k] = r // the mask, as the string it is
 				} else {
@@ -888,19 +938,17 @@ func (c *contentCollector) toolArguments(args string) (json.RawMessage, bool) {
 				}
 				continue
 			}
-			c.evicted += len(c.redact(string(t), &c.findings))
-		default: // a boolean, null
-			if recordedArguments[k] {
+			c.redact(string(t), &c.findings)
+		default: // a boolean, null: nothing to scan
+			if listed[k] {
 				out[k] = t
 				continue
 			}
-			enc, _ := json.Marshal(t)
-			c.evicted += len(c.redact(string(enc), &c.findings))
 		}
-		dropped = true
+		filtered = true
 	}
-	if len(out) == 0 && dropped {
-		return nil, true
+	if listed == nil || len(out) == 0 && filtered {
+		return nil, false
 	}
 	enc, err := json.Marshal(out)
 	if err != nil {
@@ -910,7 +958,7 @@ func (c *contentCollector) toolArguments(args string) (json.RawMessage, bool) {
 		c.evicted += len(enc)
 		return nil, true
 	}
-	return enc, dropped
+	return enc, false
 }
 
 var errTrailingInput = errors.New("trailing input after the JSON value")
@@ -931,7 +979,8 @@ func decodeJSON(s string) (any, error) {
 }
 
 // revealing reports a finding that costs a call its summary: any but the
-// normalizer's, which shows a secret was there; the normalizer's stripping
+// normalizer's, which shows a secret — or a URL's userinfo, query or
+// fragment — was there; the normalizer's stripping
 // of content; and invalid UTF-8, after which the arguments were not judged
 // at all — and a summary is cut from a member only that judgement sees
 // whole.

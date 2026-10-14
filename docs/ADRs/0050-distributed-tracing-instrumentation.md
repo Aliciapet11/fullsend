@@ -183,8 +183,10 @@ remains deferred.
 under the content gate, a retry iteration that carries validation feedback
 records the prompt the runner composed as `gen_ai.input.messages`, and
 `tool_call` parts on the message record carry the members of the call's
-arguments that name what was called (a path, a pattern, a command), not a
-file body or a prompt — Claude Code today
+arguments that name what was called (a path, a pattern, a `Bash` command
+whole, which can embed what it writes), not a `Write`, `Edit` or
+`NotebookEdit` body, an `Agent` or `WebFetch` prompt or the input of an
+MCP tool — Claude Code today
 ([#7414](https://github.com/fullsend-ai/fullsend/issues/7414)).
 The rest of the model's input is not recorded
 ([reference](../guides/infrastructure/distributed-tracing.md#content-capture-level-3)).

@@ -132,9 +132,14 @@ prompt the runner composed. Content is redacted for secrets and bounded per iter
 a string that held a terminal colour or title code or tag characters, as most
 coloured CLI output does, or that was not valid UTF-8 or held the replacement character (U+FFFD), is recorded as `***` whole, and so is a retry
 prompt the runner sanitized, or cut at its size bound while it held compatibility
-characters; feedback cut for size alone is still recorded. Content may still contain proprietary code or PII — tool arguments carry the
-commands an agent ran and the paths and patterns it used, never a file body
-or an edit — so make sure your backend's
+characters; feedback cut for size alone is still recorded. Content may still contain proprietary code or PII:
+tool arguments carry the commands an agent ran and the paths and patterns it used.
+A `Write`, `Edit` or `NotebookEdit` body, an `Agent` or `WebFetch` prompt and the
+input of MCP tools are not recorded as arguments, though a tool's result can quote
+what it wrote and a call's summary keeps the first 120 characters of its input;
+a `Bash` command is recorded whole (up to 8 KiB) and can embed the file content
+it writes. A URL anywhere in the record has its userinfo, query and fragment
+masked. Make sure your backend's
 access controls fit before enabling it.
 
 ```bash

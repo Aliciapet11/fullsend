@@ -1533,7 +1533,8 @@ func TestAttachContent_SetsContentAndMarkerAttrs(t *testing.T) {
 		OutputMessages: `[{"role":"assistant","parts":[{"type":"text","content":"hi"}]}]`,
 		DroppedBytes:   7,
 		Truncated:      true,
-		Findings:       []security.Finding{{Severity: "high"}},
+		Findings: []security.Finding{{Severity: "high"},
+			{Scanner: "unicode_normalizer", Name: "fullwidth"}, {Scanner: "unicode_normalizer", Name: "ansi_escape"}, {Scanner: "url", Name: "url_masked"}},
 	})
 	span.End()
 
@@ -1547,7 +1548,8 @@ func TestAttachContent_SetsContentAndMarkerAttrs(t *testing.T) {
 	assert.Contains(t, attrs[attribute.Key("gen_ai.output.messages")].AsString(), `"type":"text"`)
 	assert.Equal(t, int64(7), attrs[attribute.Key("fullsend.content.dropped_bytes")].AsInt64())
 	assert.True(t, attrs[attribute.Key("fullsend.content.truncated")].AsBool())
-	assert.Equal(t, int64(1), attrs[attribute.Key("fullsend.content.redactions")].AsInt64())
+	assert.Equal(t, int64(1), attrs[attribute.Key("fullsend.content.redactions")].AsInt64(), "only what matched a known secret")
+	assert.Equal(t, int64(3), attrs[attribute.Key("fullsend.content.sanitizations")].AsInt64(), "what was masked for its shape, apart")
 }
 
 func TestAttachContent_EmptyResultAddsNothing(t *testing.T) {
