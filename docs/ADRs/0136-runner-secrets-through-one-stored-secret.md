@@ -27,10 +27,10 @@ a user's own tools that is one fixed pair, `JIRA_TOKEN` and `JIRA_USER_EMAIL`,
 which only the `harness-run` job forwards, from a caller the user writes (the
 Jira poller). Any other secret, or Jira on another stage, cannot reach
 `fullsend run`, and the shim is a generated file that setup and
-`repos install` overwrite (#7689, #6359). Forge context now reaches scripts
-through the runner's filtered entity snapshot
-([ADR 0141](0141-deterministic-filtered-entity-context-staging.md)), so the
-remaining need is tools the user picks, such as a third-party review CLI.
+`repos install` overwrite (#7689, #6359). Once the runner's filtered entity
+snapshot ([ADR 0141](0141-deterministic-filtered-entity-context-staging.md),
+accepted but not yet implemented) supplies forge context, the remaining need
+is tools the user picks, such as a third-party review CLI.
 
 Constraints: credentials stay out of the sandbox ([ADR 0017](0017-credential-isolation-for-sandboxed-agents.md)),
 workflow `env:` is infrastructure only ([ADR 0081](0081-reserve-workflow-env-for-infra-plumbing.md)),
