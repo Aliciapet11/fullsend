@@ -1435,6 +1435,7 @@ type gitlabProtectedAccess struct {
 	AccessLevel int  `json:"access_level"`
 	UserID      *int `json:"user_id"`
 	GroupID     *int `json:"group_id"`
+	DeployKeyID *int `json:"deploy_key_id"`
 }
 
 func convertProtectedAccess(levels []gitlabProtectedAccess) []forge.ProtectedBranchAccess {
@@ -1446,6 +1447,9 @@ func convertProtectedAccess(levels []gitlabProtectedAccess) []forge.ProtectedBra
 		}
 		if l.GroupID != nil {
 			a.GroupID = *l.GroupID
+		}
+		if l.DeployKeyID != nil {
+			a.DeployKeyID = *l.DeployKeyID
 		}
 		out = append(out, a)
 	}
