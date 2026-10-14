@@ -456,50 +456,6 @@ func TestUpdateInferenceAuth_Errors(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid manifest repo pattern")
 }
 
-func TestSetDefault_InferenceAuth(t *testing.T) {
-	path := writeInferenceManifest(t, "version: 1\ngithub:\n  repos:\n    - name: acme/a\n")
-
-	for _, key := range []string{"defaults.inference.auth", "github.inference.auth", "gitlab.inference.auth"} {
-		assert.Contains(t, ValidDefaultKeys, key)
-	}
-
-	require.NoError(t, SetDefault(path, "defaults.inference.auth", InferenceAuthVertexWIF))
-	require.NoError(t, SetDefault(path, "github.inference.auth", InferenceAuthOpenAIAPIKey))
-	require.NoError(t, SetDefault(path, "gitlab.inference.auth", InferenceAuthVertexWIF))
-
-	m, err := LoadManifest(context.Background(), path)
-	require.NoError(t, err)
-	assert.Equal(t, InferenceAuthVertexWIF, m.Defaults.Inference.Auth)
-	assert.Equal(t, InferenceAuthOpenAIAPIKey, m.GitHub.Inference.Auth)
-	require.NotNil(t, m.GitLab)
-	assert.Equal(t, InferenceAuthVertexWIF, m.GitLab.Inference.Auth)
-
-	err = SetDefault(path, "github.inference.auth", "openai")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "github.inference.auth")
-
-	require.NoError(t, SetDefault(path, "github.inference.auth", InferenceAuthOpenAIWIF))
-	err = SetDefault(path, "gitlab.inference.auth", InferenceAuthOpenAIWIF)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gitlab.inference.auth")
-	assert.Contains(t, err.Error(), "GitHub only")
-
-	require.NoError(t, SetDefault(path, "defaults.inference.auth", ""))
-	require.NoError(t, SetDefault(path, "github.inference.auth", ""))
-	require.NoError(t, SetDefault(path, "gitlab.inference.auth", ""))
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.NotContains(t, string(data), "inference", "empty value removes the key")
-}
-
-func TestSetDefault_InferenceAuthClearOnMissingSection(t *testing.T) {
-	path := writeInferenceManifest(t, "version: 1\ngithub:\n  repos:\n    - name: acme/a\n")
-	require.NoError(t, SetDefault(path, "gitlab.inference.auth", ""))
-	m, err := LoadManifest(context.Background(), path)
-	require.NoError(t, err)
-	assert.Nil(t, m.GitLab, "clearing must not create a forge section")
-}
-
 // recordingScaffoldCommit records which repositories received scaffold commits.
 type recordingScaffoldCommit struct {
 	mu    sync.Mutex

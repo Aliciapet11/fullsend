@@ -809,6 +809,13 @@ func (m *Manifest) validate(checkInferenceAuth func(key, value string) error) er
 			return fmt.Errorf("gitlab.fullsend_ref %q contains invalid characters; only alphanumeric, dot, underscore, and hyphen are allowed", m.GitLab.FullsendRef)
 		}
 
+		if err := validateRunnerTagElements("gitlab.agent_runner_tags", m.GitLab.AgentRunnerTags); err != nil {
+			return err
+		}
+		if err := validateRunnerTagElements("gitlab.control_runner_tags", m.GitLab.ControlRunnerTags); err != nil {
+			return err
+		}
+
 		if err := m.validatePlatformRepos(ForgeGitLab, m.GitLab, allSeen); err != nil {
 			return err
 		}
@@ -818,6 +825,18 @@ func (m *Manifest) validate(checkInferenceAuth func(key, value string) error) er
 		return err
 	}
 
+	return nil
+}
+
+// validateRunnerTagElements rejects empty or whitespace-only runner tags,
+// which would render as an empty CI tag instead of an untagged job. An empty
+// list is valid.
+func validateRunnerTagElements(key string, tags []string) error {
+	for i, tag := range tags {
+		if strings.TrimSpace(tag) == "" {
+			return fmt.Errorf("%s[%d]: tags must not be empty", key, i)
+		}
+	}
 	return nil
 }
 

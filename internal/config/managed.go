@@ -85,6 +85,13 @@ type ManagedConfig struct {
 	cfg *perRepoConfig
 }
 
+// ManagedConfigSchema returns the struct type whose yaml tags define the
+// fields a managed configuration block accepts. Manifest editors walk it to
+// resolve config paths without keeping a separate list of keys.
+func ManagedConfigSchema() reflect.Type {
+	return reflect.TypeOf(perRepoConfig{})
+}
+
 // IsSet reports whether a config mapping was present in YAML, including
 // an empty mapping (`config: {}`) that opts a repository into managed
 // configuration without supplying values.

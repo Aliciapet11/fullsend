@@ -21,7 +21,7 @@ These flags are inherited by all `repos` subcommands:
 | `fullsend repos install [repos...]` | Converge repos to the desired state defined in a manifest |
 | `fullsend repos uninstall <repos...>` | Tear down fullsend from repos and remove from manifest |
 | `fullsend repos status` | Compare manifest against actual repo state |
-| `fullsend repos set-default <key> <value>` | Set or remove a platform-level default in repos.yaml |
+| `fullsend repos set <path> <value>` | Set or remove any field in repos.yaml (replaces `repos set-default`) |
 
 The former `repos migrate <org>` command (per-org to per-repo migration) has been removed along with per-org installation.
 
@@ -143,20 +143,20 @@ There is no implicit default. When no level selects a method, `repos install` (c
 - **Existing entries** selected by the positional arguments (or every entry, in both forge sections, when no repos are given) are updated in place. A concrete repo that is matched only by a glob entry gets its own explicit entry, copied from that glob, so its siblings keep their selection.
 - `defaults`, forge sections, and unselected entries are never changed. `--dry-run` applies the selection in memory only.
 
-Because the override is kept at repo scope, later `repos status` and `repos install` runs resolve the same desired state without the flag. To change a forge-wide or global selection, use [`repos set-default`](#repos-set-default) with `github.inference.auth`, `gitlab.inference.auth`, or `defaults.inference.auth`.
+Because the override is kept at repo scope, later `repos status` and `repos install` runs resolve the same desired state without the flag. To change a forge-wide or global selection, use [`repos set`](#repos-set) with `github.inference.auth`, `gitlab.inference.auth`, or `defaults.inference.auth`.
 
 #### Upgrading existing manifests
 
 Older manifests have no `inference.auth`, and they are **not** treated as Vertex. Until a selection is added, `repos install` and `repos status` report every affected repo as misconfigured. Before upgrading, add the method each repo actually uses. For example, to keep the previous Vertex WIF behaviour for every repo:
 
 ```bash
-fullsend repos set-default defaults.inference.auth vertex-wif
+fullsend repos set defaults.inference.auth vertex-wif
 ```
 
 Or scope it to one forge or one repo:
 
 ```bash
-fullsend repos set-default gitlab.inference.auth openai-api-key
+fullsend repos set gitlab.inference.auth openai-api-key
 fullsend repos install acme/api --inference-auth openai-api-key
 ```
 
@@ -196,7 +196,7 @@ To upgrade an `openai-api-key` GitLab project that used `OPENAI_API_KEY`:
 
 #### `runtime` and `allowed_remote_resources` moved into `config` (breaking)
 
-`runtime` and `allowed_remote_resources` are no longer sibling keys under `defaults` or a repository entry. Loading a manifest that still uses `defaults.runtime`, `defaults.allowed_remote_resources`, or the repository-entry equivalents fails with an error naming the replacement path (for example `defaults.runtime is no longer supported; move it to defaults.config.runtime`). The old spellings are not migrated automatically and are not accepted as aliases. `repos install` no longer accepts `--runtime` or `--allowed-remote-resources`, and `repos set-default` rejects `defaults.runtime` and `defaults.allowed_remote_resources`; there is no replacement flag.
+`runtime` and `allowed_remote_resources` are no longer sibling keys under `defaults` or a repository entry. Loading a manifest that still uses `defaults.runtime`, `defaults.allowed_remote_resources`, or the repository-entry equivalents fails with an error naming the replacement path (for example `defaults.runtime is no longer supported; move it to defaults.config.runtime`). The old spellings are not migrated automatically and are not accepted as aliases. `repos install` no longer accepts `--runtime` or `--allowed-remote-resources`, and `repos set` rejects `defaults.runtime` and `defaults.allowed_remote_resources` with the replacement path; set `defaults.config.runtime` or `defaults.config.allowed_remote_resources` instead.
 
 To upgrade, move each value under the matching `config` section, then re-run `fullsend repos install`:
 
@@ -850,103 +850,128 @@ fullsend repos uninstall group/subgroup/project
 | `--manifest-only` | `false` | Remove from manifest without tearing down |
 | `--uninstall-only` | `false` | Tear down without removing from manifest |
 
-## `repos set-default`
+## `repos set`
 
-Set or remove a platform-level default in `repos.yaml`. An empty value removes the key. Creates the manifest with `version: 1` if the file does not exist.
+Set or remove any writable field in `repos.yaml`: `defaults`, the `github` and `gitlab` sections, and individual repository entries (concrete or glob), including nested `config` fields and structured values such as lists, objects, and whole entries.
 
 ```bash
-fullsend repos set-default <key> <value>
-fullsend repos set-default github.fullsend_ref v2.5.0
-fullsend repos set-default github.mint_url ""   # removes the key
+fullsend repos set <path> <value>
+fullsend repos set --unset <path>
 ```
 
-`set-default` does not write per-repo config fields. Declare `runtime`, `allowed_remote_resources`, and every other `.fullsend/config.yaml` field by editing `defaults.config`, `github.config`, `gitlab.config`, or a repository entry's `config` in `repos.yaml`. The former keys `defaults.runtime` and `defaults.allowed_remote_resources` are rejected with that guidance, and nothing is written.
+Paths are resolved against the manifest schema, so every field the manifest accepts can be set and there is no separate list of keys. After each edit the whole resulting manifest is validated with the same checks `repos install` uses. A rejected edit leaves the file byte-identical. A successful edit changes only the edited lines and keeps unrelated values, comments, blank lines, and ordering. If the manifest does not exist, `repos set` creates it with `version: 1`. Missing optional parent mappings (for example `defaults.config`) are created as needed.
 
-### Valid keys
+A manifest loaded from an HTTPS URL, or a local file without write permission, is read-only: `repos set` reports `manifest <path> is read-only; apply the equivalent edit to its source, then re-run` and writes nothing.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `defaults.inference.auth` | `vertex-wif`, `openai-api-key`, or `openai-wif` | Global [inference authentication selection](#inference-authentication-selection); forge-section and per-entry `inference.auth` override it |
-| `defaults.vendor` | `true` or `false` | Vendor fullsend binary and content into each repo for offline CI; per-entry `vendor` overrides it. Currently GitHub-only; GitLab CI templates do not yet reference the vendored binary. |
-| `defaults.config_base.source` | local path or HTTPS URL | Configuration preset written as `.fullsend/config.base.yaml`; a per-entry `config_base.source` overrides it (`none` disables inheritance: the desired state is then no base file, and an existing one blocks install and shows as drift). A local path is resolved relative to `repos.yaml`'s directory and must not escape it; manifests loaded from an HTTPS URL must use an HTTPS preset URL. Fetch/validation semantics otherwise match `github setup --config`. |
-| `defaults.config_base.sha256` | 64-character SHA-256 hex | Optional digest that validates the fetched preset; a per-entry `config_base.sha256` overrides it (`none` skips validation). Same semantics as `github setup --config-hash`. |
-| `github.url` | URL | GitHub instance URL (default: `https://github.com`) |
-| `github.mint_url` | URL | Token mint service URL (defaults to `https://mint.fullsend.sh` in public mode) |
-| `github.mint_mode` | `public` or `private` | Controls the default mint URL: `public` defaults to `https://mint.fullsend.sh`; `private` requires an explicit `mint_url` (default: `public`) |
-| `github.fullsend_ref` | ref string | Git ref to pin in scaffold workflow YAML |
-| `github.inference.auth` | `vertex-wif`, `openai-api-key`, or `openai-wif` | Inference authentication selection for every GitHub repo; overrides `defaults.inference.auth`, and a per-entry value overrides it |
-| `gitlab.url` | URL | GitLab instance URL |
-| `gitlab.fullsend_ref` | ref string | Git ref to pin in scaffold CI template files |
-| `gitlab.inference.auth` | `vertex-wif` or `openai-api-key` | Inference authentication selection for every GitLab repo; overrides `defaults.inference.auth`, and a per-entry value overrides it |
-| `gitlab.agent_runner_tags` | comma-separated tags | CI runner tags for routing agent (data-plane) jobs |
-| `gitlab.control_runner_tags` | comma-separated tags | CI runner tags for routing control-plane jobs (poll today). Independent of `gitlab.agent_runner_tags`; unset renders `tags: []` (untagged) |
-| `gitlab.runner_tags` | comma-separated tags | Deprecated alias for `gitlab.agent_runner_tags`. Still accepted; rewrites persist `agent_runner_tags`. On-disk persistence happens on `repos set-default`, `repos install` (only when it appends new manifest entries), and `repos uninstall` (only when it removes entries) — not `repos converge`, which resolves the alias in memory for rendering but does not rewrite `repos.yaml` |
+### Path syntax
+
+| Form | Example | Meaning |
+|------|---------|---------|
+| Dot-separated field names | `defaults.config.runtime`, `github.mint_url`, `gitlab.agent_runner_tags` | A field at `defaults`, forge-section, or nested scope |
+| Repository selector | `github.repos["acme/api"]` | The repository entry named exactly `acme/api` |
+| Field under an entry | `github.repos["acme/api"].config.runtime` | A field of an existing repository entry |
+| Glob entry | `github.repos["acme/*"].inference.auth` | The glob entry whose `name` is literally `acme/*` |
+| Map key selector | `defaults.config.models.aliases["opus"]` | A key of a map-valued field (a plain `.opus` also works) |
+
+The selector is a double-quoted string with Go/JSON escapes, so entry names may contain dots, `*`, `?`, brackets, and other path characters without ambiguity. Selectors match entry names exactly, including case; a case-only mismatch is reported with the existing spelling. Quote the whole path in your shell, for example `'github.repos["acme/api"].config.runtime'`.
+
+The path identifies the forge, so there is no `--forge` flag. Platform-specific fields are checked against the forge: `gitlab.mint_url`, `gitlab.app_set`, and `github.agent_runner_tags` are rejected with an error that names the field.
+
+### Repository entries
+
+- **Nested paths require the entry to exist.** `github.repos["acme/api"].config.runtime` fails without writing if there is no entry named exactly `acme/api`, so a typo cannot enroll a repository.
+- **Whole-entry paths create or replace.** Setting `github.repos["acme/api"]` to an object creates the entry (appending it to the list) or replaces an existing entry in place. The selector supplies `name`; a `name` in the value must match it.
+- **Whole lists.** `github.repos` and `gitlab.repos` can be set to a list of entries or removed with `--unset`.
+- Duplicate entries (including the same repository in both forge sections), a mismatched name, and removing `name` are rejected.
+
+### Values
+
+Values are parsed according to the type of the target field:
+
+| Field type | Accepted value | Notes |
+|------------|----------------|-------|
+| String | Any text, taken literally | `none` and `""` are stored as strings. `none` keeps its meaning as the explicit inheritance stop where the field supports it. |
+| Boolean | `true` or `false` | `false` is stored explicitly and is distinct from an absent key |
+| Number | A number | |
+| List | YAML or JSON list, e.g. `'[gpu, linux]'` or `'["gpu"]'` | `[]` stores an explicit empty list |
+| Object | YAML or JSON mapping, e.g. `'{"runtime": "claude"}'` | `{}` stores an explicit empty mapping. Unknown keys, YAML aliases, and YAML merge keys (`<<`) are rejected. |
+
+An empty argument never deletes a key. Use `--unset <path>` to remove a key; removing a key that is already absent is not an error and leaves the file unchanged. Removing the last key of a mapping leaves an explicit empty mapping (for example `config: {}`).
+
+Unknown, misspelled, or wrong-scope paths fail with an error that names the path, lists the valid fields at that scope, and points to the scope where the field is valid when there is one (for example `defaults.mint_url` points to `github.mint_url`). `defaults.runtime`, `defaults.allowed_remote_resources`, and the repository-entry equivalents point to the matching `config` path. `version` cannot be changed, and `gitlab.runner_tags` (the deprecated alias of `gitlab.agent_runner_tags`) can only be removed.
 
 ### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-f`, `--manifest` | `repos.yaml` | Path to repos.yaml |
+| `--unset` | `false` | Remove the key at `<path>` instead of setting it |
 
 ### Examples
 
 Select Vertex WIF inference authentication for every repo, and OpenAI API key authentication for GitLab repos:
 
 ```bash
-fullsend repos set-default defaults.inference.auth vertex-wif
-fullsend repos set-default gitlab.inference.auth openai-api-key
+fullsend repos set defaults.inference.auth vertex-wif
+fullsend repos set gitlab.inference.auth openai-api-key
 ```
 
-Set GitLab agent runner tags:
+Set a per-repo config field for every repo, for one forge, or for one repo:
 
 ```bash
-fullsend repos set-default gitlab.agent_runner_tags fullsend-agent
+fullsend repos set defaults.config.runtime claude
+fullsend repos set github.config.allowed_remote_resources '["https://github.com/acme/"]'
+fullsend repos set 'github.repos["acme/api"].config.runtime' pi
 ```
 
-Set multiple agent runner tags:
+Add a repository entry, or replace an existing one:
 
 ```bash
-fullsend repos set-default gitlab.agent_runner_tags "fullsend-agent,gpu-runner"
+fullsend repos set 'github.repos["acme/api"]' '{"inference": {"auth": "vertex-wif"}}'
+fullsend repos set 'gitlab.repos["group/sub/project"]' '{}'
 ```
 
-Route control-plane jobs (poll) onto a cheaper runner fleet.
-`gitlab.control_runner_tags` is independent of `gitlab.agent_runner_tags`;
-left unset, control-plane jobs render `tags: []` (untagged):
+Set GitLab runner tags. `gitlab.control_runner_tags` is independent of `gitlab.agent_runner_tags`; left unset, control-plane jobs render `tags: []` (untagged):
 
 ```bash
-fullsend repos set-default gitlab.control_runner_tags fullsend-api
+fullsend repos set gitlab.agent_runner_tags '[fullsend-agent, gpu-runner]'
+fullsend repos set gitlab.control_runner_tags '[fullsend-api]'
 ```
 
-Remove agent runner tags:
+Set the GitLab instance URL and pin a ref:
 
 ```bash
-fullsend repos set-default gitlab.agent_runner_tags ""
+fullsend repos set gitlab.url https://gitlab.example.com
+fullsend repos set github.fullsend_ref v2.5.0
 ```
 
-`gitlab.runner_tags` remains a deprecated alias that writes
-`gitlab.agent_runner_tags`:
+Delete keys:
 
 ```bash
-fullsend repos set-default gitlab.runner_tags fullsend-agent
+fullsend repos set --unset github.mint_url
+fullsend repos set --unset gitlab.agent_runner_tags
+fullsend repos set --unset 'github.repos["acme/old"]'
 ```
 
-This alias rewrite is not scoped to `set-default`: `repos install` (only
-when it appends new manifest entries) and `repos uninstall` (only when it
-removes entries) also drop the deprecated `gitlab.runner_tags` key and
-persist `gitlab.agent_runner_tags`, even if you never ran `set-default`
-yourself. `repos converge` resolves the alias in memory for rendering
-scaffold files on every run, but it does not rewrite `repos.yaml` — a
-manifest that still has `gitlab.runner_tags` on disk keeps parsing
-correctly until a command that actually writes the manifest runs.
-Tooling that parses `repos.yaml` directly outside `fullsend`'s own
-commands should prefer `gitlab.agent_runner_tags` when present and treat
-`gitlab.runner_tags` as deprecated.
+### Migrating from `repos set-default` (breaking)
 
-Set the GitLab instance URL:
+`repos set-default` has been removed and has no alias. Use `repos set` with the same key as the path:
 
-```bash
-fullsend repos set-default gitlab.url https://gitlab.example.com
-```
+| Before | After |
+|--------|-------|
+| `fullsend repos set-default github.fullsend_ref v2.5.0` | `fullsend repos set github.fullsend_ref v2.5.0` |
+| `fullsend repos set-default github.mint_url ""` | `fullsend repos set --unset github.mint_url` |
+| `fullsend repos set-default gitlab.agent_runner_tags "a,b"` | `fullsend repos set gitlab.agent_runner_tags '[a, b]'` |
+| `fullsend repos set-default gitlab.runner_tags a` | `fullsend repos set gitlab.agent_runner_tags '[a]'` |
+| `fullsend repos set-default defaults.vendor true` | `fullsend repos set defaults.vendor true` |
+
+Differences to watch for in scripts:
+
+- An empty value no longer deletes a key. It stores an empty string, or is rejected for non-string fields. Use `--unset`.
+- Runner tags take a YAML or JSON list instead of a comma-separated string.
+- `gitlab.runner_tags` can no longer be set; set `gitlab.agent_runner_tags` instead.
+- Keys outside the old list, including `defaults.config.*`, `github.config.*`, `gitlab.config.*`, and repository entries, can now be set directly.
+- `repos set` edits the file in place and validates the whole result, so it rejects an edit that leaves the manifest invalid (for example adding a GitLab entry before `gitlab.url` is set).
 
 ## See also
 
