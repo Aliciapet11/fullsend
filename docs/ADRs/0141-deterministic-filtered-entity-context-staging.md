@@ -67,10 +67,14 @@ source record's current-revision actor and current authorization independently
 of the event sender, poller, retrieval credential, or discovery provenance.
 Unauthorized, unattributed, or unverifiable comments and reviews are omitted
 and represented by bounded manifest gaps; they are not exposed as raw or
-filtered text. The v1 snapshot profile intentionally retains its stricter bot
-boundary until a future ADR defines verifiable bot-role admission. Successful
-authorization is therefore an admission prerequisite, not a claim that the
-record is trustworthy or can change platform authority.
+filtered text. For a bot actor, Fullsend uses the provider-backed exact
+`actor.bot_role` recognition defined by [ADR 0107](0107-bot-identity-resolution-for-dispatch-authorization.md);
+the human repository-role threshold does not apply. A bot with no recognized
+role, or with an unavailable or unverifiable lookup, remains omitted. Future
+ADRs may broaden admission to additional provider-backed bot identities, but
+this ADR does not invent a second bot-role mechanism. Successful authorization
+is therefore an admission prerequisite, not a claim that the record is
+trustworthy or can change platform authority.
 
 The snapshot is written outside the repository clone. Host-side pre- and
 post-scripts receive `FULLSEND_CONTEXT_DIR` pointing to an access-restricted

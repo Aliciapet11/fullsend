@@ -168,21 +168,26 @@ This ADR deliberately borrows only that contract's forge-neutral role ordering
 and minimum-role thresholds for the selected agent category: observation
 agents require `triage` or above, while mutation agents require `write` or
 above. It does not apply event-specific `transition.kind` rules or exceptions
-because comment admission is not event authorization. A comment author whose
-verified role meets the selected agent threshold is trusted as an eligible
-command source and the comment is admitted; lower or unverified roles are
-omitted and count in the `comments` scope's `authorization_failed` gap. This
-is the intentional v1 trust boundary: users who may invoke the agent may also
-provide its command inputs. The required entity body is always staged; this
-admission rule applies to conversation comments and reviews. Bot actors do not
-have a verified repository role in v1, so their comments remain outside this
-trust boundary until a future ADR defines bot-role resolution or an explicit
-allow-list. An omitted formal review is counted in the `reviews` scope's
-`authorization_failed` gap by the same rule; it is not charged only to
-`comments`. Every admitted comment or review still passes the complete filter
-pipeline below, including Unicode safety that removes invisible text and
-unnecessary control characters, secret redaction, prompt-injection scanning,
-and byte bounds.
+because comment admission is not event authorization. A human comment author
+whose verified role meets the selected agent threshold is trusted as an
+eligible command source and the comment is admitted; lower or unverified human
+roles are omitted and count in the `comments` scope's `authorization_failed`
+gap. For a bot actor, the producer MUST establish provider-positive bot identity
+and resolve the exact registered `actor.bot_role` under [ADR 0107](../../../ADRs/0107-bot-identity-resolution-for-dispatch-authorization.md).
+The bot's snapshot actor state retains `role: bot`; the human repository-role
+threshold does not apply. A bot with no recognized role, or with an unavailable
+or unverifiable lookup, is omitted and counted in the same authorization gap.
+This is the intentional v1 trust boundary: users who may invoke the agent, and
+Fullsend-registered bots admitted by ADR 0107, may provide its command inputs.
+The required entity body is always staged; this admission rule applies to
+conversation comments and reviews. Label-transition and bot-review event
+exceptions authorize an event path only; they do not by themselves authorize
+arbitrary bot-authored comment content. An omitted formal review is counted in
+the `reviews` scope's `authorization_failed` gap by the same rule; it is not
+charged only to `comments`. Every admitted comment or review still passes the
+complete filter pipeline below, including Unicode safety that removes invisible
+text and unnecessary control characters, secret redaction, prompt-injection
+scanning, and byte bounds.
 
 The initial issue or change-proposal body uses the same layout with
 `Fullsend-Record: "entity"`, the entity's stable ID, immutable author ID, and
@@ -360,15 +365,17 @@ accepts `role: bot` as an explicit non-authority marker outside that
 permission-only enum. Each row states whether the actor is a `human` or
 `bot`. For `kind: bot`, producers set `role: bot` and `role_verified: false`:
 the marker records the known actor kind, while the false verification bit
-records that no repository permission was resolved. For `kind: human`,
+records that no human repository permission was resolved; it does not negate a
+separate, successful ADR 0107 `actor.bot_role` admission check. For `kind: human`,
 `role_verified: false` is paired with `role: null` and means consumers must
 fail closed rather than infer authority from forge association labels such as
 GitHub `authorAssociation`; a permission lookup failure, including a
 collaborator API 404, uses that representation. A future ADR may define a
-verifiable bot-permission mapping. Until then, the authorization contract's
-narrow transition-specific exceptions for GitHub label changes and submitted
-bot reviews remain the only bot authorization paths; they do not authorize
-arbitrary bot comments.
+broader provider-backed bot allow-list or mapping, but registered bot roles
+already follow ADR 0107. The authorization contract's narrow
+transition-specific exceptions for GitHub label changes and submitted bot
+reviews remain event-path exceptions; they do not authorize arbitrary bot
+comments without the applicable bot-role admission.
 
 Entity-context-snapshot and normalized-event v1 carry independently versioned
 copies of the actor-role vocabulary. The snapshot-only `bot` marker is not a
