@@ -100,8 +100,11 @@ filter statuses, and compatibility rules are the versioned
 Content records and mutable observation state are separate: resolving or
 reordering a thread changes its state/index files, never an unchanged comment
 or review body. No runner-clock timestamp enters the staged tree. Given the
-same forge state and filter version, implementations produce the same paths
-and bytes; breaking that guarantee requires a new major specification.
+same complete normalized acquisition inputs defined by the v1 specification—
+including forge responses, authorization-provider results, effective admission
+policy, collection profile, size bounds, filter version, and active
+credential-redaction registry—implementations produce the same paths and bytes;
+breaking that guarantee requires a new major specification.
 
 The snapshot contains forge state that cannot be reconstructed from the target
 Git checkout. It does not copy diffs, commit history, changed-file manifests,

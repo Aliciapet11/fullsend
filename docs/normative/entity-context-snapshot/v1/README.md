@@ -662,11 +662,14 @@ that snapshot.
 
 Verification, upload, and cleanup MUST reject symlinks and special files at the
 context root and every path component, and MUST require regular files beneath
-real directories. They use no-follow, containment-preserving directory-handle
-operations and upload the bytes from the verified handles (or retain an
-equivalent exclusive root handle) so a path cannot be replaced between digest
-verification and sandbox upload. If this guarantee cannot be enforced,
-assembly aborts before scripts or the agent launch.
+real directories. After the root-index comparison, Fullsend MUST verify child
+bytes into an immutable, digest-verified upload snapshot (for example, a private
+copy with concurrent writers excluded and immutable/read-only enforcement), or
+hold an equivalent exclusive writer-blocking capability. No-follow handles alone
+are insufficient because an already-open regular file can still be truncated or
+overwritten in place. The uploaded bytes MUST be the exact bytes verified against
+the retained assembly manifest; if immutability or writer exclusion cannot be
+enforced, assembly aborts before scripts or the agent launch.
 
 Findings contain codes and counts, not rejected source text. Filters and bounds
 are identified by `filter_version`; changing emitted bytes for the same input
