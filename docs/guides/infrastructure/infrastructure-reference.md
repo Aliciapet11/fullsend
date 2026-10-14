@@ -290,7 +290,11 @@ Inference authentication uses GCP Workload Identity Federation (WIF) to allow Gi
 │  │ Project: FULLSEND_GCP_PROJECT_ID│                        │
 │  │ Region:  FULLSEND_GCP_REGION    │                        │
 │  │                                 │                        │
-│  │ Models:                         │                        │
+│  │ Models (alias defaults):        │                        │
+│  │  - claude-haiku-5-5             │                        │
+│  │  - claude-sonnet-5-5            │                        │
+│  │  - claude-opus-5-5              │                        │
+│  │ Fallbacks, if not served:       │                        │
 │  │  - claude-haiku-4-5             │                        │
 │  │  - claude-sonnet-4-6            │                        │
 │  │  - claude-opus-4-6              │                        │

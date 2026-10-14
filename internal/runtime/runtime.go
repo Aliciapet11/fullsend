@@ -28,6 +28,12 @@ type RunMetrics struct {
 	// whose cost is dominated by children is legible in metrics.json;
 	// runtimes without sub-agents leave it nil and the totals stand alone.
 	PerModelUsage map[string]ModelUsage `json:"per_model_usage,omitempty"`
+	// FallbackFrom lists, in the order they were tried, the models the run
+	// moved off before Model took over (#8426): models the Vertex project
+	// did not serve, and on Claude Code any model its own --fallback-model
+	// handling left (a "model_fallback" event, for example on overload).
+	// Empty when the first model ran.
+	FallbackFrom []string `json:"fallback_from,omitempty"`
 }
 
 // ModelUsage is one model's token and cost contribution to a run. Requests
@@ -67,7 +73,9 @@ type RunParams struct {
 	Effort        string
 	// FallbackModels is the ordered overload/retirement fallback chain
 	// (FULLSEND_FALLBACK_MODELS). Claude Code passes it as --fallback-model;
-	// runtimes without the capability ignore it with a warning.
+	// runtimes without the capability ignore it with a warning. On Claude
+	// Code and pi it also replaces an alias's built-in chain
+	// (ImplicitFallbackModels) when the alias is not served.
 	FallbackModels []string
 	RepoDir        string
 	FullsendDir    string
