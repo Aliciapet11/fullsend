@@ -1566,7 +1566,9 @@ func (f *FakeClient) CreateIssue(_ context.Context, owner, repo, title, body str
 		f.OpenIssues = make(map[string][]Issue)
 	}
 	f.OpenIssues[key] = append(f.OpenIssues[key], issue)
-	return &issue, nil
+	out := issue
+	out.Labels = slices.Clone(issue.Labels)
+	return &out, nil
 }
 
 func (f *FakeClient) AddIssueLabels(_ context.Context, owner, repo string, number int, labels ...string) error {

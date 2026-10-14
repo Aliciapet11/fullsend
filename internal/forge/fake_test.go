@@ -1140,6 +1140,9 @@ func threadSafetyCalls(ctx context.Context) map[string]func(fc *FakeClient) []an
 		"GrantProtectedBranchMergeUser": func(fc *FakeClient) []any {
 			return pack(fc.GrantProtectedBranchMergeUser(ctx, "o", "r", "main", 1))
 		},
+		"RevokeProtectedBranchMergeUserEntry": func(fc *FakeClient) []any {
+			return pack(fc.RevokeProtectedBranchMergeUserEntry(ctx, "o", "r", "main", 1, 1))
+		},
 		"CreatePipeline": func(fc *FakeClient) []any {
 			return pack(fc.CreatePipeline(ctx, "o", "r", "main", map[string]string{"k": "v"}))
 		},
@@ -2592,6 +2595,11 @@ func TestFakeClient_ReadsReturnCopies(t *testing.T) {
 	issues[0].Labels[0] = "changed"
 	filtered[0].Labels[0] = "changed"
 	assert.Equal(t, "bug", fc.OpenIssues["o/r"][0].Labels[0])
+
+	created, err := fc.CreateIssue(ctx, "o", "new", "t", "b", "bug")
+	require.NoError(t, err)
+	created.Labels[0] = "changed"
+	assert.Equal(t, "bug", fc.OpenIssues["o/new"][0].Labels[0])
 
 	files, err := fc.ListPullRequestFiles(ctx, "o", "r", 1)
 	require.NoError(t, err)
