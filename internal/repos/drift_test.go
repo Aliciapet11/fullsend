@@ -449,17 +449,18 @@ func TestCheckOrphanVars_GitLabDetectsGenuineOrphan(t *testing.T) {
 	}
 }
 
-// The unverified-variable-scope acceptance is Maintainer-owned input that
-// install reads but never writes, so it is not an orphan on GitLab.
-func TestCheckOrphanVars_GitLabUnverifiedScopeAcceptanceNotFlagged(t *testing.T) {
+// The removed unverified-variable-scope acceptance setting is no longer
+// special: a value left on a project is an ordinary orphan.
+func TestCheckOrphanVars_GitLabObsoleteScopeAcceptanceIsOrphan(t *testing.T) {
+	const obsolete = "FULLSEND_GITLAB_ACCEPT_UNVERIFIED_VARIABLE_SCOPES"
 	fc := forge.NewFakeClient()
-	fc.VariableValues["owner/repo/"+GitLabAcceptUnverifiedVariableScopesVar] = "instance"
+	fc.VariableValues["owner/repo/"+obsolete] = "instance"
 
 	orphans, err := CheckOrphanVars(context.Background(), fc, "owner", "repo", InstallConfig{Forge: ForgeGitLab}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(orphans) != 0 {
-		t.Errorf("expected 0 orphan vars, got %d: %v", len(orphans), orphans)
+	if len(orphans) != 1 || orphans[0].Name != obsolete {
+		t.Errorf("orphans = %v, want only %s", orphans, obsolete)
 	}
 }

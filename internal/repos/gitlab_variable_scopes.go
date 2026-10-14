@@ -2,30 +2,10 @@ package repos
 
 import (
 	"context"
-	"fmt"
-	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 )
-
-// GitLabAcceptUnverifiedVariableScopesVar names the project CI/CD variable
-// with which a project Maintainer accepts inherited CI/CD variable scopes
-// that the installing credential cannot inspect. Its value is a comma- or
-// whitespace-separated list of scopes, each either "instance" (instance-level
-// variables on self-managed GitLab) or "group:<full/group/path>" (the
-// variables of one ancestor group). Fullsend reads it but never writes it.
-const GitLabAcceptUnverifiedVariableScopesVar = "FULLSEND_GITLAB_ACCEPT_UNVERIFIED_VARIABLE_SCOPES"
-
-// unverifiedVariableScope is an inherited CI/CD variable scope whose
-// variables could not be listed with the installing credential.
-type unverifiedVariableScope struct {
-	// key is the scope's name in GitLabAcceptUnverifiedVariableScopesVar.
-	key string
-	// reason explains why the scope could not be inspected.
-	reason string
-}
 
 // gitlabInheritedVariableOverrideProblem checks the instance-level and
 // ancestor-group CI/CD variables a project inherits for a definition of one
@@ -35,28 +15,20 @@ type unverifiedVariableScope struct {
 // pipelines when GitLab would in fact run it.
 //
 // Every scope the credential can read is checked, and a definition found in
-// any of them is a problem regardless of acknowledgement. Listing
-// instance-level variables needs administrator access and listing group
-// variables needs group Owner access, which a project Maintainer usually
-// lacks. A scope that answers forbidden is unverified: inability to inspect
-// it does not show that an override exists, but nor does it rule one out.
-// The fast path therefore proceeds only when every unverified scope is named
-// in GitLabAcceptUnverifiedVariableScopesVar, a project variable only a
-// project Maintainer can set; otherwise the returned problem names each
-// unaccepted scope and the value that would accept them. Errors other than
-// forbidden mean the overrides could not be checked at all.
+// any of them is a problem. Listing instance-level variables needs
+// administrator access and listing group variables needs group Owner access,
+// which a project Maintainer usually lacks. A scope that answers forbidden is
+// unverified, not unsafe: it is skipped and the remaining scopes are still
+// checked. This deliberately trusts instance administrators and group Owners
+// not to override those predefined variables; an override in a scope the
+// installing credential cannot read, whether present at install time or
+// added later, is not detected. Errors other than forbidden mean the
+// overrides could not be checked at all.
 func gitlabInheritedVariableOverrideProblem(ctx context.Context, client forge.Client, owner, repo string, env map[string]*string) (string, error) {
-	var unverified []unverifiedVariableScope
 	// Instance-level variables (self-managed GitLab) are inherited by every
 	// project.
 	instanceVars, instanceErr := client.ListInstanceVariables(ctx)
-	switch {
-	case forge.IsForbidden(instanceErr):
-		unverified = append(unverified, unverifiedVariableScope{
-			key:    "instance",
-			reason: "instance-level CI/CD variables cannot be inspected without administrator access",
-		})
-	case instanceErr != nil:
+	if instanceErr != nil && !forge.IsForbidden(instanceErr) {
 		return "", safeAPIError("checking instance variable overrides", instanceErr)
 	}
 	for _, variable := range instanceVars {
@@ -77,12 +49,9 @@ func gitlabInheritedVariableOverrideProblem(ctx context.Context, client forge.Cl
 			continue
 		} // personal namespace
 		if forge.IsForbidden(groupErr) {
-			// The remaining groups are still checked: a readable scope's
-			// override must be reported even when another scope is unreadable.
-			unverified = append(unverified, unverifiedVariableScope{
-				key:    "group:" + group,
-				reason: fmt.Sprintf("group variables of %q cannot be inspected without group Owner access", group),
-			})
+			// Unverified: the remaining groups are still checked, so a
+			// readable scope's override is reported even when another scope
+			// is unreadable.
 			continue
 		}
 		if groupErr != nil {
@@ -94,46 +63,5 @@ func gitlabInheritedVariableOverrideProblem(ctx context.Context, client forge.Cl
 			}
 		}
 	}
-	if len(unverified) == 0 {
-		return "", nil
-	}
-	accepted, err := acceptedUnverifiedVariableScopes(ctx, client, owner, repo)
-	if err != nil {
-		return "", err
-	}
-	var reasons, keys []string
-	for _, scope := range unverified {
-		keys = append(keys, scope.key)
-		if !accepted[scope.key] {
-			reasons = append(reasons, scope.reason)
-		}
-	}
-	if len(reasons) == 0 {
-		return "", nil
-	}
-	names := make([]string, 0, len(env))
-	for name := range env {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return fmt.Sprintf("webhook fast-path deferred: %s, so predefined variable overrides cannot be ruled out and the managed credentials are revoked; after confirming that none of %s is defined there, a project Maintainer can accept the unverified scopes by setting the project CI/CD variable %s to %q",
-		strings.Join(reasons, "; "), strings.Join(names, ", "), GitLabAcceptUnverifiedVariableScopesVar, strings.Join(keys, ",")), nil
-}
-
-// acceptedUnverifiedVariableScopes reads the scopes listed in
-// GitLabAcceptUnverifiedVariableScopesVar. An absent variable accepts none.
-// Entries must match a scope key exactly; anything else is ignored.
-func acceptedUnverifiedVariableScopes(ctx context.Context, client forge.Client, owner, repo string) (map[string]bool, error) {
-	raw, exists, err := client.GetRepoVariable(ctx, owner, repo, GitLabAcceptUnverifiedVariableScopesVar)
-	if err != nil {
-		return nil, safeAPIError("reading "+GitLabAcceptUnverifiedVariableScopesVar, err)
-	}
-	accepted := map[string]bool{}
-	if !exists {
-		return accepted, nil
-	}
-	for _, entry := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
-		accepted[entry] = true
-	}
-	return accepted, nil
+	return "", nil
 }

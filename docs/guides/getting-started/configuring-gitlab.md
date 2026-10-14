@@ -215,12 +215,12 @@ then converges the project:
   as `CI_PIPELINE_SOURCE` or `CI_COMMIT_REF_PROTECTED` also defers it.
   Instance-level variables can only be listed with administrator access
   and group variables with group Owner access. Every scope your
-  credential can read is still checked; a scope it cannot read defers the
-  fast path until a project Maintainer, after confirming that none of
-  those variables is defined there, lists it in the project CI/CD
-  variable `FULLSEND_GITLAB_ACCEPT_UNVERIFIED_VARIABLE_SCOPES` (for
-  example `instance,group:my-group`; the deferral message gives the exact
-  value). Re-runs are no-ops and repair a
+  credential can read is checked; a scope it cannot read is skipped as
+  unverified and neither defers the fast path nor revokes an existing
+  one, so a project Maintainer can enable it without administrator or
+  group Owner access. Fullsend does not verify those scopes; see
+  [Inherited CI/CD variable trust](#inherited-cicd-variable-trust)
+  for the security assumption this relies on. Re-runs are no-ops and repair a
   missing or drifted webhook or token; `--rotate-gitlab-trigger-token`
   rotates the token and revokes the old one after the webhook is updated.
   The polling schedules stay in place as the backstop. Token and secret
@@ -253,6 +253,46 @@ to the default branch instead. Preview with `--dry-run`.
 
 For the full list of install flags, see the
 [CLI reference](../../cli/repos.md#repos-install).
+
+### Inherited CI/CD variable trust
+
+> **Security assumption:** the webhook fast path trusts GitLab instance
+> administrators and group Owners not to define CI/CD variables that
+> redefine predefined variables such as `CI_PIPELINE_SOURCE` or
+> `CI_COMMIT_REF_PROTECTED`. Fullsend checks only the scopes the installing
+> credential can read. It does not verify the others and cannot prove that
+> no override exists there.
+
+GitLab gives instance and group CI/CD variables
+[precedence](https://docs.gitlab.com/ci/variables/#ci-cd-variable-precedence)
+over predefined values. Fullsend decides statically which committed jobs
+can run in a trigger pipeline. An inherited override of one of these
+variables can make that check wrongly conclude that a user-owned job is
+excluded. GitLab would then run that job in a protected trigger pipeline,
+where it receives the protected, wildcard-scoped project credentials and
+its GitLab job token before the dispatcher's runtime checks run. The same
+applies to an override added **after** installation: later `repos install`
+and `repos status` runs cannot inspect that scope either.
+
+Without administrator access, `repos install` cannot list instance-level
+variables. Without group Owner access, it cannot list the variables of an
+ancestor group. A forbidden response means the scope is unverified, not
+unsafe: the fast path is activated or retained when the remaining checks
+pass. These checks still apply:
+
+* A collision found in any scope the credential **can** read defers the
+  fast path and revokes existing managed credentials. So does a
+  collision in a project variable.
+* Errors other than forbidden from those listings fail the step instead
+  of being treated as unverified.
+* The committed-CI job and include exclusion checks, protected-ref
+  checks, the `no_one_allowed` pipeline-variable restriction, the
+  debug-trace gate, dispatcher job identity verification, and the
+  polling fallback all still apply.
+
+Environment-scoped variables do not mitigate this risk. A job can
+declare the matching environment, and Fullsend stores and reads these
+credentials at the wildcard scope.
 
 ### Enabling a subset of agents
 

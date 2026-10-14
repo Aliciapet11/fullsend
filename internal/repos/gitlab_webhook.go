@@ -766,8 +766,8 @@ func gitlabTriggerSafetyProblem(ctx context.Context, client forge.Client, owner,
 		}
 	}
 	// Instance-level and group variables can redefine the same predefined
-	// variables; scopes this credential cannot read must be accepted
-	// explicitly (see gitlabInheritedVariableOverrideProblem).
+	// variables; scopes this credential cannot read are unverified and
+	// skipped (see gitlabInheritedVariableOverrideProblem).
 	if problem, err := gitlabInheritedVariableOverrideProblem(ctx, client, owner, repo, env); problem != "" || err != nil {
 		return problem, err
 	}
