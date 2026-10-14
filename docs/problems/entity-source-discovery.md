@@ -108,12 +108,16 @@ options are cheap to adopt:
   after 200 pages. In both cases the client returns what it has with no error
   and no truncation signal. This is an existing correctness gap, not an
   acceptable trade-off, and a watermark does not cover it. GitLab note lists
-  always start at page 1 in ascending order, so once a thread passes the cap
-  its newer notes are never seen on any later poll. The poll client contract
-  also requires list methods to exhaust pagination. The gap therefore affects
-  event reconstruction as well as entity-first discovery. It is exactly the
-  "partial result looks complete" failure that entity-first discovery must
-  not inherit.
+  always start at page 1 in ascending order, so in thread-list-based
+  all-events polling, once a thread passes the cap its newer notes are never
+  seen on any later poll. The fast slash-command path is different: it reads
+  note bodies from the project events feed rather than listing threads, so a
+  newer slash command can still be found there. That path has its own
+  project-event pagination cap with the same silent truncation. The poll
+  client contract also requires list methods to exhaust pagination. The gap
+  therefore affects event reconstruction as well as entity-first discovery.
+  It is exactly the "partial result looks complete" failure that
+  entity-first discovery must not inherit.
 - **Permission lookups differ by provider.** GitHub uses the
   collaborator-permission endpoint and GitLab uses `members/all`, one call
   per actor with no cross-call caching. Jira reads the project role
@@ -276,7 +280,7 @@ through custom activations or type providers.
   `true || <error>` is `true`). Whether a failed read changes the result
   therefore depends on operand values, not textual order. This is the
   intended CEL semantics, but the platform must not convert a load failure
-  into a value. A failed load must never be converted to a value. Because
+  into a value. Because
   CEL's error absorption means a result can be `true` even when a read
   failed (for example `entity.optional_field == 'x' || true`), the
   evaluation result alone cannot enforce denial. Acquisition failures must be
@@ -380,7 +384,7 @@ capability-check time, before any read).
 | **I5. A kind or provider without full category coverage is unsupported.** | Provider cannot enumerate a required category, such as label-application actors | Unsupported: denied before reads |
 | **I6. Missing authorization removes the element.** Missing actor provenance, missing or unverifiable current permission, or an unrecognized bot cannot trigger execution. Cached or historical relationships are insufficient. | Unattributed element; permission lookup failure; ADR 0107 lookup failure | Fail-closed for the element; for the entity if its required body is affected (ADR 0141) |
 | **I7. Malformed configuration denies.** Missing or malformed entity sources, or missing, malformed, or unverifiable eligibility policy, deny scheduled evaluation. | Invalid declaration or policy | Unsupported for that harness or policy scope |
-| **I8. Deduplication never hides work.** The same identity arriving from several sources, pages, or a webhook and poll overlap is evaluated once per harness per cycle, keyed by stable cross-system identity. Pagination must not skip items when the underlying set changes. Prefer keyset or cursor pagination over offset pages, or re-scan an overlap window. Duplicates are harmless after dedup; skips are not. | Pagination drift; duplicate candidates | Skips: fail-closed (incomplete); duplicates: coalesced |
+| **I8. Deduplication never hides work.** Scheduled candidates for the same identity arriving from several sources or pages are evaluated once per harness per cycle, keyed by stable cross-system identity, only when their evaluation contexts are equivalent. A webhook and a poll overlap is not such a case: webhook evaluation carries a prompting event and scheduled evaluation has `event = null`, and predicates may inspect either. Each distinct prompting event is still evaluated, and matching runs are coalesced afterward under [ADR 0106](../ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md). Pagination must not skip items when the underlying set changes. Prefer keyset or cursor pagination over offset pages, or re-scan an overlap window. Duplicates are harmless after dedup; skips are not. | Pagination drift; duplicate candidates | Skips: fail-closed (incomplete); duplicates: coalesced |
 | **I9. Resolution is authoritative over enumeration hints.** State in a list response may be stale by evaluation time. The resolved entity, not the hint, feeds CEL, and [ADR 0106](../ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md) runs reconcile current state again. | Entity changed between enumeration and resolution | Use resolved state; a deleted or inaccessible entity is not evaluated |
 | **I10. Budget for authorization is reserved.** A cycle must not spend its budget on optional reads and then fail permission lookups. Exhaustion is incomplete (I2/I3), not empty. | Rate limit or quota reached | Fail-closed |
 
