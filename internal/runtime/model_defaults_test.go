@@ -739,8 +739,33 @@ func TestRecordClaudeMetrics_InSessionModelFallback(t *testing.T) {
 	assert.Contains(t, events, AgentEvent(ModelFallbackEvent{From: "claude-opus-4-5", To: "claude-haiku-5-5", Trigger: "last_resort"}))
 	assert.False(t, claudeAttemptOutput(ModelFallbackEvent{}), "a fallback notice is not model output")
 
-	// A runner-level fallback already recorded is kept and not duplicated.
-	metrics = RunMetrics{FallbackFrom: []string{"claude-opus-4-5"}}
+	// The same model is not recorded twice.
 	recordClaudeMetrics(&metrics, ModelFallbackEvent{From: "claude-opus-4-5", To: "claude-haiku-5-5"})
 	assert.Equal(t, []string{"claude-opus-4-5"}, metrics.FallbackFrom)
+}
+
+// A runner fallback followed by Claude Code's own in-session fallback on the
+// next attempt records both models, in the order the run left them.
+func TestClaudeRuntime_Run_RunnerThenInSessionFallback(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "openshell.log")
+	inSession := `{"type":"system","subtype":"init","model":"claude-sonnet-5-5","claude_code_version":"2.1.296","session_id":"9e8d7c6b-4444-4a5b-8c9d-0e1f2a3b4c5d"}
+{"type":"system","subtype":"model_fallback","trigger":"last_resort","original_model":"claude-sonnet-5-5","fallback_model":"claude-haiku-5-5"}
+{"type":"assistant","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":10,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"done","num_turns":1,"usage":{"input_tokens":10,"output_tokens":2}}
+`
+	fakeOpenshellClaude(t, logPath, map[string]string{
+		"claude-opus-5-5":   fmt.Sprintf(claudeModelNotAvailableStream, "claude-opus-5-5"),
+		"claude-sonnet-5-5": inSession,
+	})
+
+	var metrics RunMetrics
+	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
+		SandboxName: "fs-claude-fallback-mixed", AgentBaseName: "code", RepoDir: "/r", Model: "opus",
+		FallbackModels: []string{"sonnet", "haiku"},
+		Timeout:        30 * time.Second, OnEvent: func(AgentEvent) {},
+	}, ui.New(io.Discard), time.Now(), &metrics)
+	require.NoError(t, err)
+	assert.Equal(t, 0, exit)
+	assert.Equal(t, "claude-haiku-5-5", metrics.Model)
+	assert.Equal(t, []string{"claude-opus-5-5", "claude-sonnet-5-5"}, metrics.FallbackFrom)
 }

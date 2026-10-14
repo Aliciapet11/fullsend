@@ -234,9 +234,9 @@ type aggregateMetrics struct {
 	// iteration's result modelUsage. A run on a runtime without sub-agents
 	// keeps metrics.json as it was.
 	PerModelUsage map[string]agentruntime.ModelUsage `json:"per_model_usage,omitempty"`
-	// FallbackFrom lists the models the run's Vertex project did not serve
-	// before Model took over through the alias's fallback chain (#8426),
-	// from the last iteration that fell back. Absent when none did.
+	// FallbackFrom lists the models the run moved off before Model took
+	// over (#8426; see agentruntime.RunMetrics.FallbackFrom), from the last
+	// iteration that fell back. Absent when none did.
 	FallbackFrom []string `json:"fallback_from,omitempty"`
 }
 

@@ -51,20 +51,19 @@ vertex deployment` for an id in its own model list (every default and fallback i
 falls back when `<id>` is the attempt's own model. It also matches Vertex's own shapes, a 404
 `Publisher model ... not found` or a 403 `... data sharing to be enabled for publisher ...`; Claude
 Code passes the 403 text through. The chain is `FULLSEND_FALLBACK_MODELS` when set, else the alias's
-built-in chain from the table above. The runner does the retry itself: Claude Code's
-`--fallback-model` switches models on a 404 or 403 only for Anthropic API error types, which Vertex's
-errors do not carry. A retry happens only when the model produced nothing. The abandoned
+built-in chain from the table above. The runner does the retry itself, because the built-in chain is
+never passed to Claude Code as `--fallback-model`. A retry happens only when the model produced nothing. The abandoned
 attempt's events and transcript are discarded, and every attempt shares the run's timeout. The
 plan block lists the built-in chain (`Fallback models: claude-opus-4-6 (built-in for opus, when
 not served)`). A fallback prints `model claude-opus-5-5 is not available in this project; falling
 back to claude-opus-4-6` and is recorded in `metrics.json` as `fallback_from`. Pinned ids,
 `provider/id` specs, `models.aliases` retargets without `FULLSEND_FALLBACK_MODELS`, the inference
-gateway route, and any other error (auth, quota, `PERMISSION_DENIED`) never fall back.
-`FULLSEND_FALLBACK_MODELS=a,b` is also passed as `--fallback-model a,b`, which Claude Code tries
-when the primary model is overloaded or retired. With that flag, Claude Code 2.1.296 also handles a
-Vertex 404 itself, moving to the next entry within the same session; the run then prints `model
-<id> failed; Claude Code fell back to <next> (last_resort)` and records the same `model` and
-`fallback_from` as a runner fallback. pi runs the same chain, sub-agent children
+gateway route, and any other error (auth, quota, `PERMISSION_DENIED`) never get a runner retry.
+`FULLSEND_FALLBACK_MODELS=a,b` is also passed as `--fallback-model a,b` on every route, the gateway
+included, and Claude Code then switches models within the session on its own triggers: overload,
+server errors, and (2.1.296) a Vertex 404 as `last_resort`. The run prints `model <id> failed;
+Claude Code fell back to <next> (<trigger>)` and records the model that took over as `model` and the
+one it left in `fallback_from`. pi runs the same chain, sub-agent children
 included; see [pi](pi.md#at-a-glance).
 
 ## At a glance

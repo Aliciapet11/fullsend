@@ -135,7 +135,7 @@ depend on the process cwd.
 | `num_turns` | Number of conversation turns |
 | `iterations` | Number of agent iterations run; an iteration killed at the budget is not retried (see [Budget and deadline](#budget-and-deadline)) |
 | `per_model_usage` | Per-model breakdown, present only when a runtime reports one (today: `pi` with the `Agent` tool enabled, and `claude` when Claude Code's result carries `modelUsage`). See below |
-| `fallback_from` | Models the Vertex project did not serve, in the order tried, before `model` took over through the alias's fallback chain (`claude` and `pi`; see [Claude Code](../runtimes/claude.md#models)). Absent when the first model ran |
+| `fallback_from` | Models the run moved off, in the order tried, before `model` took over: models the Vertex project did not serve, and on `claude` any model Claude Code's own `--fallback-model` handling left, for example on overload (`claude` and `pi`; see [Claude Code](../runtimes/claude.md#models)). Absent when the first model ran |
 
 #### Per-model usage
 

@@ -296,9 +296,8 @@ type runMetrics struct {
 	// NumTurns is 0 when the agent process produced no events (for pi,
 	// metrics.model is the resolved id echoed back, not a provider reply).
 	NumTurns int `json:"num_turns"`
-	// FallbackFrom lists the models the Vertex project did not serve
-	// before Model took over through the alias's fallback chain; empty
-	// when the first model ran.
+	// FallbackFrom lists the models the run moved off before Model took
+	// over; empty when the first model ran.
 	FallbackFrom []string `json:"fallback_from"`
 	TokenUsage   struct {
 		Input  int `json:"input"`

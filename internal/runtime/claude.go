@@ -415,7 +415,16 @@ func (r ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pr
 	} else {
 		result, served = modelFallbackLoop(chain, params.Timeout, piMinAttemptTimeout, time.Now, attempt, claudeShouldFallBack, onFallback)
 		if served > 0 {
-			metrics.FallbackFrom = slices.Clone(chain[:served])
+			// The served attempt's own in-session fallback (a
+			// ModelFallbackEvent, already recorded) comes after the
+			// models the runner abandoned.
+			from := slices.Clone(chain[:served])
+			for _, m := range metrics.FallbackFrom {
+				if !slices.Contains(from, m) {
+					from = append(from, m)
+				}
+			}
+			metrics.FallbackFrom = from
 		}
 	}
 	// Replay the final attempt's withheld events so metrics are captured
