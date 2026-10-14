@@ -7,7 +7,8 @@
 # reading the team, a membership or the member list aborts; a membership that
 # stays pending after the add fails; a creator left on the team by a failed
 # removal is removed on the retry; a write actor who is a maintainer is set
-# back to member; any other member or pending invitee on the team fails; no
+# back to member; any other member or pending invitee (including an email
+# invitation with a null login) on the team fails; no
 # PAT value is printed.
 #
 # Run from the repo root:
@@ -42,6 +43,8 @@ trap 'rm -rf "${SHIM_DIR}" "${STATE}"' EXIT
 # ${S}/member_get_error     GET of any membership fails with HTTP 500
 # ${S}/list_error           listing team members fails with HTTP 500
 # ${S}/delete_error         DELETE of a membership fails with HTTP 500
+# ${S}/email_invitation     the invitations list includes an email invitation
+#                           (null login)
 # ${S}/put_state            "STATE ROLE" a PUT produces (default: active, role
 #                           from the request)
 # Pending memberships show up in the invitations list, not the members list.
@@ -66,7 +69,8 @@ while [[ $# -gt 0 ]]; do
 done
 notfound() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
 servererr() { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
-out() { if [[ -n "${jq_filter}" ]]; then jq -r "${jq_filter}" <<< "$1"; else echo "$1"; fi; }
+# gh --jq prints a scalar null as an empty line, unlike jq -r ("null").
+out() { if [[ -n "${jq_filter}" ]]; then jq -r "${jq_filter} | if . == null then \"\" else . end" <<< "$1"; else echo "$1"; fi; }
 # list_logins prints a JSON array of {login} for members in the given state.
 list_logins() {
   local want="$1" f st ro
@@ -92,7 +96,10 @@ case "${method} ${path}" in
     [[ -f "${S}/list_error" ]] && servererr
     out "$(list_logins active)" ;;
   "GET ${team_path}/invitations")
-    out "$(list_logins pending)" ;;
+    inv="$(list_logins pending)"
+    # An email invitation has no login: GitHub returns it as null.
+    [[ -f "${S}/email_invitation" ]] && inv=$(jq '. + [{login: null}]' <<< "${inv}")
+    out "${inv}" ;;
   "GET ${team_path}/memberships/"*)
     [[ -f "${S}/member_get_error" ]] && servererr
     login="${path##*/}"
@@ -252,6 +259,17 @@ if [[ "${RC}" -ne 0 ]] && grep -q "${STRANGER} is on ${ORG}/${TEAM}" <<< "${OUT}
   pass "pending invitee on team: fails"
 else
   fail "pending invitee on team: rc=${RC}: ${OUT}"
+fi
+
+# --- 8b. email invitation (null login) on the team: fail ------------------
+new_state
+provision
+touch "${STATE}/email_invitation"
+run_step
+if [[ "${RC}" -ne 0 ]] && grep -q "<email-invitation> is on ${ORG}/${TEAM}" <<< "${OUT}"; then
+  pass "email invitation on team: fails"
+else
+  fail "email invitation on team: rc=${RC}: ${OUT}"
 fi
 
 # --- 9. creator removal fails after create, then the retry cleans up ------

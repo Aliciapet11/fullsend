@@ -222,8 +222,10 @@ ensure_status_team() {
     echo "    ERROR: could not list members of ${org}/${slug}: ${logins}" >&2
     return 1
   fi
+  # An invitation sent by email has a null login; surface it as a name so it
+  # fails the check below instead of printing an empty line that is skipped.
   if ! invited=$(gh api --paginate "/orgs/${org}/teams/${slug}/invitations?per_page=100" \
-      --jq '.[].login' 2>&1); then
+      --jq '.[] | (.login // "<email-invitation>")' 2>&1); then
     echo "    ERROR: could not list invitations of ${org}/${slug}: ${invited}" >&2
     return 1
   fi
