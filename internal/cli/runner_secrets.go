@@ -267,9 +267,19 @@ func registerRunnerSecretValue(value string) bool {
 	if !security.RegisterRuntimeSecret(value) {
 		return false
 	}
+	// Script output is often trimmed (validation feedback, pre-script
+	// outputs) before it is redacted, so the trimmed forms are registered
+	// too; values that become too short are refused by the registry.
+	if trimmed := strings.TrimSpace(value); trimmed != value {
+		security.RegisterRuntimeSecret(trimmed)
+	}
 	if strings.ContainsAny(value, "\r\n") {
 		for _, line := range strings.Split(value, "\n") {
-			security.RegisterRuntimeSecret(strings.TrimRight(line, "\r"))
+			line = strings.TrimRight(line, "\r")
+			security.RegisterRuntimeSecret(line)
+			if trimmed := strings.TrimSpace(line); trimmed != line {
+				security.RegisterRuntimeSecret(trimmed)
+			}
 		}
 	}
 	if escaped := jsonEscapedString(value); escaped != value {

@@ -731,6 +731,21 @@ func TestRunAgent_RunnerSecretSkipReasonRedacted(t *testing.T) {
 	assert.NotContains(t, out.String(), "x-secret-value-skip")
 }
 
+// A padded runner secret is redacted even after the pre-script output
+// parser trims it, because its trimmed form is registered too.
+func TestRunAgent_RunnerSecretPaddedSkipReasonRedacted(t *testing.T) {
+	usePreScriptStub(t)
+	writeRunnerSecretsFile(t, `{"X":"  x-secret-padded-skip  "}`)
+	dir := newRunnerSecretHarnessDir(t,
+		"env:\n  runner:\n    X: \"${X}\"\n",
+		`echo "reason=${X}" >> "${FULLSEND_PRESCRIPT_OUTPUT}"`+"\n")
+
+	var out bytes.Buffer
+	require.NoError(t, runRunnerSecretAgentTo(t, dir, &out))
+	assert.Contains(t, out.String(), "Run skipped by pre-script")
+	assert.NotContains(t, out.String(), "x-secret-padded-skip")
+}
+
 // The scrubbed result is what reaches GITHUB_OUTPUT: the reason and any
 // output carrying a secret are redacted, and a non-reason output that only
 // looks like a token is relayed unchanged.
