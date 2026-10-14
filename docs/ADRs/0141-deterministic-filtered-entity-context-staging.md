@@ -1,5 +1,5 @@
 ---
-title: "107. Deterministic filtered entity-context-snapshot staging"
+title: "141. Deterministic filtered entity-context-snapshot staging"
 status: Accepted
 relates_to:
   - agent-architecture
@@ -11,7 +11,7 @@ topics:
   - token-cost
 ---
 
-# 107. Deterministic filtered entity-context-snapshot staging
+# 141. Deterministic filtered entity-context-snapshot staging
 
 Date: 2026-09-07
 
@@ -40,6 +40,14 @@ from the dispatch-layer routing category called entity context in
 name is intentional: it identifies the data structure without redefining ADR
 0076's established routing term.
 
+[ADR 0133](0133-actor-attributed-data-security-boundary.md) defines the
+security boundary for actor-attributed source data: authorization is evaluated
+for the actor of each current source revision, authorization permits data to be
+considered but does not make its text safe, and every admitted record must pass
+the common filtering, delimitation, and fail-closed rules. This ADR applies
+that boundary to the deterministic snapshot path rather than defining a second
+trust model.
+
 ## Decision
 
 Before the harness pre-script, `fullsend run` uses `forge.Client` to assemble
@@ -51,6 +59,18 @@ closed when required data cannot be fetched or safely represented. Filtered
 content is the only copy exposed to scripts and the agent; the manifest records
 every truncation, replacement, finding, and fetch error without retaining
 rejected content.
+
+Record admission follows ADR 0133 and the role thresholds selected by the
+agent's harness under [ADR 0054](0054-require-authorization-on-all-agent-dispatch-paths.md)
+and [ADR 0098](0098-entity-first-harness-evaluation.md). Fullsend verifies the
+source record's current-revision actor and current authorization independently
+of the event sender, poller, retrieval credential, or discovery provenance.
+Unauthorized, unattributed, or unverifiable comments and reviews are omitted
+and represented by bounded manifest gaps; they are not exposed as raw or
+filtered text. The v1 snapshot profile intentionally retains its stricter bot
+boundary until a future ADR defines verifiable bot-role admission. Successful
+authorization is therefore an admission prerequisite, not a claim that the
+record is trustworthy or can change platform authority.
 
 The snapshot is written outside the repository clone. Host-side pre- and
 post-scripts receive `FULLSEND_CONTEXT_DIR` pointing to an access-restricted
@@ -138,3 +158,7 @@ only bounded counts, digests, and filtering findings, never bodies or logs.
 - Shipped and custom review, fix, and code agents must migrate from mutable sticky summaries and single-body hand-offs to discovered entity-context-snapshot projections, publish immutable per-run result receipts while retaining human-facing summaries, and anchor decisions to record keys and revisions.
 - Forge adapters must expose review/reply relationships, locations, reviewed-revision references, checks, and immutable agent-result references through `forge.Client`; unavailable or unrecoverable forge history is an explicit manifest gap, not a silent omission.
 - Snapshot assembly adds bounded startup latency and storage and can become stale, so collection profiles avoid indiscriminate log/history fetching and deterministic post-processing still validates relevant revisions before any forge mutation.
+- The actor-attributed data boundary, including fresh authorization, common
+  filtering, redaction, delimitation, and fail-closed behavior, is inherited
+  from ADR 0133; future snapshot or retrieval paths must preserve that boundary
+  rather than treating this file layout as a security mechanism by itself.

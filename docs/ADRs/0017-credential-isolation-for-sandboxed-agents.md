@@ -19,7 +19,7 @@ Date: 2026-04-01
 Accepted (credential delivery tiers extended by [ADR 0025](0025-provider-credential-delivery-for-sandboxed-agents.md))
 
 The default prefetch model is standardized for handled entity content by
-[ADR 0107](0107-deterministic-filtered-entity-context-staging.md).
+[ADR 0141](0141-deterministic-filtered-entity-context-staging.md).
 
 ## Context
 

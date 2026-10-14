@@ -59,7 +59,8 @@ The attack surface is the same as for visible prompt injection — PR descriptio
 
 - **Input sanitization** — strip or flag non-rendering Unicode characters before content reaches agents. Specific character classes to target: Tag characters (U+E0000–U+E007F), zero-width characters (U+200B, U+200C, U+200D, U+FEFF), bidirectional overrides (U+202A–U+202E, U+2066–U+2069), and variation selectors. This is more tractable than general prompt injection detection because the characters themselves are the signal — their mere presence in a PR description or code comment is suspicious, regardless of what they encode. However, some of these characters have legitimate uses in internationalized text, so stripping must be context-aware or at minimum flag rather than silently remove.
   Deterministic filtering and finding disclosure for fetched entity content is
-  decided in [ADR 0107](../ADRs/0107-deterministic-filtered-entity-context-staging.md).
+  decided in [ADR 0141](../ADRs/0141-deterministic-filtered-entity-context-staging.md)
+  under the actor-attributed admission and filtering boundary of [ADR 0133](../ADRs/0133-actor-attributed-data-security-boundary.md).
 - **Separation of data and instructions** — agent prompts should clearly delineate between "system instructions" and "untrusted input being analyzed"
 - **Multi-agent verification** — a reviewing agent's decision is checked by a separate security agent that specifically looks for injection patterns
 - **Principle of least privilege** — agents should have the minimum permissions needed. A reviewing agent doesn't need merge authority.

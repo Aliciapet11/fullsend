@@ -1,7 +1,8 @@
 # Entity-context-snapshot v1
 
 This specification defines the deterministic, filtered entity-context-snapshot
-adopted by [ADR 0107](../../../ADRs/0107-deterministic-filtered-entity-context-staging.md).
+adopted by [ADR 0141](../../../ADRs/0141-deterministic-filtered-entity-context-staging.md)
+under the actor-attributed data boundary in [ADR 0133](../../../ADRs/0133-actor-attributed-data-security-boundary.md).
 It is the contract between forge adapters, `fullsend run`, harness scripts, and
 agent runtimes.
 

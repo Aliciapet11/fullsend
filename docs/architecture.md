@@ -191,7 +191,8 @@ repo baseline and overrides)
   relationship anchors.
   Scripts and the sandbox use `FULLSEND_CONTEXT_DIR` with the same relative
   paths; runtimes may inject ordered records as separate cacheable input blocks
-  ([ADR 0107](ADRs/0107-deterministic-filtered-entity-context-staging.md)).
+  ([ADR 0141](ADRs/0141-deterministic-filtered-entity-context-staging.md),
+  constrained by [ADR 0133](ADRs/0133-actor-attributed-data-security-boundary.md)).
 - CEL-guarded overlays: an `overlays:` list of CEL-guarded config
   overlays generalizes the `forge:` block, letting harness authors
   condition scripts, skills, env vars, and other fields on any event
