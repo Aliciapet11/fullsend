@@ -2693,9 +2693,11 @@ func (f *FakeClient) CreatePipelineSchedule(_ context.Context, owner, repo, ref,
 		Ref:         ref,
 		Cron:        cron,
 		Active:      true,
-		Variables:   variables,
+		Variables:   maps.Clone(variables), // DeletePipelineScheduleVariable edits the stored map in place
 	}
-	f.CreatedSchedules = append(f.CreatedSchedules, s)
+	rec := s
+	rec.Variables = maps.Clone(variables) // separate copy so the log keeps what the caller sent
+	f.CreatedSchedules = append(f.CreatedSchedules, rec)
 	key := owner + "/" + repo
 	if f.PipelineSchedules == nil {
 		f.PipelineSchedules = make(map[string][]PipelineSchedule)
