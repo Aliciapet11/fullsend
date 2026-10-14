@@ -169,9 +169,10 @@ Each pool org must be provisioned before e2e can use it:
 1. Org exists with `botsend` as owner
 2. `test-repo` and `e2e-lock` repos (lock created at runtime)
 3. Test actor permissions granted (see [Test actor permissions](#test-actor-permissions) below)
-4. The six `fullsend-test-*` role apps are installed for the test mint. The production `fullsend-ai-e2e` app is also installed with **Repository → Variables: Read and write** (`actions_variables`) and **Organization → Variables: Read and write** (`organization_actions_variables`); there is no test replacement for the `e2e` role.
-5. `FULLSEND_FOREIGN_E2E_REPOS` includes `fullsend-ai/fullsend` with org-wide visibility (`visibility: all`)
-6. Mint enrolled: requesting repository `fullsend-ai/fullsend` in `PER_REPO_WIF_REPOS` (or public mode), `e2e` in `ROLE_APP_IDS`, e2e app PEM enrolled. The pool org is a foreign target, so its access is governed by the `FULLSEND_FOREIGN_E2E_REPOS` grant and App installation above rather than by requesting-repository enrollment
+4. `mint-status` team exists with `fstest-write` as an active member (see [Mint status team](#mint-status-team) below)
+5. The six `fullsend-test-*` role apps are installed for the test mint. The production `fullsend-ai-e2e` app is also installed with **Repository → Variables: Read and write** (`actions_variables`) and **Organization → Variables: Read and write** (`organization_actions_variables`); there is no test replacement for the `e2e` role.
+6. `FULLSEND_FOREIGN_E2E_REPOS` includes `fullsend-ai/fullsend` with org-wide visibility (`visibility: all`)
+7. Mint enrolled: requesting repository `fullsend-ai/fullsend` in `PER_REPO_WIF_REPOS` (or public mode), `e2e` in `ROLE_APP_IDS`, e2e app PEM enrolled. The pool org is a foreign target, so its access is governed by the `FULLSEND_FOREIGN_E2E_REPOS` grant and App installation above rather than by requesting-repository enrollment
 
 Use the idempotent setup script. Numeric arguments become `halfsend-NN`; a full org name (for example `halfsend` for STAGE) is used as-is:
 
@@ -250,6 +251,72 @@ Accounts and PATs are managed under
 stored as repository secrets `TEST_ACTOR_WRITE_PAT`,
 `TEST_ACTOR_TRIAGE_PAT`, and `TEST_ACTOR_OUTSIDER_PAT` on
 `fullsend-ai/fullsend`.
+
+### Mint status team
+
+GitHub user-token authentication on the test mint status endpoints
+(`--status-auth=github`, see
+[mint administration](../infrastructure/mint-administration.md)) allows
+members of a GitHub team. Every pool org and the STAGE org has a team
+with slug `mint-status`. Its only member is `fstest-write`, the account
+behind `TEST_ACTOR_WRITE_PAT`. The membership is a plain `member` role in
+a closed team.
+
+| Organization | Status auth group |
+|--------------|-------------------|
+| `halfsend` (STAGE) | `halfsend/mint-status` |
+| `halfsend-01` | `halfsend-01/mint-status` |
+| `halfsend-02` | `halfsend-02/mint-status` |
+| `halfsend-03` | `halfsend-03/mint-status` |
+| `halfsend-04` | `halfsend-04/mint-status` |
+| `halfsend-05` | `halfsend-05/mint-status` |
+| `halfsend-06` | `halfsend-06/mint-status` |
+| `halfsend-07` | `halfsend-07/mint-status` |
+| `halfsend-08` | `halfsend-08/mint-status` |
+| `halfsend-09` | `halfsend-09/mint-status` |
+| `halfsend-10` | `halfsend-10/mint-status` |
+| `halfsend-11` | `halfsend-11/mint-status` |
+| `halfsend-12` | `halfsend-12/mint-status` |
+
+The STAGE and numbered test mints take these values as
+`--status-github-group=ORG/mint-status`.
+
+The setup script (`hack/setup-new-e2e-org.sh`) creates or verifies the
+team after it confirms test actor org membership:
+
+- When the team is missing, the script creates it.
+- On every run, the script removes the operator whose `gh` session it
+  uses from the team, because GitHub adds a team's creator as a
+  maintainer. Doing this on every run also cleans up after a run that
+  stopped between creating the team and removing the creator.
+- When `fstest-write` is not an active team member with the `member`
+  role, the script adds it or sets it back to `member`. A maintainer
+  could add others and widen the allowlist. The membership is active
+  straight away because the earlier step made `fstest-write` an active
+  org member. The step uses the operator's `gh` session, not the actor
+  PAT.
+- The script then checks the team slug and lists every team member and
+  pending invitation. It stops with an error when anyone other than
+  `fstest-write` is on the team.
+- Any API error other than a "not found" 404 stops the script.
+
+Re-running the script makes no changes when the team and membership
+already exist, so it also restores them after an org is rebuilt. To roll
+the team out to existing orgs, an org owner runs the script once per org:
+
+```bash
+for org in halfsend $(seq -w 1 12); do
+  MINT_PROJECT=... MINT_FUNCTION=... hack/setup-new-e2e-org.sh "${org}"
+done
+```
+
+To check one org by hand:
+
+```bash
+gh api /orgs/halfsend-01/teams/mint-status --jq .slug
+gh api /orgs/halfsend-01/teams/mint-status/memberships/fstest-write --jq .state
+# expect: mint-status, then active
+```
 
 ## Inference gateway test gateway
 
