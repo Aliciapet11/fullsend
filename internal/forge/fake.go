@@ -733,7 +733,7 @@ func (f *FakeClient) GetFileContent(_ context.Context, owner, repo, path string)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
-	return data, nil
+	return slices.Clone(data), nil
 }
 
 func (f *FakeClient) DeleteFile(_ context.Context, owner, repo, path, message string) error {
@@ -819,7 +819,7 @@ func (f *FakeClient) ListDirectoryContents(_ context.Context, owner, repo, path,
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
-	return entries, nil
+	return slices.Clone(entries), nil
 }
 
 func (f *FakeClient) GetFileContentAtRef(_ context.Context, owner, repo, path, ref string) ([]byte, error) {
@@ -835,7 +835,7 @@ func (f *FakeClient) GetFileContentAtRef(_ context.Context, owner, repo, path, r
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
-	return content, nil
+	return slices.Clone(content), nil
 }
 
 func (f *FakeClient) CommitFiles(_ context.Context, owner, repo, message string, files []TreeFile) (bool, error) {
@@ -1190,7 +1190,7 @@ func (f *FakeClient) ListRepoPullRequests(_ context.Context, owner, repo string)
 
 	if f.PullRequests != nil {
 		if prs, ok := f.PullRequests[owner+"/"+repo]; ok {
-			return prs, nil
+			return slices.Clone(prs), nil
 		}
 	}
 	return []ChangeProposal{}, nil
@@ -1242,7 +1242,8 @@ func (f *FakeClient) GetAuthenticatedUserIdentity(_ context.Context) (*UserIdent
 	}
 
 	if f.AuthenticatedUserIdentity != nil {
-		return f.AuthenticatedUserIdentity, nil
+		id := *f.AuthenticatedUserIdentity
+		return &id, nil
 	}
 	return nil, fmt.Errorf("%w: no user identity configured", ErrNotFound)
 }
@@ -1255,7 +1256,7 @@ func (f *FakeClient) GetTokenScopes(_ context.Context) ([]string, error) {
 		return nil, e
 	}
 
-	return f.TokenScopes, nil
+	return slices.Clone(f.TokenScopes), nil
 }
 
 func (f *FakeClient) IsInstallationToken(_ context.Context) (bool, error) {
@@ -1467,7 +1468,8 @@ func (f *FakeClient) GetWorkflow(_ context.Context, owner, repo, workflowFile st
 	key := owner + "/" + repo + "/" + workflowFile
 	if f.Workflows != nil {
 		if wf, ok := f.Workflows[key]; ok {
-			return wf, nil
+			w := *wf
+			return &w, nil
 		}
 	}
 
@@ -1491,7 +1493,8 @@ func (f *FakeClient) GetLatestWorkflowRun(_ context.Context, owner, repo, workfl
 	if !ok {
 		return nil, fmt.Errorf("no workflow run found: %s", key)
 	}
-	return run, nil
+	r := *run
+	return &r, nil
 }
 
 func (f *FakeClient) GetWorkflowRun(_ context.Context, owner, repo string, runID int) (*WorkflowRun, error) {
@@ -1504,7 +1507,8 @@ func (f *FakeClient) GetWorkflowRun(_ context.Context, owner, repo string, runID
 
 	for _, run := range f.WorkflowRuns {
 		if run.ID == runID {
-			return run, nil
+			r := *run
+			return &r, nil
 		}
 	}
 	return nil, fmt.Errorf("workflow run %d not found in %s/%s", runID, owner, repo)
@@ -1588,6 +1592,7 @@ func (f *FakeClient) GetIssue(_ context.Context, owner, repo string, number int)
 	for _, issue := range f.OpenIssues[owner+"/"+repo] {
 		if issue.Number == number {
 			copy := issue
+			copy.Labels = slices.Clone(issue.Labels)
 			return &copy, nil
 		}
 	}
@@ -1611,11 +1616,16 @@ func (f *FakeClient) ListOpenIssues(_ context.Context, owner, repo string, label
 	}
 	issues := f.OpenIssues[owner+"/"+repo]
 	if len(labels) == 0 {
-		return append([]Issue(nil), issues...), nil
+		out := append([]Issue(nil), issues...)
+		for i := range out {
+			out[i].Labels = slices.Clone(out[i].Labels)
+		}
+		return out, nil
 	}
 	filtered := make([]Issue, 0, len(issues))
 	for _, issue := range issues {
 		if issueHasLabels(issue, labels) {
+			issue.Labels = slices.Clone(issue.Labels)
 			filtered = append(filtered, issue)
 		}
 	}
@@ -1898,7 +1908,7 @@ func (f *FakeClient) ListPullRequestFiles(_ context.Context, owner, repo string,
 	if f.PRFiles != nil {
 		key := fmt.Sprintf("%s/%s/%d", owner, repo, number)
 		if files, ok := f.PRFiles[key]; ok {
-			return files, nil
+			return slices.Clone(files), nil
 		}
 	}
 	return nil, nil
@@ -1911,7 +1921,7 @@ func (f *FakeClient) ListPullRequestCommits(_ context.Context, owner, repo strin
 		return nil, e
 	}
 	key := fmt.Sprintf("%s/%s/%d", owner, repo, number)
-	return f.PRCommits[key], nil
+	return slices.Clone(f.PRCommits[key]), nil
 }
 
 func (f *FakeClient) ListPullRequestFileDiffs(_ context.Context, owner, repo string, number int) ([]PullRequestFileDiff, error) {
@@ -1923,7 +1933,7 @@ func (f *FakeClient) ListPullRequestFileDiffs(_ context.Context, owner, repo str
 	if f.PRFileDiffs != nil {
 		key := fmt.Sprintf("%s/%s/%d", owner, repo, number)
 		if files, ok := f.PRFileDiffs[key]; ok {
-			return files, nil
+			return slices.Clone(files), nil
 		}
 	}
 	return nil, nil
@@ -1991,6 +2001,19 @@ func (f *FakeClient) ListPullRequestReviewThreads(_ context.Context, owner, repo
 	if f.PRReviewThreads != nil {
 		key := fmt.Sprintf("%s/%s/%d", owner, repo, number)
 		if threads, ok := f.PRReviewThreads[key]; ok {
+			threads.Threads = slices.Clone(threads.Threads)
+			for i := range threads.Threads {
+				t := &threads.Threads[i]
+				t.Comments = slices.Clone(t.Comments)
+				if t.Line != nil {
+					l := *t.Line
+					t.Line = &l
+				}
+				if t.OriginalLine != nil {
+					l := *t.OriginalLine
+					t.OriginalLine = &l
+				}
+			}
 			return threads, nil
 		}
 	}
@@ -2164,7 +2187,7 @@ func (f *FakeClient) GetWorkflowRunAnnotations(_ context.Context, _, _ string, _
 	if e := f.err("GetWorkflowRunAnnotations"); e != nil {
 		return nil, e
 	}
-	return f.Annotations, nil
+	return slices.Clone(f.Annotations), nil
 }
 
 func (f *FakeClient) ListOrgInstallations(_ context.Context, _ string) ([]Installation, error) {
@@ -2175,7 +2198,11 @@ func (f *FakeClient) ListOrgInstallations(_ context.Context, _ string) ([]Instal
 		return nil, e
 	}
 
-	return f.Installations, nil
+	out := slices.Clone(f.Installations)
+	for i := range out {
+		out[i].Permissions = maps.Clone(out[i].Permissions)
+	}
+	return out, nil
 }
 
 func (f *FakeClient) GetAppClientID(_ context.Context, slug string) (string, error) {

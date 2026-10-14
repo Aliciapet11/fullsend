@@ -2508,6 +2508,114 @@ func TestFakeClient_ReadsReturnCopies(t *testing.T) {
 	none, err := fc.ListPipelineSchedules(ctx, "o", "missing")
 	require.NoError(t, err)
 	assert.Nil(t, none)
+
+	fc.AuthenticatedUserIdentity = &UserIdentity{Name: "n", Email: "e"}
+	fc.TokenScopes = []string{"repo"}
+	fc.PRFiles = map[string][]string{"o/r/1": {"a.go"}}
+	fc.PRCommits = map[string][]string{"o/r/1": {"sha"}}
+	fc.PRFileDiffs = map[string][]PullRequestFileDiff{"o/r/1": {{Path: "a.go"}}}
+	line, originalLine := 3, 4
+	fc.PRReviewThreads = map[string]ReviewThreadPage{"o/r/1": {Threads: []ReviewThread{{ID: "t", Line: &line, OriginalLine: &originalLine, Comments: []ReviewThreadComment{{Author: "u"}}}}}}
+	fc.Installations[0].Permissions = map[string]string{"contents": "read"}
+	fc.FileContents["o/r/f"] = []byte("x")
+	fc.FileContentsRef["o/r/f@main"] = []byte("x")
+	fc.DirContents["o/r/d@main"] = []DirectoryEntry{{Path: "f"}}
+	fc.PullRequests = map[string][]ChangeProposal{"o/r": {{Title: "pr"}}}
+	fc.Workflows = map[string]*Workflow{"o/r/ci.yml": {Name: "ci"}}
+	fc.Annotations = []Annotation{{Message: "m"}}
+
+	identity, err := fc.GetAuthenticatedUserIdentity(ctx)
+	require.NoError(t, err)
+	identity.Name = "changed"
+	assert.Equal(t, "n", fc.AuthenticatedUserIdentity.Name)
+
+	scopes, err := fc.GetTokenScopes(ctx)
+	require.NoError(t, err)
+	scopes[0] = "changed"
+	assert.Equal(t, "repo", fc.TokenScopes[0])
+
+	latest, err := fc.GetLatestWorkflowRun(ctx, "o", "r", "ci.yml")
+	require.NoError(t, err)
+	latest.Status = "changed"
+	run, err := fc.GetWorkflowRun(ctx, "o", "r", 1)
+	require.NoError(t, err)
+	run.Conclusion = "changed"
+	assert.Equal(t, "completed", fc.WorkflowRuns["o/r/ci.yml"].Status)
+	assert.Equal(t, "success", fc.WorkflowRuns["o/r/ci.yml"].Conclusion)
+
+	issue, err := fc.GetIssue(ctx, "o", "r", 1)
+	require.NoError(t, err)
+	issues, err := fc.ListOpenIssues(ctx, "o", "r")
+	require.NoError(t, err)
+	filtered, err := fc.ListOpenIssues(ctx, "o", "r", "bug")
+	require.NoError(t, err)
+	issue.Labels[0] = "changed"
+	issues[0].Labels[0] = "changed"
+	filtered[0].Labels[0] = "changed"
+	assert.Equal(t, "bug", fc.OpenIssues["o/r"][0].Labels[0])
+
+	files, err := fc.ListPullRequestFiles(ctx, "o", "r", 1)
+	require.NoError(t, err)
+	files[0] = "changed"
+	assert.Equal(t, "a.go", fc.PRFiles["o/r/1"][0])
+
+	commits, err := fc.ListPullRequestCommits(ctx, "o", "r", 1)
+	require.NoError(t, err)
+	commits[0] = "changed"
+	assert.Equal(t, "sha", fc.PRCommits["o/r/1"][0])
+
+	diffs, err := fc.ListPullRequestFileDiffs(ctx, "o", "r", 1)
+	require.NoError(t, err)
+	diffs[0].Path = "changed"
+	assert.Equal(t, "a.go", fc.PRFileDiffs["o/r/1"][0].Path)
+
+	threads, err := fc.ListPullRequestReviewThreads(ctx, "o", "r", 1)
+	require.NoError(t, err)
+	threads.Threads[0].ID = "changed"
+	threads.Threads[0].Comments[0].Author = "changed"
+	assert.Equal(t, "t", fc.PRReviewThreads["o/r/1"].Threads[0].ID)
+	assert.Equal(t, "u", fc.PRReviewThreads["o/r/1"].Threads[0].Comments[0].Author)
+	*threads.Threads[0].Line = 0
+	*threads.Threads[0].OriginalLine = 0
+	assert.Equal(t, 3, line)
+	assert.Equal(t, 4, originalLine)
+
+	annotations, err := fc.GetWorkflowRunAnnotations(ctx, "o", "r", 1)
+	require.NoError(t, err)
+	annotations[0].Message = "changed"
+	assert.Equal(t, "m", fc.Annotations[0].Message)
+
+	installations, err := fc.ListOrgInstallations(ctx, "o")
+	require.NoError(t, err)
+	installations[0].AppSlug = "changed"
+	installations[0].Permissions["contents"] = "write"
+	assert.Equal(t, "app", fc.Installations[0].AppSlug)
+	assert.Equal(t, "read", fc.Installations[0].Permissions["contents"])
+
+	content, err := fc.GetFileContent(ctx, "o", "r", "f")
+	require.NoError(t, err)
+	content[0] = 'y'
+	assert.Equal(t, "x", string(fc.FileContents["o/r/f"]))
+
+	contentAtRef, err := fc.GetFileContentAtRef(ctx, "o", "r", "f", "main")
+	require.NoError(t, err)
+	contentAtRef[0] = 'y'
+	assert.Equal(t, "x", string(fc.FileContentsRef["o/r/f@main"]))
+
+	entries, err := fc.ListDirectoryContents(ctx, "o", "r", "d", "main", false)
+	require.NoError(t, err)
+	entries[0].Path = "changed"
+	assert.Equal(t, "f", fc.DirContents["o/r/d@main"][0].Path)
+
+	prs, err := fc.ListRepoPullRequests(ctx, "o", "r")
+	require.NoError(t, err)
+	prs[0].Title = "changed"
+	assert.Equal(t, "pr", fc.PullRequests["o/r"][0].Title)
+
+	workflow, err := fc.GetWorkflow(ctx, "o", "r", "ci.yml")
+	require.NoError(t, err)
+	workflow.Name = "changed"
+	assert.Equal(t, "ci", fc.Workflows["o/r/ci.yml"].Name)
 }
 
 func TestFakeClient_UpdateRepoVisibility(t *testing.T) {
