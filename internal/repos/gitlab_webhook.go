@@ -862,14 +862,14 @@ func gitlabTriggerOwnerProblem(ctx context.Context, client forge.Client, owner, 
 // to the user with the given ID and project access level, through a role
 // grant at or below that level or an explicit per-user grant. Group grants
 // are not resolved, so a rule that reaches the user only through a group is
-// treated as not admitting them.
+// treated as not admitting them. A deploy-key grant is not a role grant.
 func protectedRuleAdmitsUser(rule forge.ProtectedBranchRule, userID int64, level int) bool {
 	grants := append(append([]forge.ProtectedBranchAccess(nil), rule.PushAccessLevels...), rule.MergeAccessLevels...)
 	for _, g := range grants {
 		if g.UserID != 0 && int64(g.UserID) == userID {
 			return true
 		}
-		if g.UserID == 0 && g.GroupID == 0 && g.AccessLevel > 0 && g.AccessLevel <= level {
+		if g.UserID == 0 && g.GroupID == 0 && g.DeployKeyID == 0 && g.AccessLevel > 0 && g.AccessLevel <= level {
 			return true
 		}
 	}
