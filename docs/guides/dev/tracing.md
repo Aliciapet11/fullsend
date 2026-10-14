@@ -280,11 +280,13 @@ with the summary the parser derives from it) and every wrapping a review
 has constructed so far — terminal escapes before, around and inside a
 secret, repeated and paired secrets, zero-width, bidi, tag, NUL and
 variation-selector characters inside it, a URL's delimiters in
-compatibility forms, a password quoted for the shell, a URL nested in
-another's path, an invalid byte or the
+compatibility forms, separators escaped for the shell or JSON, a
+password quoted for the shell, a URL nested in another's path, an
+invalid byte or the
 replacement character inside it, an invalid byte after it with the
 secret straddling the parser's summary cut, compatibility forms, and
-noise, inside the record and across the feedback cut.
+noise, inside the record and across the feedback cut, in compatibility
+forms or plain with 12 bytes before the cut.
 Four limits are named there and here, and nowhere else: an env value
 written in compatibility (fullwidth) forms, since the normalizer rewrites
 it and the literal pass matches only what the env has; a secret split
@@ -336,7 +338,8 @@ ran before the feedback was sanitized and framed, and sanitizing can join
 a token that scan saw split, so the recorded copy is pattern-scanned
 again; a prompt the composition altered in a way that pass cannot see —
 sanitized, or cut at `maxFeedbackBytes` while holding compatibility
-characters (`promptHidesAlterations`) — is recorded `***` whole; the
+characters or a URL `maskURLs` would mask, since the cut can take the `@`
+that marks a password (`promptHidesAlterations`) — is recorded `***` whole; the
 prompt the agent is sent is not changed, and the mask the first
 scan leaves for a connection-string password of ten or more bytes matches
 its own pattern and counts a finding —

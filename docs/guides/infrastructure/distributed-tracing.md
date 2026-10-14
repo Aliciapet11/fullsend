@@ -142,7 +142,7 @@ marked, since the list is the policy and the markers mean loss. A `Bash`
 `command` is recorded whole, up to 8 KiB, so a heredoc or an inline
 script records what it writes. A URL anywhere in the record — a
 member, text, a result, a summary, the input message, a name — has
-everything from `://` to its last `@` (userinfo, or a URL nested in
+everything from its `://` (or `:\/\/`, escaped for a shell or JSON) to its last `@` (userinfo, or a URL nested in
 another's path) and everything after its first `?` or `#` masked `***`,
 after the patterns ran, and counted in `fullsend.content.sanitizations`;
 the URL runs to the next white space, so in compact JSON the mask can

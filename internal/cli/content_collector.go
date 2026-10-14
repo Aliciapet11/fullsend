@@ -200,8 +200,8 @@ func attachContent(span trace.Span, res contentResult) {
 // maxEncoded: the two content attributes of one span together stay
 // within the size maxEncodedContentBytes is proven for. A prompt the
 // composition altered in a way this pass cannot see — sanitized, or cut
-// while holding compatibility characters (promptHidesAlterations) — is
-// recorded "***" whole.
+// while holding compatibility characters or a URL maskURLs would mask
+// (promptHidesAlterations) — is recorded "***" whole.
 func (c *contentCollector) attachInput(span trace.Span, prompt string, alteredUpstream bool) {
 	if c == nil || prompt == "" {
 		return
@@ -809,15 +809,20 @@ func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text s
 	return maskURLs(text, findings)
 }
 
-// urlRun matches a URL as a scheme, "://" and the rest of the run up to
-// white space — the only end it has, so a quote inside it (a password
-// quoted for the shell, a query quoted half-way) never ends it early.
-var urlRun = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://\S+`)
+// urlRun matches a URL as a scheme, its separator (urlSep) and the rest
+// of the run up to white space — the only end it has, so a quote inside
+// it (a password quoted for the shell, a query quoted half-way) never
+// ends it early.
+var urlRun = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*:(?:\\*/){2}\S+`)
+
+// urlSep matches a URL's "://", or the same with its slashes escaped, as
+// a shell command or a JSON encoder writes them, once or more.
+var urlSep = regexp.MustCompile(`:(?:\\*/){2}`)
 
 // maskURLs masks what a URL carries that no pattern is written for:
 // everything after its first '?' or '#' (a presigned signature, an access
-// token, a token in a fragment) and everything from "://" to its last
-// '@' (userinfo, or a URL nested in another's path), as ***, with one
+// token, a token in a fragment) and everything from its separator to its
+// last '@' (userinfo, or a URL nested in another's path), as ***, with one
 // finding for a string that had any. It runs last in redactText, on text
 // the normalizer has folded and the patterns have masked, so a
 // compatibility '？' or '＠' is a plain one here, and nothing is
@@ -830,8 +835,8 @@ func maskURLs(text string, findings *[]security.Finding) string {
 		if i := strings.IndexAny(out, "?#"); i >= 0 {
 			out = out[:i+1] + "***"
 		}
-		if s, a := strings.Index(out, "://"), strings.LastIndex(out, "@"); a > s {
-			out = out[:s+3] + "***" + out[a:]
+		if s, a := urlSep.FindStringIndex(out)[1], strings.LastIndex(out, "@"); a > s {
+			out = out[:s] + "***" + out[a:]
 		}
 		masked = masked || out != run
 		return out

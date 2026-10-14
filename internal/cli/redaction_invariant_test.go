@@ -101,6 +101,10 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 				out[i] = secret{name, "https://h.example.com/x" + string(rune(0xff1f)) + "access_token=" + b[:16], b[:16], false}
 			case "url_fragment":
 				out[i] = secret{name, "https://app.example.com/cb#access_token=" + b[:16], b[:16], false}
+			case "url_userinfo_escaped": // separators escaped for the shell or JSON
+				out[i] = secret{name, `https:\/\/deploy:` + b[:16] + `@git.example.com\/o\/r`, b[:16], false}
+			case "url_query_escaped":
+				out[i] = secret{name, `https:\/\/h.example.com\/x?access_token=` + b[:16], b[:16], false}
 			case "url_nested": // a URL in another's path
 				out[i] = secret{name, "https://proxy.example.com/https://u:" + b[:16] + "@h.example.com/x", b[:16], false}
 			}
@@ -113,6 +117,7 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 		mk("env_assignment", 800), mk("auth_header", 900),
 		mk("url_userinfo", 1000), mk("url_userinfo_quoted", 1100), mk("url_userinfo_fullwidth", 1200),
 		mk("url_query", 1300), mk("url_query_fullwidth", 1400), mk("url_fragment", 1500), mk("url_nested", 1600),
+		mk("url_userinfo_escaped", 1700), mk("url_query_escaped", 1800),
 	}
 
 	// Wrappings over the secret text; the ones that insert a character
@@ -179,6 +184,9 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 		{"fullwidth body", func(a, _ secret) string { return fullwidth(a) }, envExcluded, false},
 		{"inside 2 KiB of noise each side", func(a, _ secret) string { return noise(1, 2048) + " " + a.text + " " + noise(2, 2048) }, none, false},
 		{"fullwidth body straddling the feedback cut", func(a, _ secret) string { return noise(3, maxFeedbackBytes-48) + " " + fullwidth(a) }, envExcluded, false},
+		{"body straddling the feedback cut, 12 bytes before it", func(a, _ secret) string {
+			return noise(5, maxFeedbackBytes-1-window-strings.Index(a.text, a.body)) + " " + a.text
+		}, none, false},
 	}
 
 	// Views of one exported string.

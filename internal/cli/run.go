@@ -3879,11 +3879,21 @@ func buildFeedbackPrompt(feedback string) (string, int) {
 // sanitizer stripped something (sanitized > 0), which the collector's own
 // normalizer can then no longer see — a stripped colour code can take a
 // token's first letter with it, and what is left matches no pattern — or
-// the feedback was cut at maxFeedbackBytes while it held compatibility
-// characters, so the cut may have split a secret written in those forms,
-// which only the collector's fold would have recognised whole.
+// the feedback was cut at maxFeedbackBytes while it held what the
+// collector recognises only whole: compatibility characters, which only
+// its fold joins, or a URL whose userinfo, query or fragment maskURLs
+// masks — a cut can take the '@' that marks userinfo and leave the
+// password before it. Feedback cut with neither is recorded.
 func promptHidesAlterations(feedback string, sanitized int) bool {
-	return sanitized > 0 || (len(feedback) > maxFeedbackBytes && !security.NewUnicodeNormalizer().Scan(feedback).Safe)
+	if sanitized > 0 {
+		return true
+	}
+	if len(feedback) <= maxFeedbackBytes {
+		return false
+	}
+	var urls []security.Finding
+	maskURLs(feedback, &urls)
+	return len(urls) > 0 || !security.NewUnicodeNormalizer().Scan(feedback).Safe
 }
 
 // sanitizeFeedbackUnicode strips dangerous non-rendering Unicode characters

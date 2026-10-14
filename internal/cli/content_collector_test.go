@@ -249,18 +249,20 @@ func TestContentCollector_AURLsUserinfoQueryAndFragmentAreMasked(t *testing.T) {
 	for name, tc := range map[string]struct {
 		tool, args, want string
 	}{
-		"a password before the host":      {"WebFetch", `{"url":"https://alice:` + pw + `@example.com/repo"}`, `{"url":"https://***@example.com/repo"}`},
-		"a presigned query":               {"WebFetch", `{"url":"https://b.s3.amazonaws.com/k?X-Amz-Credential=AKIA` + pw + `&X-Amz-Signature=` + pw + `"}`, `{"url":"https://b.s3.amazonaws.com/k?***"}`},
-		"an access token in the query":    {"Bash", `{"command":"curl 'https://api.example.com/v1/me?access_token=` + pw + `' -s"}`, `{"command":"curl 'https://api.example.com/v1/me?*** -s"}`},
-		"a token in a clone URL":          {"Bash", `{"command":"git clone https://x-access-token:` + pw + `@github.com/o/r.git /tmp/r"}`, `{"command":"git clone https://***@github.com/o/r.git /tmp/r"}`},
-		"a token behind the fragment":     {"Bash", `{"command":"open https://app.example.com/cb#access_token=` + pw + `"}`, `{"command":"open https://app.example.com/cb#***"}`},
-		"a password quoted for the shell": {"Bash", `{"command":"git clone https://deploy:'` + pw + `'@git.example.com/o/r"}`, `{"command":"git clone https://***@git.example.com/o/r"}`},
-		"a query quoted half-way":         {"Bash", `{"command":"curl 'https://h.example.com/x'?token=` + pw + `"}`, `{"command":"curl 'https://h.example.com/x'?***"}`},
-		"a URL nested in another's path":  {"Bash", `{"command":"curl https://proxy.example.com/https://u:` + pw + `@h.example.com/x"}`, `{"command":"curl https://***@h.example.com/x"}`},
-		"a fullwidth question mark":       {"Bash", `{"command":"curl https://api.example.com/v1/me` + fw(0xff1f) + `access_token=` + pw + `"}`, `{"command":"curl https://api.example.com/v1/me?***"}`},
-		"a fullwidth at sign":             {"Bash", `{"command":"git clone https://x-access-token` + fw(0xff1a) + pw + fw(0xff20) + `github.com/o/r"}`, `{"command":"git clone https://***@github.com/o/r"}`},
-		"a zero-width split scheme":       {"Bash", `{"command":"curl https:` + fw(0x200b) + `//h.example.com/p?access_token=` + pw + `"}`, `{"command":"curl https://h.example.com/p?***"}`},
-		"a fullwidth token in the path":   {"Bash", `{"command":"curl https://h.example.com/ghp_` + ghpFull.String() + `?x=1"}`, `{"command":"curl https://h.example.com/ghp_...?***"}`},
+		"a password before the host":           {"WebFetch", `{"url":"https://alice:` + pw + `@example.com/repo"}`, `{"url":"https://***@example.com/repo"}`},
+		"a presigned query":                    {"WebFetch", `{"url":"https://b.s3.amazonaws.com/k?X-Amz-Credential=AKIA` + pw + `&X-Amz-Signature=` + pw + `"}`, `{"url":"https://b.s3.amazonaws.com/k?***"}`},
+		"an access token in the query":         {"Bash", `{"command":"curl 'https://api.example.com/v1/me?access_token=` + pw + `' -s"}`, `{"command":"curl 'https://api.example.com/v1/me?*** -s"}`},
+		"a token in a clone URL":               {"Bash", `{"command":"git clone https://x-access-token:` + pw + `@github.com/o/r.git /tmp/r"}`, `{"command":"git clone https://***@github.com/o/r.git /tmp/r"}`},
+		"a token behind the fragment":          {"Bash", `{"command":"open https://app.example.com/cb#access_token=` + pw + `"}`, `{"command":"open https://app.example.com/cb#***"}`},
+		"a password quoted for the shell":      {"Bash", `{"command":"git clone https://deploy:'` + pw + `'@git.example.com/o/r"}`, `{"command":"git clone https://***@git.example.com/o/r"}`},
+		"a query quoted half-way":              {"Bash", `{"command":"curl 'https://h.example.com/x'?token=` + pw + `"}`, `{"command":"curl 'https://h.example.com/x'?***"}`},
+		"a URL nested in another's path":       {"Bash", `{"command":"curl https://proxy.example.com/https://u:` + pw + `@h.example.com/x"}`, `{"command":"curl https://***@h.example.com/x"}`},
+		"a fullwidth question mark":            {"Bash", `{"command":"curl https://api.example.com/v1/me` + fw(0xff1f) + `access_token=` + pw + `"}`, `{"command":"curl https://api.example.com/v1/me?***"}`},
+		"a fullwidth at sign":                  {"Bash", `{"command":"git clone https://x-access-token` + fw(0xff1a) + pw + fw(0xff20) + `github.com/o/r"}`, `{"command":"git clone https://***@github.com/o/r"}`},
+		"a zero-width split scheme":            {"Bash", `{"command":"curl https:` + fw(0x200b) + `//h.example.com/p?access_token=` + pw + `"}`, `{"command":"curl https://h.example.com/p?***"}`},
+		"a fullwidth token in the path":        {"Bash", `{"command":"curl https://h.example.com/ghp_` + ghpFull.String() + `?x=1"}`, `{"command":"curl https://h.example.com/ghp_...?***"}`},
+		"separators escaped for the shell":     {"Bash", `{"command":"curl https:\\\\/\\\\/h.example.com/p?access_token=` + pw + `"}`, `{"command":"curl https:\\\\/\\\\/h.example.com/p?***"}`},
+		"a password behind escaped separators": {"Bash", `{"command":"git clone https:\\\\/\\\\/deploy:` + pw + `@git.example.com/o/r"}`, `{"command":"git clone https:\\\\/\\\\/***@git.example.com/o/r"}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newContentCollector(4096)
@@ -295,10 +297,12 @@ func TestContentCollector_AURLsUserinfoQueryAndFragmentAreMasked(t *testing.T) {
 		c := newContentCollector(4096)
 		c.Handle(agentruntime.TextEvent{Text: "pushing to https://deploy:" + pw + "@git.example.com/o/r now"})
 		c.Handle(agentruntime.ToolResultEvent{ID: "toolu_01", Result: "origin\thttps://deploy:" + pw + "@git.example.com/o/r (fetch)"})
+		c.Handle(agentruntime.ToolResultEvent{ID: "toolu_02", Result: `{"next":"https:\/\/api.example.com\/v1?access_token=` + pw + `"}`})
 
 		res := c.Result("stop")
 		assert.Contains(t, res.OutputMessages, `"content":"pushing to https://***@git.example.com/o/r now"`)
 		assert.Contains(t, res.OutputMessages, `"response":"origin\thttps://***@git.example.com/o/r (fetch)"`)
+		assert.Contains(t, res.OutputMessages, `/v1?***"`, "a JSON encoder's escaped slashes")
 		assert.NotContains(t, res.OutputMessages, pw)
 	})
 	t.Run("a URL with none of them is kept as written", func(t *testing.T) {
@@ -457,9 +461,10 @@ func TestAttachInput_APromptAlteredUpstreamIsMaskedWhole(t *testing.T) {
 	// the sanitizer stripped: a colour code that ate a token's first
 	// letter plus a zero-width character that kept the token from the
 	// pattern scan leave "hp_" and the body; and a token in compatibility
-	// forms straddling the cut is split before anything can fold it. Both
-	// are recorded masked whole (promptHidesAlterations). Big plain
-	// feedback is not.
+	// forms straddling the cut is split before anything can fold it; and a
+	// URL password straddling the cut loses the '@' that marks it. All are
+	// recorded masked whole (promptHidesAlterations). Big plain feedback,
+	// a URL with nothing to mask in it included, is not.
 	token := "ghp_" + strings.Repeat("r", 36)
 	var fw strings.Builder
 	for _, r := range token {
@@ -472,7 +477,8 @@ func TestAttachInput_APromptAlteredUpstreamIsMaskedWhole(t *testing.T) {
 	}{
 		"a colour code ate the first letter of a zero-width-split token": {"\x1b[" + token[:20] + "\u200b" + token[20:], true},
 		"a fullwidth token straddling the cut":                           {strings.Repeat("x", maxFeedbackBytes-48) + " " + fw.String(), true},
-		"plain feedback over the cut":                                    {plain, false},
+		"a URL password straddling the cut, 12 bytes before it":          {strings.Repeat("x", maxFeedbackBytes-28) + " https://deploy:" + token[4:20] + "@git.example.com/o/r", true},
+		"plain feedback over the cut":                                    {plain + " see https://example.com/docs", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fb := redactFeedback(tc.feedback, nil)
@@ -788,13 +794,15 @@ func TestContentCollector_ADroppedResultIsReportedWithNoPartsLeft(t *testing.T) 
 }
 
 func TestContentCollector_ArgumentsAreScannedOnce(t *testing.T) {
-	// A connection string counts the pattern's finding and the URL mask's,
-	// once each, though the call is evicted before Result.
+	// Arguments are scanned when the event is handled, and neither
+	// eviction nor Result scans them again.
 	c := newContentCollector(64)
+	scans := countScans(c, "psql") // survives redaction, so a second scan would see it
 	c.Handle(agentruntime.ToolUseEvent{Name: "Bash", Arguments: `{"command":"psql postgres://u:hunter2hunter2@db/x"}`})
 	c.Handle(agentruntime.TextEvent{Text: strings.Repeat("x", 200)}) // evicts the call
 
 	assert.Equal(t, []string{"db_connection_password", "url_masked"}, findingNames(c.Result("stop").Findings))
+	assert.Equal(t, 1, *scans)
 }
 
 func TestContentCollector_FullwidthQuotesCannotAddAMember(t *testing.T) {
@@ -1297,18 +1305,18 @@ func TestContentCollector_RedactionUnderCapDoesNotMarkTruncated(t *testing.T) {
 
 func TestContentCollector_CappedResultScannedOnce(t *testing.T) {
 	// The cap path already scans the response; Result must not scan the
-	// same bytes again. The URL mask leaves nothing a second pass would
-	// match, so this pins the count: the pattern's finding and the URL
-	// mask's, once each.
+	// same bytes again (bulkScanned).
 	c := newContentCollector(maxContentBytes)
+	scans := countScans(c, "scanned-once") // survives redaction and the cut
 	c.Handle(agentruntime.ToolResultEvent{
 		ID:     "toolu_db",
-		Result: strings.Repeat("x", maxToolResultBytes) + " postgres://user:supersecret@host",
+		Result: strings.Repeat("x", maxToolResultBytes) + " scanned-once postgres://user:supersecret@host",
 	})
 
 	res := c.Result("stop")
 	assert.NotContains(t, res.OutputMessages, "supersecret")
 	assert.Equal(t, []string{"db_connection_password", "url_masked"}, findingNames(res.Findings))
+	assert.Equal(t, 1, *scans)
 }
 
 func TestContentCollector_CoalescedAfterPreTrimStillScanned(t *testing.T) {
@@ -1947,6 +1955,28 @@ func TestAttachInput_WorstCaseFeedbackSharesTheEncodedCeiling(t *testing.T) {
 		"both attributes ride one span; together they stay within the proven size")
 	assert.Greater(t, len(in)+len(out), maxEncodedContentBytes-100,
 		"the output keeps everything the input left")
+}
+
+// scanCounter counts the strings holding marker that reach a pipeline.
+type scanCounter struct {
+	marker string
+	n      *int
+}
+
+func (s scanCounter) Name() string { return "scan_counter" }
+
+func (s scanCounter) Scan(text string) security.ScanResult {
+	if strings.Contains(text, s.marker) {
+		*s.n++
+	}
+	return security.ScanResult{Safe: true}
+}
+
+// countScans puts a scanCounter ahead of c's pipeline and returns its count.
+func countScans(c *contentCollector, marker string) *int {
+	n := new(int)
+	c.pipeline = security.NewPipeline(scanCounter{marker, n}, security.NewUnicodeNormalizer(), security.NewSecretRedactor())
+	return n
 }
 
 func findingNames(fs []security.Finding) []string {
