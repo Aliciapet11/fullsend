@@ -23,7 +23,8 @@ func codexDelegates(def *piAgentDef, securityEnabled bool) bool {
 
 // codexRole is one native Codex sub-agent role, written to
 // $CODEX_HOME/agents/<Name>.toml. Instructions is the child's
-// developer_instructions: the persona body and nothing else (#6970).
+// developer_instructions: codexChildNote, then the persona body; nothing of
+// the dropped frontmatter (#6970).
 type codexRole struct {
 	Name, Description, Instructions string
 }
@@ -44,6 +45,17 @@ func (role codexRole) toml() []byte {
 		"developer_instructions = " + codexTOMLString(role.Instructions) + "\n")
 }
 
+// codexChildNote opens every role's developer_instructions. A native child
+// runs with its role's developer_instructions in place of the parent's, so
+// nothing of codexNoSubagentNote reaches it: the note carries the child
+// contract (pi's CHILD_SYSTEM_NOTE, word for word) and the chunked-read rule.
+const codexChildNote = "## Runtime note\n\n" +
+	"You are a sub-agent dispatched by another agent. Carry out the single task in the message you " +
+	"were given and then stop. You have no sub-agent tool of your own and cannot dispatch further " +
+	"work. Your final assistant message is the entire result handed back to the agent that " +
+	"dispatched you, so make it self-contained.\n\n" +
+	codexChunkedReadNote + "\n"
+
 // Built-in roles. `default` serves a spawn without agent_type, which is how
 // retro's unnamed investigation tasks run; `explore` is Claude Code's
 // Explore as an instruction to the child, not an enforced sandbox: the
@@ -52,11 +64,11 @@ const (
 	codexDefaultRoleDescription  = "Generic sub-agent for a task the parent describes in full in its message."
 	codexDefaultRoleInstructions = "# Sub-agent\n\nDo the task in the message you were given, and only that task. " +
 		"Put your findings, with file paths and line numbers where they apply, in your final message: " +
-		"the parent reads nothing else and owns the synthesis and the final result.\n"
+		"the parent owns the synthesis and the final result.\n"
 	codexExploreRoleDescription  = "Investigation of the repository by reading only; reports findings. Instruction-only: nothing enforces read-only on a child."
 	codexExploreRoleInstructions = "# Explore\n\nAnswer the question in the message you were given by reading the " +
 		"repository: read files, search, and run commands that change nothing. Do not edit or create files. " +
-		"Put what you found, with file paths and line numbers, in your final message: the parent reads nothing else.\n"
+		"Put what you found, with file paths and line numbers, in your final message.\n"
 )
 
 // codexRoles is the role list for a delegating agent: every skill persona
@@ -72,8 +84,8 @@ func codexRoles(skillDirs []string, agentName string) []codexRole {
 		fmt.Fprintf(os.Stderr, "Warning: persona %q skipped: %s\n", sk.Path, sk.Reason)
 	}
 	roles := []codexRole{
-		{Name: "default", Description: codexDefaultRoleDescription, Instructions: codexDefaultRoleInstructions},
-		{Name: "explore", Description: codexExploreRoleDescription, Instructions: codexExploreRoleInstructions},
+		{Name: "default", Description: codexDefaultRoleDescription, Instructions: codexChildNote + codexDefaultRoleInstructions},
+		{Name: "explore", Description: codexExploreRoleDescription, Instructions: codexChildNote + codexExploreRoleInstructions},
 	}
 	for _, p := range personas {
 		var reason string
@@ -94,7 +106,7 @@ func codexRoles(skillDirs []string, agentName string) []codexRole {
 				"restriction, so the run-level child model and the parent's tools apply\n",
 				p.Name, strings.Join(keys, ", "))
 		}
-		roles = append(roles, codexRole{Name: p.Name, Description: p.Description, Instructions: p.Body + "\n"})
+		roles = append(roles, codexRole{Name: p.Name, Description: p.Description, Instructions: codexChildNote + p.Body + "\n"})
 	}
 	slices.SortFunc(roles, func(a, b codexRole) int { return strings.Compare(a.Name, b.Name) })
 	return roles

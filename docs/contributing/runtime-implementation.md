@@ -1101,7 +1101,9 @@ flowchart TB
   files through the shell, and Codex 0.157.0 truncates a single exec at 10,000 tokens (head and
   tail), so `codexNoSubagentNote` tells it to count lines with `awk 'END { print NR }'` (`wc -l`
   misses a last line with no trailing newline) then `sed -n` a long `SKILL.md` in at most
-  200-line ranges, one per tool call (#7831).
+  200-line ranges, one per tool call (#7831). A native child runs with its role's
+  `developer_instructions` in place of the parent's, so every role file opens with
+  `codexChildNote`: the child contract pi gives every child, and the same rule.
 - **AGENTS.md** — codex skips a project's own `AGENTS.md` while the project is untrusted
   (`codex-rs/core/src/agents_md.rs`), but always loads `$CODEX_HOME/AGENTS.md` as user
   instructions. The runner copies the repo's root `AGENTS.md` (or the injected org-level one) there

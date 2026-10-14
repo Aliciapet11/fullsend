@@ -373,19 +373,21 @@ func codexDeveloperInstructions(agentName string, def *piAgentDef) string {
 // single-context path deliberately instead of recording a failed dispatch.
 // codex does have a spawn_agent tool, but fullsend wires no sub-agent roster
 // for it in v1, the same position pi was in (#6527).
-//
-// The second paragraph is the chunked-read rule for Codex's exec truncation
-// (10,000 tokens, head and tail, at 0.157.0). A single cat of a long SKILL.md
-// drops the middle with no retry (#7831). Lines are counted with awk's NR, not
-// `wc -l`: `wc -l` counts newline characters, so a file whose last line has no
-// trailing newline reports one line too few and the last range would stop
-// short of it.
 const codexNoSubagentNote = "\n## Runtime note\n\n" +
 	"This agent runs on the codex runtime (FULLSEND_RUNTIME=codex). No fullsend sub-agent " +
 	"roster is available. When a skill says to dispatch sub-agents, execute each sub-agent " +
 	"definition yourself, in the listed order, with the same context package, and treat each " +
 	"output as that sub-agent's result.\n\n" +
-	"When reading a SKILL.md or other instruction file, do not cat it in one call: Codex " +
+	codexChunkedReadNote
+
+// codexChunkedReadNote is the chunked-read rule for Codex's exec truncation
+// (10,000 tokens, head and tail, at 0.157.0). A single cat of a long SKILL.md
+// drops the middle with no retry (#7831). Lines are counted with awk's NR, not
+// `wc -l`: `wc -l` counts newline characters, so a file whose last line has no
+// trailing newline reports one line too few and the last range would stop
+// short of it. codexNoSubagentNote and every role file (codexChildNote) end
+// their runtime note with it.
+const codexChunkedReadNote = "When reading a SKILL.md or other instruction file, do not cat it in one call: Codex " +
 	"truncates exec output (head and tail, dropping the middle). For each file, count its " +
 	"lines with `awk 'END { print NR }' <file>` (`wc -l` misses a last line with no newline), " +
 	"then `sed -n '<start>,<end>p'` in contiguous ranges of at most 200 lines, one range per " +

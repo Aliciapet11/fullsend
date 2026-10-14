@@ -156,9 +156,9 @@ func TestCodexRoles_SkillPersonasSorted(t *testing.T) {
 	assert.Equal(t, codexRole{
 		Name:         "correctness",
 		Description:  "Evaluates logic correctness, edge cases, nil handling, API contracts, test adequacy/integrity.",
-		Instructions: "# Correctness\n\nYou are a senior software engineer reviewing for correctness.\n",
+		Instructions: codexChildNote + "# Correctness\n\nYou are a senior software engineer reviewing for correctness.\n",
 	}, roles[0])
-	assert.Equal(t, "Review for style.\n", roles[3].Instructions)
+	assert.Equal(t, codexChildNote+"Review for style.\n", roles[3].Instructions)
 }
 
 // A file discoverPersonas skips (reserved name, bad shape) is a warning here
@@ -228,7 +228,7 @@ func TestCodexRoles_DuplicateAcrossSkillsKeepsTheFirst(t *testing.T) {
 	out := captureStderr(t, func() { roles = codexRoles([]string{first, second}, "review") })
 
 	assert.Equal(t, []string{"correctness", "default", "explore"}, codexRoleNames(roles))
-	assert.Equal(t, "# Correctness\n\nYou are a senior software engineer reviewing for correctness.\n", roles[0].Instructions)
+	assert.Equal(t, codexChildNote+"# Correctness\n\nYou are a senior software engineer reviewing for correctness.\n", roles[0].Instructions)
 	assert.Contains(t, out, "skipped: name already declared by skill")
 }
 
