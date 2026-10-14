@@ -258,32 +258,30 @@ func maskRunnerSecretValue(value string) {
 }
 
 // registerRunnerSecretValue registers a runner secret with the
-// process-wide redactor and reports whether the whole value was long
-// enough to register. It also registers each line of a multi-line value
-// and the JSON-escaped form when that differs, so a script that prints one
-// line or embeds the value in JSON output is still redacted. A line or
+// process-wide redactor and reports whether the value is long enough to
+// register, judged on its trimmed form so padding cannot lift a short
+// value over the minimum. Script output is often trimmed (validation
+// feedback, pre-script outputs) before it is redacted, so it registers the
+// value and its trimmed form, each line of a multi-line value with and
+// without padding, and the JSON-escaped form of each of these. A line or
 // escaped form below the redactor's minimum length is skipped.
 func registerRunnerSecretValue(value string) bool {
-	if !security.RegisterRuntimeSecret(value) {
+	trimmed := strings.TrimSpace(value)
+	if !security.RegisterRuntimeSecret(trimmed) {
 		return false
 	}
-	// Script output is often trimmed (validation feedback, pre-script
-	// outputs) before it is redacted, so the trimmed forms are registered
-	// too; values that become too short are refused by the registry.
-	if trimmed := strings.TrimSpace(value); trimmed != value {
-		security.RegisterRuntimeSecret(trimmed)
-	}
+	forms := []string{value, trimmed}
 	if strings.ContainsAny(value, "\r\n") {
 		for _, line := range strings.Split(value, "\n") {
 			line = strings.TrimRight(line, "\r")
-			security.RegisterRuntimeSecret(line)
-			if trimmed := strings.TrimSpace(line); trimmed != line {
-				security.RegisterRuntimeSecret(trimmed)
-			}
+			forms = append(forms, line, strings.TrimSpace(line))
 		}
 	}
-	if escaped := jsonEscapedString(value); escaped != value {
-		security.RegisterRuntimeSecret(escaped)
+	for _, form := range forms {
+		security.RegisterRuntimeSecret(form)
+		if escaped := jsonEscapedString(form); escaped != form {
+			security.RegisterRuntimeSecret(escaped)
+		}
 	}
 	return true
 }

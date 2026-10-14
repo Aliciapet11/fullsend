@@ -206,6 +206,27 @@ func TestLoadRunnerSecrets_RefusesValueTooShortToRedact(t *testing.T) {
 	assert.NotContains(t, err.Error(), "abc1234")
 }
 
+// Padding must not lift a value over the minimum length: the trimmed form
+// is what a trimming parser leaves behind for the redactor to match.
+func TestLoadRunnerSecrets_RefusesPaddedValueTooShortToRedact(t *testing.T) {
+	t.Setenv(runnerSecretsEnv, `{"PADDED_SHORT":"  abc1234  "}`)
+
+	secrets, err := loadRunnerSecrets()
+	require.Error(t, err)
+	assert.Nil(t, secrets)
+	assert.Contains(t, err.Error(), "PADDED_SHORT: value is too short to redact from logs")
+}
+
+// The trimmed form of a padded value with quotes is registered escaped
+// too, since a parse error quotes the trimmed value.
+func TestLoadRunnerSecrets_RegistersEscapedTrimmedForm(t *testing.T) {
+	t.Setenv(runnerSecretsEnv, `{"PADDED_QUOTED":"  say \"hi\" 7689-d  "}`)
+
+	_, err := loadRunnerSecrets()
+	require.NoError(t, err)
+	assert.Contains(t, security.RuntimeSecrets(), `say \"hi\" 7689-d`)
+}
+
 func TestLoadRunnerSecrets_RegistersLinesAndJSONEscapedForm(t *testing.T) {
 	t.Setenv(runnerSecretsEnv, `{"PEM_LIKE":"first-line-7689-a\nsecond-line-7689-b","QUOTED":"say \"hi\" to 7689-c"}`)
 
