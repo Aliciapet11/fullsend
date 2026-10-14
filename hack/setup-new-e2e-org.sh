@@ -18,7 +18,6 @@ set -euo pipefail
 TEST_APP_SET="fullsend-test"
 TEST_ROLES=(fullsend triage coder review retro prioritize)
 E2E_APP_SET="fullsend-ai"
-MINT_ROLES=(fullsend triage coder review retro prioritize e2e)
 BOT_USER="botsend"
 TEST_WRITE_USER="fstest-write"
 TEST_TRIAGE_USER="fstest-triage"
@@ -555,62 +554,9 @@ else
 fi
 echo "    Verify with: fullsend admin foreign list --org ${ORG}"
 
-# --- 5. check mint enrollment ---
-MINT_PROJECT="${MINT_PROJECT:?MINT_PROJECT must be set}"
-MINT_REGION="${MINT_REGION:-us-central1}"
-MINT_FUNCTION="${MINT_FUNCTION:?MINT_FUNCTION must be set}"
-
 echo
-echo "==> Checking mint enrollment (project: ${MINT_PROJECT}, region: ${MINT_REGION})..."
-mint_ok=true
-
-if ! command -v gcloud &>/dev/null; then
-  echo "    SKIP: gcloud CLI not found, cannot check mint config."
-  mint_ok=false
-else
-  mint_env=$(gcloud functions describe "${MINT_FUNCTION}" \
-    --region "${MINT_REGION}" \
-    --project "${MINT_PROJECT}" \
-    --format json 2>/dev/null \
-    | jq -r '.serviceConfig.environmentVariables' 2>/dev/null) || mint_env=""
-
-  if [[ -z "${mint_env}" || "${mint_env}" == "null" ]]; then
-    echo "    SKIP: could not read mint function env vars."
-    echo "    You may need to run: gcloud auth login"
-    mint_ok=false
-  else
-    # Check ROLE_APP_IDS
-    role_app_ids=$(echo "${mint_env}" | jq -r '.ROLE_APP_IDS // ""')
-    missing_roles=()
-    for role in "${MINT_ROLES[@]}"; do
-      # ROLE_APP_IDS uses role-only keys; org/role keys are legacy and ignored
-      # by the mint during the migration window.
-      key="${role}"
-      if echo "${role_app_ids}" | jq -e --arg k "${key}" '.[$k]' &>/dev/null; then
-        echo "    OK: ${key} is in ROLE_APP_IDS"
-      else
-        echo "    MISSING: ${key} is NOT in ROLE_APP_IDS"
-        missing_roles+=("${key}")
-        mint_ok=false
-      fi
-    done
-  fi
-fi
-
-echo
-if [[ "${mint_ok}" == "true" ]]; then
-  echo "==> ${ORG} is fully ready for e2e testing."
-else
-  echo "==> ${ORG} GitHub setup is complete, but mint enrollment needs attention."
-  echo "    Fix the issues above, then:"
-fi
+echo "==> ${ORG} is ready for e2e testing."
 echo
 echo "    Next steps:"
-if [[ "${mint_ok}" != "true" ]]; then
-  echo "    1. Enroll ${ORG} in the mint: run /mint-enroll in Claude Code"
-  echo "    2. Uncomment \"${ORG}\" in internal/e2etest/testutil.go orgPool"
-  echo "    3. Run: make behaviour-test"
-else
-  echo "    1. Uncomment \"${ORG}\" in internal/e2etest/testutil.go orgPool"
-  echo "    2. Run: make behaviour-test"
-fi
+echo "    1. Uncomment \"${ORG}\" in internal/e2etest/testutil.go orgPool"
+echo "    2. Run: make behaviour-test"

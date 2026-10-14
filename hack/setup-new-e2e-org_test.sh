@@ -9,7 +9,9 @@
 # removal is removed on the retry; a write actor who is a maintainer is set
 # back to member; any other member or pending invitee (including an email
 # invitation with a null login) on the team fails; no
-# PAT value is printed.
+# PAT value is printed. Also checks that the script no longer references
+# the legacy hosted-GCP-mint settings and keeps the
+# FULLSEND_FOREIGN_E2E_REPOS step.
 #
 # Run from the repo root:
 #   bash hack/setup-new-e2e-org_test.sh
@@ -325,6 +327,18 @@ if [[ "${RC}" -ne 0 ]] && grep -q "could not list members" <<< "${OUT}"; then
   pass "member list error: fails"
 else
   fail "member list error: rc=${RC}: ${OUT}"
+fi
+
+# --- 13. no legacy hosted-GCP-mint check (#8416) ---------------------------
+if grep -nE 'MINT_PROJECT|MINT_FUNCTION|MINT_REGION|gcloud|ROLE_APP_IDS' "${SETUP}"; then
+  fail "legacy mint check: script still references hosted-GCP-mint settings"
+else
+  pass "legacy mint check: no hosted-GCP-mint settings referenced"
+fi
+if grep -q 'FULLSEND_FOREIGN_E2E_REPOS' "${SETUP}"; then
+  pass "legacy mint check: FULLSEND_FOREIGN_E2E_REPOS step kept"
+else
+  fail "legacy mint check: FULLSEND_FOREIGN_E2E_REPOS step missing"
 fi
 
 if [[ "${FAILURES}" -gt 0 ]]; then

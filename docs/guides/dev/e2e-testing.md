@@ -177,8 +177,8 @@ Each pool org must be provisioned before e2e can use it:
 Use the idempotent setup script. Numeric arguments become `halfsend-NN`; a full org name (for example `halfsend` for STAGE) is used as-is:
 
 ```bash
-MINT_PROJECT=... MINT_FUNCTION=... hack/setup-new-e2e-org.sh 07
-MINT_PROJECT=... MINT_FUNCTION=... hack/setup-new-e2e-org.sh halfsend
+hack/setup-new-e2e-org.sh 07
+hack/setup-new-e2e-org.sh halfsend
 ```
 
 Verify foreign authorization:
@@ -241,7 +241,7 @@ environment variables:
 
 ```bash
 TEST_ACTOR_WRITE_PAT=ghp_... TEST_ACTOR_TRIAGE_PAT=ghp_... \
-  MINT_PROJECT=... MINT_FUNCTION=... hack/setup-new-e2e-org.sh 07
+  hack/setup-new-e2e-org.sh 07
 ```
 
 Without the PAT variables, the script pauses for manual acceptance.
@@ -306,7 +306,7 @@ the team out to existing orgs, an org owner runs the script once per org:
 
 ```bash
 for org in halfsend $(seq -w 1 12); do
-  MINT_PROJECT=... MINT_FUNCTION=... hack/setup-new-e2e-org.sh "${org}"
+  hack/setup-new-e2e-org.sh "${org}"
 done
 ```
 
