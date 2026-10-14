@@ -25,10 +25,14 @@ import defaultExport, {
   RESULT_MAX_BYTES,
   childArgs,
   childEnv,
+  childFallbacks,
+  childModelNotServed,
+  childSessionDir,
   childTools,
   createAgentTool,
   isAgentEndPrefix,
   isAssistantMessageEndPrefix,
+  isVertexModelUnavailable,
   resolveModel,
   vertexChildAuthenticated,
   vertexCredentialsUsable,
@@ -1680,4 +1684,149 @@ test("run: without a pinned gateway config the child gets no config file", async
   assert.equal(children[0].opts.env[GATEWAY_CONFIG_FILE_ENV], process.env[GATEWAY_CONFIG_FILE_ENV], "nothing set or changed");
   children[0].child.finish(okStream("one"));
   await pending;
+});
+
+// --- model fallback for children (#8426) ---
+
+const NOT_SERVED = "Publisher model `projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-5-5` not found.";
+const notServedStream = (msg = NOT_SERVED) => [
+  { type: "agent_start" },
+  { type: "message_end", message: { role: "assistant", content: [], model: "m", provider: "anthropic-vertex", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } }, stopReason: "error", errorMessage: msg } },
+  { type: "agent_end", messages: [] },
+  { type: "agent_settled" },
+];
+
+function fallbackFixture() {
+  const { dir, manifest } = fixture();
+  manifest.agent.models = {
+    default: "anthropic-vertex/claude-opus-5-5",
+    opus: "anthropic-vertex/claude-opus-5-5",
+    sonnet: "anthropic-vertex/claude-sonnet-5-5",
+    haiku: "anthropic-vertex/claude-haiku-5-5",
+  };
+  manifest.agent.modelFallbacks = {
+    opus: ["anthropic-vertex/claude-opus-4-6"],
+    sonnet: ["anthropic-vertex/claude-sonnet-4-6"],
+    haiku: ["anthropic-vertex/claude-haiku-4-5"],
+  };
+  return { dir, manifest };
+}
+
+async function untilChildren(children, n) {
+  for (let i = 0; i < 200 && children.length < n; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(children.length, n);
+}
+
+const modelArg = (c) => c.args[c.args.indexOf("--model") + 1];
+
+test("isVertexModelUnavailable matches the two not-served shapes only", () => {
+  assert.equal(isVertexModelUnavailable(NOT_SERVED), true);
+  assert.equal(isVertexModelUnavailable("Access to this model requires data sharing to be enabled for publisher 'anthropic'"), true);
+  assert.equal(isVertexModelUnavailable("403 PERMISSION_DENIED: Permission denied on resource project p"), false);
+  assert.equal(isVertexModelUnavailable("quota exhausted"), false);
+  assert.equal(isVertexModelUnavailable(undefined), false);
+});
+
+test("childFallbacks: aliases, personas and subagents.default; pinned specs and inheritance never", () => {
+  const { manifest } = fallbackFixture();
+  const agent = manifest.agent;
+  assert.deepEqual(childFallbacks(agent, { model: "Sonnet" }), ["anthropic-vertex/claude-sonnet-4-6"]);
+  assert.deepEqual(childFallbacks(agent, { model: "sonnet@default" }), ["anthropic-vertex/claude-sonnet-4-6"]);
+  assert.deepEqual(childFallbacks(agent, { model: "anthropic-vertex/claude-sonnet-5-5" }), [], "a provider/id the caller pinned");
+  assert.deepEqual(childFallbacks(agent, { model: "claude-sonnet-5-5" }), [], "a bare id the caller pinned");
+  assert.deepEqual(childFallbacks(agent, { model: "default" }), []);
+  assert.deepEqual(childFallbacks(agent, {}), [], "inherits the parent's live model");
+  assert.deepEqual(childFallbacks({ ...agent, subagentDefault: "anthropic-vertex/claude-haiku-5-5", subagentDefaultFallbacks: ["anthropic-vertex/claude-haiku-4-5"] }, {}),
+    ["anthropic-vertex/claude-haiku-4-5"]);
+  assert.deepEqual(childFallbacks(agent, { model: "opus" }, { model: "anthropic-vertex/claude-sonnet-5-5", fallbacks: ["anthropic-vertex/claude-sonnet-4-6"] }),
+    ["anthropic-vertex/claude-sonnet-4-6"], "a persona uses its own chain, not the caller's");
+  assert.deepEqual(childFallbacks(agent, { model: "opus" }, { model: "", fallbacks: ["x"] }), [], "an inheriting persona");
+  assert.deepEqual(childFallbacks({}, { model: "sonnet" }), [], "a manifest without the table");
+});
+
+test("childModelNotServed: only a silent not-served error on a clean exit", () => {
+  const state = (over) => ({ stopReason: "error", errorMessage: NOT_SERVED, text: "", usage: { output: 0 }, ...over });
+  assert.equal(childModelNotServed({ exitCode: 0, state: state() }), true);
+  assert.equal(childModelNotServed({ exitCode: 0, state: state({ errorMessage: "quota exhausted" }) }), false);
+  assert.equal(childModelNotServed({ exitCode: 0, state: state({ usage: { output: 4 } }) }), false, "the model answered");
+  assert.equal(childModelNotServed({ exitCode: 0, state: state({ text: "partial" }) }), false, "the model answered");
+  assert.equal(childModelNotServed({ exitCode: 1, state: state() }), false);
+  assert.equal(childModelNotServed({ exitCode: 0, timedOut: true, state: state() }), false);
+  assert.equal(childModelNotServed({ exitCode: null, spawnError: "ENOENT", state: state() }), false);
+  assert.equal(childModelNotServed({ exitCode: 0, state: state({ stopReason: "stop" }) }), false);
+});
+
+test("run: a child asking for an alias falls back when the project does not serve it", async () => {
+  const { dir, manifest } = fallbackFixture();
+  const logs = [];
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { log: (l) => logs.push(l), spawn });
+  const sessionDir = childSessionDir(manifest.agent, 1, "");
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(join(sessionDir, "abandoned.jsonl"), "{}\n");
+  const pending = tool.run({ prompt: "p", model: "sonnet" }, {});
+  await untilChildren(children, 1);
+  assert.equal(modelArg(children[0]), "anthropic-vertex/claude-sonnet-5-5");
+  children[0].child.finish(notServedStream());
+  await untilChildren(children, 2);
+  assert.equal(modelArg(children[1]), "anthropic-vertex/claude-sonnet-4-6");
+  assert.equal(existsSync(join(sessionDir, "abandoned.jsonl")), false, "the abandoned attempt's session is removed");
+  children[1].child.finish(okStream("served"));
+  const res = await pending;
+  assert.equal(res.isError, false, res.error);
+  assert.equal(res.text, "served");
+  assert.equal(res.model, "anthropic-vertex/claude-sonnet-4-6");
+  assert.ok(logs.some((l) => l.includes("model anthropic-vertex/claude-sonnet-5-5 is not available in this project; falling back to anthropic-vertex/claude-sonnet-4-6")), logs.join("\n"));
+  const usage = readFileSync(manifest.agent.usageFile, "utf8").trim().split("\n");
+  assert.equal(usage.length, 1, "one usage record per dispatch");
+  assert.equal(JSON.parse(usage[0]).model, "anthropic-vertex/claude-sonnet-4-6");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("run: other errors, pinned models and an exhausted chain do not fall back further", async () => {
+  const { dir, manifest } = fallbackFixture();
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { ...quiet, spawn });
+
+  const denied = tool.run({ prompt: "p", model: "sonnet" }, {});
+  await untilChildren(children, 1);
+  children[0].child.finish(notServedStream("403 PERMISSION_DENIED: Permission denied on resource project p"));
+  const deniedRes = await denied;
+  assert.equal(deniedRes.isError, true);
+  assert.match(deniedRes.error, /PERMISSION_DENIED/);
+
+  const pinned = tool.run({ prompt: "p", model: "anthropic-vertex/claude-sonnet-5-5" }, {});
+  await untilChildren(children, 2);
+  children[1].child.finish(notServedStream());
+  assert.equal((await pinned).isError, true);
+
+  const exhausted = tool.run({ prompt: "p", model: "haiku" }, {});
+  await untilChildren(children, 3);
+  children[2].child.finish(notServedStream());
+  await untilChildren(children, 4);
+  children[3].child.finish(notServedStream());
+  const exhaustedRes = await exhausted;
+  assert.equal(exhaustedRes.isError, true);
+  assert.equal(exhaustedRes.model, "anthropic-vertex/claude-haiku-4-5");
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(children.length, 4, "the chain ends at its last model");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("run: a persona configured with an alias falls back along its chain", async () => {
+  const { dir, manifest } = fallbackFixture();
+  manifest.agent.personas = { challenger: { model: "anthropic-vertex/claude-opus-5-5", tools: ["read"], fallbacks: ["anthropic-vertex/claude-opus-4-6"] } };
+  const { spawn, children } = fakeSpawn();
+  const tool = createAgentTool(manifest, { ...quiet, spawn });
+  const pending = tool.run({ prompt: "p", subagent_type: "challenger" }, {});
+  await untilChildren(children, 1);
+  children[0].child.finish(notServedStream());
+  await untilChildren(children, 2);
+  assert.equal(modelArg(children[1]), "anthropic-vertex/claude-opus-4-6");
+  assert.ok(children[1].args.includes(childSessionDir(manifest.agent, 1, "challenger")));
+  children[1].child.finish(okStream("ok"));
+  const res = await pending;
+  assert.equal(res.isError, false, res.error);
+  assert.equal(res.model, "anthropic-vertex/claude-opus-4-6");
+  rmSync(dir, { recursive: true, force: true });
 });

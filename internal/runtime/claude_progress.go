@@ -99,6 +99,7 @@ type systemEvent struct {
 	Subtype           string `json:"subtype"`
 	Model             string `json:"model"`
 	ClaudeCodeVersion string `json:"claude_code_version"`
+	SessionID         string `json:"session_id"`
 	Attempt           int    `json:"attempt"`
 	MaxRetries        int    `json:"max_retries"`
 	RetryDelayMs      int    `json:"retry_delay_ms"`
@@ -334,8 +335,9 @@ func parseClaudeStream(r io.Reader, onEvent func(AgentEvent)) error {
 			switch se.Subtype {
 			case "init":
 				onEvent(InitEvent{
-					Model:   se.Model,
-					Version: se.ClaudeCodeVersion,
+					Model:     se.Model,
+					Version:   se.ClaudeCodeVersion,
+					SessionID: se.SessionID,
 				})
 				for _, pe := range decodePluginErrors(se.PluginErrors) {
 					onEvent(pe)

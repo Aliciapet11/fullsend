@@ -16,6 +16,9 @@ type AgentEvent interface {
 type InitEvent struct {
 	Model   string
 	Version string
+	// SessionID is the runtime's session id when the stream reports one
+	// (Claude Code's init event); empty otherwise.
+	SessionID string
 }
 
 func (InitEvent) agentEvent() {}

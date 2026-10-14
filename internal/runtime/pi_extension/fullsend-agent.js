@@ -206,6 +206,57 @@ function stripThinkingSuffix(spec) {
   return spec.slice(0, i);
 }
 
+// childSessionDir is the session dir of child seq: "sessions/<persona>-<seq>"
+// for a persona dispatch, "sessions/agent-<seq>" otherwise.
+export function childSessionDir(agent, seq, personaName) {
+  return `${agent.sessionsDir}/${personaName ? personaName : "agent"}-${seq}`;
+}
+
+// isVertexModelUnavailable mirrors the runner's check (pi_run.go): the two
+// Vertex error shapes that mean the project does not serve the model — a
+// 404 "Publisher model ... not found" and a 403 "... data sharing to be
+// enabled for publisher ...". Any other error is not a fallback trigger.
+export function isVertexModelUnavailable(msg) {
+  const lower = typeof msg === "string" ? msg.toLowerCase() : "";
+  if (lower.includes("publisher model") && lower.includes("not found")) return true;
+  return lower.includes("data sharing") && lower.includes("enabled for publisher");
+}
+
+// childFallbacks returns the specs a child falls back to, in order, when
+// its model is not served (#8426): a persona's own chain when the persona
+// has a configured model, the alias's chain when the orchestrator named an
+// alias, subagents.default's chain when the child takes that default, and
+// nothing otherwise — a provider/id or bare id the orchestrator pinned,
+// and a child inheriting the parent's live model (the parent has already
+// fallen back, if it had to), never fall back. Bootstrap writes the chains.
+export function childFallbacks(agent, params, persona) {
+  const list = (v) => (Array.isArray(v) ? v.filter((s) => typeof s === "string" && s.trim() !== "") : []);
+  if (persona) {
+    const model = typeof persona.model === "string" ? persona.model.trim() : "";
+    return model === "" ? [] : list(persona.fallbacks);
+  }
+  let s = typeof params?.model === "string" ? params.model.trim() : "";
+  s = stripThinkingSuffix(cut(s, "@")[0]).trim();
+  if (s === "") {
+    const subagentDefault = typeof agent?.subagentDefault === "string" ? agent.subagentDefault.trim() : "";
+    return subagentDefault === "" ? [] : list(agent?.subagentDefaultFallbacks);
+  }
+  const key = s.toLowerCase();
+  if (key === "default" || s.includes("/")) return [];
+  return list(agent?.modelFallbacks?.[key]);
+}
+
+// childModelNotServed reports whether a child's run failed only because its
+// model is not served in this project: pi exited 0 with a stream error of
+// one of the two "not served" shapes, and the model produced nothing. Any
+// other outcome — a timeout, a kill, a non-zero exit, output — is final.
+export function childModelNotServed(outcome) {
+  if (!outcome || outcome.spawnError || outcome.timedOut || outcome.exitCode !== 0) return false;
+  const state = outcome.state ?? {};
+  if (state.stopReason !== "error" || !isVertexModelUnavailable(state.errorMessage)) return false;
+  return (Number(state.usage?.output) || 0) === 0 && (typeof state.text !== "string" || state.text.trim() === "");
+}
+
 // resolveModel turns the orchestrator's `model` argument into the pi spec
 // a child is started with. Accepted: empty (the parent's model, else the
 // manifest default), the Claude aliases, a Claude id the fleet personas
@@ -358,10 +409,9 @@ export function childTools(agent, subagentType) {
 // session dir becomes "sessions/<persona>-<seq>" instead of
 // "sessions/agent-<seq>" so transcripts are labelled by persona (#7031).
 export function childArgs(agent, { seq, modelSpec, tools, personaName }) {
-  const prefix = personaName ? personaName : "agent";
   const args = [
     "--print", "--mode", "json", "--no-approve", "--no-extensions", "--no-prompt-templates", "--no-themes",
-    "--session-dir", `${agent.sessionsDir}/${prefix}-${seq}`,
+    "--session-dir", childSessionDir(agent, seq, personaName),
   ];
   for (const ext of agent.extensions ?? []) args.push("-e", ext);
   // The edit-repair extension registers the edit tool, and pi does not
@@ -1024,7 +1074,27 @@ export function createAgentTool(manifest, { spawn = nodeSpawn, log = (m) => cons
           return { seq: id, isError: true, error: drift, text: "", stopReason: "rejected", model: modelSpec };
         }
         log(`${LOG_PREFIX} #${id}${persona ? ` [${subagentType}]` : ""} ${modelSpec} start "${capBytes(description, MAX_DESCRIPTION_BYTES)}"`);
-        outcome = await runChild(id, params, modelSpec, tools, ticket, persona ? subagentType.trim().toLowerCase() : "");
+        const personaName = persona ? subagentType.trim().toLowerCase() : "";
+        outcome = await runChild(id, params, modelSpec, tools, ticket, personaName);
+        // Walk the alias's fallback chain while the project does not serve
+        // the model (#8426). The abandoned attempt's session is removed so
+        // it is not extracted as an error on a dispatch that succeeded.
+        const chain = childFallbacks(agent, params, persona).filter((s) => s !== modelSpec);
+        for (const next of chain) {
+          if (!childModelNotServed(outcome) || cancelled()) break;
+          const nextDrift = manifestDrift();
+          if (nextDrift) {
+            return { seq: id, isError: true, error: nextDrift, text: "", stopReason: "rejected", model: modelSpec };
+          }
+          log(`${LOG_PREFIX} #${id} model ${modelSpec} is not available in this project; falling back to ${next}`);
+          try {
+            rmSync(childSessionDir(agent, id, personaName), { recursive: true, force: true });
+          } catch (err) {
+            log(`${LOG_PREFIX} #${id} cannot remove the abandoned attempt's session: ${err.message}`);
+          }
+          modelSpec = next;
+          outcome = await runChild(id, params, modelSpec, tools, ticket, personaName);
+        }
       } finally {
         release();
       }

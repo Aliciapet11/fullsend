@@ -13,12 +13,15 @@ is what changes once you are on it.
 ## Models and providers
 
 A model on pi is `provider/id`. Aliases and bare ids still work — `opus`/`sonnet`/`haiku`/`fable`
-resolve through fullsend's pinned alias table, and a bare id gets the provider from
+resolve through fullsend's pinned alias table (`opus` → `claude-opus-5-5`, `sonnet` →
+`claude-sonnet-5-5`, `haiku` → `claude-haiku-5-5`, `fable` → `claude-fable-5-1`, each falling back
+to the previous default when your project does not serve it; see
+[Per-repo alias overrides](#per-repo-alias-overrides)), and a bare id gets the provider from
 `FULLSEND_PI_PROVIDER` (default `anthropic-vertex`).
 
 | Model | Spec | Provider |
 |---|---|---|
-| Claude | `anthropic-vertex/claude-opus-4-6` | vendored extension |
+| Claude | `anthropic-vertex/claude-opus-5-5` | vendored extension |
 | Gemini | `google-vertex/gemini-3.8-flash` | pi built-in |
 | Grok | `xai-vertex/xai/grok-4.6` | vendored extension |
 | GPT | `openai/gpt-5.6-luna` | pi built-in |
@@ -78,8 +81,19 @@ Harness `model:` and `agents:` entry `model:` values accept the `provider/id` fo
 
 ### Per-repo alias overrides
 
-fullsend pins what each alias means. Vertex enables models per project, so your project may be
-able to run a newer one than the pin — point the alias at it in `.fullsend/config.yaml`:
+fullsend pins what each alias means, and gives `opus`, `sonnet` and `haiku` a built-in fallback
+chain to the previous default:
+
+| Alias | Default | Built-in fallback chain |
+|---|---|---|
+| `opus` | `claude-opus-5-5` | `claude-opus-4-6` |
+| `sonnet` | `claude-sonnet-5-5` | `claude-sonnet-4-6` |
+| `haiku` | `claude-haiku-5-5` | `claude-haiku-4-5` |
+| `fable` | `claude-fable-5-1` | none |
+
+Vertex enables models per project, so a project that has not enabled the 5.5 models runs on the
+fallback without any config change. To run a different model, point the alias at it in
+`.fullsend/config.yaml`:
 
 ```yaml
 models:
@@ -101,13 +115,23 @@ models:
 
 **If it goes wrong.** A key or value the block does not accept stops `fullsend run` before the
 sandbox is created, naming the key (`models.aliases: unknown alias key "grok"`). A model your
-project cannot serve is not caught here: aliased models (opus, sonnet, etc.) fall back through
-`FULLSEND_FALLBACK_MODELS` when Vertex answers that it does not serve the model: the 404
-`Publisher model ... not found` or the 403 `... data sharing to be enabled for publisher ...`. Any
-other error, including a 403 `PERMISSION_DENIED`, fails the run. Pinned ids fail at the first
-model call. A fallback
-must resolve to the same pi provider as the primary model; others are ignored with a warning.
-Sub-agent children get no fallback: each is launched with the one model its alias maps to.
+project cannot serve is not caught here. Aliased models (opus, sonnet, etc.) fall back when
+Vertex answers that it does not serve the model: the 404 `Publisher model ... not found` or the
+403 `... data sharing to be enabled for publisher ...`. The chain is `FULLSEND_FALLBACK_MODELS`
+when set, else the alias's built-in chain above. An alias retargeted with `models.aliases` has no
+built-in chain. Any other error, including a 403 `PERMISSION_DENIED`, fails the run. Pinned ids
+fail at the first model call. A fallback must resolve to the same pi provider as the primary
+model; others are ignored with a warning. The plan block lists the built-in chain, the run prints
+`model claude-opus-5-5 is not available in this project; falling back to claude-opus-4-6`, and
+`metrics.json` records the models tried before the one that ran as `fallback_from`.
+
+Sub-agent children fall back too, along the alias's built-in chain. This covers a child whose
+`model` argument is an alias, a persona whose model (`subagents.<persona>`, frontmatter, or
+`subagents.default`) is an alias, and a child that takes an alias `subagents.default`. The
+`[fullsend-agent]` log line says which model was not available and which one the child moved to.
+A child that pins an id or a `provider/id`, or that inherits the parent's live model (already
+fallen back if it had to), does not fall back. `FULLSEND_FALLBACK_MODELS` applies to the parent
+run only.
 
 ### Each provider has its own GCP project
 
@@ -160,7 +184,7 @@ cache-eligible Claude coder. One 98-turn `code` run on `xai-vertex/xai/grok-4.6`
 | Extra knobs | `FULLSEND_PI_PROVIDER` (prefix for bare ids), `FULLSEND_PI_BASH_ALLOWLIST=enforce`, `FULLSEND_PI_SUBAGENT_THINKING` |
 | Plugins | The pi-format entries of the harness's `plugins:` list, uploaded and loaded with `-e` after a tree-hash preflight ([Plugins](#plugins-pi-extensions)) |
 | Sub-agents | `Agent` (alias `Task`) via a fullsend extension: children are `pi` processes with the same hooks, providers and tool allowlist ([Sub-agents](#sub-agents)) |
-| Fallback chains | Top-level run only: alias requests tried in order when Vertex does not serve the model (404/403, two messages only), same provider only; pinned ids and sub-agent children fail loudly |
+| Fallback chains | Alias requests tried in order when Vertex does not serve the model (404/403, two messages only): `FULLSEND_FALLBACK_MODELS`, else the alias's built-in chain; same provider only; sub-agent children asking for an alias use its built-in chain; pinned ids and `models.aliases` retargets fail loudly |
 | Not supported | Claude-format plugins (named and skipped), Bedrock/Azure providers, [prompt caching for Grok on Vertex](#prompt-caching) |
 
 ## Running it locally

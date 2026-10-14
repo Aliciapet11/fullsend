@@ -26,6 +26,27 @@ type piPersonaManifestEntry struct {
 	Model         string   `json:"model"`
 	Tools         []string `json:"tools"`
 	BashAllowlist []string `json:"bashAllowlist,omitempty"`
+	// Fallbacks are the specs the persona's child falls back to, in order,
+	// when the run's Vertex project does not serve Model; set only when
+	// the persona's model was given as an alias with a built-in chain
+	// (#8426).
+	Fallbacks []string `json:"fallbacks,omitempty"`
+}
+
+// piPersonaModelSource returns the model that decides persona p's child and
+// where it came from. Resolution order: repo subagents.<persona> >
+// frontmatter model > repo subagents.default > the parent's live model
+// (an empty model). defaultModel is the raw subagents.default value.
+func piPersonaModelSource(p piPersona, subagentsCfg map[string]*string, defaultModel string) (model, source string) {
+	switch {
+	case subagentsCfg[p.Name] != nil:
+		return *subagentsCfg[p.Name], "subagents." + p.Name
+	case p.Model != "":
+		return p.Model, "frontmatter"
+	case defaultModel != "":
+		return defaultModel, "subagents.default"
+	}
+	return "", "parent"
 }
 
 // piSkippedPersona is a sub-agents/*.md file that failed validation and was
@@ -282,15 +303,7 @@ func resolvePersonaModels(
 		// floor for personas that say nothing, not an override of ones
 		// that do. The source is echoed to stderr so a user can see why a
 		// persona resolved as it did.
-		model, source := "", "parent"
-		switch {
-		case subagentsCfg[p.Name] != nil:
-			model, source = *subagentsCfg[p.Name], "subagents."+p.Name
-		case p.Model != "":
-			model, source = p.Model, "frontmatter"
-		case defaultModel != "":
-			model, source = defaultModel, "subagents.default"
-		}
+		model, source := piPersonaModelSource(p, subagentsCfg, defaultModel)
 
 		var entry piPersonaManifestEntry
 		if model != "" {

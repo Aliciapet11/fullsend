@@ -234,6 +234,10 @@ type aggregateMetrics struct {
 	// iteration's result modelUsage. A run on a runtime without sub-agents
 	// keeps metrics.json as it was.
 	PerModelUsage map[string]agentruntime.ModelUsage `json:"per_model_usage,omitempty"`
+	// FallbackFrom lists the models the run's Vertex project did not serve
+	// before Model took over through the alias's fallback chain (#8426),
+	// from the last iteration that fell back. Absent when none did.
+	FallbackFrom []string `json:"fallback_from,omitempty"`
 }
 
 func writeMetricsJSON(dir string, m aggregateMetrics) error {
@@ -1206,6 +1210,12 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			fallbacks[i] = fb
 		}
 		printer.KeyValue("Fallback models", withSource(strings.Join(fallbacks, ", "), overrides.fallbackSource))
+	} else if name := runtimeBackend.Runtime.Name(); name == "claude" || name == "pi" {
+		// The alias's built-in chain (#8426), so a downgrade the run may
+		// take is visible before it starts.
+		if chain := agentruntime.ImplicitFallbackModels(h.Model, configModelAliases); len(chain) > 0 {
+			printer.KeyValue("Fallback models", fmt.Sprintf("%s (built-in for %s, when not served)", strings.Join(chain, ", "), h.Model))
+		}
 	}
 	printer.KeyValue("Runtime", fmt.Sprintf("%s (from %s)", runtimeBackend.Runtime.Name(), runtimeConfigSource))
 	if h.Image != "" {
@@ -4159,6 +4169,9 @@ func aggregateRunMetrics(agg *aggregateMetrics, m *agentruntime.RunMetrics, iter
 	agg.Iterations = iteration
 	if m.Model != "" {
 		agg.Model = m.Model
+	}
+	if len(m.FallbackFrom) > 0 {
+		agg.FallbackFrom = append([]string(nil), m.FallbackFrom...)
 	}
 	// Iterations are retries of the same task, so the per-model entries add
 	// up the same way the totals do.
