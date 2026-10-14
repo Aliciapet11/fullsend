@@ -27,31 +27,34 @@ a user's own tools that is one fixed pair, `JIRA_TOKEN` and `JIRA_USER_EMAIL`,
 which only the `harness-run` job forwards, from a caller the user writes (the
 Jira poller). Any other secret, or Jira on another stage, cannot reach
 `fullsend run`, and the shim is a generated file that setup and
-`repos install` overwrite (#7689, #6359).
+`repos install` overwrite (#7689, #6359). Forge context now reaches scripts
+through the runner's filtered entity snapshot
+([ADR 0141](0141-deterministic-filtered-entity-context-staging.md)), so the
+remaining need is tools the user picks, such as a third-party review CLI.
 
-Credentials stay out of the sandbox
-([ADR 0017](0017-credential-isolation-for-sandboxed-agents.md)), workflow
-`env:` carries infrastructure plumbing only
-([ADR 0081](0081-reserve-workflow-env-for-infra-plumbing.md)),
-`GH_WORKFLOW_TOKEN` must stay unforgeable
-([ADR 0114](0114-github-packages-via-host-bound-workflow-token-provider.md)),
-and an overlay may set any field once guarded fields are checked
-([ADR 0112](0112-overlays-may-set-any-harness-field.md)).
+Constraints: credentials stay out of the sandbox ([ADR 0017](0017-credential-isolation-for-sandboxed-agents.md)),
+workflow `env:` is infrastructure only ([ADR 0081](0081-reserve-workflow-env-for-infra-plumbing.md)),
+`GH_WORKFLOW_TOKEN` stays unforgeable ([ADR 0114](0114-github-packages-via-host-bound-workflow-token-provider.md)),
+and overlays may set guarded fields ([ADR 0112](0112-overlays-may-set-any-harness-field.md)).
 
 ## Options
 
-1. **Caller-side list in the shim** (`format(...)` with `toJSON(secrets.X)`).
-   Users would edit a generated file.
-2. **`secrets: inherit` with `toJSON(secrets)`.** Every repository secret
-   would reach the runner.
-3. **One named secret per integration.** Every new integration would need a
-   fullsend release.
+1. **Caller-side list in the shim** (`format(...)`): edits a generated file.
+2. **`secrets: inherit`:** every repository secret would reach the runner.
+3. **One named secret per integration**, as
+   [ADR 0138](0138-inference-gateway-api-key-credential-mode.md) does for the
+   inference gateway on both forges. Right for integrations fullsend owns, and
+   kept for them; it cannot name a tool the user picks without a release.
 
 ## Decision
 
-On GitHub, user secrets reach host-side scripts through one optional stored
-secret, `FULLSEND_RUNNER_SECRETS`, a JSON object of name → string value. The
-reusable workflow passes it to each stage's composite action; a staging step
+Until #6359 settles a provider-based route for user credentials, on GitHub a
+custom harness's own secrets reach host-side scripts through one optional
+stored secret, `FULLSEND_RUNNER_SECRETS`, a JSON object of name → string value.
+This channel is interim, covers host-side scripts only, never sandbox
+credentials, and does not replace named secrets for integrations fullsend
+owns. The reusable workflow passes it to each stage's composite action; a
+staging step
 writes it to a mode 0600 file under `RUNNER_TEMP` and hands `fullsend run`
 only the path. `fullsend run` deletes the file and unsets the path before any
 child starts, then resolves `${NAME}` in the resolved `env.runner` (after
@@ -62,11 +65,10 @@ carry the object inline.
 
 These rules apply to names in the GitHub object:
 
-- **Refused names:** `oidcDenyKeys`, `providerOnlyKeys`, sandbox-reserved
-  names, the `FULLSEND_`, `GITHUB_`, `ACTIONS_`, `RUNNER_`, `CI_`, `LD_`,
-  `OTEL_`, `GOOGLE_` and `CLOUDSDK_` families, `GH_TOKEN`, the minted role
-  tokens, `GITLAB_TOKEN`, `PATH`, and every name the workflow sets for the
-  `fullsend run` step (such as `JIRA_TOKEN`), so each name has one source.
+- **Refused names:** runner-owned names and families (credential, provider,
+  sandbox-reserved, `FULLSEND_`, `GITHUB_`, `OTEL_` and more; the harness
+  reference lists them all) and every name the workflow sets for the
+  `fullsend run` step, such as `JIRA_TOKEN`, so each name has one source.
   Null values, duplicate keys and too-short values are refused too.
 - **Host side only:** a reference from `env.sandbox`, `runner_env`, a provider
   credential, a `host_files` source or expanded content, or a
@@ -81,15 +83,11 @@ there. Keeping fullsend's own credentials out of GitLab host-side scripts is
 #8146.
 
 GitHub's hardening guidance advises against structured secrets such as JSON,
-because the log masks the stored string, not the fields inside it. Three
-controls compensate: `fullsend run` masks each value and each of its lines
-with an escaped `::add-mask::`; it registers each value, each line and the
-JSON-escaped form with the redactor that cleans failure detail and validation
-feedback; and file staging keeps the object out of the environment of
-`fullsend run` and its children. Their limits: masking and redaction match
-exact strings, so a transformed value (base64, URL-encoded, a substring) is
-not hidden; a line shorter than the redactor's minimum is masked in the log
-but not redacted; and a script that receives a value can still leak it.
+because the log masks the stored string, not its fields. `fullsend run`
+compensates by masking each value and line with an escaped `::add-mask::`,
+registering them with the redactor, and staging the object in a file. These
+match exact strings only, so a transformed value is not hidden, and a script
+that receives a value can still leak it.
 
 ## Consequences
 
@@ -101,6 +99,8 @@ but not redacted; and a script that receives a value can still leak it.
   secret the called workflow does not declare, so a shim rendered with an
   older `--fullsend-ref` fails; it needs the CLI from that release. #7872
   tracks detecting the mismatch.
+- #6359's provider-based design supersedes this channel; the secret name and
+  staging stay supported until that ADR announces a migration.
 - Known gap: until ADR 0112's guarded-field check exists, an event-guarded
   overlay can still swap `pre_script`, `post_script` or `validation_loop`, and
   so choose which script receives a referenced secret.
