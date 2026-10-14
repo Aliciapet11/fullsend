@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -32,8 +33,9 @@ import (
 // at Developer, is quarantined: no further generation starts until an
 // operator resolves it, and polling stays in effect.
 //
-// This is inert scaffolding: no adapter implements GitLabPollerHandoff yet,
-// so handoffPollerGeneration is never invoked outside tests.
+// The webhook fast path drives this handoff through
+// handoffPollerOwnedTrigger (gitlab_poller_cutover.go) when its trigger owner
+// implements GitLabPollerHandoff, as the live GitLab adapter does.
 
 // PollerGenerationPhase is the handoff phase of a pending Poller generation.
 type PollerGenerationPhase string
@@ -86,6 +88,13 @@ type PendingPollerGeneration struct {
 	// trigger secret is never persisted; it is held in memory by the run that
 	// created it.
 	TriggerID int64 `json:"trigger_id,omitempty"`
+	// TriggerDistributed is set before the trigger secret is stored and is
+	// never cleared: once the trigger credential may have reached protected
+	// jobs (a secret write whose outcome is unknown counts), requests it
+	// authorized may still be accepted after revocation, so the account is
+	// never re-elevated. It is retired instead (AbandonedUserIDs) and a
+	// genuinely fresh account takes its place.
+	TriggerDistributed bool `json:"trigger_distributed,omitempty"`
 	// Reason explains a quarantine. It is authored by fullsend and carries no
 	// credential material.
 	Reason string `json:"reason,omitempty"`
@@ -102,7 +111,16 @@ type PollerGenerationState struct {
 	// credentials, triggers, and account are still being retired. It stays at
 	// Developer until retirement completes.
 	RetiringUserID int64 `json:"retiring_user_id,omitempty"`
+	// AbandonedUserIDs are replacement accounts whose trigger credential may
+	// have been distributed but whose publication did not complete. Each was
+	// verified at Developer without credentials and is never re-elevated; they
+	// stay owned so uninstall verifies and deletes them.
+	AbandonedUserIDs []int64 `json:"abandoned_user_ids,omitempty"`
 }
+
+// maxAbandonedPollerGenerations bounds the abandoned replacement accounts kept
+// before further generations are refused until an operator reconciles them.
+const maxAbandonedPollerGenerations = 3
 
 type pollerGenerationEnvelope struct {
 	Version int `json:"version"`
@@ -115,17 +133,28 @@ const gitLabPollerGenerationStateVersion = 1
 // blocked or quarantined generation. It removes only the pending generation:
 // clearing the whole document would also drop current_user_id, so a later
 // cutover would not record the running Poller as retiring.
-const pollerClearPendingAction = "remove only the \"pending\" generation from " + forge.VarGitLabPollerGenerations + ", keeping its version, current_user_id and retiring_user_id"
+const pollerClearPendingAction = "remove only the \"pending\" generation from " + forge.VarGitLabPollerGenerations + ", keeping its version, current_user_id, retiring_user_id and abandoned_user_ids"
 
-// loadPollerGenerations reads and validates the generation document. A
-// missing or empty variable is an empty state.
+// errPollerGenerationsBlank reports a generation variable that exists but
+// holds no document. The handoff writes this variable, so a blank value means
+// recorded current, retiring, or quarantine state may have been lost.
+var errPollerGenerationsBlank = errors.New(forge.VarGitLabPollerGenerations + " exists but is blank, so recorded Poller generation state (current, retiring, or quarantined accounts) may have been lost; no Poller generation is started. Reconcile the fullsend-poller service accounts and pipeline trigger tokens manually, then delete the variable to start again from an empty state")
+
+// loadPollerGenerations reads and validates the generation document. An
+// absent variable is an empty state: the first handoff, or the documented
+// recovery after an administrator deleted the variable. A variable that
+// exists but is blank or whitespace fails closed, because the handoff writes
+// it and a blank value may mean recorded state was lost.
 func loadPollerGenerations(ctx context.Context, client forge.Client, owner, repo string) (PollerGenerationState, error) {
 	raw, exists, err := client.GetRepoVariable(ctx, owner, repo, forge.VarGitLabPollerGenerations)
 	if err != nil {
 		return PollerGenerationState{}, safeAPIError("reading "+forge.VarGitLabPollerGenerations, err)
 	}
-	if !exists || strings.TrimSpace(raw) == "" {
+	if !exists {
 		return PollerGenerationState{}, nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		return PollerGenerationState{}, errPollerGenerationsBlank
 	}
 	return decodePollerGenerations(raw)
 }
@@ -219,6 +248,11 @@ func decodePollerGenerations(raw string) (PollerGenerationState, error) {
 	if st.CurrentUserID != 0 && st.CurrentUserID == st.RetiringUserID {
 		return PollerGenerationState{}, fmt.Errorf("invalid %s: current and retiring Poller account IDs must differ", forge.VarGitLabPollerGenerations)
 	}
+	for i, id := range st.AbandonedUserIDs {
+		if id <= 0 || id == st.CurrentUserID || id == st.RetiringUserID || slices.Contains(st.AbandonedUserIDs[:i], id) {
+			return PollerGenerationState{}, fmt.Errorf("invalid %s: abandoned account IDs must be positive, distinct, and differ from the current and retiring Poller accounts", forge.VarGitLabPollerGenerations)
+		}
+	}
 	if p := st.Pending; p != nil {
 		if !p.Phase.valid() {
 			return PollerGenerationState{}, fmt.Errorf("invalid %s: unknown pending phase %q", forge.VarGitLabPollerGenerations, p.Phase)
@@ -229,7 +263,7 @@ func decodePollerGenerations(raw string) (PollerGenerationState, error) {
 		if p.UserID == 0 && p.Phase != PollerPhaseAccountRequested && p.Phase != PollerPhaseQuarantined {
 			return PollerGenerationState{}, fmt.Errorf("invalid %s: pending phase %q requires a recorded account ID", forge.VarGitLabPollerGenerations, p.Phase)
 		}
-		if p.UserID != 0 && (p.UserID == st.CurrentUserID || p.UserID == st.RetiringUserID) {
+		if p.UserID != 0 && (p.UserID == st.CurrentUserID || p.UserID == st.RetiringUserID || slices.Contains(st.AbandonedUserIDs, p.UserID)) {
 			return PollerGenerationState{}, fmt.Errorf("invalid %s: pending account ID %d must differ from the current and retiring Poller accounts", forge.VarGitLabPollerGenerations, p.UserID)
 		}
 		if err := validatePendingConsistency(p); err != nil {
@@ -243,6 +277,9 @@ func decodePollerGenerations(raw string) (PollerGenerationState, error) {
 // fields agree with its phase. Quarantined generations may carry any trigger
 // state, because a quarantine can follow any phase.
 func validatePendingConsistency(p *PendingPollerGeneration) error {
+	if p.TriggerDistributed && p.Phase != PollerPhaseVerified && p.Phase != PollerPhaseQuarantined {
+		return fmt.Errorf("pending phase %q must not record trigger distribution", p.Phase)
+	}
 	switch p.Phase {
 	case PollerPhaseAccountRequested, PollerPhaseAccountRecorded:
 		if p.TriggerAttempted || p.TriggerID != 0 {
@@ -282,6 +319,9 @@ func writePollerGenerations(ctx context.Context, client forge.Client, owner, rep
 // or "" when one may. Interrupted elevated and trigger-requested generations
 // are not blocked here: the handoff first returns them to Developer.
 func pollerHandoffBlocked(st PollerGenerationState) string {
+	if len(st.AbandonedUserIDs) >= maxAbandonedPollerGenerations {
+		return fmt.Sprintf("webhook fast-path blocked: %d replacement GitLab Poller accounts were abandoned after their trigger publication failed (user IDs %v), so no further replacement is started. Delete those accounts, then remove abandoned_user_ids from %s. The polling schedules remain in effect", len(st.AbandonedUserIDs), st.AbandonedUserIDs, forge.VarGitLabPollerGenerations)
+	}
 	if st.RetiringUserID != 0 {
 		return fmt.Sprintf("webhook fast-path blocked: the superseded GitLab Poller identity (user ID %d) has not finished retiring, so no replacement Poller generation is started. The polling schedules remain in effect", st.RetiringUserID)
 	}
@@ -312,7 +352,7 @@ func beginPollerCutover(st PollerGenerationState, newUserID int64) (PollerGenera
 	if st.RetiringUserID != 0 {
 		return st, fmt.Errorf("GitLab Poller cutover refused: the superseded Poller (user ID %d) has not finished retiring", st.RetiringUserID)
 	}
-	return PollerGenerationState{CurrentUserID: newUserID, RetiringUserID: st.CurrentUserID}, nil
+	return PollerGenerationState{CurrentUserID: newUserID, RetiringUserID: st.CurrentUserID, AbandonedUserIDs: st.AbandonedUserIDs}, nil
 }
 
 // finishPollerRetirement clears the retiring Poller once its schedules,
@@ -360,8 +400,7 @@ func pollerGenerationSafetyReason(err error) string {
 // generations. Every operation acts on the replacement account identified by
 // userID using the installer's own authority, except
 // CreatePipelineTriggerTokenAsReplacementPoller, which authenticates as the
-// replacement account with its bootstrap credential. No adapter implements
-// it yet.
+// replacement account with its bootstrap credential.
 type GitLabPollerHandoff interface {
 	// CreateReplacementPoller creates a fresh fullsend-managed project
 	// service account for the Poller role with no personal access token and
@@ -370,6 +409,12 @@ type GitLabPollerHandoff interface {
 	// error wrapping forge.ErrNotFound means project service accounts are not
 	// supported and no account was created.
 	CreateReplacementPoller(ctx context.Context, owner, repo string) (int64, error)
+	// EnsureReplacementPollerAccess idempotently establishes the account's
+	// Developer membership and verifies, read-only, that the existing
+	// protected-branch policy lets it start pipelines on the default branch.
+	// It never changes the branch rule. A policy that does not admit the
+	// account is a *PollerGenerationUnsafeError, which defers the handoff.
+	EnsureReplacementPollerAccess(ctx context.Context, owner, repo string, userID int64) error
 	// VerifyReplacementPollerCredentialsRevoked requires that the account
 	// holds no active personal access token. Managed token names are not
 	// evidence of revocation. A *PollerGenerationUnsafeError carries an
@@ -682,6 +727,17 @@ func (g *pollerGenerationRun) attemptTrigger() (PollerHandoffResult, error) {
 		// second one, whatever phase the document claims.
 		return g.quarantine(fmt.Sprintf("its single pipeline trigger creation request was already attempted and is never retried; delete any %q pipeline trigger owned by user ID %d, remove the account, then %s", GitLabWebhookTriggerDescription, uid, pollerClearPendingAction))
 	}
+	// Preparing the recorded account (Developer membership and read-only
+	// protected-branch admission) is idempotent and runs on every attempt, so
+	// a membership or policy failure in an earlier run is retried here instead
+	// of leaving the generation stuck at account_recorded.
+	if prepErr := g.h.EnsureReplacementPollerAccess(g.ctx, g.owner, g.repo, uid); prepErr != nil {
+		var unsafe *PollerGenerationUnsafeError
+		if errors.As(prepErr, &unsafe) {
+			return PollerHandoffResult{Details: g.details, DeferReason: fmt.Sprintf("webhook fast-path blocked: the replacement GitLab Poller (user ID %d) was not raised because %s. The polling schedules remain in effect", uid, unsafe.Reason)}, nil
+		}
+		return PollerHandoffResult{Details: g.details}, safeAPIError(fmt.Sprintf("preparing the replacement GitLab Poller service account (user ID %d)", uid), prepErr)
+	}
 	level, err := g.client.GetProjectMemberAccessLevel(g.ctx, g.owner, g.repo, uid)
 	if err != nil {
 		return PollerHandoffResult{Details: g.details}, safeAPIError(fmt.Sprintf("reading the replacement GitLab Poller (user ID %d) project access", uid), err)
@@ -691,6 +747,26 @@ func (g *pollerGenerationRun) attemptTrigger() (PollerHandoffResult, error) {
 	}
 	if safeErr := g.h.VerifyReplacementPollerCredentialsRevoked(g.ctx, g.owner, g.repo, uid); safeErr != nil {
 		return PollerHandoffResult{Details: g.details, DeferReason: fmt.Sprintf("webhook fast-path blocked: the replacement GitLab Poller (user ID %d) was not raised to temporary Maintainer access because %s. The polling schedules remain in effect", uid, pollerGenerationSafetyReason(safeErr))}, nil
+	}
+
+	// The credential verification above ignores triggers carrying the managed
+	// description, because the post-mint demotion check must accept the trigger
+	// just minted. Before elevation the account must own no pipeline trigger at
+	// all: a pre-existing one would start pipelines as Maintainer during the
+	// elevation window, and the generation never handed one out, so owning one
+	// means the account was tampered with. It is quarantined, never elevated.
+	triggers, trigErr := g.client.ListPipelineTriggerTokens(g.ctx, g.owner, g.repo)
+	if trigErr != nil {
+		return PollerHandoffResult{Details: g.details}, safeAPIError("listing pipeline trigger tokens before elevating the replacement Poller", trigErr)
+	}
+	var ownedTriggers []int64
+	for _, t := range triggers {
+		if t.OwnerID == uid {
+			ownedTriggers = append(ownedTriggers, t.ID)
+		}
+	}
+	if len(ownedTriggers) > 0 {
+		return g.quarantine(fmt.Sprintf("it already owns pipeline trigger token IDs %v before any trigger was requested, so it was not raised; delete those triggers, remove the account, then %s", ownedTriggers, pollerClearPendingAction))
 	}
 
 	// The project-wide trigger-safety invariants must hold before the account

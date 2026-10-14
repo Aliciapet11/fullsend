@@ -215,20 +215,25 @@ func CleanupScenario(w *world.World) {
 	// GitHub has released the name. Uniqueness can lag; givenFork
 	// retries CreateFork on 403 "Name already exists on this account"
 	// rather than polling here, because 404 is not a sufficient signal.
+	//
+	// A fork owned by a test actor (givenActorFork) lives in that
+	// actor's account, so fork-side deletes go through forkSCM, and it
+	// usually shares the base repo's name — the guard compares owner
+	// and name together so it still protects only the base repo.
 	if w.ForkPRBranch != "" && w.ForkOwner != "" && w.ForkRepo != "" {
 		desc := fmt.Sprintf("delete fork branch %s", w.ForkPRBranch)
 		if err := cleanupRetry(w.Logf, desc, func() error {
-			return w.SCM.DeleteBranch(ctx, w.ForkOwner, w.ForkRepo, w.ForkPRBranch)
+			return forkSCM(w).DeleteBranch(ctx, w.ForkOwner, w.ForkRepo, w.ForkPRBranch)
 		}); err != nil {
 			if !forge.IsNotFound(err) {
 				worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
 			}
 		}
 	}
-	if w.ForkOwner != "" && w.ForkRepo != "" && w.ForkRepo != w.RepoName {
+	if w.ForkOwner != "" && w.ForkRepo != "" && (w.ForkOwner != w.RepoOwner || w.ForkRepo != w.RepoName) {
 		desc := fmt.Sprintf("delete fork repo %s/%s", w.ForkOwner, w.ForkRepo)
 		if err := cleanupRetry(w.Logf, desc, func() error {
-			return w.SCM.DeleteRepo(ctx, w.ForkOwner, w.ForkRepo)
+			return forkSCM(w).DeleteRepo(ctx, w.ForkOwner, w.ForkRepo)
 		}); err != nil {
 			if !forge.IsNotFound(err) {
 				worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
@@ -247,6 +252,26 @@ func CleanupScenario(w *world.World) {
 		}); err != nil {
 			if !forge.IsNotFound(err) {
 				worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
+			}
+		}
+	}
+
+	// --- Mint probe host repo cleanup ---
+	// Probe host repos are ephemeral, like the hosting repos above. The
+	// probe's shim branch on the leased repo is in CreatedBranches and
+	// was deleted with the other branches.
+	if w.MintProbe != nil {
+		for _, repo := range w.MintProbe.CreatedRepos {
+			if repo == "" || repo == w.RepoName {
+				continue
+			}
+			desc := fmt.Sprintf("delete mint probe host repo %s/%s", w.Org, repo)
+			if err := cleanupRetry(w.Logf, desc, func() error {
+				return w.SCM.DeleteRepo(ctx, w.Org, repo)
+			}); err != nil {
+				if !forge.IsNotFound(err) {
+					worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
+				}
 			}
 		}
 	}

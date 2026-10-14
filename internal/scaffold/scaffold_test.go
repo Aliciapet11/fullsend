@@ -1,6 +1,7 @@
 package scaffold
 
 import (
+	"embed"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -766,4 +767,24 @@ func TestScaffoldVertexProfile_BinaryAllowlist(t *testing.T) {
 	// bin/claude.exe even on Linux, so **/claude alone denies it STS access.
 	assert.ElementsMatch(t, []string{"**/claude", "**/claude.exe", "**/node", "**/pi"}, profile.Binaries,
 		"scaffold Vertex profile binaries drifted from the pinned allowlist; keep it in sync with the fullsend-ai/agents copy")
+}
+
+// walkFixture holds .fullsend-cache dirs (force-added past the root
+// .gitignore) so the skip runs against a real embed.FS (#5184).
+//
+//go:embed all:testdata/walkembedfs
+var walkFixture embed.FS
+
+func TestWalkEmbedFSSkipsFullsendCache(t *testing.T) {
+	var got []string
+	// nil skip matches WalkGitLabPerRepo: the exclusion must not depend on it.
+	err := walkEmbedFS(walkFixture, "testdata/walkembedfs", func(path string, _ []byte) error {
+		got = append(got, path)
+		return nil
+	}, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		".fullsend/config.yaml",
+		"notes/.fullsend-cache",
+	}, got)
 }

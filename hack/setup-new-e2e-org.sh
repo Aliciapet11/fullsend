@@ -8,16 +8,22 @@
 # Idempotent: safe to run multiple times. Checks each prerequisite and
 # only acts on what's missing. Pauses for manual steps and verifies
 # before continuing. Test actors receive organization-level all-repository
-# roles so access survives pool repo delete/recreate.
+# roles so access survives pool repo delete/recreate. The write test actor
+# is also made an active member of the mint-status team, the allowlist for
+# GitHub user-token auth on test mint status endpoints
+# (--status-github-group=ORG/mint-status).
 
 set -euo pipefail
 
-APP_SET="fullsend-ai"
-ROLES=(fullsend triage coder review retro prioritize e2e)
+TEST_APP_SET="fullsend-test"
+TEST_ROLES=(fullsend triage coder review retro prioritize)
+E2E_APP_SET="fullsend-ai"
+MINT_ROLES=(fullsend triage coder review retro prioritize e2e)
 BOT_USER="botsend"
 TEST_WRITE_USER="fstest-write"
 TEST_TRIAGE_USER="fstest-triage"
 TEST_OUTSIDER_USER="fstest-outsider"
+STATUS_TEAM_SLUG="mint-status"
 
 # open_browser tries to open a URL in the default browser.
 open_browser() {
@@ -115,6 +121,133 @@ assign_all_repo_role() {
   fi
   echo "    OK: ${username} has all-repository ${perm}"
 }
+
+# team_membership prints "STATE ROLE" for username's membership in org/slug
+# (state "active" or "pending", role "member" or "maintainer"), or "none"
+# when GitHub answers 404. Any other API error goes to stderr and returns 1,
+# so callers fail closed.
+team_membership() {
+  local org="$1" slug="$2" username="$3" body
+  if body=$(gh api "/orgs/${org}/teams/${slug}/memberships/${username}" 2>&1); then
+    echo "${body}" | jq -r '"\(.state // "unknown") \(.role // "unknown")"'
+  elif echo "${body}" | grep -q "HTTP 404"; then
+    echo "none"
+  else
+    echo "    ERROR: could not read ${username} membership in ${org}/${slug}: ${body}" >&2
+    return 1
+  fi
+}
+
+# ensure_status_team creates the STATUS_TEAM_SLUG team in org when it is
+# missing and makes member an active team member with the member role.
+# member must be the only person on the team, so the authenticated gh user
+# (the team creator) is removed on every run, and anyone else, pending
+# invitations included, fails the step. Idempotent: an existing team and
+# an active membership are verified, not recreated. Fails closed on any API
+# error other than the documented 404.
+ensure_status_team() {
+  local org="$1" member="$2"
+  local slug="${STATUS_TEAM_SLUG}"
+  local body creator state actual_slug username logins invited
+
+  if body=$(gh api "/orgs/${org}/teams/${slug}" 2>&1); then
+    echo "    OK: team ${org}/${slug} exists"
+  elif echo "${body}" | grep -q "HTTP 404"; then
+    echo "    Creating team ${org}/${slug}..."
+    if ! body=$(gh api -X POST "/orgs/${org}/teams" \
+        -f name="${slug}" \
+        -f privacy="closed" \
+        -f description="Allowlist for GitHub user-token auth on test mint status endpoints" 2>&1); then
+      echo "    ERROR: failed to create team ${org}/${slug}: ${body}" >&2
+      return 1
+    fi
+    echo "    OK: created team ${org}/${slug}"
+  else
+    echo "    ERROR: could not read team ${org}/${slug}: ${body}" >&2
+    return 1
+  fi
+
+  if ! actual_slug=$(gh api "/orgs/${org}/teams/${slug}" --jq '.slug' 2>&1); then
+    echo "    ERROR: could not verify team ${org}/${slug}: ${actual_slug}" >&2
+    return 1
+  fi
+  if [[ "${actual_slug}" != "${slug}" ]]; then
+    echo "    ERROR: team slug is '${actual_slug}', expected '${slug}'." >&2
+    return 1
+  fi
+  echo "    OK: team slug ${org}/${slug} verified"
+
+  # GitHub adds the user who creates a team as a maintainer. Remove the
+  # authenticated user on every run, not only when this run created the
+  # team, so a creator left behind by an interrupted run is cleaned up.
+  if ! creator=$(gh api /user --jq '.login' 2>&1); then
+    echo "    ERROR: could not read the authenticated gh user: ${creator}" >&2
+    return 1
+  fi
+  if [[ "$(lower "${creator}")" != "$(lower "${member}")" ]]; then
+    state=$(team_membership "${org}" "${slug}" "${creator}") || return 1
+    if [[ "${state}" != "none" ]]; then
+      if ! body=$(gh api -X DELETE "/orgs/${org}/teams/${slug}/memberships/${creator}" 2>&1) \
+          && ! echo "${body}" | grep -q "HTTP 404"; then
+        echo "    ERROR: could not remove ${creator} from ${org}/${slug}: ${body}" >&2
+        return 1
+      fi
+      echo "    Removed ${creator} (the authenticated gh user) from ${org}/${slug}"
+    fi
+  fi
+
+  # The member must be active with the plain member role. A maintainer can
+  # add others to the team, which would widen the allowlist.
+  state=$(team_membership "${org}" "${slug}" "${member}") || return 1
+  if [[ "${state}" != "active member" ]]; then
+    echo "    Setting ${member} on ${org}/${slug} as member (current: ${state})..."
+    if ! body=$(gh api -X PUT "/orgs/${org}/teams/${slug}/memberships/${member}" \
+        -f role="member" 2>&1); then
+      echo "    ERROR: failed to add ${member} to ${org}/${slug}: ${body}" >&2
+      return 1
+    fi
+    state=$(team_membership "${org}" "${slug}" "${member}") || return 1
+    if [[ "${state}" != "active member" ]]; then
+      echo "    ERROR: ${member} membership in ${org}/${slug} is '${state}', not 'active member'." >&2
+      echo "    ${member} must be an active member of ${org} first." >&2
+      return 1
+    fi
+  fi
+  echo "    OK: ${member} is an active member of ${org}/${slug}"
+
+  # The team must hold only the write actor. List every member, including
+  # maintainers, and every pending invitation; fail on anyone else.
+  if ! logins=$(gh api --paginate "/orgs/${org}/teams/${slug}/members?per_page=100" \
+      --jq '.[].login' 2>&1); then
+    echo "    ERROR: could not list members of ${org}/${slug}: ${logins}" >&2
+    return 1
+  fi
+  # An invitation sent by email has a null login; surface it as a name so it
+  # fails the check below instead of printing an empty line that is skipped.
+  if ! invited=$(gh api --paginate "/orgs/${org}/teams/${slug}/invitations?per_page=100" \
+      --jq '.[] | (.login // "<email-invitation>")' 2>&1); then
+    echo "    ERROR: could not list invitations of ${org}/${slug}: ${invited}" >&2
+    return 1
+  fi
+  while IFS= read -r username; do
+    [[ -n "${username}" ]] || continue
+    if [[ "$(lower "${username}")" != "$(lower "${member}")" ]]; then
+      echo "    ERROR: ${username} is on ${org}/${slug}." >&2
+      echo "    Remove them so the team stays a write-actor-only allowlist." >&2
+      return 1
+    fi
+  done <<< "${logins}"$'\n'"${invited}"
+  echo "    OK: ${member} is the only member of ${org}/${slug}"
+}
+
+# lower prints its argument in lowercase; GitHub logins are case-insensitive.
+lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# Tests source this file for its function definitions; stop here when
+# sourced so nothing below runs against GitHub.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
 
 # --- arg parsing ---
 if [[ $# -ne 1 ]]; then
@@ -339,16 +472,27 @@ else
 fi
 echo
 
+# --- 3d. mint status team ---
+# GitHub user-token auth on the test mint status endpoints allows members
+# of ORG/mint-status (--status-github-group=ORG/mint-status).
+echo "==> Checking ${STATUS_TEAM_SLUG} team (mint status allowlist)..."
+if ! ensure_status_team "${ORG}" "${TEST_WRITE_USER}"; then
+  echo "    ERROR: ${ORG}/${STATUS_TEAM_SLUG} is not provisioned." >&2
+  exit 1
+fi
+echo "    Status auth group: ${ORG}/${STATUS_TEAM_SLUG}"
+echo
+
 # --- 4. check app installations ---
 echo "==> Checking app installations..."
 org_id=$(gh api "/orgs/${ORG}" --jq '.id')
 installed_apps=$(gh api "/orgs/${ORG}/installations" --jq '.installations[].app_slug' 2>/dev/null || echo "")
 
-for role in "${ROLES[@]}"; do
-  slug="${APP_SET}-${role}"
+ensure_app_installation() {
+  local slug="$1"
   if echo "${installed_apps}" | grep -qx "${slug}"; then
     echo "    OK: ${slug} is installed"
-    continue
+    return
   fi
 
   url="https://github.com/apps/${slug}/installations/new/permissions?target_id=${org_id}&target_type=Organization"
@@ -371,7 +515,12 @@ for role in "${ROLES[@]}"; do
     fi
     echo "    OK: ${slug} is now installed"
   fi
+}
+
+for role in "${TEST_ROLES[@]}"; do
+  ensure_app_installation "${TEST_APP_SET}-${role}"
 done
+ensure_app_installation "${E2E_APP_SET}-e2e"
 
 # --- 4b. cross-org mint authorization for CI ---
 echo
@@ -433,7 +582,7 @@ else
     # Check ROLE_APP_IDS
     role_app_ids=$(echo "${mint_env}" | jq -r '.ROLE_APP_IDS // ""')
     missing_roles=()
-    for role in "${ROLES[@]}"; do
+    for role in "${MINT_ROLES[@]}"; do
       # ROLE_APP_IDS uses role-only keys; org/role keys are legacy and ignored
       # by the mint during the migration window.
       key="${role}"

@@ -2935,6 +2935,132 @@ func TestGrantProtectedBranchMergeUser(t *testing.T) {
 	assert.True(t, patched)
 }
 
+// revokeServer serves the exact-name protected-branch record and records any
+// PATCH body, so revoke tests can assert exactly what was destroyed.
+func revokeServer(t *testing.T, mux *http.ServeMux, exact map[string]any) (patches *[]map[string]any) {
+	t.Helper()
+	patches = &[]map[string]any{}
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches/main", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if exact == nil {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			writeJSON(t, w, http.StatusOK, exact)
+		case http.MethodPatch:
+			var body map[string]any
+			readJSONBody(t, r, &body)
+			*patches = append(*patches, body)
+			writeJSON(t, w, http.StatusOK, map[string]any{"name": "main"})
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	})
+	return patches
+}
+
+func TestRevokeProtectedBranchMergeUserEntry(t *testing.T) {
+	ctx := context.Background()
+	rule := map[string]any{
+		"name": "main",
+		"merge_access_levels": []map[string]any{
+			{"id": 1, "access_level": 40},
+			{"id": 11, "access_level": 30, "user_id": 98},
+			{"id": 12, "access_level": 30, "user_id": 99},
+		},
+		"push_access_levels": []map[string]any{{"id": 2, "access_level": 40}},
+	}
+
+	t.Run("destroys exactly the identified entry", func(t *testing.T) {
+		client, mux := setupTest(t)
+		patches := revokeServer(t, mux, rule)
+		require.NoError(t, client.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 12, 99))
+		require.Len(t, *patches, 1)
+		allowed, ok := (*patches)[0]["allowed_to_merge"].([]any)
+		require.True(t, ok)
+		require.Len(t, allowed, 1, "no other entry is part of the request")
+		assert.Equal(t, map[string]any{"id": float64(12), "_destroy": true}, allowed[0])
+		assert.NotContains(t, (*patches)[0], "allowed_to_push")
+	})
+
+	t.Run("refuses an entry that is not the user's", func(t *testing.T) {
+		client, mux := setupTest(t)
+		patches := revokeServer(t, mux, rule)
+		err := client.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 11, 99)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not a grant for user")
+		assert.Empty(t, *patches)
+	})
+
+	t.Run("never removes a role entry", func(t *testing.T) {
+		client, mux := setupTest(t)
+		patches := revokeServer(t, mux, rule)
+		require.Error(t, client.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 1, 99))
+		assert.Empty(t, *patches)
+	})
+
+	t.Run("an entry that is already gone is a no-op", func(t *testing.T) {
+		client, mux := setupTest(t)
+		patches := revokeServer(t, mux, rule)
+		require.NoError(t, client.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 404, 99))
+		assert.Empty(t, *patches)
+	})
+
+	t.Run("a missing rule is a no-op", func(t *testing.T) {
+		client, mux := setupTest(t)
+		patches := revokeServer(t, mux, nil)
+		require.NoError(t, client.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 12, 99))
+		assert.Empty(t, *patches)
+	})
+
+	t.Run("rejects invalid identifiers", func(t *testing.T) {
+		client, _ := setupTest(t)
+		require.Error(t, client.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 0, 99))
+		require.Error(t, client.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 12, 0))
+	})
+
+	t.Run("reports a failed lookup and a failed patch", func(t *testing.T) {
+		client, mux := setupTest(t)
+		mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches/main", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				writeJSON(t, w, http.StatusOK, rule)
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+		})
+		err := client.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 12, 99)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "revoke protected branch merge")
+
+		client2, mux2 := setupTest(t)
+		mux2.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches/main", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		require.Error(t, client2.RevokeProtectedBranchMergeUserEntry(ctx, "myorg", "myrepo", "main", 12, 99))
+	})
+}
+
+func TestGetProtectedBranchReportsEntryIDs(t *testing.T) {
+	client, mux := setupTest(t)
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`))
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/protected_branches/main", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"name": "main",
+			"merge_access_levels": []map[string]any{
+				{"id": 3, "access_level": 30, "user_id": 99},
+			},
+		})
+	})
+	rule, err := client.GetProtectedBranch(context.Background(), "myorg", "myrepo", "main")
+	require.NoError(t, err)
+	require.Len(t, rule.MergeAccessLevels, 1)
+	assert.Equal(t, forge.ProtectedBranchAccess{ID: 3, AccessLevel: 30, UserID: 99}, rule.MergeAccessLevels[0])
+}
+
 func TestGrantProtectedBranchMergeUser_Idempotent(t *testing.T) {
 	client, mux := setupTest(t)
 	ctx := context.Background()

@@ -1235,6 +1235,41 @@ func TestUploadDir_ExcludesPatternsFromTarball(t *testing.T) {
 	assert.Equal(t, "nested\n", string(got))
 }
 
+func TestUploadDir_PreservesInTreeSymlinks(t *testing.T) {
+	// Only in-tree relative links: escaping/absolute links are deliberately
+	// not asserted here, since #5253 may sanitize them on upload.
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real-dir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "real-dir", "f.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink("real-dir", filepath.Join(dir, "link-dir")))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "sub"), 0o755))
+	require.NoError(t, os.Symlink("../real-dir/f.txt", filepath.Join(dir, "sub", "link-file")))
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "openshell.log")
+	sentinelPath := filepath.Join(binDir, "uploaded.tar.gz")
+	fakeOpenshell(t, binDir, logPath, sentinelPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	require.NoError(t, UploadDir("test-sandbox", dir, "/sandbox/workspace/repo"))
+
+	extracted := extractTar(t, sentinelPath)
+	for link, want := range map[string]string{
+		"link-dir":      "real-dir",          // top-level member passed to tar by tarRootMembers
+		"sub/link-file": "../real-dir/f.txt", // nested entry reached by tar's own recursion
+	} {
+		t.Run(link, func(t *testing.T) {
+			p := filepath.Join(extracted, filepath.FromSlash(link))
+			fi, err := os.Lstat(p)
+			require.NoError(t, err, "%s should be in the tarball", link)
+			assert.NotZero(t, fi.Mode()&os.ModeSymlink, "%s must stay a symlink, not be dereferenced", link)
+			got, err := os.Readlink(p)
+			require.NoError(t, err)
+			assert.Equal(t, want, got, "%s symlink target", link)
+		})
+	}
+}
+
 func TestTarRootMembers_RejectsNestedExclude(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("x"), 0o644))

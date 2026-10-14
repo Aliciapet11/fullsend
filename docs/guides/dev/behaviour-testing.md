@@ -362,6 +362,11 @@ Fork scenarios require the pool org to have:
 - **Permission to create forks** of the leased enrolled base (`test-repo-NN`) under the same org. The `Given a fork` step creates `{leased}-fork` idempotently when missing.
 - **The same installation token** must have write access to both the base repo and the fork repo within the org, since the e2e bot commits to the fork and opens cross-fork PRs.
 
+Scenarios that fork as a human-like test actor (`owned by the outsider`) additionally require:
+
+- **The actor can fork the leased base into its own account.** The base is public, so a user with no collaborator access can fork it.
+- **The actor's PAT can create, write to, and delete repositories in its own account**, because the actor commits to its fork, opens the PR, and `CleanupScenario` deletes the fork as that actor. A classic PAT needs the `public_repo` and `delete_repo` scopes.
+
 ### Fork lifecycle
 
 | Resource | Lifecycle | Cleanup |
@@ -371,6 +376,8 @@ Fork scenarios require the pool org to have:
 | Fork PRs | Per-scenario | Closed by `CleanupScenario` |
 
 Fork repos are **ephemeral**: created when the `Given a fork` step runs and deleted by `CleanupScenario` after the scenario completes. Fork PRs are opened against the base repo (not the fork). `CleanupScenario` closes them via `CloseIssue` on the base repo, deletes the head branch on the fork repo, and then deletes the fork repo itself. Do **not** mint-enroll fork names — forks are PR sources only; mint stays on the enrolled base.
+
+A fork **owned by a test actor** lives in that actor's own account, not the pool org. The forge names it, by default after the base repo (for example `fstest-outsider/test-repo-07`), and adds a numeric suffix when the actor already has a repo with that name. The logical fork name in Gherkin is not used. `World.ForkSCM` records the actor's driver, and fork-side operations go through it: branch creation, commits, and the branch and repo deletes in `CleanupScenario`. The e2e installation token has no access to a personal account. The pool's repo ensurer only deletes leftover `{name}-fork` repos inside the org, so a fork whose cleanup failed stays in the actor's account until someone deletes it.
 
 ### Background step usage
 
@@ -384,6 +391,11 @@ Background:
 
 The `Given a fork` step remaps the logical name as above and is idempotent for that actual fork repo. Each scenario then creates its own branch and PR within the fork.
 
+Two fork steps take an optional actor suffix. The actor is one of `write actor`, `triage actor`, or `outsider`, the same names the actor steps use (see [Test actor account permission scope](#test-actor-account-permission-scope)). Without the suffix, both steps act as the e2e identity:
+
+- **`a fork "<name>" of the enrolled test repository owned by the <actor>`** forks the leased base into the actor's own account. See [Fork lifecycle](#fork-lifecycle).
+- **`a fork pull request is opened by the <actor>`** prepares the head branch through the fork owner's driver and opens the PR as the actor. The actor is then both the PR author and the sender of the `opened` event.
+
 ### Fork PR behaviour contract
 
 The `fork-dispatch.feature` file defines the canonical fork-PR behaviour contract for `harness-dispatch`. Each CEL port PR ([#2896](https://github.com/fullsend-ai/fullsend/issues/2896)–[#2901](https://github.com/fullsend-ai/fullsend/issues/2901)) should follow this contract when adding fork-PR rows to the agent's harness behaviour feature file.
@@ -395,16 +407,22 @@ The `fork-dispatch.feature` file defines the canonical fork-PR behaviour contrac
 | Disabled harness (`enabled: false`) on fork event | Empty matrix, exit 0 | Disabled harness in positive scenario; assert agent did not run |
 | Fork PR `synchronize` + label dispatches harness | Harness dispatched exactly 1 time; workflow completes | Separate scenario with sync commit + label |
 | CEL `is_fork` exclusion (`!event.state.change_proposal.is_fork`) | Empty matrix, exit 0 | Harness with `is_fork` guard in positive scenario; assert agent did not run |
+| Fork PR matches CEL `trigger` on `pull_request_target`; unauthorized actor ([ADR 0054](../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)) | Empty matrix, exit 0 — no agent run | `platform/trigger-auth.feature`. The outsider opens a PR from its own fork; assert the harness dispatch completed with an empty matrix, the agent did not run, and it was dispatched exactly 0 times, then a label as the positive control |
 
 **Kill switch vs disabled harness:** These are distinct mechanisms. The **kill switch** (`kill_switch: true`, settable in either `config.yaml` or `config.base.yaml`) is a global emergency stop that blocks *all* harness dispatch for the repo — tested in its own scenario because no positive harness can run alongside it. A **disabled harness** (`enabled: false` per agent entry) only prevents that single agent from running — tested as a piggyback negative assertion in the positive-path scenario.
 
 **Consolidation pattern:** To conserve parallel execution slots, add negative-path harnesses (disabled agent, CEL exclusion) alongside the positive-path harness in a single scenario rather than creating separate scenarios. The positive harness wait acts as the settle window for negative assertions (piggyback pattern — see `negativeSettleDuration` in `dispatch.go`). The kill switch scenario cannot be consolidated because it blocks all harnesses.
 
-**Unauthorized-actor denial** ([ADR 0054](../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)) for fork PRs is tracked separately in [#5613](https://github.com/fullsend-ai/fullsend/issues/5613) and is not part of this contract.
+**Unauthorized-actor denial:** The row lives in `e2e/behaviour/features/platform/trigger-auth.feature`, the home for platform trigger authorization scenarios, rather than in `fork-dispatch.feature`. The shared dispatch gate (`harnessdispatch.IsAuthorized`) authorizes label-added events without a write role. So the denial can only be exercised through a transition that needs one: the PR `opened` event, sent by the outsider when it opens the PR from its own fork. The harness trigger matches both `opened` and a label, and the scenario orders its steps as follows:
+
+1. The denial assertions (`the harness dispatch completes with an empty matrix`, then `agent did not run`, then `dispatched exactly 0 times`) run before the label is added. The first is the one that checks the required outcome: the other two also pass when the dispatch job errored or when no run was created, because neither counts a run without an agent job. `harness-run` uses a `cancel-in-progress` concurrency group per agent and PR, and the dispatch count excludes cancelled jobs. A leaked `opened` dispatch that the label run cancelled would therefore not be counted.
+2. The label, added afterwards by the e2e identity, must dispatch. This positive control shows that the harness is registered and its trigger matches the PR, so the denial cannot pass just because the harness never loaded.
 
 ### Dispatch step reference
 
 **`a disabled custom harness "<name>" with:`** — Registers the harness YAML under `.fullsend/harness/<name>.yaml` and adds an agent entry with `enabled: false` to the repo's `config.yaml`. Use this step for negative dispatch assertions where a single agent should be excluded while other agents in the same scenario continue to run. This is *not* the kill switch; for the global emergency stop that blocks all harnesses, use `the kill switch is active`.
+
+**`the harness dispatch completes with an empty matrix`** — Waits for the harness workflow run(s) created since the last trigger step, then requires every run that was not cancelled to have completed with its `Harness dispatch` job succeeded and no `Harness run (<agent>)` job scheduled. It fails if the dispatch job failed or an agent was scheduled, and keeps waiting while no run exists yet or a run is still in progress, so a denial is never inferred from a missing or failed run. Pair it with `agent did not run` and `dispatched exactly 0 times` for denial scenarios. It needs a CI driver that implements the optional `ci.EmptyMatrixWaiter`; the GitHub Actions driver does.
 
 **`the kill switch is active`** — Sets `kill_switch: true` in the repo's `config.yaml` (the overlay), causing `Dispatch` to return an empty matrix for *all* agents. Use this step in a dedicated scenario where no harness should run. Because the kill switch blocks everything, it cannot share a scenario with a positive-path harness.
 
@@ -456,7 +474,7 @@ Reference: [`awaitWorkflowReady`](../../../pkg/behaviourtest/drivers/install/ens
 
 Each lease of a pool repo adds approximately 3–5 minutes of overhead (delete leftover state + create + `github setup` + Actions settle; the first lease of each name also resolves inference WIF), including when a later scenario reuses the same `test-repo-NN` name. The behaviour job's `timeout-minutes` in `e2e.yml` and the `go test -timeout` in the Makefile must account for this overhead across all leases in the suite.
 
-Current budget: **45 minutes** for both the CI job timeout and `go test -timeout`. If adding scenarios that lease additional repos (or increase reuse of the 12-slot pool), verify that the total provisioning overhead plus test execution time fits within this budget. Adjust both values together — a `go test -timeout` higher than the CI `timeout-minutes` means the Go process is killed mid-test with no artifact collection. The same rule applies to the `playback-test` target (also 45 minutes) and to any CI job that runs it.
+Current budget: **45 minutes** for both the CI job timeout and `go test -timeout`. If adding scenarios that lease additional repos (or increase reuse of the 12-slot pool), verify that the total provisioning overhead plus test execution time fits within this budget. The [GitHub mint scope scenarios](#github-mint-scope-scenarios) lease one repo per Examples row. Adjust both values together — a `go test -timeout` higher than the CI `timeout-minutes` means the Go process is killed mid-test with no artifact collection. The same rule applies to the `playback-test` target (also 45 minutes) and to any CI job that runs it.
 
 Reference: [`.github/workflows/e2e.yml`](../../../.github/workflows/e2e.yml) behaviour job `timeout-minutes` and `Makefile` `behaviour-test` target.
 
@@ -502,6 +520,57 @@ URL-dispatch scenarios require a vendored CLI binary that includes `FetchPolicy`
 The install driver's internal ensurer always re-vendors the CLI binary (`github setup --vendor`) even when a prior install's post-install validation passes. This guarantees leased pool repos run the binary built from the current checkout rather than a stale binary from a previous CI run. Without re-vendoring, pool repos that passed validation would keep a pre-fix binary and silently fail to dispatch URL-sourced agents.
 
 `doEnsure` always resets (delete + recreate), installs, and settles: every lease starts from a freshly created repo, so there is no re-vendor path that skips the settle wait — the settle step runs on every ensure.
+
+## GitHub mint scope scenarios
+
+`e2e/behaviour/features/platform/mint-scope.feature` covers the GitHub per-repo mint request contract with real GitHub Actions OIDC tokens. It sends requests to the suite's own mint: the preview mint on `dev`, the stage mint on `stage`. A `Scenario Outline` holds the matrix, and each Examples row is one request and its expected result:
+
+| Column | Values |
+|--------|--------|
+| `forge` | `github` (the only supported forge; the feature is tagged `@skip:gitlab`) |
+| `role` | A `fullsend-test` role: `triage`, `coder`, `review`, `retro`, `prioritize`, `fullsend` |
+| `repos` | `shim repo` (the leased repository), `other repo` (another repository of the same org, see below) or `*` |
+| `level` | `read` or `write` |
+| `workflow host` | `approved` or `unapproved` |
+| `outcome` | `minted`, `scope-denied` or `host-denied` |
+| `target repo` | `shim repo` or `none` |
+| `selection` | The token's `repository_selection` (`selected`), or `none` |
+
+Every role mints at both levels for its own repository. Wildcard and other-repository scopes are denied (`scope-denied`), and an unapproved workflow host is denied (`host-denied`). Out of scope: the deprecated per-org installation mode, the infrastructure-only `e2e` role, cross-organization minting, and GitLab or Forgejo minting.
+
+### Probe topology
+
+The probe adds and changes no committed Fullsend workflow, and runs no harness or dummy runtime. For each row the steps:
+
+1. Create a temporary, public host repository in the pool org and commit the reusable probe workflow (`pkg/behaviourtest/steps/mint_probe_workflow.yml`) to it. The approved host is `test-repo-NN-mint-host`. Both CF mint drivers list that name in the mint's `WORKFLOW_HOST_REPOS`, next to the pool repos (see [Install driver (unified)](behaviour-drivers.md#install-driver-unified)). Unapproved-host rows also create `test-repo-NN-mint-unapproved`, which no list names.
+2. Push a shim workflow to a temporary branch (`behaviour/mint-probe-<nonce>`) of the leased repository. On that push, the shim calls the probe workflow twice in one run and passes the repository's `FULLSEND_MINT_URL` variable to both jobs.
+3. Wait for that run, download each job's result artifact and classify it.
+
+The leased repository is the OIDC `repository` claim (the shim) and the host repository is the `job_workflow_ref` claim, so the two are always different repositories. The probe reports both claims, and the outcome step checks them. `other repo` is the approved host itself: it is in the same org and covered by the role's App installation, so a denial cannot come from a missing repository. `CleanupScenario` deletes the shim branch and the host repositories, and the leased repository is deleted when it is deallocated.
+
+### Telling denials from failures
+
+Each probe job requests one token with the job's OIDC token, then masks and revokes any token it gets. It uploads a compact JSON result: the outcome (`minted`, `denied` or `error`), the mint's HTTP status and error message, the two claims, and a minted token's `repository_selection`, granted repositories and granted permissions. No token is kept. The job exits 0 whatever the mint answers, and the upload requires the result file, so a missing result fails the run.
+
+The steps report a policy denial separately from an infrastructure failure. These are infrastructure failures, and none can satisfy an expected denial:
+
+- an OIDC failure: no OIDC token was obtained, or the probe could not verify it (see below);
+- a transport failure: the mint request did not complete;
+- a server failure: an unexpected HTTP status, such as a 422 for a missing App permission, or a 5xx;
+- a malformed result: a 200 without a usable token;
+- a configuration failure: no `FULLSEND_MINT_URL`;
+- a workflow failure: the run did not succeed;
+- a result-artifact failure: the artifact is missing or holds an unknown outcome.
+
+A scope denial must be a 403 with one of the mint's repos-scope messages (`validateReposScope` in `internal/mintcore`). Any other 403, for example `role not allowed`, is a misconfiguration, not a scope denial. A workflow-host denial is a 401. The mint answers `authentication failed` both when the workflow host is not approved and when OIDC verification fails. To rule out the latter, the same run makes a **control** request: same role and level, the leased repository only, through the approved host. The control must mint a `selected` token for the leased repository with the role's canonical permissions, or the row fails whatever the subject request returned.
+
+The control rules out an OIDC failure common to both requests, but not one specific to the subject's token. So each probe job also verifies its own OIDC token before it calls the mint: the RS256 signature against GitHub's published signing keys, the issuer, the `fullsend-mint` audience, and `exp`/`nbf`. A token that fails is reported as an OIDC failure and the mint is not called. The result carries `oidc_verified`, and a 401 `authentication failed` counts as a host denial only when it is `true`. The mint's 401 stays generic on purpose, so no mint-side denial reason is needed. The step log prints only the outcome, error class, HTTP status and `oidc_verified`; the mint's message is kept in the artifact alone.
+
+A minted token's granted permissions are compared with the role's canonical set at the requested level. Permissions the mint may drop while an installation catches up (`coder`'s `packages:read`) may be absent. Nothing else may differ. The expected sets duplicate `canonicalRolePermissions` and `optionalRolePermissions` in `internal/mintcore/github.go`, because `pkg/behaviourtest` must not import mintcore (see [Version pinning](#version-pinning-for-fullsend-aiagents)). Change both together. `TestMintScopeFeature_RowsMatchSteps` checks that every Examples row matches the step patterns and that every role mints at both levels.
+
+### Budget
+
+Each row is a scenario that leases a pool repository, so the 18 rows add 18 leases (about 3–5 minutes of provisioning each) to the [CI timeout budget](#ci-timeout-budgeting-for-lazy-provisioning). Each probe run is short: two parallel jobs that each make one HTTP request. If the suite outgrows the budget, grow the pool through `DefaultPoolSize` (`pkg/behaviourtest/drivers/install/driver.go`). Update the pool-sized infrastructure in the same change, for example `POOL_REPOS` in the inference gateway setup script (see [e2e-testing.md](e2e-testing.md#who-runs-it-and-when)). Then rerun that infrastructure before the larger pool is used.
 
 ## Version pinning for `fullsend-ai/agents`
 
@@ -615,6 +684,14 @@ suiteRunner := godog.TestSuite{
 
 **`scm.Driver.ListPullRequestCommits` addition (breaking change):** The `scm.Driver` interface now includes `ListPullRequestCommits(ctx, owner, repo, number) ([]string, error)`, returning the commit SHAs on a pull request, oldest first. The dummy-playback suite uses the first entry as the code stage's published commit: review and fix only append commits to the branch, so unlike the head branch's live tip, that commit cannot be displaced by a later stage that races ahead. The GitHub and GitLab reference implementations pass through to the new `forge.Client.ListPullRequestCommits` method (GitHub caps results at 250 commits). This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
 
+**`scm.Driver.CreateUserFork` addition (breaking change):** The `scm.Driver` interface now includes `CreateUserFork(ctx, owner, repo string) (forkOwner, forkRepo string, err error)`, which forks a repository into the authenticated user's own account, the way an outside contributor does. The forge picks the fork's name. The `owned by the <actor>` fork step uses it. The GitHub and GitLab reference implementations pass through to the existing `forge.Client.CreateFork` method. This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
+
 **`ci.RunLister` optional interface:** `ListRecentRuns(ctx, owner, repo string, limit int) ([]forge.WorkflowRun, error)` lists a repository's most recent workflow runs across all workflows. Failure log collection uses it to find runs that no step resolved. It is a separate interface, not a `ci.Driver` method, so external `ci.Driver` implementations keep compiling. Without it, failed scenarios still get a failure summary but only the run a step resolved has its logs collected. The GitHub Actions and GitLab CI reference drivers implement it.
+
+**`world.World.MintProbe` addition:** The new `MintProbe *world.MintProbe` field (with the `world.MintProbe` and `world.MintProbeResult` types) holds the state of the [GitHub mint scope scenarios](#github-mint-scope-scenarios). It is a non-breaking addition. The mint probe steps need a CI driver that implements the optional `ci.RunLister` interface, as the GitHub Actions driver does.
+
+**`install.MintProbeHostRepoSuffix` addition:** The suffix (`-mint-host`) of each pool slot's mint-probe host repository. The CF mint drivers add those names to the mint's `--workflow-host-repos`.
+
+**`ci.EmptyMatrixWaiter` optional interface:** `WaitForHarnessEmptyMatrix(ctx, owner, repo string, after time.Time) (*forge.WorkflowRun, error)` backs the `the harness dispatch completes with an empty matrix` step. It is a separate interface, not a `ci.Driver` method, so external `ci.Driver` implementations keep compiling; the step fails with an explanatory error on a driver without it. Only the GitHub Actions reference driver implements it.
 
 Bump the pinned version when behaviour step vocabulary or `pkg/behaviourtest` APIs change.

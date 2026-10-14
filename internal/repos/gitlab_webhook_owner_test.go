@@ -533,7 +533,7 @@ func TestEnsureGitLabWebhookFastPath_ConcurrentRotationDetected(t *testing.T) {
 		c := setup()
 		c.before = func() {
 			// Another installer process does not share this process's lock.
-			_, err := ensureGitLabWebhookFastPath(context.Background(), c.webhookFake, nil, webhookTestBase, webhookTestOwner, webhookTestRepo, true, false, &credentialRedactor{})
+			_, err := ensureGitLabWebhookFastPath(context.Background(), c.webhookFake, nil, nil, webhookTestBase, webhookTestOwner, webhookTestRepo, true, false, &credentialRedactor{})
 			require.NoError(t, err)
 		}
 
@@ -557,7 +557,7 @@ func TestEnsureGitLabWebhookFastPath_ConcurrentRotationDetected(t *testing.T) {
 		c := setup()
 		c.after = func() {
 			// Another installer process does not share this process's lock.
-			_, err := ensureGitLabWebhookFastPath(context.Background(), c.webhookFake, nil, webhookTestBase, webhookTestOwner, webhookTestRepo, true, false, &credentialRedactor{})
+			_, err := ensureGitLabWebhookFastPath(context.Background(), c.webhookFake, nil, nil, webhookTestBase, webhookTestOwner, webhookTestRepo, true, false, &credentialRedactor{})
 			require.NoError(t, err)
 		}
 

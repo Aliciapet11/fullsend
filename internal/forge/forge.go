@@ -1148,6 +1148,16 @@ type Client interface {
 	// returns ErrNotSupported.
 	GrantProtectedBranchMergeUser(ctx context.Context, owner, repo, branch string, userID int) error
 
+	// RevokeProtectedBranchMergeUserEntry removes the single user merge-access
+	// entry identified by entryID from the exact-name protected-branch rule for
+	// branch. It exists so a caller that added a grant (and learned its entry ID
+	// from a ProtectedBranchAccess it read back) can undo exactly that grant
+	// without touching any other entry for the same user. It refuses an entry
+	// that is not a grant for userID, never touches wildcard rules, and is a
+	// no-op when the entry or rule is already gone. Used on GitLab; GitHub
+	// returns ErrNotSupported.
+	RevokeProtectedBranchMergeUserEntry(ctx context.Context, owner, repo, branch string, entryID, userID int) error
+
 	// Pipeline schedules and branch-restricted CI variables live on
 	// the base Client because both GitHub Actions and GitLab CI support
 	// timed triggers. However, the branch-restricted/protected variable
@@ -1335,10 +1345,13 @@ func (v PipelineInputValue) MarshalJSON() ([]byte, error) {
 
 // ProtectedBranchAccess is one grant on a protected branch.
 // A role-based grant has AccessLevel set and UserID/GroupID zero.
-// A user or group grant has the corresponding ID set.
+// A user or group grant has the corresponding ID set. ID is the forge's
+// identifier of this individual entry (zero when the forge does not report
+// one); it lets a caller remove exactly this entry later.
 // GitLab access levels: 0 (No one), 30 (Developer), 40 (Maintainer),
 // 60 (Admin). A role-based grant of N allows identities at N or above.
 type ProtectedBranchAccess struct {
+	ID          int
 	AccessLevel int
 	UserID      int
 	GroupID     int

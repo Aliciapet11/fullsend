@@ -181,6 +181,18 @@ repo baseline and overrides)
   (contract: [`docs/normative/prescript-output/v1`](normative/prescript-output/v1/README.md)),
   replacing the inline workflow pre-checks and their scaffold script copies
   ([ADR 0072](ADRs/0072-pre-script-output-protocol.md)).
+- Deterministic forge entity-context-snapshot (v1): before the pre-script, the
+  runner fetches one
+  bounded entity snapshot through `forge.Client`, filters untrusted content,
+  and stages a versioned per-record file tree with relationship, projection,
+  and immutable agent-run lineage metadata outside the repository. Repository
+  diffs and commit history remain derived from the separately provisioned Git
+  checkout; the entity-context-snapshot carries Git object IDs only as
+  relationship anchors.
+  Scripts and the sandbox use `FULLSEND_CONTEXT_DIR` with the same relative
+  paths; runtimes may inject ordered records as separate cacheable input blocks
+  ([ADR 0141](ADRs/0141-deterministic-filtered-entity-context-staging.md),
+  constrained by [ADR 0133](ADRs/0133-actor-attributed-data-security-boundary.md)).
 - CEL-guarded overlays: an `overlays:` list of CEL-guarded config
   overlays generalizes the `forge:` block, letting harness authors
   condition scripts, skills, env vars, and other fields on any event
@@ -216,7 +228,7 @@ repo baseline and overrides)
 
 - Does the harness live inside the sandbox (configuring the agent from within its isolation boundary) or outside it (preparing the environment before the agent starts)? (Security hooks are injected as a runner-owned `hooks.json` loaded via `--settings`; see [ADR 0027](ADRs/0027-allowed-and-disallowed-tools-for-agents.md). General harness placement remains open.)
 - How is codebase context assembled? (See [codebase-context.md](problems/codebase-context.md).)
-- How do we version and test harness configurations? (See [testing-agents.md](problems/testing-agents.md).) (Functional tests now test the full pipeline including harness-assembled configuration — [ADR 0052](ADRs/0052-functional-tests-for-agent-pipelines.md). Harness versioning is decided in [ADR 0127](ADRs/0127-harness-schema-versioning-and-field-types.md); per-version field-value schemas remain open.)
+- How do we version and test harness configurations? (See [testing-agents.md](problems/testing-agents.md).) (Functional tests in fullsend-ai/agents test the full pipeline including harness-assembled configuration — [ADR 0052](ADRs/0052-functional-tests-for-agent-pipelines.md), [ADR 0139](ADRs/0139-agent-functional-test-suite-lives-in-agents-repo.md). Harness versioning is decided in [ADR 0127](ADRs/0127-harness-schema-versioning-and-field-types.md); per-version field-value schemas remain open.)
 
 ## Agent Runtime
 
@@ -391,6 +403,16 @@ The existing design principle is that [the repo is the coordinator](problems/age
   non-label paths ([ADR 0107](ADRs/0107-bot-identity-resolution-for-dispatch-authorization.md);
   [Authorization Contract v1](normative/authorization/v1/);
   [ADR 0054](ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)).
+- Data security boundary (target state): each source-system record is admitted
+  only when its actor attribution and current authorization meet the selected
+  harness threshold, regardless of whether it arrives through an event or a
+  proactive API read; unrecognized or unauthorized content is redacted.
+  Host-side filtering removes hidden characters, redacts sensitive data, scans
+  for prompt injection, and applies size limits before filtered,
+  provenance-labelled content reaches the model. This ADR does not govern
+  model-initiated direct source-system calls; future ADRs may encourage use of
+  platform-originated checked data or add filtering for model-originated
+  retrievals ([ADR 0133](ADRs/0133-actor-attributed-data-security-boundary.md)).
 - Poll entity-discovery authorization: `fullsend poll` has no prompting event
   actor; verified, non-user-assertable Fullsend invocation provenance authorizes
   entity enumeration and evaluation, and callers without it are denied. Before
@@ -514,10 +536,11 @@ the inheritance model: fullsend defaults, then repo baseline (`config.base.yaml`
 - Config lookup: config entries are looked up directly via `findConfigAgentEntry`; the agents-repo fallback operates independently when the agent is not found in config. Builds on [ADR 0045](ADRs/0045-forge-portable-harness-schema.md) harness identity model.
 - CLI management: `fullsend agent add|list|set|update|remove` manages config entries and auto-pins URLs to a commit SHA with an integrity hash.
 - Agent generation: `fullsend agent new <name>` writes a complete custom agent — harness, agent definition, result schema, post-script, and the base policy a per-repo install does not vendor; its built-in providers are bare names whose definitions and profiles come from the `fullsend` binary — validates it with the loader dispatch uses, and registers it through the `agent add` path above. A `trigger:` is mandatory, because a trigger-less harness registers and validates and is then silently never dispatched; `--role` is a closed table of the roles the hosted mint serves, so an unservable role fails locally rather than as a `403` at first dispatch ([ADR 0102](ADRs/0102-generate-custom-agents-from-the-cli.md)).
+- Functional tests: agent functional tests live in fullsend-ai/agents, not in this repo. The fullsend release gate runs the release tier (each agent's `release: true` case), and the full tier runs nightly in the agents repo against fullsend `main` ([ADR 0139](ADRs/0139-agent-functional-test-suite-lives-in-agents-repo.md), superseding [ADR 0052](ADRs/0052-functional-tests-for-agent-pipelines.md)'s `eval/` layout).
 
 **Open questions:**
 
-- How are new agent roles added, tested, and promoted to production? (See [testing-agents.md](problems/testing-agents.md).) (Functional tests provide a framework for testing agent roles against controlled fixtures — [ADR 0052](ADRs/0052-functional-tests-for-agent-pipelines.md). Admission criteria for a new built-in role are in [ADR 0124](ADRs/0124-criteria-for-adding-a-built-in-agent-role.md). Promotion workflow remains open.)
+- How are new agent roles added, tested, and promoted to production? (See [testing-agents.md](problems/testing-agents.md).) (Functional tests provide a framework for testing agent roles against controlled fixtures — [ADR 0052](ADRs/0052-functional-tests-for-agent-pipelines.md); the suite lives in fullsend-ai/agents — [ADR 0139](ADRs/0139-agent-functional-test-suite-lives-in-agents-repo.md). Admission criteria for a new built-in role are in [ADR 0124](ADRs/0124-criteria-for-adding-a-built-in-agent-role.md). Promotion workflow remains open.)
 - Does the registry include version information, so we can roll back to a previous agent configuration?
 - How does the registry relate to the policy store — does policy reference registry entries, or are they independent?
 

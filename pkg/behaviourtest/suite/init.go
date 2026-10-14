@@ -128,6 +128,7 @@ func resetScenarioWorld(w *world.World) {
 	w.ForkRepo = ""
 	w.ForkPRNumber = 0
 	w.ForkPRBranch = ""
+	w.ForkSCM = nil
 	w.URLHarnessRepoOwner = ""
 	w.URLHarnessRepoName = ""
 	w.URLBaseHarnesses = nil
@@ -154,6 +155,7 @@ func resetScenarioWorld(w *world.World) {
 	w.ConsumedHarnessRunIDs = nil
 	w.HarnessRunArtifactDirs = nil
 	w.StagePublishedSHA = nil
+	w.MintProbe = nil
 }
 
 func tagNames(tags []*messages.PickleTag) []string {

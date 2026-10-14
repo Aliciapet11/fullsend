@@ -95,7 +95,8 @@ func TestServiceAccountCreationOwnershipFailureDeletesOnlyNewAccount(t *testing.
 	sa := newFakeSAAPI()
 	sa.accounts = []GitLabServiceAccount{{ID: 77, Name: gitlabroles.CoderTokenName}}
 	c := ServiceAccountTokenClient{
-		SA: sa,
+		SA:          sa,
+		VerifyToken: acceptReplacementToken,
 		ManagedAccountIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
 			return ManagedGitLabRoleAccountIDs(ctx, fc, owner, repo)
 		},
@@ -208,7 +209,22 @@ func (f *fakeSAAPI) GetProjectMemberAccessLevel(_ context.Context, _, _ string, 
 
 func saCreate(t *testing.T, c ServiceAccountTokenClient, name string) (*ProjectAccessToken, error) {
 	t.Helper()
+	if c.VerifyToken == nil {
+		c.VerifyToken = acceptReplacementToken
+	}
 	return c.CreateProjectAccessToken(context.Background(), "g", "p", name, gitlabroles.TokenScopes(), gitlabroles.DeveloperAccessLevel, validRolePATExpiry())
+}
+
+// Legacy creation never mints a credential it cannot verify: without a
+// VerifyToken the request is refused before the legacy backend is reached.
+func TestLegacyCreateRefusesWithoutVerifier(t *testing.T) {
+	legacy := &fakeTokens{}
+	c := ServiceAccountTokenClient{Legacy: legacy, RoleRegistry: customRoleRegistry(t)}
+	tok, err := c.CreateProjectAccessToken(context.Background(), "g", "p", gitlabroles.CustomTokenName("custom"), gitlabroles.TokenScopes(), gitlabroles.DeveloperAccessLevel, validRolePATExpiry())
+	require.Error(t, err)
+	assert.Nil(t, tok)
+	assert.Contains(t, err.Error(), "verification unavailable")
+	assert.Empty(t, legacy.createdNames(), "no legacy credential is minted")
 }
 
 // validRolePATExpiry is the role credential lifetime from the real clock,
@@ -299,6 +315,40 @@ func TestServiceAccountTokenClient_DuplicateAccountsResolveToLowestID(t *testing
 	assert.Empty(t, sa.createdSAs)
 }
 
+// After a Poller generation handoff the retiring Poller shares the Poller
+// display name and stays in the ownership inventory for cleanup, but a forced
+// or expiry-driven role-token rotation must mint for the recorded managed
+// account, not the older retiring one.
+func TestServiceAccountTokenClient_HandoffThenRotationMintsForRecordedManagedPoller(t *testing.T) {
+	ctx := context.Background()
+	fc := forge.NewFakeClient()
+	const retiringID, currentID = 10, 20
+	require.NoError(t, writeRotationState(ctx, fc, "g", "p", rotationStateFile{Roles: map[string]rotationRoleState{
+		string(gitlabroles.RolePoller): {ManagedUserID: currentID, Phase: rotationPhaseIdle},
+	}}))
+	require.NoError(t, writePollerGenerations(ctx, fc, "g", "p", PollerGenerationState{CurrentUserID: currentID, RetiringUserID: retiringID}))
+	sa := newFakeSAAPI()
+	sa.accounts = []GitLabServiceAccount{{ID: retiringID, Name: gitlabroles.PollerTokenName}, {ID: currentID, Name: gitlabroles.PollerTokenName}}
+	c := ServiceAccountTokenClient{
+		SA:                sa,
+		Legacy:            &fakeTokens{},
+		ContainmentClient: fc,
+		VerifyToken:       acceptReplacementToken,
+		ManagedAccountIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+			return ManagedGitLabRoleAccountIDs(ctx, fc, owner, repo)
+		},
+		ManagedAccountNames: func(ctx context.Context, owner, repo string) (map[int]string, error) {
+			return ManagedGitLabRoleAccountNames(ctx, fc, owner, repo)
+		},
+	}
+
+	tok, err := c.CreateProjectAccessToken(ctx, "g", "p", gitlabroles.PollerTokenName, gitlabroles.TokenScopes(), gitlabroles.DeveloperAccessLevel, validRolePATExpiry())
+	require.NoError(t, err)
+	assert.Equal(t, currentID, tok.UserID)
+	assert.Empty(t, sa.createdSAs)
+	assert.NotContains(t, sa.members, int64(retiringID), "the retiring Poller is not touched")
+}
+
 func TestServiceAccountTokenClient_FallsBackToLegacyWhenUnavailable(t *testing.T) {
 	for name, setup := range map[string]func(*fakeSAAPI){
 		"list not found":   func(f *fakeSAAPI) { f.failList = fmt.Errorf("list: %w", forge.ErrNotFound) },
@@ -317,6 +367,128 @@ func TestServiceAccountTokenClient_FallsBackToLegacyWhenUnavailable(t *testing.T
 			assert.Equal(t, legacy.created[0].ID, tok.ID)
 		})
 	}
+}
+
+// A legacy fallback replacement is verified like a service-account PAT before it
+// is published, and an unverified one is revoked rather than returned.
+func TestServiceAccountTokenClient_LegacyFallbackVerifiesReplacement(t *testing.T) {
+	for name, verifyErr := range map[string]error{
+		"accepted":           nil,
+		"identity mismatch":  errors.New("token identity mismatch"),
+		"scope mismatch":     errors.New("token scopes mismatch"),
+		"effective access":   errors.New("effective access below Developer"),
+		"poller protected":   errors.New("protected-ref access missing"),
+		"verification error": errors.New("self lookup failed"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			sa := newFakeSAAPI()
+			sa.failList = forge.ErrNotFound
+			legacy := &fakeTokens{}
+			var verified []*ProjectAccessToken
+			c := ServiceAccountTokenClient{SA: sa, ManagedLegacyTokenIDs: recordedLegacyTokens(legacy), Legacy: legacy,
+				VerifyToken: func(_ context.Context, _, _ string, tok *ProjectAccessToken) error {
+					verified = append(verified, tok)
+					return verifyErr
+				}}
+
+			tok, err := saCreate(t, c, gitlabroles.PollerTokenName)
+			require.Len(t, legacy.created, 1)
+			require.Len(t, verified, 1, "the configured verifier runs on the legacy replacement")
+			if verifyErr == nil {
+				require.NoError(t, err)
+				assert.Equal(t, legacy.created[0].ID, tok.ID)
+				assert.Empty(t, legacy.revoked)
+				return
+			}
+			require.Error(t, err)
+			assert.Nil(t, tok)
+			assert.Contains(t, err.Error(), "validating the replacement legacy credential")
+			assert.Equal(t, []int{legacy.created[0].ID}, legacy.revoked, "the unverified replacement is revoked")
+		})
+	}
+}
+
+// tamperedPATAPI rewrites the creation response of the fake service-account API.
+type tamperedPATAPI struct {
+	*fakeSAAPI
+	tamper func(*ProjectAccessToken)
+}
+
+func (a tamperedPATAPI) CreateServiceAccountPAT(ctx context.Context, owner, repo string, userID int, name string, scopes []string, expiresAt string) (*ProjectAccessToken, error) {
+	tok, err := a.fakeSAAPI.CreateServiceAccountPAT(ctx, owner, repo, userID, name, scopes, expiresAt)
+	if err == nil {
+		a.tamper(tok)
+	}
+	return tok, err
+}
+
+// The authenticated token is verified against the requested name and expiry:
+// a creation response that contradicts the request is rejected and revoked, and
+// an omitted name or expiry is filled from the request before verification.
+func TestServiceAccountTokenClient_CreatePinsRequestedPolicy(t *testing.T) {
+	expiry := validRolePATExpiry()
+	for name, tc := range map[string]struct {
+		tamper  func(*ProjectAccessToken)
+		wantErr string
+	}{
+		"other name":     {func(p *ProjectAccessToken) { p.Name = gitlabroles.AnalystTokenName }, "validating the replacement service-account credential"},
+		"other expiry":   {func(p *ProjectAccessToken) { p.ExpiresAt = "2099-01-01" }, "validating the replacement service-account credential"},
+		"omitted name":   {func(p *ProjectAccessToken) { p.Name = "" }, ""},
+		"omitted expiry": {func(p *ProjectAccessToken) { p.ExpiresAt = "" }, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sa := newFakeSAAPI()
+			var verified *ProjectAccessToken
+			c := ServiceAccountTokenClient{SA: tamperedPATAPI{sa, tc.tamper}, Legacy: &fakeTokens{},
+				VerifyToken: func(_ context.Context, _, _ string, tok *ProjectAccessToken) error {
+					verified = tok
+					return nil
+				}}
+
+			tok, err := saCreate(t, c, gitlabroles.CoderTokenName)
+
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				require.NotNil(t, verified)
+				assert.Equal(t, gitlabroles.CoderTokenName, verified.Name)
+				assert.Equal(t, expiry, verified.ExpiresAt)
+				assert.Equal(t, tok, verified)
+				return
+			}
+			require.Error(t, err)
+			assert.Nil(t, tok)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Nil(t, verified, "a contradicting response never reaches the authenticating verifier")
+			assert.Len(t, sa.revoked, 1, "the contradicting credential is revoked")
+		})
+	}
+
+	t.Run("legacy fallback", func(t *testing.T) {
+		sa := newFakeSAAPI()
+		sa.failList = forge.ErrNotFound
+		legacy := &fakeTokens{}
+		wrongName := tamperedLegacy{legacy}
+		c := ServiceAccountTokenClient{SA: sa, ManagedLegacyTokenIDs: recordedLegacyTokens(legacy), Legacy: wrongName}
+
+		tok, err := saCreate(t, c, gitlabroles.PollerTokenName)
+
+		require.Error(t, err)
+		assert.Nil(t, tok)
+		assert.Contains(t, err.Error(), "validating the replacement legacy credential")
+		require.Len(t, legacy.created, 1)
+		assert.Equal(t, []int{legacy.created[0].ID}, legacy.revoked, "the contradicting legacy credential is revoked")
+	})
+}
+
+// tamperedLegacy makes the legacy creation response claim another token name.
+type tamperedLegacy struct{ *fakeTokens }
+
+func (l tamperedLegacy) CreateProjectAccessToken(ctx context.Context, owner, repo, name string, scopes []string, accessLevel int, expiresAt string) (*ProjectAccessToken, error) {
+	tok, err := l.fakeTokens.CreateProjectAccessToken(ctx, owner, repo, name, scopes, accessLevel, expiresAt)
+	if err == nil {
+		tok.Name = gitlabroles.CoderTokenName
+	}
+	return tok, err
 }
 
 func TestServiceAccountTokenClient_CreateErrors(t *testing.T) {
@@ -1107,7 +1279,7 @@ func TestLegacyCreationRecordsOwnershipBeforePublication(t *testing.T) {
 			if fail {
 				fc.Errors["UpdateCIVariable"] = errors.New(leakToken)
 			}
-			c := ServiceAccountTokenClient{SA: sa, Legacy: legacy, ManagedLegacyTokenIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
+			c := ServiceAccountTokenClient{SA: sa, Legacy: legacy, VerifyToken: acceptReplacementToken, ManagedLegacyTokenIDs: func(ctx context.Context, owner, repo string) ([]int, error) {
 				return ManagedGitLabLegacyTokenIDs(ctx, fc, owner, repo)
 			}, LegacyTokenCreated: func(ctx context.Context, owner, repo string, tok *ProjectAccessToken) error {
 				return RecordManagedGitLabLegacyToken(ctx, fc, owner, repo, tok)

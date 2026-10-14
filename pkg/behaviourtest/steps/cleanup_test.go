@@ -279,6 +279,38 @@ func TestCleanupScenario_SkipsForkRepoDelete_WhenForkRepoEqualsRepoName(t *testi
 	assert.Empty(t, scmDriver.deletedRepos, "repo deletion should be skipped when ForkRepo == RepoName")
 }
 
+func TestCleanupScenario_ActorOwnedForkDeletedThroughForkSCM(t *testing.T) {
+	t.Parallel()
+
+	e2eSCM := &fakeCleanupSCM{}
+	outsiderSCM := &fakeCleanupSCM{}
+	w := &world.World{
+		RepoOwner:    "org",
+		RepoName:     "repo",
+		ForkPRNumber: 10,
+		ForkOwner:    "outsider",
+		ForkRepo:     "repo", // user forks take the base repo's name
+		ForkPRBranch: "test-branch",
+		SCM:          e2eSCM,
+		ForkSCM:      outsiderSCM,
+	}
+	CleanupScenario(w)
+
+	// The fork PR lives on the base repo, so the e2e identity closes it.
+	require.Len(t, e2eSCM.closedIssues, 1)
+	assert.Equal(t, 10, e2eSCM.closedIssues[0].number)
+	assert.Empty(t, e2eSCM.deletedBranches)
+	assert.Empty(t, e2eSCM.deletedRepos)
+
+	require.Len(t, outsiderSCM.deletedBranches, 1)
+	assert.Equal(t, "outsider", outsiderSCM.deletedBranches[0].owner)
+	assert.Equal(t, "repo", outsiderSCM.deletedBranches[0].repo)
+	assert.Equal(t, "test-branch", outsiderSCM.deletedBranches[0].branch)
+	require.Len(t, outsiderSCM.deletedRepos, 1)
+	assert.Equal(t, "outsider", outsiderSCM.deletedRepos[0].owner)
+	assert.Equal(t, "repo", outsiderSCM.deletedRepos[0].repo)
+}
+
 func TestCleanupScenario_SkipsForkRepoDelete_WhenFieldsMissing(t *testing.T) {
 	t.Parallel()
 
@@ -629,6 +661,10 @@ func (f *fakeCleanupSCM) GetBranchRef(context.Context, string, string, string) (
 
 func (f *fakeCleanupSCM) CreateFork(context.Context, string, string, string) (string, error) {
 	return "", nil
+}
+
+func (f *fakeCleanupSCM) CreateUserFork(context.Context, string, string) (string, string, error) {
+	return "", "", nil
 }
 
 func (f *fakeCleanupSCM) CommitFileToFork(context.Context, string, string, string, string, string, []byte) error {
@@ -1308,6 +1344,10 @@ func (f *fakeRetryCleanupSCM) GetBranchRef(context.Context, string, string, stri
 
 func (f *fakeRetryCleanupSCM) CreateFork(context.Context, string, string, string) (string, error) {
 	return "", nil
+}
+
+func (f *fakeRetryCleanupSCM) CreateUserFork(context.Context, string, string) (string, string, error) {
+	return "", "", nil
 }
 
 func (f *fakeRetryCleanupSCM) CommitFileToFork(context.Context, string, string, string, string, string, []byte) error {

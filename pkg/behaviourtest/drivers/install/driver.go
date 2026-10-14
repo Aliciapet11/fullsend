@@ -91,4 +91,13 @@ const (
 	// DefaultPoolSize is the number of test-repo-NN repos in a pool org.
 	// Drivers use this as the default capacity when no override is set.
 	DefaultPoolSize = 12
+
+	// MintProbeHostRepoSuffix names the per-slot repository that hosts
+	// the reusable mint-probe workflow of the GitHub mint scope
+	// scenarios: test-repo-NN + suffix. The CF mint drivers list these
+	// names in the mint's WORKFLOW_HOST_REPOS next to the pool repos, so
+	// a workflow hosted there is an approved workflow host while staying
+	// a different repository from the leased test-repo-NN that calls it.
+	// The repositories themselves are created and deleted per scenario.
+	MintProbeHostRepoSuffix = "-mint-host"
 )

@@ -53,6 +53,23 @@ func PollerPipelineUserIDs(tokens []ProjectAccessToken) []int {
 	return ids
 }
 
+// WithSuppliedPollerUserID returns ids extended with the owner of the
+// administrator-supplied Poller credential recorded in rotation state. A
+// supplied personal access token has no inventory snapshot, so
+// PollerPipelineUserIDs cannot see its owner; install and status pipeline-access
+// checks add it here. A state that is absent, unreadable or records no supplied
+// Poller owner leaves ids unchanged.
+func WithSuppliedPollerUserID(ctx context.Context, client forge.Client, owner, repo string, ids []int) []int {
+	if client == nil {
+		return ids
+	}
+	prov, err := PollerCredentialProvenance(ctx, client, owner, repo)
+	if err != nil || !prov.Supplied || prov.UserID <= 0 || containsInt(ids, prov.UserID) {
+		return ids
+	}
+	return append(append([]int(nil), ids...), prov.UserID)
+}
+
 // PollerCanCreatePipeline reports whether every given Developer-level poller
 // identity can create pipelines on the given protected ref. A nil rule means
 // the branch is not protected and CreatePipeline does not need merge/push
@@ -264,6 +281,65 @@ func AppendGitLabPipelineRefStatus(ctx context.Context, client forge.Client, own
 	})
 	return true
 }
+
+// VerifyGitLabSuppliedPollerPipelineAccess checks, without changing the
+// protected-branch rule, that the owner of an administrator-supplied Poller
+// credential has or can be given protected-default-branch pipeline access. A
+// rejected enrollment must not leave a merge grant behind, so the grant itself
+// is deferred to EstablishSuppliedPollerAccess, which runs after the supplied
+// owner is recorded in rotation state and before the credential is published
+// (see VerifyGitLabReplacementPipelineAccess). An unprotected
+// branch or an existing grant passes; a branch protected only through a
+// wildcard rule fails, because the grant is refused there.
+func VerifyGitLabSuppliedPollerPipelineAccess(ctx context.Context, client forge.Client, owner, repo string, userID int) error {
+	if userID <= 0 {
+		return fmt.Errorf("supplied Poller identity unavailable")
+	}
+	branch, rule, err := loadDefaultBranchRule(ctx, client, owner, repo)
+	if err != nil {
+		if forge.IsNotSupported(err) {
+			return nil
+		}
+		return err
+	}
+	if PollerCanCreatePipeline(rule, []int{userID}) {
+		return nil
+	}
+	if rule.Name != branch {
+		return fmt.Errorf("supplied Poller protected-ref access cannot be granted: %q is only protected via wildcard rule %q; add an exact-name protection rule that includes the poller in allowed_to_merge", branch, rule.Name)
+	}
+	return nil
+}
+
+// VerifyGitLabPollerProtectedPipelineAccess checks, without changing the
+// protected-branch rule, that userID may start pipelines on the project's
+// default branch under the existing branch policy. A forge without
+// protected-branch support passes; an unreadable rule fails closed.
+func VerifyGitLabPollerProtectedPipelineAccess(ctx context.Context, client forge.Client, owner, repo string, userID int) error {
+	if userID <= 0 {
+		return fmt.Errorf("Poller identity unavailable")
+	}
+	branch, rule, err := loadDefaultBranchRule(ctx, client, owner, repo)
+	if err != nil {
+		if forge.IsNotSupported(err) {
+			return nil
+		}
+		return err
+	}
+	if !PollerCanCreatePipeline(rule, []int{userID}) {
+		return &PollerPipelineAccessDeniedError{Reason: fmt.Sprintf("user ID %d cannot start pipelines on protected branch %q (%s)", userID, branch, describePipelineAccess(rule))}
+	}
+	return nil
+}
+
+// PollerPipelineAccessDeniedError reports that the existing protected-branch
+// policy does not let the account start pipelines. Reason is authored by
+// fullsend and carries no credential material.
+type PollerPipelineAccessDeniedError struct {
+	Reason string
+}
+
+func (e *PollerPipelineAccessDeniedError) Error() string { return e.Reason }
 
 // VerifyGitLabReplacementPipelineAccess establishes protected-default-branch
 // access and rereads the rule before a replacement Poller credential is published.
