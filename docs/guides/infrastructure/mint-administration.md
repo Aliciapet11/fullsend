@@ -572,7 +572,8 @@ fullsend inference provision "$FIRST_ORG/$FIRST_REPO" --project="$GCP_PROJECT"
 # 4. Configure a repository and create public apps (installable by other orgs).
 #    `github setup` does not create GitHub Apps, so use `admin install`, which
 #    creates the apps (as public with --public) and configures the repository.
-#    It targets a single owner/repo; repeat per repository.
+#    It targets a single owner/repo; repeat per repository. `admin install`
+#    prints a deprecation warning but is still the way to create the apps.
 # $MINT_URL: the "Mint deployed at ..." URL printed by step 1.
 # $WIF_PROVIDER: the FULLSEND_GCP_WIF_PROVIDER value from step 3 — run
 #   `fullsend inference status "$FIRST_ORG/$FIRST_REPO" --project="$GCP_PROJECT" --format=env`

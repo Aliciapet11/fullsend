@@ -97,7 +97,8 @@ PEM keys and app IDs are tied to the role, not the org. Secrets use role-only na
 (`fullsend-{role}-app-pem`) — one secret per role, shared across orgs on the
 mint. `ROLE_APP_IDS` uses the same model: one GitHub App ID per role (e.g.,
 `coder` → `123456`), shared by all enrolled repos. PEMs and app IDs must already
-exist (from `mint deploy --pem-dir` or `go run ./cmd/fullsend admin install <owner/repo>`); enrollment
+exist (from `mint deploy --pem-dir` or `go run ./cmd/fullsend admin install <owner/repo>`, which is
+deprecated but still required to create GitHub Apps); enrollment
 does not create, copy, or modify PEM secrets or app ID mappings.
 
 Apps must be installed on the target org before the mint can produce tokens.
@@ -230,7 +231,7 @@ The mint SRE does not configure target repos. Inform the repo admin that
 mint-side enrollment is complete and provide:
 
 - **Mint URL**: shown in `mint status` output
-- GitHub Actions repository variable `FULLSEND_MINT_URL` (set per repo by `go run ./cmd/fullsend admin install <owner/repo>` or manually)
+- GitHub Actions repository variable `FULLSEND_MINT_URL` (set per repo by `go run ./cmd/fullsend github setup <owner/repo>` or manually)
 - `.github/workflows/fullsend.yaml` shim workflow in the target repo
 
 Also provide:
@@ -238,7 +239,7 @@ Also provide:
 - **WIF Provider ID**: shown in the enrollment output (needed for the
   `google-github-actions/auth` step)
 
-The admin runs `go run ./cmd/fullsend admin install <owner/repo>` for each
+The admin runs `go run ./cmd/fullsend github setup <owner/repo>` for each
 repository (the CLI no longer supports org-targeted installs) or configures
 it manually.
 
