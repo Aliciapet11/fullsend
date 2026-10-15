@@ -2060,7 +2060,9 @@ func TestToAgentCredentials(t *testing.T) {
 func TestInstallCmd_Deprecated(t *testing.T) {
 	installCmd, _, err := newAdminCmd().Find([]string{"install"})
 	require.NoError(t, err)
+	assert.Contains(t, installCmd.Deprecated, "fullsend inference provision")
 	assert.Contains(t, installCmd.Deprecated, "fullsend github setup")
+	assert.Contains(t, installCmd.Deprecated, "fullsend mint add-role")
 	assert.Contains(t, installCmd.Deprecated, "fullsend repos install")
 	assert.Contains(t, installCmd.Deprecated, "--forge gitlab")
 }

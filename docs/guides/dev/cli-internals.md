@@ -7,7 +7,7 @@ This guide provides implementation details for fullsend CLI internals: command s
 ```
 fullsend
 ├── admin                                    # All-in-one setup (GCP + GitHub)
-│   ├── install      <owner/repo>            # Deprecated: use github setup / repos install --forge gitlab
+│   ├── install      <owner/repo>            # Deprecated: use inference provision + github setup / repos install --forge gitlab
 │   ├── uninstall    <org>                   # Tear down (reverse layer order)
 │   ├── analyze      <org>                   # Health check installed state
 │   ├── enable
