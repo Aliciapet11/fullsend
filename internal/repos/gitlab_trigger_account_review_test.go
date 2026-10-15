@@ -234,15 +234,19 @@ func TestConvergeGitLabTriggerAccount_BootstrapNamedPATOnReadyAccountFailsClosed
 func TestGitLabTriggerAccount_AmbiguousPublicationRevokedBeforeElevation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		arm  func(e *trigEnv)
+		// liveAfterFailure is whether the failed run leaves the token live. A
+		// failed publication revokes it in the same run; a failed ledger write
+		// after a successful one cannot.
+		liveAfterFailure bool
+		arm              func(e *trigEnv)
 	}{
-		{"publisher stores the token then errors", func(e *trigEnv) {
+		{"publisher stores the token then errors", false, func(e *trigEnv) {
 			e.publish = func(_ context.Context, id int64, token string) error {
 				e.f.published[id] = token
 				return errTrigInjected
 			}
 		}},
-		{"ledger write after publication fails", func(e *trigEnv) {
+		{"ledger write after publication fails", true, func(e *trigEnv) {
 			e.state.failWhen = func(st gitLabTriggerAccountState) bool { return st.TriggerPublished }
 		}},
 	} {
@@ -251,7 +255,11 @@ func TestGitLabTriggerAccount_AmbiguousPublicationRevokedBeforeElevation(t *test
 			tc.arm(e)
 			_, err := ConvergeGitLabTriggerAccount(context.Background(), e.opts())
 			require.Error(t, err)
-			require.Equal(t, 1, e.managedTriggers(), "the published token is live")
+			if tc.liveAfterFailure {
+				require.Equal(t, 1, e.managedTriggers(), "the published token is live")
+			} else {
+				require.Zero(t, e.managedTriggers(), "the failed publication revoked the token")
+			}
 			st, ok := e.ledger(t)
 			require.True(t, ok)
 			require.False(t, st.TriggerPublished, "the ledger does not know the token is published")

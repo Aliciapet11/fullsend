@@ -1325,7 +1325,15 @@ func (op *gitLabTriggerAccountOp) bootstrap(ctx context.Context, keyOK, triggerO
 		}
 	}
 	if err := op.opts.PublishTriggerToken(ctx, pending.id, pending.value); err != nil {
-		return safeAPIError("publishing the pipeline trigger token", err)
+		pubErr := safeAPIError("publishing the pipeline trigger token", err)
+		// The publisher may have written the value with unsafe attributes and
+		// then failed to delete it, so contain it now instead of waiting for the
+		// next install: remove the variable and revoke the ownership-verified
+		// trigger on a bounded context detached from ctx's cancellation. The
+		// ledger keeps every obligation that did not complete.
+		cctx, cancel := gitlabCleanupContext(ctx)
+		defer cancel()
+		return errors.Join(pubErr, op.removeRevokeAndSave(cctx, true))
 	}
 	op.st.TriggerPublished = true
 	return op.save(ctx)
@@ -1504,7 +1512,11 @@ func RemoveGitLabTriggerAccount(ctx context.Context, opts GitLabTriggerAccountOp
 		return err
 	}
 	if err := op.removeSink(ctx); err != nil {
-		return err
+		// A failed variable deletion must not leave any generation's trigger
+		// live: revoke the ownership-verified triggers of every published
+		// generation independently, report both failures, and keep the ledger
+		// (and its removing phase) so a retry resumes.
+		return errors.Join(err, op.removeRevokeAndSave(ctx, false))
 	}
 	if err := op.retirePrevious(ctx); err != nil {
 		return err

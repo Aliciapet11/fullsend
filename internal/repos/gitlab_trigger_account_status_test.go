@@ -152,7 +152,8 @@ func TestGitLabTriggerAccount_SinkClearedWithTrigger(t *testing.T) {
 	e.assertRemoved(t)
 	assert.False(t, e.sinkPresent(), "uninstall removes the published token")
 
-	// A failing unpublish keeps the trigger and the ledger obligation.
+	// A failing unpublish keeps the ledger obligation but still revokes the
+	// trigger, so a persistent delete failure leaves no live credential.
 	e = newTrigEnv()
 	_, err = ConvergeGitLabTriggerAccount(context.Background(), e.opts())
 	require.NoError(t, err)
@@ -160,7 +161,7 @@ func TestGitLabTriggerAccount_SinkClearedWithTrigger(t *testing.T) {
 	require.Error(t, RemoveGitLabTriggerAccount(context.Background(), e.opts()))
 	_, ok := e.ledger(t)
 	assert.True(t, ok, "the ledger stays")
-	assert.Equal(t, 1, e.managedTriggers(), "the trigger is not revoked while its value cannot be removed")
+	assert.Equal(t, 0, e.managedTriggers(), "the trigger is revoked even though its value could not be removed")
 	require.NoError(t, RemoveGitLabTriggerAccount(context.Background(), e.opts()))
 	e.assertRemoved(t)
 }

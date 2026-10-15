@@ -2,6 +2,7 @@ package repos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -159,6 +160,17 @@ func triggerAccountHeldResources(st gitLabTriggerAccountState) []string {
 	return held
 }
 
+// foreignStateReason words a failed foreign-credential or foreign-resource
+// check. An inventory that could not be read (a redacted API error) is
+// unverified; any other failure names what was found.
+func foreignStateReason(err error) string {
+	var apiErr *redactedError
+	if errors.As(err, &apiErr) {
+		return "could not verify the trigger account holds no credential or resource fullsend did not create: " + err.Error()
+	}
+	return "install would refuse to continue: " + err.Error()
+}
+
 // liveDrift compares the recorded resources with GitLab. A failed read is
 // reported as unverified rather than as drift or health.
 func (op *gitLabTriggerAccountOp) liveDrift(ctx context.Context) []string {
@@ -183,6 +195,17 @@ func (op *gitLabTriggerAccountOp) liveDrift(ctx context.Context) []string {
 		reasons = append(reasons, fmt.Sprintf("recorded deploy key %d is missing", op.st.DeployKeyID))
 	} else if !key.CanPush {
 		reasons = append(reasons, fmt.Sprintf("recorded deploy key %d cannot push, so it does not admit the trigger account on %s", key.ID, op.st.Branch))
+	}
+	// Install refuses to continue while the account holds a credential or
+	// resource fullsend did not create, so status must not call that ready. A
+	// recorded bootstrap obligation is already reported, and its own PAT would
+	// otherwise be counted as foreign.
+	if !op.st.Elevated && op.st.PATID == 0 && !op.st.PATPending {
+		for _, check := range []func(context.Context) error{op.checkForeignPATs, op.checkForeignResources} {
+			if err := check(ctx); err != nil {
+				reasons = append(reasons, foreignStateReason(err))
+			}
+		}
 	}
 	if op.st.TriggerTokenID != 0 {
 		tok, found, err := op.findTrigger(ctx, op.st.TriggerTokenID)
