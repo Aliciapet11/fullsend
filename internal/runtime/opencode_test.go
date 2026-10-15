@@ -179,97 +179,52 @@ func TestOpenCodePermissionRecord(t *testing.T) {
 func TestIntersectPermissionRecord(t *testing.T) {
 	t.Parallel()
 
-	// Agent requests bash+read+edit, but trusted policy denies edit.
-	rec := openCodePermissionRecord([]string{"Bash", "Read", "Edit"})
-	assert.Equal(t, "allow", rec["bash"])
-	assert.Equal(t, "allow", rec["read"])
-	assert.Equal(t, "allow", rec["edit"])
-
-	trustedPolicy := map[string]string{
-		"bash": "allow", "read": "allow", "edit": "deny", "*": "deny",
+	rules := func(perm string) []openCodePermissionRule {
+		return parseTrustedPermissionPolicy(`{"permission":` + perm + `}`)
 	}
-	capped := intersectPermissionRecord(rec, trustedPolicy, nil)
-	assert.Equal(t, "allow", capped["bash"], "bash allowed by policy, stays allow")
-	assert.Equal(t, "allow", capped["read"], "read allowed by policy, stays allow")
-	assert.Equal(t, "deny", capped["edit"], "edit denied by policy, capped to deny")
-	// Tools already denied stay denied.
-	assert.Equal(t, "deny", capped["write"], "write was already deny")
+	agent := openCodePermissionRecord([]string{"Bash", "Read", "Edit", "WebFetch"})
 
-	// Wildcard fallback: policy with only "*": "deny" caps everything.
-	rec2 := openCodePermissionRecord([]string{"Bash", "Read", "Edit", "Write"})
-	wildcardPolicy := map[string]string{"*": "deny"}
-	capped2 := intersectPermissionRecord(rec2, wildcardPolicy, nil)
-	for _, id := range openCodeAllToolIDs {
-		assert.Equal(t, "deny", capped2[id], "all tools capped to deny by wildcard")
-	}
+	// OpenCode applies the last matching rule, so order and glob keys count.
+	capped := intersectPermissionRecord(agent, rules(`{"*":"deny","bash":"allow","read":"allow","web*":"deny"}`))
+	assert.Equal(t, "allow", capped["bash"])
+	assert.Equal(t, "allow", capped["read"])
+	assert.Equal(t, "deny", capped["edit"], "only the wildcard matches edit")
+	assert.Equal(t, "deny", capped["webfetch"], "glob key matches webfetch")
+	assert.Equal(t, "deny", capped["write"], "never allowed by the agent")
 
-	// Empty rec (unrestricted agent) → stays empty (no intersection).
-	emptyRec := openCodePermissionRecord(nil)
-	result := intersectPermissionRecord(emptyRec, trustedPolicy, nil)
-	assert.Empty(t, result, "unrestricted agent stays empty")
+	// A trailing "*" overrides the earlier specific allow.
+	capped = intersectPermissionRecord(agent, rules(`{"read":"allow","*":"deny"}`))
+	assert.Equal(t, "deny", capped["read"])
 
-	// Nil trusted policy → no-op.
-	rec3 := openCodePermissionRecord([]string{"Bash"})
-	result3 := intersectPermissionRecord(rec3, nil, nil)
-	assert.Equal(t, "allow", result3["bash"], "nil policy means no capping")
+	// "ask" caps "allow" (headless runs auto-reject it).
+	capped = intersectPermissionRecord(agent, rules(`{"*":"deny","bash":"ask"}`))
+	assert.Equal(t, "ask", capped["bash"])
 
-	// "ask" in trusted policy caps agent "allow" to "ask".
-	askPolicy := map[string]string{"bash": "ask", "*": "deny"}
-	rec4 := openCodePermissionRecord([]string{"Bash", "Read"})
-	capped4 := intersectPermissionRecord(rec4, askPolicy, nil)
-	assert.Equal(t, "ask", capped4["bash"], "ask policy must cap allow to ask")
-	assert.Equal(t, "deny", capped4["read"], "wildcard deny still applies")
+	// No matching trusted rule keeps the agent's action; an unrestricted
+	// agent stays empty.
+	assert.Equal(t, "allow", intersectPermissionRecord(agent, nil)["bash"])
+	assert.Empty(t, intersectPermissionRecord(openCodePermissionRecord(nil), rules(`{"*":"deny"}`)))
 
-	// Pattern-map tool: the agent's bash allow becomes a copy of the trusted
-	// pattern map, byte for byte. A flat allow would widen bash; deleting the
-	// key would let the agent's own "*": "deny" (evaluated after the global
-	// rules) deny bash outright.
-	bashMap := json.RawMessage(`{"gh *":"allow","*":"deny"}`)
-	bashPatternMap := map[string]json.RawMessage{"bash": bashMap}
-	for name, policy := range map[string]map[string]string{
-		"wildcard deny": {"*": "deny"},
-		"no wildcard":   {"read": "allow"},
-		"pattern only":  {},
-	} {
-		capped5 := intersectPermissionRecord(openCodePermissionRecord([]string{"Bash", "Read"}), policy, bashPatternMap)
-		assert.Equal(t, bashMap, capped5["bash"], name)
-		assert.Equal(t, "deny", capped5["*"], name)
-	}
-
-	// Agent WITHOUT Bash keeps its deny: copying the pattern map would widen
-	// bash for an agent that never asked for it.
-	cappedNoBash := intersectPermissionRecord(openCodePermissionRecord([]string{"Read"}), map[string]string{"*": "deny"}, bashPatternMap)
-	assert.Equal(t, "deny", cappedNoBash["bash"], "bash deny must survive the pattern-map pass")
+	// A pattern map replaces an agent allow with a copy of the map, and an
+	// agent without Bash keeps its deny.
+	bashMap := `{"gh *":"allow","*":"deny"}`
+	capped = intersectPermissionRecord(agent, rules(`{"*":"deny","bash":`+bashMap+`}`))
+	assert.JSONEq(t, bashMap, string(capped["bash"].(json.RawMessage)))
+	assert.Equal(t, "deny", capped["*"])
+	noBash := intersectPermissionRecord(openCodePermissionRecord([]string{"Read"}), rules(`{"bash":`+bashMap+`}`))
+	assert.Equal(t, "deny", noBash["bash"])
 }
 
 func TestParseTrustedPermissionPolicy(t *testing.T) {
 	t.Parallel()
 
-	// Simple string actions.
-	policy, pmTools := parseTrustedPermissionPolicy(`{"permission":{"bash":"allow","edit":"deny","*":"deny"}}`)
-	assert.Equal(t, "allow", policy["bash"])
-	assert.Equal(t, "deny", policy["edit"])
-	assert.Equal(t, "deny", policy["*"])
-	assert.Empty(t, pmTools, "no pattern maps in flat-only config")
+	got := parseTrustedPermissionPolicy(`{"permission":{"*":"deny","bash":{"gh *":"allow"},"read":"allow"}}`)
+	require.Len(t, got, 3)
+	assert.Equal(t, []string{"*", "bash", "read"}, []string{got[0].Key, got[1].Key, got[2].Key}, "config order kept")
+	assert.JSONEq(t, `{"gh *":"allow"}`, string(got[1].Value))
 
-	// Pattern map omitted from policy, recorded in patternMaps.
-	policy2, pmTools2 := parseTrustedPermissionPolicy(`{"permission":{"bash":{"gh *":"allow","*":"deny"},"read":"allow"}}`)
-	_, hasBash := policy2["bash"]
-	assert.False(t, hasBash, "pattern map should be omitted so global rule applies")
-	assert.Equal(t, "allow", policy2["read"], "flat action preserved")
-	assert.JSONEq(t, `{"gh *":"allow","*":"deny"}`, string(pmTools2["bash"]), "bash pattern map kept verbatim")
-	_, readIsMap := pmTools2["read"]
-	assert.False(t, readIsMap, "read is flat, not a pattern map")
-
-	// Invalid JSON → nil, nil.
-	nilPolicy, nilPM := parseTrustedPermissionPolicy("not json")
-	assert.Nil(t, nilPolicy)
-	assert.Nil(t, nilPM)
-
-	// Missing permission key → empty map (no-op for intersection).
-	policy3, pmTools3 := parseTrustedPermissionPolicy(`{"provider":{}}`)
-	assert.Empty(t, policy3)
-	assert.Empty(t, pmTools3)
+	assert.Nil(t, parseTrustedPermissionPolicy("not json"))
+	assert.Nil(t, parseTrustedPermissionPolicy(`{"provider":{}}`))
 }
 
 func TestOpenCodeAgentMarkdown(t *testing.T) {
@@ -283,10 +238,8 @@ func TestOpenCodeAgentMarkdown(t *testing.T) {
 		Body:        "You are the triage agent.",
 	}
 	// Trusted policy allows bash and read but denies everything else.
-	trustedPolicy := map[string]string{
-		"bash": "allow", "read": "allow", "*": "deny",
-	}
-	md, err := openCodeAgentMarkdown("triage", def, trustedPolicy, nil)
+	md, err := openCodeAgentMarkdown("triage", def,
+		parseTrustedPermissionPolicy(`{"permission":{"*":"deny","bash":"allow","read":"allow"}}`))
 	require.NoError(t, err)
 	s := string(md)
 	assert.True(t, strings.HasPrefix(s, "---\n"), "starts with frontmatter fence")
