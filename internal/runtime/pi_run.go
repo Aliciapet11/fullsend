@@ -929,63 +929,15 @@ type piRunResult struct {
 	answered bool
 }
 
-// piAttemptGate forwards an attempt's events to next, except that while
-// hold is set it withholds them until the model produces output. A Vertex
-// "model not served" answer carries no output, so an attempt abandoned for
-// a fallback leaves no ErrorEvent, token line or retry line behind on a run
-// that then succeeds; the first output event flushes what was held, in
-// order, and passes everything after it straight through.
-//
-// output, when set, decides which events count as model output; nil means
-// any text, thinking or tool event (piAttemptOutput).
-type piAttemptGate struct {
-	next     func(AgentEvent)
-	hold     bool
-	held     []AgentEvent
-	answered bool
-	output   func(AgentEvent) bool
-}
-
-// piAttemptOutput reports whether evt is output only a served model
-// produces.
-func piAttemptOutput(evt AgentEvent) bool {
-	switch evt.(type) {
-	case TextEvent, ThinkingEvent, ToolUseEvent, ToolResultEvent:
-		return true
-	}
-	return false
-}
-
-func (g *piAttemptGate) handle(evt AgentEvent) {
-	output := g.output
-	if output == nil {
-		output = piAttemptOutput
-	}
-	if output(evt) {
-		if !g.answered {
-			g.answered = true
-			for _, h := range g.held {
-				g.next(h)
-			}
-			g.held = nil
-		}
-	}
-	if g.hold && !g.answered {
-		g.held = append(g.held, evt)
-		return
-	}
-	g.next(evt)
-}
-
 // piExecModel runs a single pi invocation with the given model spec and
 // returns the result. It handles stream parsing, output tee, and exit code
 // handling but does NOT fold sub-agent usage or apply the stream-error
 // override — those are the caller's responsibility after the fallback loop
 // selects the successful attempt. timeout is what is left of the run's
-// budget, and mayFallBack holds the attempt's events back (piAttemptGate)
+// budget, and mayFallBack holds the attempt's events back (attemptGate)
 // when a later model could still replace it.
 func (r PiRuntime) piExecModel(ctx context.Context, params RunParams, m *piManifest, exts []piManifestExtension, manifestSum, modelSpec string, timeout time.Duration, mayFallBack bool, handler func(AgentEvent), printer *ui.Printer) (res piRunResult) {
-	gate := &piAttemptGate{next: handler, hold: mayFallBack}
+	gate := &attemptGate{next: handler, hold: mayFallBack}
 	defer func() { res.held, res.answered = gate.held, gate.answered }()
 
 	// Override the model in params for this attempt.
@@ -1076,10 +1028,6 @@ func (r PiRuntime) piExecModel(ctx context.Context, params RunParams, m *piManif
 // run's timeout; mayFallBack is true when a later model could replace it.
 type piAttemptFunc func(modelSpec string, timeout time.Duration, mayFallBack bool) piRunResult
 
-// piMinAttemptTimeout is the least budget a fallback attempt is started
-// with; openshell takes --timeout in whole seconds.
-const piMinAttemptTimeout = time.Second
-
 // piShouldFallBack reports whether an attempt failed only because Vertex
 // does not serve its model in this project. Infrastructure and guard
 // failures, non-zero exits, other stream errors and attempts where the
@@ -1096,7 +1044,7 @@ func piShouldFallBack(res piRunResult) bool {
 // onFallback contract. An attempt is abandoned when piShouldFallBack says
 // so.
 func piFallbackLoop(chain []string, timeout time.Duration, now func() time.Time, attempt piAttemptFunc, onFallback func(prev, next string, budget time.Duration) bool) piRunResult {
-	result, _ := modelFallbackLoop(chain, timeout, piMinAttemptTimeout, now, attempt, piShouldFallBack, onFallback)
+	result, _ := modelFallbackLoop(chain, timeout, minFallbackAttemptTimeout, now, attempt, piShouldFallBack, onFallback)
 	return result
 }
 
@@ -1213,19 +1161,18 @@ func (r PiRuntime) Run(ctx context.Context, params RunParams, printer *ui.Printe
 			cerr = fmt.Errorf("exit %d: %s", code, strings.TrimSpace(stderr))
 		}
 		if cerr != nil {
-			printer.StepWarn(fmt.Sprintf("model %s is not available in this project; not falling back to %s because the abandoned attempt's session files could not be cleared: %s", sanitizeOutput(piBareModelID(prev)), sanitizeOutput(piBareModelID(next)), sanitizeOutput(cerr.Error())))
+			printer.StepWarn(fmt.Sprintf("model %s is not available (%s); not falling back to %s because the abandoned attempt's session files could not be cleared: %s", sanitizeOutput(piBareModelID(prev)), fallbackReasonText(fallbackReasonNotServed), sanitizeOutput(piBareModelID(next)), sanitizeOutput(cerr.Error())))
 			return false
 		}
-		printer.StepWarn(fmt.Sprintf("model %s is not available in this project; falling back to %s", sanitizeOutput(piBareModelID(prev)), sanitizeOutput(piBareModelID(next))))
+		printer.StepWarn(modelFallbackWarning(piBareModelID(prev), piBareModelID(next), fallbackReasonNotServed))
 		return true
 	}
 	result := piFallbackLoop(chain, params.Timeout, time.Now, attempt, onFallback)
 	// Record the models abandoned for the one that ran, so a silent
 	// downgrade shows up in metrics.json and not only in the run log.
 	if served := slices.Index(chain, result.modelSpec); served > 0 {
-		metrics.FallbackFrom = make([]string, served)
-		for i, spec := range chain[:served] {
-			metrics.FallbackFrom[i] = piBareModelID(spec)
+		for _, spec := range chain[:served] {
+			metrics.recordFallback(piBareModelID(spec), fallbackReasonNotServed)
 		}
 	}
 

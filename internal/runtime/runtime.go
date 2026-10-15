@@ -34,6 +34,13 @@ type RunMetrics struct {
 	// handling left (a "model_fallback" event, for example on overload).
 	// Empty when the first model ran.
 	FallbackFrom []string `json:"fallback_from,omitempty"`
+	// FallbackReasons says why the run moved off each FallbackFrom entry,
+	// at the same index: "not_served" when the runner retried because the
+	// Vertex project does not serve the model, "claude_code:<trigger>"
+	// when Claude Code switched itself (its model_fallback trigger, for
+	// example "claude_code:last_resort"). Add entries with recordFallback
+	// so the two stay aligned.
+	FallbackReasons []string `json:"fallback_reasons,omitempty"`
 }
 
 // ModelUsage is one model's token and cost contribution to a run. Requests

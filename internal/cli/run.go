@@ -238,6 +238,10 @@ type aggregateMetrics struct {
 	// over (#8426; see agentruntime.RunMetrics.FallbackFrom), from the last
 	// iteration that fell back. Absent when none did.
 	FallbackFrom []string `json:"fallback_from,omitempty"`
+	// FallbackReasons says why the run moved off each FallbackFrom entry,
+	// at the same index (see agentruntime.RunMetrics.FallbackReasons), from
+	// the same iteration. Absent when none fell back.
+	FallbackReasons []string `json:"fallback_reasons,omitempty"`
 }
 
 func writeMetricsJSON(dir string, m aggregateMetrics) error {
@@ -1193,6 +1197,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			// Keep the alias's own source (e.g. "--model flag") and add
 			// the remap, so neither decision is hidden.
 			modelDisplay = fmt.Sprintf("%s → %s (from %s models.aliases)", modelDisplay, resolvedModel, runCfg.source)
+		} else if id := agentruntime.BuiltinAliasModel(runtimeBackend.Runtime.Name(), h.Model, configModelAliases); id != "" {
+			// The alias's built-in default (#8426), so what it means
+			// today is visible before the run starts.
+			modelDisplay = fmt.Sprintf("%s → %s (built-in default)", modelDisplay, id)
 		}
 		printer.KeyValue("Model", modelDisplay)
 	}
@@ -4172,6 +4180,7 @@ func aggregateRunMetrics(agg *aggregateMetrics, m *agentruntime.RunMetrics, iter
 	}
 	if len(m.FallbackFrom) > 0 {
 		agg.FallbackFrom = append([]string(nil), m.FallbackFrom...)
+		agg.FallbackReasons = append([]string(nil), m.FallbackReasons...)
 	}
 	// Iterations are retries of the same task, so the per-model entries add
 	// up the same way the totals do.

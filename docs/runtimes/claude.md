@@ -62,18 +62,20 @@ not serve the one it asked for. Nothing to configure:
 What you see:
 
 ```text
+Model: opus → claude-opus-5-5 (built-in default)                          # plan block
 Fallback models: claude-opus-4-6 (built-in for opus, when not served)    # plan block
-! model claude-opus-5-5 is not available in this project; falling back to claude-opus-4-6
+! model claude-opus-5-5 is not available (not served in this project); falling back to claude-opus-4-6
 ```
 
-`metrics.json` then records the model that answered as `model` and the one it left in
-`fallback_from`. A retry happens only when the model produced nothing, and every attempt shares the
-run's timeout.
+`metrics.json` then records the model that answered as `model`, the one it left in
+`fallback_from`, and why in `fallback_reasons` (`not_served`). A retry happens only when the model
+produced nothing, and every attempt shares the run's timeout.
 
 An explicit `FULLSEND_FALLBACK_MODELS` list is also passed to Claude Code as `--fallback-model`, on
 every route. Claude Code may then switch models itself within the session (overload, server errors,
-or a Vertex 404), which prints `! model <id> failed; Claude Code fell back to <next> (<trigger>)` and
-is recorded the same way. How the runner detects "not served" is in
+or a Vertex 404). That prints the same warning with Claude Code's trigger as the reason,
+`! model <id> is not available (Claude Code: <trigger>); falling back to <next>`, and is recorded the
+same way, with `claude_code:<trigger>` in `fallback_reasons`. How the runner detects "not served" is in
 [Runtime implementation](../contributing/runtime-implementation.md).
 
 ## At a glance

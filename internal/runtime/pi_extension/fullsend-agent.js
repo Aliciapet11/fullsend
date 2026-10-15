@@ -54,7 +54,7 @@ const LOG_PREFIX = "[fullsend-agent]";
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_TIMEOUT_SECONDS = 900;
 // MIN_FALLBACK_MS is the least a child fallback attempt is started with
-// (the runner's piMinAttemptTimeout).
+// (the runner's minFallbackAttemptTimeout).
 export const MIN_FALLBACK_MS = 1000;
 const DEFAULT_THINKING = "medium";
 const DEFAULT_EXPLORE_TOOLS = ["read", "grep", "find", "ls"];
@@ -692,11 +692,32 @@ function signalChild(child, signal) {
   }
 }
 
+// ANSI_ESCAPE matches ANSI CSI sequences, OSC sequences and charset
+// designators (the runner's ansiEscRe).
+const ANSI_ESCAPE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]/g;
+
+// sanitizeLogLine makes a log line safe for the runner's stderr, which
+// reaches the CI log as is: it strips ANSI escapes, breaks "::" so no GitHub
+// Actions workflow command can form, blanks encoded line breaks, and turns
+// every other control character into a space, as the runner's
+// sanitizeOutput does. Values in a log line come from the file system, the
+// manifest or the agent's own tool arguments.
+export function sanitizeLogLine(text) {
+  let s = String(text).replace(ANSI_ESCAPE, "");
+  // One pass can rebuild "::" at the seam of two replacements, so repeat
+  // until none is left.
+  while (s.includes("::")) s = s.replaceAll("::", ": :");
+  s = s.replace(/%0[AaDd]/g, " ");
+  return s.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+}
+
 // createAgentTool builds the dispatcher from a manifest. `spawn`, `log` and
-// `now` are injectable for tests. run() never throws for a failed child —
+// `now` are injectable for tests; every line passed to `log` goes through
+// sanitizeLogLine first. run() never throws for a failed child —
 // it returns { isError, error } — so the registered execute() decides how
 // to surface it (pi marks a result isError only when execute throws).
-export function createAgentTool(manifest, { spawn = nodeSpawn, log = (m) => console.error(m), now = () => Date.now(), env = process.env, stat = statSync, killGraceMs = DEFAULT_KILL_GRACE_MS, manifestPath = "", manifestSum = "", configDir = manifestPath ? dirname(manifestPath) : "" } = {}) {
+export function createAgentTool(manifest, { spawn = nodeSpawn, log: rawLog = (m) => console.error(m), now = () => Date.now(), env = process.env, stat = statSync, killGraceMs = DEFAULT_KILL_GRACE_MS, manifestPath = "", manifestSum = "", configDir = manifestPath ? dirname(manifestPath) : "" } = {}) {
+  const log = (m) => rawLog(sanitizeLogLine(m));
   const agent = manifest?.agent ?? {};
   const maxConcurrent = Math.max(1, Number(agent.maxConcurrent) || DEFAULT_MAX_CONCURRENT);
   const timeoutMs = Math.max(1, (Number(agent.timeoutSeconds) || DEFAULT_TIMEOUT_SECONDS) * 1000);
@@ -1142,7 +1163,7 @@ export function createAgentTool(manifest, { spawn = nodeSpawn, log = (m) => cons
           if (nextDrift) {
             return { seq: id, isError: true, error: nextDrift, text: "", stopReason: "rejected", model: modelSpec };
           }
-          log(`${LOG_PREFIX} #${id} model ${modelSpec} is not available in this project; falling back to ${next}`);
+          log(`${LOG_PREFIX} #${id} model ${modelSpec} is not available (not served in this project); falling back to ${next}`);
           try {
             rmSync(childSessionDir(agent, id, personaName), { recursive: true, force: true });
           } catch (err) {
@@ -1236,7 +1257,7 @@ export default function (pi) {
     manifestSum = createHash("sha256").update(bytes).digest("hex");
     manifest = JSON.parse(bytes.toString("utf8"));
   } catch (err) {
-    console.error(`${LOG_PREFIX} cannot read manifest: ${err.message}; the Agent tool is not registered`);
+    console.error(sanitizeLogLine(`${LOG_PREFIX} cannot read manifest: ${err.message}; the Agent tool is not registered`));
     return;
   }
   if (!manifest?.agent?.enabled) {

@@ -129,8 +129,7 @@ func (r *EventRenderer) Handle(evt AgentEvent) {
 			e.Attempt, e.MaxRetries, sanitizeOutput(e.Error), e.DelayMs))
 	case ModelFallbackEvent:
 		r.endBlock()
-		r.printer.StepWarn(fmt.Sprintf("model %s failed; Claude Code fell back to %s (%s)",
-			sanitizeOutput(e.From), sanitizeOutput(e.To), sanitizeOutput(e.Trigger)))
+		r.printer.StepWarn(modelFallbackWarning(e.From, e.To, claudeCodeFallbackReason(e.Trigger)))
 	case PluginErrorEvent:
 		r.endBlock()
 		r.printer.StepWarn(pluginErrorMessage(e))

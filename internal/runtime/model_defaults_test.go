@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -290,15 +291,18 @@ func TestClaudeRuntime_Run_FallsBackWhenNotServed(t *testing.T) {
 
 	var events []AgentEvent
 	var metrics RunMetrics
+	var out bytes.Buffer
 	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
 		SandboxName: "fs-claude-fallback", AgentBaseName: "code", RepoDir: "/r", Model: "opus",
 		Timeout: 30 * time.Second, OnEvent: func(e AgentEvent) { events = append(events, e) },
-	}, ui.New(io.Discard), time.Now(), &metrics)
+	}, ui.New(&out), time.Now(), &metrics)
 	require.NoError(t, err)
 	assert.Equal(t, 0, exit)
 
 	assert.Equal(t, "claude-opus-4-6", metrics.Model)
 	assert.Equal(t, []string{"claude-opus-5-5"}, metrics.FallbackFrom)
+	assert.Equal(t, []string{"not_served"}, metrics.FallbackReasons)
+	assert.Contains(t, out.String(), "model claude-opus-5-5 is not available (not served in this project); falling back to claude-opus-4-6")
 	for _, e := range events {
 		if txt, ok := e.(TextEvent); ok {
 			assert.NotContains(t, txt.Text, "API Error", "the abandoned attempt's events are discarded")
@@ -485,7 +489,7 @@ func TestClaudeRuntime_Run_NoBudgetKeepsFinalTranscript(t *testing.T) {
 	var metrics RunMetrics
 	exit, err := ClaudeRuntime{}.Run(context.Background(), RunParams{
 		SandboxName: "fs-claude-fallback-nobudget", AgentBaseName: "code", RepoDir: "/r", Model: "opus",
-		Timeout: piMinAttemptTimeout + 500*time.Millisecond, OnEvent: func(AgentEvent) {},
+		Timeout: minFallbackAttemptTimeout + 500*time.Millisecond, OnEvent: func(AgentEvent) {},
 	}, ui.New(io.Discard), time.Now(), &metrics)
 	require.NoError(t, err)
 	assert.Equal(t, 1, exit)
@@ -571,14 +575,17 @@ func TestPiRuntimeRun_ImplicitFallbackWhenNotServed(t *testing.T) {
 	}))
 	var events []AgentEvent
 	var metrics RunMetrics
+	var out bytes.Buffer
 	exit, err := PiRuntime{}.Run(context.Background(), RunParams{
 		SandboxName: "sb", AgentBaseName: "triage", RepoDir: "/sandbox/workspace/repo", Model: "opus",
 		Timeout: 30 * time.Second, OnEvent: func(e AgentEvent) { events = append(events, e) },
-	}, ui.New(io.Discard), time.Now(), &metrics)
+	}, ui.New(&out), time.Now(), &metrics)
 	require.NoError(t, err)
 	assert.Equal(t, 0, exit)
 	assert.Equal(t, "claude-opus-4-6", metrics.Model)
 	assert.Equal(t, []string{"claude-opus-5-5"}, metrics.FallbackFrom)
+	assert.Equal(t, []string{"not_served"}, metrics.FallbackReasons)
+	assert.Contains(t, out.String(), "model claude-opus-5-5 is not available (not served in this project); falling back to claude-opus-4-6")
 	for _, e := range events {
 		if res, ok := e.(ResultEvent); ok {
 			assert.False(t, res.IsError, "the abandoned attempt's error is not rendered")
@@ -736,12 +743,62 @@ func TestRecordClaudeMetrics_InSessionModelFallback(t *testing.T) {
 	}))
 	assert.Equal(t, "claude-haiku-5-5", metrics.Model)
 	assert.Equal(t, []string{"claude-opus-4-5"}, metrics.FallbackFrom)
+	assert.Equal(t, []string{"claude_code:last_resort"}, metrics.FallbackReasons)
 	assert.Contains(t, events, AgentEvent(ModelFallbackEvent{From: "claude-opus-4-5", To: "claude-haiku-5-5", Trigger: "last_resort"}))
 	assert.False(t, claudeAttemptOutput(ModelFallbackEvent{}), "a fallback notice is not model output")
 
 	// The same model is not recorded twice.
 	recordClaudeMetrics(&metrics, ModelFallbackEvent{From: "claude-opus-4-5", To: "claude-haiku-5-5"})
 	assert.Equal(t, []string{"claude-opus-4-5"}, metrics.FallbackFrom)
+	assert.Equal(t, []string{"claude_code:last_resort"}, metrics.FallbackReasons)
+
+	// A switch with no trigger still records a reason, aligned with its model.
+	recordClaudeMetrics(&metrics, ModelFallbackEvent{From: "claude-haiku-5-5", To: "claude-haiku-4-5"})
+	assert.Equal(t, []string{"claude-opus-4-5", "claude-haiku-5-5"}, metrics.FallbackFrom)
+	assert.Equal(t, []string{"claude_code:last_resort", "claude_code"}, metrics.FallbackReasons)
+}
+
+func TestFallbackReasonText(t *testing.T) {
+	for reason, want := range map[string]string{
+		"not_served":              "not served in this project",
+		"claude_code":             "Claude Code",
+		"claude_code:last_resort": "Claude Code: last_resort",
+		"something_else":          "something_else",
+	} {
+		assert.Equal(t, want, fallbackReasonText(reason), reason)
+	}
+	assert.Equal(t, "claude_code:overloaded", claudeCodeFallbackReason(" overloaded "))
+	assert.Equal(t, "claude_code", claudeCodeFallbackReason(" "))
+}
+
+func TestRecordFallback_IgnoresEmptyModel(t *testing.T) {
+	var m RunMetrics
+	m.recordFallback("", "not_served")
+	assert.Empty(t, m.FallbackFrom)
+	assert.Empty(t, m.FallbackReasons)
+}
+
+// BuiltinAliasModel names the id a bare alias resolves to through the
+// runtime's own table, which the plan block prints; a retargeted alias, a
+// pinned id and a runtime without a table have none.
+func TestBuiltinAliasModel(t *testing.T) {
+	for _, tc := range []struct {
+		runtime, model string
+		aliases        map[string]string
+		want           string
+	}{
+		{"claude", "haiku", nil, "claude-haiku-5-5"},
+		{"claude", " opus ", nil, "claude-opus-5-5"},
+		{"claude", "fable", nil, ""},
+		{"claude", "haiku", map[string]string{"haiku": "claude-haiku-4-5"}, ""},
+		{"claude", "claude-opus-4-6", nil, ""},
+		{"pi", "sonnet", nil, "claude-sonnet-5-5"},
+		{"pi", "fable", nil, "claude-fable-5-1"},
+		{"pi", "anthropic-vertex/claude-opus-4-6", nil, ""},
+		{"codex", "opus", nil, ""},
+	} {
+		assert.Equal(t, tc.want, BuiltinAliasModel(tc.runtime, tc.model, tc.aliases), "%s %q", tc.runtime, tc.model)
+	}
 }
 
 // A runner fallback followed by Claude Code's own in-session fallback on the
@@ -768,4 +825,5 @@ func TestClaudeRuntime_Run_RunnerThenInSessionFallback(t *testing.T) {
 	assert.Equal(t, 0, exit)
 	assert.Equal(t, "claude-haiku-5-5", metrics.Model)
 	assert.Equal(t, []string{"claude-opus-5-5", "claude-sonnet-5-5"}, metrics.FallbackFrom)
+	assert.Equal(t, []string{"not_served", "claude_code:last_resort"}, metrics.FallbackReasons)
 }

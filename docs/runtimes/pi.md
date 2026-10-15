@@ -124,8 +124,8 @@ project cannot serve is not caught here; at run time:
 - **Any other error** (auth, quota, `PERMISSION_DENIED`): fails the run.
 - **A fallback on another pi provider** is ignored with a warning.
 - **What you see:** the plan block lists the chain, the run prints `model claude-opus-5-5 is not
-  available in this project; falling back to claude-opus-4-6`, and `metrics.json` records
-  `fallback_from`.
+  available (not served in this project); falling back to claude-opus-4-6`, and `metrics.json`
+  records `fallback_from` with `fallback_reasons: ["not_served"]`.
 
 **Sub-agent children** that ask for an alias (directly, through a persona, or through
 `subagents.default`) fall back along the same built-in chain; the `[fullsend-agent]` log line names
@@ -207,7 +207,7 @@ print bare — and `metrics.json` records the same (`runtime`, `runtime_source`,
 `override_source`):
 
 ```
-    Model: opus
+    Model: opus → claude-opus-5-5 (built-in default)
     Effort: high
     Runtime: pi (from --runtime flag)
 ...
