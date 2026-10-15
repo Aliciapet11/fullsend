@@ -798,9 +798,8 @@ The comment names a reason. What to do next:
 | `unauthorized` | No | The author is external and there is no `ok-to-test` label. Ask a user with write access to review the PR and apply it. If you do have write access, the permission lookup may have failed: re-run the workflow first. |
 
 Unresolved review threads and reviews that request changes are **not** gate
-inputs: they only block merging, never e2e. To see
-which role you have, use the "How to check" links in
-[LADDER.md](../../../LADDER.md).
+inputs: they only block merging, never e2e. To see which role you have, use
+the "How to check" links in [LADDER.md](../../../LADDER.md).
 
 ## CI architecture
 

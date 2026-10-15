@@ -49,8 +49,8 @@ repository.
   labels such as `ready-to-code`, but that label only dispatches the code
   agent when applied by a user with `write` access or by an agent bot.
   The same applies to `ok-to-test`: CI removes it when a triage user
-  applies it, and it does not authorize e2e or functional runs. Ask
-  someone with the Write role to apply it.
+  applies it, and it does not authorize e2e runs in this repository.
+  Ask someone with the Write role to apply it.
 - Automatic e2e CI triggering on your PRs (no maintainer label needed)
 
 **Criteria:**
@@ -80,8 +80,8 @@ repository.
 - `/fs-retro` and `/fs-prioritize` slash commands (analysis agents
   that require write-level trust)
 - Push access to non-protected branches
-- Authorizing e2e and functional CI on external PRs by applying the
-  `ok-to-test` label after reviewing the latest push
+- Authorizing e2e CI on external PRs by applying the `ok-to-test`
+  label after reviewing the latest push
 
 **Criteria:**
 
