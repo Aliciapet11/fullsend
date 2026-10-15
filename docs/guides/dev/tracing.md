@@ -280,7 +280,9 @@ with the summary the parser derives from it) and every wrapping a review
 has constructed so far — terminal escapes before, around and inside a
 secret, repeated and paired secrets, zero-width, bidi, tag, NUL and
 variation-selector characters inside it, a URL's delimiters in
-compatibility forms, separators escaped for the shell or JSON, a
+compatibility forms, separators escaped for the shell or JSON, a URL
+percent-encoded whole or in part (its separator's colon or slashes, its
+`@`, `?` or `#`), a
 password quoted for the shell, a URL nested in another's path, an
 invalid byte or the
 replacement character inside it, an invalid byte after it with the

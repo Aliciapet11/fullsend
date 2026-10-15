@@ -149,8 +149,12 @@ everything after its first `?` or `#` masked `***`, after the patterns
 ran, and counted in `fullsend.content.sanitizations`; when the first `?`
 or `#` comes before the last `@` — a password holding one, an `@` in the
 query — everything after the separator is masked, and so it is after a
-percent-encoded separator anywhere in the URL (`https%3A%2F%2F…`,
-encoded once or more), since nothing decodes it. The URL runs to white space or to a
+separator with any part percent-encoded, anywhere in the URL
+(`https%3A%2F%2F…`, `https%3A//…`, `https:%2F%2F…`, encoded once or more),
+since nothing decodes it, and when the last `@` follows one — a URL with
+userinfo nested in another's path; behind a plain `://`, a percent-encoded
+`@`, `?` or `#` (`%40`, `%3F`, `%23`, encoded once or more) reads as the
+character it encodes. The URL runs to white space or to a
 double quote that could close a JSON string — one followed by white
 space, `,`, `:`, `}`, `]` or the end — so one inside JSON ends with its
 string and the fields after it are kept; inside JSON escaped in another

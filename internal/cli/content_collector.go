@@ -809,6 +809,14 @@ func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text s
 	return maskURLs(text, findings)
 }
 
+// urlSepPattern matches a URL's "://" with its colon and slashes each
+// written plain, escaped as a shell command or a JSON encoder writes
+// them (once or more), or percent-encoded (%3A, %2F; encoded once or
+// more): the whole separator encoded, as a query value carries a URL,
+// and a part of it, as Python's quote (https%3A//) and Go's PathEscape
+// (https:%2F%2F) write it.
+const urlSepPattern = `\\*(?::|%(?:25)*3[Aa])(?:\\*(?:/|%(?:25)*2[Ff])){2}`
+
 // urlRun matches a URL as a scheme, its separator (urlSep) and the rest
 // of the run, up to white space or a double quote that could close a
 // JSON string — one followed by white space, ',', ':', '}', ']' or the
@@ -816,16 +824,19 @@ func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text s
 // fields after it are not masked with it. Any other quote (a password or
 // a query quoted half-way for the shell) and a backslash-escaped
 // character do not end it.
-var urlRun = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*(?:\\*:(?:\\*/){2}|%(?:25)*3[Aa]%(?:25)*2[Ff]%(?:25)*2[Ff])(?:[^\s"\\]|\\.|"[^\s"\\,:}\]])+`)
+var urlRun = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*(?:` + urlSepPattern + `)(?:[^\s"\\]|\\.|"[^\s"\\,:}\]])+`)
 
-// urlSep matches a URL's "://", the same with its colon or slashes
-// escaped as a shell command or a JSON encoder writes them, once or
-// more, or percent-encoded (urlSepEncoded).
-var urlSep = regexp.MustCompile(`\\*:(?:\\*/){2}|%(?:25)*3[Aa]%(?:25)*2[Ff]%(?:25)*2[Ff]`)
+// urlSep matches a URL's separator (urlSepPattern); one holding a '%'
+// has a part percent-encoded.
+var urlSep = regexp.MustCompile(urlSepPattern)
 
-// urlSepEncoded matches a percent-encoded "://" (%3A%2F%2F), as a URL
-// carried in another's query is written, encoded once or more.
-var urlSepEncoded = regexp.MustCompile(`%(?:25)*3[Aa]%(?:25)*2[Ff]%(?:25)*2[Ff]`)
+// urlAt matches a URL's '@' and urlCut its '?' or '#', plain or
+// percent-encoded once or more (%40, %3F, %23), so one encoded behind a
+// plain separator reads as the character it encodes.
+var (
+	urlAt  = regexp.MustCompile(`@|%(?:25)*40`)
+	urlCut = regexp.MustCompile(`[?#]|%(?:25)*(?:3[Ff]|23)`)
+)
 
 // maskURLs masks what a URL carries that no pattern is written for:
 // everything from its separator to its last '@' (userinfo — a password
@@ -835,9 +846,13 @@ var urlSepEncoded = regexp.MustCompile(`%(?:25)*3[Aa]%(?:25)*2[Ff]%(?:25)*2[Ff]`
 // fragment), as ***, with one finding for a string that had any. When
 // the first '?' or '#' comes before the last '@' — a password holding
 // one, or an '@' in the query — the two cannot be told apart and
-// everything after the separator is masked; so it is after a
-// percent-encoded separator anywhere in the run, whose '@', '?' and '#'
-// are encoded too and nothing here decodes. It runs last
+// everything after the separator is masked; so it is after a separator
+// with any part percent-encoded (urlSep), anywhere in the run, whose '@',
+// '?' and '#' may be encoded too and nothing here decodes, and when the
+// last '@' follows one — a URL with userinfo nested in another's path.
+// Behind a plain separator a percent-encoded '@', '?' or '#', encoded
+// once or more, reads as the character it encodes (urlAt, urlCut). Each
+// rule masks at least what the one before it did. It runs last
 // in redactText, on text the normalizer has folded and the patterns have
 // masked, so a compatibility '？' or '＠' is a plain one here, and nothing
 // is re-encoded: the mask only replaces bytes. Kept: a token carried in
@@ -848,18 +863,24 @@ func maskURLs(text string, findings *[]security.Finding) string {
 	masked := false
 	text = urlRun.ReplaceAllStringFunc(text, func(run string) string {
 		out := run
-		s, a, q := urlSep.FindStringIndex(run)[1], strings.LastIndex(run, "@"), strings.IndexAny(run, "?#")
+		s, a, q, c := urlSep.FindStringIndex(run)[1], -1, -1, encodedSepEnd(run)
+		if m := urlAt.FindAllStringIndex(run, -1); m != nil {
+			a = m[len(m)-1][0]
+		}
+		if m := urlCut.FindStringIndex(run); m != nil {
+			q = m[0]
+		}
 		switch {
-		case a > s && q >= 0 && q < a:
+		case a > s && (q >= 0 && q < a || c >= 0 && c < a):
 			out = run[:s] + "***"
 		case a > s:
 			out = run[:s] + "***" + run[a:]
 		}
-		if e := urlSepEncoded.FindStringIndex(out); e != nil {
-			out = out[:e[1]] + "***"
+		if e := encodedSepEnd(out); e >= 0 {
+			out = out[:e] + "***"
 		}
-		if i := strings.IndexAny(out, "?#"); i >= 0 {
-			out = out[:i+1] + "***"
+		if m := urlCut.FindStringIndex(out); m != nil {
+			out = out[:m[1]] + "***"
 		}
 		masked = masked || out != run
 		return out
@@ -869,6 +890,17 @@ func maskURLs(text string, findings *[]security.Finding) string {
 			Detail: "a URL's userinfo, query or fragment; masked", Position: -1})
 	}
 	return text
+}
+
+// encodedSepEnd returns where the first separator in s with a
+// percent-encoded part (urlSep) ends, or -1.
+func encodedSepEnd(s string) int {
+	for _, m := range urlSep.FindAllStringIndex(s, -1) {
+		if strings.Contains(s[m[0]:m[1]], "%") {
+			return m[1]
+		}
+	}
+	return -1
 }
 
 // recordedArguments names, tool by tool, the members of a call's input

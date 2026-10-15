@@ -123,6 +123,22 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 				out[i] = secret{name, "https://proxy.example.com/fetch/https%3A%2F%2Fdeploy%3A" + b[:16] + "%40git.example.com", b[:16], false}
 			case "url_percent_encoded_twice": // encoded in a query that was itself encoded
 				out[i] = secret{name, "https%253A%252F%252Fdeploy%253A" + b[:16] + "%2540git.example.com", b[:16], false}
+			case "url_mixed_colon_encoded": // the colon encoded, the slashes plain (Python's quote)
+				out[i] = secret{name, "https%3A//deploy%3A" + b[:16] + "%40git.example.com/o/r", b[:16], false}
+			case "url_mixed_colon_encoded_nested": // the same in a plain URL's path
+				out[i] = secret{name, "https://proxy.example.com/fetch/https%3A//deploy%3A" + b[:16] + "%40git.example.com", b[:16], false}
+			case "url_mixed_slashes_encoded": // the slashes encoded, the colon plain (Go's PathEscape)
+				out[i] = secret{name, "https:%2F%2Fdeploy:" + b[:16] + "@git.example.com%2Fo%2Fr", b[:16], false}
+			case "url_mixed_slashes_encoded_nested": // the same in a plain URL's path
+				out[i] = secret{name, "https://proxy.example.com/fetch/https:%2F%2Fdeploy:" + b[:16] + "@git.example.com%2Fo%2Fr", b[:16], false}
+			case "url_userinfo_percent_encoded": // userinfo encoded behind a plain separator
+				out[i] = secret{name, "https://deploy%3A" + b[:16] + "%40git.example.com/o/r", b[:16], false}
+			case "url_userinfo_percent_encoded_nested": // the same in a plain URL's path
+				out[i] = secret{name, "https://proxy.example.com/fetch/https://deploy%3A" + b[:16] + "%40git.example.com", b[:16], false}
+			case "url_query_percent_encoded": // the query's '?' encoded behind a plain separator
+				out[i] = secret{name, "https://h.example.com/x%3Faccess_token=" + b[:16], b[:16], false}
+			case "url_fragment_percent_encoded": // the fragment's '#' encoded behind a plain separator
+				out[i] = secret{name, "https://app.example.com/cb%23access_token=" + b[:16], b[:16], false}
 			case "url_nested": // a URL in another's path
 				out[i] = secret{name, "https://proxy.example.com/https://u:" + b[:16] + "@h.example.com/x", b[:16], false}
 			}
@@ -137,6 +153,7 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 		mk("url_query", 1300), mk("url_query_fullwidth", 1400), mk("url_fragment", 1500), mk("url_nested", 1600),
 		mk("url_userinfo_escaped", 1700), mk("url_query_escaped", 1800),
 		mk("url_userinfo_slash", 1900), mk("url_userinfo_double_quote", 2000), mk("url_userinfo_question", 2100), mk("url_userinfo_hash", 2200), mk("url_userinfo_escaped_colon", 2300), mk("url_percent_encoded", 2400), mk("url_percent_encoded_nested", 2500), mk("url_percent_encoded_twice", 2600),
+		mk("url_mixed_colon_encoded", 2700), mk("url_mixed_colon_encoded_nested", 2800), mk("url_mixed_slashes_encoded", 2900), mk("url_mixed_slashes_encoded_nested", 3000), mk("url_userinfo_percent_encoded", 3100), mk("url_userinfo_percent_encoded_nested", 3200), mk("url_query_percent_encoded", 3300), mk("url_fragment_percent_encoded", 3400),
 	}
 
 	// Wrappings over the secret text; the ones that insert a character
