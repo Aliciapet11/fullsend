@@ -105,6 +105,15 @@ func TestCodexGolden(t *testing.T) {
 		{"launch-nohooks.txt", func(t *testing.T) string {
 			return codexGoldenLaunch(buildCodexRunCommand(RunParams{RepoDir: repo}, codexModel{ID: "gpt-5.6-luna"}, "", false, noHooks))
 		}},
+		// The role files of a delegating agent and its launch command.
+		// codexRoles sorts by name (TestCodexRoles_SkillPersonasSorted), so the
+		// indexes are correctness, default, explore.
+		{"roles/correctness.toml", func(t *testing.T) string { return string(codexGoldenRoles(t)[0].toml()) }},
+		{"roles/default.toml", func(t *testing.T) string { return string(codexGoldenRoles(t)[1].toml()) }},
+		{"roles/explore.toml", func(t *testing.T) string { return string(codexGoldenRoles(t)[2].toml()) }},
+		{"launch-delegating.txt", func(t *testing.T) string {
+			return codexGoldenLaunch(buildCodexRunCommand(hooksOn, codexModel{ID: "gpt-5.6-luna"}, "high", true, codexGoldenDelegatingDigests(t)))
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,4 +136,49 @@ func TestCodexGolden(t *testing.T) {
 				tc.name)
 		})
 	}
+}
+
+// codexGoldenRoles renders the roles of a review agent with the test
+// correctness persona (codexTestPersona): three files, no model line.
+func codexGoldenRoles(t *testing.T) []codexRole {
+	t.Helper()
+	skill := t.TempDir()
+	writePersonaFile(t, skill, "correctness", codexTestPersona)
+	return codexRoles([]string{skill}, "review")
+}
+
+// codexGoldenDelegatingDigests is testRunnerHeldDigests plus the role
+// entries a delegating agent's Bootstrap records.
+func codexGoldenDelegatingDigests(t *testing.T) codexRunnerHeldDigestSet {
+	t.Helper()
+	d := testRunnerHeldDigests
+	d.RoleFiles = map[string]string{}
+	for _, role := range codexGoldenRoles(t) {
+		d.RoleFiles[role.Name] = codexAssetSHA256(role.toml())
+	}
+	return d
+}
+
+// The invariant of the role files: a delegating agent's launch command
+// differs from a non-delegating one in the FULLSEND_CODEX_SPAWN_DIGESTS
+// value and in nothing else. Rendered here from both digest sets with the
+// golden inputs, so it holds independently of the files.
+func TestCodexGolden_DelegatingLaunchDiffersOnlyInSpawnDigests(t *testing.T) {
+	t.Parallel()
+
+	plain := strings.Split(codexGoldenLaunch(buildCodexRunCommand(hooksOn, codexModel{ID: "gpt-5.6-luna"}, "high", true, testRunnerHeldDigests)), "\n")
+	delegating := strings.Split(codexGoldenLaunch(buildCodexRunCommand(hooksOn, codexModel{ID: "gpt-5.6-luna"}, "high", true, codexGoldenDelegatingDigests(t))), "\n")
+	require.Len(t, delegating, len(plain), "no fragment added or removed")
+
+	var changed []int
+	for i := range plain {
+		if plain[i] != delegating[i] {
+			changed = append(changed, i)
+		}
+	}
+	require.Len(t, changed, 1, "exactly one fragment differs")
+	assert.Equal(t, "export "+codexSpawnDigestsEnv+"='hooks.json:<sha256>'", strings.TrimSuffix(plain[changed[0]], " &&"))
+	assert.Equal(t, "export "+codexSpawnDigestsEnv+
+		"='agents/correctness.toml:<sha256> agents/default.toml:<sha256> agents/explore.toml:<sha256> hooks.json:<sha256>'",
+		strings.TrimSuffix(delegating[changed[0]], " &&"), "one entry per role, ascending, file-name bound")
 }
