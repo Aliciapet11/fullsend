@@ -8003,7 +8003,7 @@ func TestMergeProviderDefs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, shadowed := mergeProviderDefs(tt.local, tt.url)
+			got, _, shadowed := mergeProviderDefs(tt.local, dedupResolvedProviders(tt.url))
 			var names []string
 			for _, d := range got {
 				names = append(names, d.Name)
