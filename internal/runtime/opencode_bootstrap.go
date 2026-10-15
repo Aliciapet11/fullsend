@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -288,15 +289,66 @@ func parseTrustedPermissionPolicy(configContent string) []openCodePermissionRule
 	return rules
 }
 
-// trustedRuleFor returns the last trusted rule whose key matches tool, the one
-// OpenCode applies.
-func trustedRuleFor(rules []openCodePermissionRule, tool string) (json.RawMessage, bool) {
-	for i := len(rules) - 1; i >= 0; i-- {
-		if openCodeWildcardMatch(tool, rules[i].Key) {
-			return rules[i].Value, true
+// openCodePatternRule is one (argument pattern, action) rule for a tool.
+type openCodePatternRule struct {
+	Pattern string
+	Action  string
+}
+
+// trustedRulesFor returns the trusted rules OpenCode would evaluate for tool,
+// in order: every key whose glob matches tool contributes its pattern map, or
+// "*" for a flat action. A later rule with the same pattern replaces the
+// earlier one, which is equivalent under last-match-wins.
+func trustedRulesFor(rules []openCodePermissionRule, tool string) []openCodePatternRule {
+	var out []openCodePatternRule
+	add := func(pattern, action string) {
+		out = slices.DeleteFunc(out, func(r openCodePatternRule) bool { return r.Pattern == pattern })
+		out = append(out, openCodePatternRule{Pattern: pattern, Action: action})
+	}
+	for _, rule := range rules {
+		if !openCodeWildcardMatch(tool, rule.Key) {
+			continue
+		}
+		var action string
+		if json.Unmarshal(rule.Value, &action) == nil {
+			add("*", action)
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(rule.Value))
+		if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+			continue
+		}
+		for dec.More() {
+			tok, err := dec.Token()
+			if err != nil {
+				break
+			}
+			pattern, _ := tok.(string)
+			if err := dec.Decode(&action); err != nil {
+				break
+			}
+			add(pattern, action)
 		}
 	}
-	return nil, false
+	return out
+}
+
+// openCodePatternMapJSON encodes rules as an ordered OpenCode pattern map.
+func openCodePatternMapJSON(rules []openCodePatternRule) json.RawMessage {
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i, r := range rules {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		k, _ := json.Marshal(r.Pattern)
+		v, _ := json.Marshal(r.Action)
+		b.Write(k)
+		b.WriteByte(':')
+		b.Write(v)
+	}
+	b.WriteByte('}')
+	return b.Bytes()
 }
 
 // openCodeWildcardMatch mirrors OpenCode's Wildcard.match for permission keys:
@@ -310,32 +362,24 @@ func openCodeWildcardMatch(s, pattern string) bool {
 // intersectPermissionRecord makes the trusted policy the ceiling for the agent
 // record. OpenCode evaluates agent rules after global ones with findLast
 // (permission/index.ts:28-32), so without this the agent frontmatter could
-// widen the global gate. For each tool the trusted rule OpenCode would apply
-// (trustedRuleFor) decides:
-//   - "deny" or "ask" downgrades an agent "allow"; headless runs auto-reject
-//     "ask".
-//   - A pattern map replaces an agent "allow" with a copy of the map: a flat
-//     "allow" would widen it, and dropping the key would let the agent's own
-//     "*": "deny" win.
-//
-// An empty rec (unrestricted agent) stays empty; the global policy applies.
+// widen the global gate. An agent "allow" becomes the trusted rules for that
+// tool (trustedRulesFor): a single "*" rule as a flat action, anything else
+// as an ordered pattern map, so the agent's own "*": "deny" cannot shadow a
+// trusted pattern and a flat "allow" cannot widen one. Headless runs
+// auto-reject "ask". A tool no trusted rule matches keeps the agent's action,
+// as does an unrestricted (empty) record.
 func intersectPermissionRecord(rec map[string]string, rules []openCodePermissionRule) map[string]any {
 	out := make(map[string]any, len(rec))
 	for tool, agentAction := range rec {
-		raw, ok := trustedRuleFor(rules, tool)
-		if !ok || agentAction != "allow" {
+		trusted := trustedRulesFor(rules, tool)
+		switch {
+		case agentAction != "allow" || len(trusted) == 0:
 			out[tool] = agentAction
-			continue
+		case len(trusted) == 1 && trusted[0].Pattern == "*":
+			out[tool] = trusted[0].Action
+		default:
+			out[tool] = openCodePatternMapJSON(trusted)
 		}
-		var action string
-		if err := json.Unmarshal(raw, &action); err != nil {
-			out[tool] = raw
-			continue
-		}
-		if action == "deny" || action == "ask" {
-			agentAction = action
-		}
-		out[tool] = agentAction
 	}
 	return out
 }

@@ -164,8 +164,8 @@ How the shared PostToolUse chain reaches each runtime — the three sanitizer ro
   same one-shot CLI process; a future long-lived runner must evict state when each sandbox finishes.
 - **OpenCode agent permissions and reset:** OpenCode evaluates agent-level permission rules after
   the global policy (`findLast`), so Bootstrap intersects the translated agent record with the
-  trusted `OPENCODE_CONFIG_CONTENT` policy, copying a trusted pattern map (`bash: {...}`) for a
-  declared tool. Before every iteration Run removes `agent/`, `agents/`, `mode/`, `modes/`,
+  trusted `OPENCODE_CONFIG_CONTENT` policy: a declared tool gets every trusted rule that applies
+  to it, in config order, as a flat action or an ordered pattern map. Before every iteration Run removes `agent/`, `agents/`, `mode/`, `modes/`,
   `tool/`, `tools/`, `command/`, `commands/` and `opencode.jsonc` from the config dir, the
   user-level config dirs, a cached `models.json` and `auth.json`, then re-uploads the agent and
   re-runs `opencode debug agent`. After sourcing the agent-writable `.env`, the run prelude

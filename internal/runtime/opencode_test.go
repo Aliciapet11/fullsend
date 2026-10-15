@@ -211,6 +211,10 @@ func TestIntersectPermissionRecord(t *testing.T) {
 	capped = intersectPermissionRecord(agent, rules(`{"*":"deny","bash":`+bashMap+`}`))
 	assert.JSONEq(t, bashMap, string(capped["bash"].(json.RawMessage)))
 	assert.Equal(t, "deny", capped["*"])
+	// A partial pattern map keeps the earlier flat rule as its fallback.
+	capped = intersectPermissionRecord(agent, rules(`{"*":"allow","bash":{"rm *":"deny"}}`))
+	assert.JSONEq(t, `{"*":"allow","rm *":"deny"}`, string(capped["bash"].(json.RawMessage)))
+	assert.Equal(t, `{"*":"allow","rm *":"deny"}`, string(capped["bash"].(json.RawMessage)), "rule order kept")
 	noBash := intersectPermissionRecord(openCodePermissionRecord([]string{"Read"}), rules(`{"bash":`+bashMap+`}`))
 	assert.Equal(t, "deny", noBash["bash"])
 }
