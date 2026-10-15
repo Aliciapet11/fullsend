@@ -291,10 +291,11 @@ Four limits are named there and here, and nowhere else: an env value
 written in compatibility (fullwidth) forms, since the normalizer rewrites
 it and the literal pass matches only what the env has; a secret split
 across two parts or events; a secret that matches no pattern and is in no
-env, among them a token in a URL's path, what follows a double quote
-that ends a URL (one that could close a JSON string, so a URL inside
-JSON ends with its string), and a URL written percent-encoded or with
-an escaped colon, which is not read as one; a summary a pi or codex parser cut before the collector saw it, since
+env, among them a token in a URL's path, in a URL holding a double quote
+that ends it (one that could close a JSON string, so a URL inside JSON
+ends with its string), what follows the quote and userinfo whose `@`
+follows it, and a URL written percent-encoded or with an escaped colon,
+which is not read as one; a summary a pi or codex parser cut before the collector saw it, since
 that cut can split a value the parser's own scan did not see joined (a
 Claude summary is cut from a member the collector scans whole). A finding
 inside the guarantee is a defect; one on this list is a documented limit.
