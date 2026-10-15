@@ -24,6 +24,9 @@ type sinkFixture struct {
 	varType   string
 	envScope  string
 	deletes   int
+	// creates counts requests that reached the create handler, so a test can
+	// tell a refusal the handler produced from a routing mismatch.
+	creates   int
 	createErr int
 }
 
@@ -33,17 +36,27 @@ func (f *sinkFixture) register(t *testing.T, mux *http.ServeMux) {
 	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		require.Equal(t, http.MethodPost, r.Method)
+		// The handler runs on the httptest server's goroutine, so it uses assert
+		// (t.Errorf), never require (t.FailNow).
+		f.creates++
+		if !assert.Equal(t, http.MethodPost, r.Method) {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		if f.createErr != 0 {
 			writeTestJSON(t, w, f.createErr, map[string]any{"message": "refused"})
 			return
 		}
 		var body map[string]any
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		assert.Equal(t, forge.SecretGitLabTriggerAccountToken, body["key"])
 		assert.Equal(t, true, body["masked"], "the sink is created masked")
 		assert.Equal(t, true, body["protected"], "the sink is created protected")
-		f.exists, f.value = true, body["value"].(string)
+		value, _ := body["value"].(string)
+		f.exists, f.value = true, value
 		writeTestJSON(t, w, http.StatusCreated, map[string]any{"key": body["key"]})
 	})
 	mux.HandleFunc(base+"/"+forge.SecretGitLabTriggerAccountToken, func(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +114,7 @@ func TestTriggerAccountOptions_SinkRequiresProtectedMaskedVariable(t *testing.T)
 			f := tc.fixture
 			o := newSinkOwner(t, f)
 			err := o.publishTriggerToken(context.Background(), "g", "p", "glptt-secret-value")
+			assert.Equal(t, 1, f.creates, "the create handler was invoked exactly once")
 			if tc.wantErr {
 				require.Error(t, err)
 				assert.NotContains(t, err.Error(), "glptt-secret-value", "the token never appears in errors")
@@ -120,6 +134,8 @@ func TestTriggerAccountOptions_SinkCreateFailureAndUnpublish(t *testing.T) {
 	err := o.publishTriggerToken(context.Background(), "g", "p", "glptt-secret-value")
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "glptt-secret-value")
+	assert.Equal(t, 1, f.creates, "the create handler refused the request, not a routing mismatch")
+	assert.False(t, f.exists, "no variable is stored after a refused create")
 
 	// Unpublishing removes the variable and is idempotent when it is absent.
 	f = &sinkFixture{exists: true, value: "x", masked: true, protected: true}

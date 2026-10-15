@@ -188,3 +188,95 @@ func TestContainGitLabTriggerAccount_VariableDeletionFailureDoesNotSuppressRevoc
 	assert.True(t, e.sinkPresent(), "the variable that could not be removed stays")
 	assert.NotContains(t, e.f.triggers, res.TriggerTokenID, "the trigger is revoked anyway")
 }
+
+// A published trigger is contained against the account's live access before any
+// deferral or unrelated readiness failure can return. An account raised out of
+// band is demoted while a healthy sink and role keep the credential in place;
+// when Developer access cannot be established the credential is removed and
+// the owned trigger revoked, with the cleanup obligation kept.
+func TestConvergeGitLabTriggerAccount_ElevatedPublishedAccountIsContainedBeforeDeferral(t *testing.T) {
+	ctx := context.Background()
+	elevate := func(t *testing.T, e *trigEnv, accountID int) {
+		t.Helper()
+		e.f.members[accountID] = forge.GitLabAccessLevelMaintainer
+	}
+	deferrals := map[string]func(e *trigEnv, o *GitLabTriggerAccountOptions){
+		"protected-branch rule removed": func(e *trigEnv, _ *GitLabTriggerAccountOptions) { e.f.exactRule = false },
+		"default branch changed":        func(_ *trigEnv, o *GitLabTriggerAccountOptions) { o.Branch = "release" },
+	}
+
+	for name, defer_ := range deferrals {
+		t.Run("demoted before "+name+" defers", func(t *testing.T) {
+			e := newTrigEnv()
+			e.useRecreatingSink()
+			res, err := ConvergeGitLabTriggerAccount(ctx, e.unpublishClearsAttributes(e.opts()))
+			require.NoError(t, err)
+			elevate(t, e, res.AccountID)
+
+			o := e.unpublishClearsAttributes(e.opts())
+			defer_(e, &o)
+			got, err := ConvergeGitLabTriggerAccount(ctx, o)
+			require.NoError(t, err)
+			assert.NotEmpty(t, got.Deferred)
+
+			assert.Equal(t, forge.GitLabAccessLevelDeveloper, e.f.members[res.AccountID], "the published account is back at Developer")
+			assert.True(t, e.sinkPresent(), "a verified credential is left in place")
+			assert.Contains(t, e.f.triggers, res.TriggerTokenID)
+		})
+	}
+
+	// Access that cannot be restored, or verified because the inventory or
+	// the membership cannot be read, contains the credential instead.
+	failures := map[string]func(e *trigEnv){
+		"membership update fails": func(e *trigEnv) { e.f.fail["UpdateProjectMemberAccessLevel"] = true },
+		"inventory unreadable":    func(e *trigEnv) { e.f.fail["ListProjectServiceAccounts"] = true },
+		"membership unreadable":   func(e *trigEnv) { e.f.fail["GetProjectMemberAccessLevel"] = true },
+	}
+	for name, breakIt := range failures {
+		for dName, defer_ := range deferrals {
+			t.Run(name+" with "+dName, func(t *testing.T) {
+				e := newTrigEnv()
+				e.useRecreatingSink()
+				res, err := ConvergeGitLabTriggerAccount(ctx, e.unpublishClearsAttributes(e.opts()))
+				require.NoError(t, err)
+				elevate(t, e, res.AccountID)
+
+				o := e.unpublishClearsAttributes(e.opts())
+				defer_(e, &o)
+				breakIt(e)
+				_, err = ConvergeGitLabTriggerAccount(ctx, o)
+				require.ErrorIs(t, err, errTrigInjected)
+
+				assert.False(t, e.sinkPresent(), "the credential is removed")
+				assert.NotContains(t, e.f.triggers, res.TriggerTokenID, "the owned trigger is revoked")
+				st, ok := e.ledger(t)
+				require.True(t, ok, "the ledger keeps the cleanup obligation")
+				assert.True(t, st.PublishStarted)
+				assert.False(t, st.TriggerPublished)
+				assert.Equal(t, res.TriggerTokenID, st.TriggerTokenID)
+			})
+		}
+	}
+
+	t.Run("a retired publishing generation is demoted too", func(t *testing.T) {
+		e := newTrigEnv()
+		e.useRecreatingSink()
+		res, err := ConvergeGitLabTriggerAccount(ctx, e.unpublishClearsAttributes(e.opts()))
+		require.NoError(t, err)
+		e.f.fail["CreateProjectServiceAccount"] = true
+		_, err = RotateGitLabTriggerAccount(ctx, e.unpublishClearsAttributes(e.opts()))
+		require.Error(t, err)
+		st, ok := e.ledger(t)
+		require.True(t, ok)
+		require.Len(t, st.Retired, 1)
+		require.True(t, st.Retired[0].PublishStarted)
+		elevate(t, e, res.AccountID)
+
+		o := e.unpublishClearsAttributes(e.opts())
+		o.Branch = "release"
+		got, err := ConvergeGitLabTriggerAccount(ctx, o)
+		require.NoError(t, err)
+		assert.NotEmpty(t, got.Deferred)
+		assert.Equal(t, forge.GitLabAccessLevelDeveloper, e.f.members[res.AccountID], "the retired generation's account is demoted")
+	})
+}

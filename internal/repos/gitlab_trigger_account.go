@@ -744,6 +744,31 @@ func (op *gitLabTriggerAccountOp) restorePreviousToDeveloper(ctx context.Context
 	return op.ensureMembership(ctx, forge.GitLabAccessLevelDeveloper)
 }
 
+// restorePublishedAccessToDeveloper proves each publication-owning generation's
+// account is the recorded, nonce-named one and confirms its effective access is
+// exactly Developer, restoring it when it is not. The current generation and
+// every retired generation that started publishing are covered, because an
+// interrupted replacement can leave a retired generation's live token in the
+// sink. Every generation is attempted and the errors are joined.
+func (op *gitLabTriggerAccountOp) restorePublishedAccessToDeveloper(ctx context.Context) error {
+	var errs []error
+	if op.st.PublishStarted {
+		if err := op.restorePreviousToDeveloper(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for i := range op.st.Retired {
+		if !op.st.Retired[i].PublishStarted {
+			continue
+		}
+		sub := &gitLabTriggerAccountOp{opts: op.opts, st: op.st.Retired[i], exists: true, retired: true}
+		if err := sub.restorePreviousToDeveloper(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // containUnsafePublishedSink removes a published token sink that is present
 // but unsafe, and revokes the generation's ownership-verified trigger, before
 // a deferral is returned: a deferral must not leave an exposed value usable.
@@ -786,10 +811,23 @@ func (op *gitLabTriggerAccountOp) containUnsafePublishedSink(ctx context.Context
 	if err != nil {
 		return err
 	}
-	if len(problems) == 0 {
-		return nil
+	if len(problems) > 0 {
+		return op.removeRevokeAndSave(ctx, true)
 	}
-	return op.removeRevokeAndSave(ctx, true)
+	// A healthy sink and role do not bound what the account can do: a
+	// distributed trigger value is only safe while its account holds exactly
+	// Developer access. An account raised out of band is restored here, for
+	// every publication-owning generation, before any deferral or unrelated
+	// readiness check can return. When Developer access cannot be established
+	// the sink is removed and the owned triggers are revoked independently,
+	// keeping the retry obligations.
+	if accessErr := op.restorePublishedAccessToDeveloper(ctx); accessErr != nil {
+		return errors.Join(
+			fmt.Errorf("GitLab trigger account: Developer access of a publishing generation could not be verified, so its published credential was contained: %w", accessErr),
+			op.removeRevokeAndSave(ctx, true),
+		)
+	}
+	return nil
 }
 
 // removeAndRevokePublished optionally removes the token sink, then revokes the

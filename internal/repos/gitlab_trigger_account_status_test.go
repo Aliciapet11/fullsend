@@ -2,6 +2,7 @@ package repos
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -130,6 +131,62 @@ func TestApplyGitLabTriggerAccountStatus(t *testing.T) {
 	ApplyGitLabTriggerAccountStatus(st, GitLabTriggerAccountStatus{State: GitLabTriggerStateCleanup, Reasons: []string{"a", "b"}})
 	require.Len(t, st.Drifts, 1)
 	assert.Equal(t, "cleanup-pending: a; b", st.Drifts[0].Actual)
+}
+
+// A default-branch change explains the deferral but does not hide unfinished
+// retirement, missing or unsafe resources or excess account access on the
+// recorded branch: those keep the drift classification.
+func TestDiagnoseGitLabTriggerAccount_BranchChangeKeepsIndependentProblems(t *testing.T) {
+	ctx := context.Background()
+	const newBranch = "develop"
+
+	problems := map[string]struct {
+		mutate func(t *testing.T, e *trigEnv, res GitLabTriggerAccountResult)
+		want   string
+	}{
+		"unfinished retirement": {func(t *testing.T, e *trigEnv, _ GitLabTriggerAccountResult) {
+			st, ok := e.ledger(t)
+			require.True(t, ok)
+			st.Retired = []gitLabTriggerAccountState{{Phase: gitLabTriggerPhaseReady, Branch: trigBranch, Nonce: "00112233445566bb", AccountID: 77}}
+			e.setLedger(t, st)
+		}, "retirement of the previous trigger account generation"},
+		"sink unsafe": {func(_ *testing.T, e *trigEnv, _ GitLabTriggerAccountResult) {
+			e.state.SecretProtections = map[string]forge.SecretProtection{trigSinkKey: {Exists: true, Protected: true}} // unmasked
+		}, "is not masked"},
+		"sink missing": {func(_ *testing.T, e *trigEnv, _ GitLabTriggerAccountResult) {
+			e.setSink(false)
+		}, forge.SecretGitLabTriggerAccountToken + " is missing"},
+		"trigger missing": {func(_ *testing.T, e *trigEnv, res GitLabTriggerAccountResult) {
+			delete(e.f.triggers, res.TriggerTokenID)
+		}, "trigger token"},
+		"account elevated": {func(_ *testing.T, e *trigEnv, res GitLabTriggerAccountResult) {
+			e.f.members[res.AccountID] = forge.GitLabAccessLevelMaintainer
+		}, "access level 40"},
+		"grant missing": {func(_ *testing.T, e *trigEnv, _ GitLabTriggerAccountResult) { e.f.pushes = nil }, "push entry"},
+	}
+	for name, tc := range problems {
+		t.Run(name, func(t *testing.T) {
+			e := newTrigEnv()
+			res, err := ConvergeGitLabTriggerAccount(ctx, e.opts())
+			require.NoError(t, err)
+			tc.mutate(t, e, res)
+
+			got := e.diagnose(e.f, newBranch)
+			assert.Equal(t, GitLabTriggerStateDrifted, got.State)
+			require.NotEmpty(t, got.Reasons)
+			assert.Contains(t, got.Reasons[0], "Run repos uninstall", "the branch-change explanation is kept")
+			assert.Contains(t, strings.Join(got.Reasons, "; "), tc.want)
+		})
+	}
+
+	t.Run("nothing else wrong stays deferred", func(t *testing.T) {
+		e := newTrigEnv()
+		_, err := ConvergeGitLabTriggerAccount(ctx, e.opts())
+		require.NoError(t, err)
+		got := e.diagnose(e.f, newBranch)
+		assert.Equal(t, GitLabTriggerStateDeferred, got.State)
+		assert.Len(t, got.Reasons, 1)
+	})
 }
 
 // The published value is removed before its token is revoked, in rotation and

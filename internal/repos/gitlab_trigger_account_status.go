@@ -72,24 +72,35 @@ func DiagnoseGitLabTriggerAccount(ctx context.Context, client forge.Client, api 
 		return GitLabTriggerAccountStatus{State: GitLabTriggerStateInProgress, Reasons: append([]string{"an install or rotation did not finish (" + st.Phase + "); re-run repos install to continue"}, held...)}
 	}
 	var reasons []string
+	// A default-branch change defers install, but it does not hide what is
+	// wrong with the resources recorded on the old branch: those are still
+	// diagnosed below, and the state stays deferred only when nothing else is
+	// wrong.
+	branchChanged := st.Branch != branch && branch != ""
 	// A published generation whose trigger is no longer published had its
 	// token variable removed and trigger revoked, for example after an unsafe
 	// variable was contained. Keep saying so, including while install defers.
 	removedNote := "the published trigger token was removed or revoked; run repos install to publish a replacement"
-	if st.Branch != branch && branch != "" {
-		deferred := []string{branchChangeReason(st.Branch, branch)}
-		if st.PublishStarted && !st.TriggerPublished {
-			deferred = append(deferred, removedNote)
-		}
-		return GitLabTriggerAccountStatus{State: GitLabTriggerStateDeferred, Reasons: deferred}
+	var deferralNotes []string
+	if branchChanged {
+		deferralNotes = append(deferralNotes, branchChangeReason(st.Branch, branch))
 	}
 	if st.Elevated || st.PATID != 0 || st.PATPending {
 		reasons = append(reasons, "a bootstrap elevation obligation is still recorded")
 	}
 	if !st.TriggerPublished {
-		reasons = append(reasons, "the trigger token is not published")
+		// Without a branch change this is drift. With one, a contained and
+		// removed trigger is part of the explanation for the deferral.
+		notPublished := []string{"the trigger token is not published"}
 		if st.PublishStarted {
-			reasons = append(reasons, removedNote)
+			notPublished = append(notPublished, removedNote)
+		}
+		if branchChanged {
+			if st.PublishStarted {
+				deferralNotes = append(deferralNotes, removedNote)
+			}
+		} else {
+			reasons = append(reasons, notPublished...)
 		}
 	} else if problems, err := triggerSinkProblems(ctx, client, owner, repo); err != nil {
 		reasons = append(reasons, "could not verify "+forge.SecretGitLabTriggerAccountToken+"; its masking, protection, type and scope are unverified")
@@ -112,7 +123,10 @@ func DiagnoseGitLabTriggerAccount(ctx context.Context, client forge.Client, api 
 		reasons = append(reasons, op.liveDrift(ctx)...)
 	}
 	if len(reasons) > 0 {
-		return GitLabTriggerAccountStatus{State: GitLabTriggerStateDrifted, Reasons: reasons}
+		return GitLabTriggerAccountStatus{State: GitLabTriggerStateDrifted, Reasons: append(deferralNotes, reasons...)}
+	}
+	if branchChanged {
+		return GitLabTriggerAccountStatus{State: GitLabTriggerStateDeferred, Reasons: deferralNotes}
 	}
 	return GitLabTriggerAccountStatus{State: GitLabTriggerStateReady}
 }
