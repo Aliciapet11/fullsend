@@ -1046,6 +1046,22 @@ administrators to tell you about planned rotations, or run a scheduled
 job inside the network that fetches the JWKS and re-uploads it when it
 changes.
 
+Treat key removal as a security event, not only an availability one.
+Because the uploaded JWKS is static, STS keeps trusting every key in it
+after GitLab retires or revokes that key. Removing or revoking a signing
+key in GitLab does not revoke the uploaded copy in GCP. Anyone who holds a
+compromised key can keep minting tokens that satisfy the provider's issuer,
+audience, project-id, and project-path conditions until you replace the
+uploaded JWKS. Issuer-URI discovery drops such keys automatically; an
+uploaded JWKS does not.
+
+- Include emergency revocations, not only planned rotations, in the
+  notification and refresh procedure with the instance administrators.
+- After any retirement or revocation, promptly re-upload a JWKS that
+  omits the retired or compromised keys (repeat steps 1 and 2).
+- If you cannot obtain a trustworthy replacement JWKS during an incident,
+  disable the provider until you can.
+
 ## Runner Configuration
 
 Agent jobs run on GitLab CI using the `fullsend-runner` image and the
