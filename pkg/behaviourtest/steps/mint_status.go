@@ -549,14 +549,17 @@ func thenMintStatusCredentialAbsent(w *world.World) error {
 		return fmt.Errorf("scanning behaviour artifacts: %w", err)
 	}
 	if len(found) > 0 {
-		return mintStatusFailure(mintStatusClassAssertion,
-			"write actor PAT found in behaviour artifacts: %s", strings.Join(found, ", "))
+		return mintStatusFailure(mintStatusClassAssertion, "%s",
+			redactText(fmt.Sprintf("write actor PAT found in behaviour artifacts: %s", strings.Join(found, ", "))))
 	}
 	return nil
 }
 
 // filesContaining returns the paths, relative to root, of regular files
 // under root whose content contains needle. A missing root holds none.
+// Scenarios may run concurrently and write into root, so in-progress
+// ".artifact-*" temp files are skipped and a file that vanishes between
+// listing and reading is ignored.
 func filesContaining(root, needle string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -566,11 +569,14 @@ func filesContaining(root, needle string) ([]string, error) {
 			}
 			return err
 		}
-		if !d.Type().IsRegular() {
+		if !d.Type().IsRegular() || strings.HasPrefix(d.Name(), ".artifact-") {
 			return nil
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		if strings.Contains(string(data), needle) {

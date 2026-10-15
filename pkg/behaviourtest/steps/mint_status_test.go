@@ -388,6 +388,15 @@ func TestFilesContaining_MissingRoot(t *testing.T) {
 	assert.Empty(t, found)
 }
 
+func TestFilesContaining_SkipsInProgressTempFiles(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".artifact-123"), []byte("needle"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "done.txt"), []byte("needle"), 0o600))
+	found, err := filesContaining(root, "needle")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"done.txt"}, found)
+}
+
 // writeFakeCLI writes a shell script standing in for the fullsend CLI.
 // It records its arguments and environment under dir and runs body.
 func writeFakeCLI(t *testing.T, dir, body string) string {
