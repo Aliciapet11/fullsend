@@ -147,14 +147,17 @@ func TestOpenCodePermissionRecord(t *testing.T) {
 	rec = openCodePermissionRecord([]string{"Skill", "NoSuchTool"})
 	assert.NotNil(t, rec)
 	assert.Equal(t, []string{"skill"}, openCodeToolNamesSorted(rec))
-	// Every other known tool is explicitly denied.
-	assert.Len(t, rec, len(openCodeAllToolIDs))
+	// Every known tool is explicitly denied, plus a wildcard catch-all.
+	assert.Len(t, rec, len(openCodeAllToolIDs)+1)
+	assert.Equal(t, "deny", rec["*"], "wildcard deny must cover unknown tools")
 	for _, id := range openCodeAllToolIDs {
 		if id != "skill" {
 			assert.Equal(t, "deny", rec[id], "tool %q should be denied", id)
 		}
 	}
 	assert.Equal(t, "deny", openCodePermissionRecord([]string{"Read"})["skill"])
+	// Unrestricted agent (nil) has no wildcard — it uses OpenCode's defaults.
+	assert.Empty(t, openCodePermissionRecord(nil)["*"])
 
 	// Write maps to the "edit" permission key (OpenCode's write tool checks
 	// "edit", not "write"; see write.ts:55 and permission/index.ts).
@@ -228,6 +231,24 @@ func TestIntersectPermissionRecord(t *testing.T) {
 	_, hasBash6 := capped6["bash"]
 	assert.False(t, hasBash6, "bash in patternMapTools must be removed even without a wildcard")
 	assert.Equal(t, "allow", capped6["read"], "read explicitly allowed")
+
+	// Agent WITHOUT Bash (bash: "deny" from deny-all-first) plus a bash
+	// pattern-map in the trusted config: the deny must be kept, not deleted.
+	// Deleting it would leave no agent-level bash rule, and the global
+	// pattern-map's "gh *": allow would apply via findLast — widening bash
+	// for an agent that never asked for it.
+	recNoBash := openCodePermissionRecord([]string{"Read"})
+	assert.Equal(t, "deny", recNoBash["bash"], "bash starts as deny for agent without Bash")
+	cappedNoBash := intersectPermissionRecord(recNoBash, patternMapDenyPolicy, bashPatternMap)
+	assert.Equal(t, "deny", cappedNoBash["bash"], "bash deny must survive patternMapTools pass")
+
+	// Pattern-map-only trusted policy (flat trustedPolicy is empty after
+	// parsing): the agent's flat bash allow must still be deleted.
+	recPMOnly := openCodePermissionRecord([]string{"Bash", "Read"})
+	cappedPMOnly := intersectPermissionRecord(recPMOnly, map[string]string{}, bashPatternMap)
+	_, hasBashPMOnly := cappedPMOnly["bash"]
+	assert.False(t, hasBashPMOnly, "flat allow deleted even when trustedPolicy is empty (pattern-map-only config)")
+	assert.Equal(t, "allow", cappedPMOnly["read"], "read unaffected by pattern-map-only pass")
 }
 
 func TestParseTrustedPermissionPolicy(t *testing.T) {

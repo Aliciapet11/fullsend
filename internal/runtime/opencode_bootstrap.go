@@ -223,9 +223,9 @@ func openCodeAgentMarkdown(agentName string, def *piAgentDef, trustedPolicy map[
 
 // openCodeAllToolIDs is the canonical set of OpenCode permission keys
 // (packages/opencode/src/cli/cmd/agent.ts AVAILABLE_PERMISSIONS plus "write"
-// from the tool registry). Keep in sync with upstream — a missing entry here
-// means that tool silently stays at its default rather than being explicitly
-// denied.
+// from the tool registry). Keep in sync with upstream — a missing entry is
+// caught by the explicit "*": "deny" wildcard emitted for restricted agents,
+// but listing known IDs keeps the record readable and testable.
 var openCodeAllToolIDs = []string{
 	"bash", "edit", "glob", "grep", "lsp", "read", "skill",
 	"task", "todowrite", "webfetch", "websearch", "write",
@@ -250,8 +250,11 @@ func openCodePermissionRecord(claudeTools []string) map[string]string {
 		return map[string]string{}
 	}
 
-	// Start with every known tool denied; allowed tools are overwritten below.
-	rec := make(map[string]string, len(openCodeAllToolIDs))
+	// Start with every known tool denied and a wildcard deny for any tool not
+	// in openCodeAllToolIDs (MCP tools, plugin tools, tools added in later
+	// OpenCode releases). Allowed tools are overwritten below.
+	rec := make(map[string]string, len(openCodeAllToolIDs)+1)
+	rec["*"] = "deny"
 	for _, id := range openCodeAllToolIDs {
 		rec[id] = "deny"
 	}
@@ -354,28 +357,38 @@ func parseTrustedPermissionPolicy(configContent string) (policy map[string]strin
 //   - The wildcard "*" entry in the trusted policy applies to any tool not
 //     explicitly listed in the policy and not in patternMapTools.
 //   - Tools in patternMapTools are governed by a global pattern-map rule
-//     (e.g. bash: {"gh *": "allow", "*": "deny"}). The agent's flat allow
-//     must be deleted from the frontmatter — leaving it would override the
-//     global pattern-map via findLast, widening bash to every command. The
-//     wildcard fallback must also not apply, for the same reason.
+//     (e.g. bash: {"gh *": "allow", "*": "deny"}). A flat "allow" for such
+//     a tool must be deleted from the agent frontmatter — leaving it would
+//     override the global pattern-map via findLast, widening bash to every
+//     command. A flat "deny" is kept as-is because it is already more
+//     restrictive than any pattern-map rule. This pass runs before the
+//     trustedPolicy early return so a policy whose rules are entirely
+//     pattern-map-based still strips flat allows.
 //
 // An empty rec (unrestricted agent) is left empty — the global policy applies.
 func intersectPermissionRecord(rec map[string]string, trustedPolicy map[string]string, patternMapTools map[string]bool) map[string]string {
-	if len(rec) == 0 || len(trustedPolicy) == 0 {
+	if len(rec) == 0 {
 		return rec
 	}
+	// First pass: remove flat allows for pattern-map tools. Must happen before
+	// the trustedPolicy length check so that a trusted config whose permission
+	// block consists entirely of pattern-map rules (trustedPolicy empty after
+	// parsing) still strips the agent's flat allows.
 	for tool, agentAction := range rec {
+		if patternMapTools[tool] && agentAction == "allow" {
+			delete(rec, tool)
+		}
+	}
+	if len(trustedPolicy) == 0 {
+		return rec
+	}
+	// Second pass: cap remaining entries against the flat trusted policy.
+	for tool, agentAction := range rec {
+		if patternMapTools[tool] {
+			continue // already handled; a surviving deny is intentionally kept
+		}
 		policyAction, ok := trustedPolicy[tool]
 		if !ok {
-			// Tools governed by a global pattern-map must be removed from
-			// the agent frontmatter entirely. A flat allow left in the
-			// frontmatter overrides the pattern-map via findLast, widening
-			// the tool to every command rather than just the allowed ones.
-			if patternMapTools[tool] {
-				delete(rec, tool)
-				continue
-			}
-			// Fall back to the wildcard entry.
 			policyAction = trustedPolicy["*"]
 		}
 		if (policyAction == "deny" || policyAction == "ask") && agentAction == "allow" {

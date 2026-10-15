@@ -221,12 +221,15 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 		// from the runner-pinned readonly copies.
 		"&& "+strings.Join(r.EnvExports(), " && "),
 		"&& "+openCodeTrustedEnvRestore(),
-		// Map CLOUD_ML_REGION → GOOGLE_CLOUD_LOCATION for Vertex region parity
-		// with pi (pi_run.go:464). The fleet exports CLOUD_ML_REGION; OpenCode's
-		// google-vertex-anthropic provider reads GOOGLE_CLOUD_LOCATION and falls
-		// back to "global" when it is unset, breaking region and data-residency
-		// parity across runtimes on the same fleet.
-		`&& export GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"`,
+		// Map fleet env vars to the names OpenCode's google-vertex-anthropic
+		// provider reads (mirrors pi_run.go:519 and pi_run.go:464).
+		// GOOGLE_CLOUD_PROJECT: upstream reads GOOGLE_CLOUD_PROJECT ?? GCP_PROJECT
+		// ?? GCLOUD_PROJECT; it does not read ANTHROPIC_VERTEX_PROJECT_ID.
+		// GOOGLE_CLOUD_LOCATION: export only when the resolved value is non-empty;
+		// an unconditional export of "" wins over the upstream JS ?? "global"
+		// fallback (JS ?? treats "" as a value, not as absent).
+		`&& export GOOGLE_CLOUD_PROJECT="${ANTHROPIC_VERTEX_PROJECT_ID:-$GOOGLE_CLOUD_PROJECT}"`,
+		`&& { _gcl="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"; [ -n "$_gcl" ] && export GOOGLE_CLOUD_LOCATION="$_gcl" || true; }`,
 		`&& "$`+openCodePrintfVar+`" '%s' `+shellQuote(configJSON)+" > "+shellQuote(configPath),
 		"&& export "+openCodeRuntimeEnv+"=opencode",
 	)
