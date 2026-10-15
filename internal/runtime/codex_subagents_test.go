@@ -1,15 +1,21 @@
 package runtime
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
 // The gate Run uses to decide that a delegating agent's breakdown must carry
@@ -476,4 +482,116 @@ func TestFoldCodexChildUsage_TwoIterationsSumToTotals(t *testing.T) {
 	}, sum.PerModelUsage, "two parent iterations and one luna child under luna; the terra child alone under terra")
 	assert.Equal(t, codexTokenTotals{1118, 1398, 398, 23016, 41620}, codexTotalsOf(sum))
 	assertCodexUsageSumsToTotals(t, sum)
+}
+
+// runCodexWithChildren runs CodexRuntime.Run against the fake with the given
+// stream fixture and a sessions tree holding the rollouts of the three
+// children the stream spawns, and returns the metrics, the exit code, the
+// printer output and the fake's argv log. delegating sets RoleFiles on the
+// runner-held digests (what Bootstrap records for an agent with the Agent
+// tool).
+func runCodexWithChildren(t *testing.T, streamFixture string, delegating bool) (*RunMetrics, int, string, string) {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "openshell.log")
+	storeDir := t.TempDir()
+	r := CodexRuntime{}
+	seedCodexManifest(t, storeDir, r, nil)
+	if delegating {
+		d, ok := lookupRunnerHeldDigests("sb")
+		require.True(t, ok)
+		d.RoleFiles = map[string]string{"default": "d0d0", "explore": "e0e0"}
+		recordRunnerHeldDigests("sb", d)
+	}
+	sessions := writeCodexChildRollouts(t, codexChildSameModelID, codexChildOtherModelID, codexChildFailedID)
+	fakeOpenshellCodexChildren(t, logPath, storeDir, filepath.Join("testdata", "codex", streamFixture), sessions)
+
+	var out bytes.Buffer
+	metrics := &RunMetrics{}
+	exit, err := r.Run(context.Background(), RunParams{
+		SandboxName: "sb",
+		RepoDir:     "/sandbox/workspace/repo",
+		Model:       "openai/gpt-5.6-luna",
+		Timeout:     time.Minute,
+	}, ui.New(&out), time.Now(), metrics)
+	require.NoError(t, err)
+	return metrics, exit, out.String(), readFileString(t, logPath)
+}
+
+// A run that spawned: metrics.json carries the children. Digests without
+// RoleFiles here, so the spawn in the stream alone is what triggers the read
+// (the second half of the gate).
+func TestCodexRun_FoldsChildUsage(t *testing.T) {
+	metrics, exit, out, log := runCodexWithChildren(t, "collab_spawn.ndjson", false)
+
+	assert.Equal(t, 0, exit)
+	assert.Equal(t, "gpt-5.6-luna", metrics.Model)
+	assert.Equal(t, codexTokenTotals{1018, 1348, 391, 22996, 41590}, codexTotalsOf(metrics),
+		"parent (15/1140/291/13618/40590) plus the luna child (3/8/0/7378/0) plus the terra child (1000/200/100/2000/1000); the failed child nothing")
+	assert.Equal(t, map[string]ModelUsage{
+		"gpt-5.6-luna":  {Requests: 2, InputTokens: 18, OutputTokens: 1148, CacheCreationInputTokens: 20996, CacheReadInputTokens: 40590},
+		"gpt-5.6-terra": {Requests: 1, InputTokens: 1000, OutputTokens: 200, CacheCreationInputTokens: 2000, CacheReadInputTokens: 1000},
+	}, metrics.PerModelUsage)
+	assertCodexUsageSumsToTotals(t, metrics)
+	assert.Zero(t, metrics.TotalCostUSD)
+	assert.Equal(t, 1, metrics.NumTurns, "turns stay parent-only")
+	assert.Contains(t, out, "2 sub-agent thread(s) folded into the run metrics")
+	assert.Equal(t, 1, strings.Count(log, codexChildUsageMarker), "one read command, after the run")
+	assert.Contains(t, log, shellQuote(codexChildFailedID), "the failed child's rollout is read too; it is its content that contributes nothing")
+	assert.NotContains(t, log, codexChildDeniedID, "the failed spawn's receiver is never looked up")
+}
+
+// A delegating agent that dispatched nothing: the breakdown carries the
+// parent's entry and no sandbox command runs (the first half of the gate).
+func TestCodexRun_DelegatingWithoutSpawnHasParentEntry(t *testing.T) {
+	metrics, exit, _, log := runCodexWithChildren(t, "basic_run.ndjson", true)
+
+	assert.Equal(t, 0, exit)
+	assert.Equal(t, map[string]ModelUsage{
+		"gpt-5.6-luna": {Requests: 1, InputTokens: 12, OutputTokens: 284, CacheCreationInputTokens: 11087, CacheReadInputTokens: 32508},
+	}, metrics.PerModelUsage, "the numbers TestApplyCodexMetrics pins for basic_run.ndjson")
+	assertCodexUsageSumsToTotals(t, metrics)
+	assert.NotContains(t, log, codexChildUsageMarker, "no id, no sandbox command")
+}
+
+// The byte-equal invariant: a non-delegating agent whose stream reports no
+// spawn writes the same metrics.json as before.
+func TestCodexRun_NoSpawnNoBreakdown(t *testing.T) {
+	metrics, exit, _, log := runCodexWithChildren(t, "basic_run.ndjson", false)
+
+	assert.Equal(t, 0, exit)
+	assert.Nil(t, metrics.PerModelUsage)
+	data, err := json.Marshal(metrics)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "per_model_usage", "omitempty keeps the key out")
+	assert.NotContains(t, log, codexChildUsageMarker)
+}
+
+// A failed read is a warning; the iteration keeps its exit code and the
+// parent's numbers, and the breakdown keeps the parent's entry.
+func TestCodexRun_ChildReadFailureIsAWarning(t *testing.T) {
+	t.Setenv("FULLSEND_TEST_CHILD_READ_FAIL", "1")
+	metrics, exit, out, _ := runCodexWithChildren(t, "collab_spawn.ndjson", false)
+
+	assert.Equal(t, 0, exit, "losing the breakdown must not fail an iteration that succeeded")
+	assert.Contains(t, out, "! Could not read the sub-agent usage: reading the child rollouts: exited 1: fake openshell: refusing the rollout read")
+	assert.NotContains(t, out, "folded into the run metrics")
+	assert.Equal(t, codexTokenTotals{15, 1140, 291, 13618, 40590}, codexTotalsOf(metrics), "the parent's tokens only")
+	assert.Equal(t, map[string]ModelUsage{
+		"gpt-5.6-luna": {Requests: 1, InputTokens: 15, OutputTokens: 1140, CacheCreationInputTokens: 13618, CacheReadInputTokens: 40590},
+	}, metrics.PerModelUsage)
+	assertCodexUsageSumsToTotals(t, metrics)
+}
+
+// A codex process that did not exit 0 (killed at the timeout, cancelled, or
+// crashed) reports the parent's tokens only and runs no sandbox command:
+// the rollouts of a killed run are not read (docs/cli/run.md).
+func TestCodexRun_NonZeroExitSkipsTheChildRead(t *testing.T) {
+	t.Setenv("FULLSEND_TEST_CODEX_EXIT", "137")
+	metrics, exit, out, log := runCodexWithChildren(t, "collab_spawn.ndjson", true)
+
+	assert.Equal(t, 137, exit)
+	assert.Nil(t, metrics.PerModelUsage)
+	assert.Equal(t, codexTokenTotals{15, 1140, 291, 13618, 40590}, codexTotalsOf(metrics))
+	assert.NotContains(t, log, codexChildUsageMarker)
+	assert.NotContains(t, out, "sub-agent")
 }

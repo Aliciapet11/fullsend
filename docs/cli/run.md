@@ -134,7 +134,7 @@ depend on the process cwd.
 | `total_cost_usd` | Total inference cost in USD, as reported by the runtime (raw floating-point aggregate across all iterations; no fullsend-side pricing-table fallback). See [Cost data contract](../guides/infrastructure/distributed-tracing.md#cost-data-contract) |
 | `num_turns` | Number of conversation turns |
 | `iterations` | Number of agent iterations run; an iteration killed at the budget is not retried (see [Budget and deadline](#budget-and-deadline)) |
-| `per_model_usage` | Per-model breakdown, present only when a runtime reports one (today: `pi` with the `Agent` tool enabled, and `claude` when Claude Code's result carries `modelUsage`). See below |
+| `per_model_usage` | Per-model breakdown, present only when a runtime reports one (today: `pi` with the `Agent` tool enabled, `claude` when Claude Code's result carries `modelUsage`, and `codex` for an agent with registered sub-agent roles or a spawn in its stream). See below |
 | `fallback_from` | Models the run moved off, in the order tried, before `model` took over: models the Vertex project did not serve, and on `claude` any model Claude Code's own `--fallback-model` handling left, for example on overload (`claude` and `pi`; see [Claude Code](../runtimes/claude.md#models)). Absent when the first model ran |
 | `fallback_reasons` | Why the run moved off each `fallback_from` entry, at the same index: `not_served` when the runner retried because the Vertex project does not serve the model, `claude_code:<trigger>` when Claude Code switched models itself (its `model_fallback` trigger, for example `claude_code:last_resort`). Absent when the first model ran |
 
@@ -142,9 +142,11 @@ depend on the process cwd.
 
 A map from model spec to
 `{requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, cost_usd}`.
-On `pi` the key is the pi model spec (`anthropic-vertex/claude-opus-4-6`). It exists because a pi
-sub-agent is a separate `pi` process whose tokens never appear in the parent's stream, so without it
-`total_cost_usd` would grow with no way to attribute it.
+On `pi` the key is the pi model spec (`anthropic-vertex/claude-opus-4-6`); on `codex` it is the bare
+OpenAI id (`gpt-5.6-luna`). It exists because a sub-agent's tokens never appear in the parent's
+stream: a pi sub-agent is a separate `pi` process, and a codex sub-agent is a separate thread whose
+usage codex records only in that thread's rollout. Without it `total_cost_usd` would grow with no
+way to attribute it on pi, and child tokens would be missing from the totals on codex.
 
 On `claude` the key is the model id Claude Code reports (`claude-haiku-4-5@20251001`), with one
 entry per model that ran, sub-agents included. The token totals come from the result event's
@@ -155,7 +157,8 @@ records its last value rather than adding each result's. `requests` has no count
 Code's result and stays `0`. A result without `modelUsage` keeps the parent-only `usage` totals and
 records no breakdown, and an iteration that ends without a result (cancelled at the budget)
 contributes to the totals but not to the breakdown, so the invariant below can fall short in those
-two cases. The rest of this section describes the `pi` breakdown.
+two cases. The rest of this section describes the `pi` breakdown; `codex` follows it, with the
+differences in the last bullet.
 
 - **What folds.** Tokens and cost, from both the parent and every child, summed across retry
   iterations. Each iteration contributes one `requests` for the parent plus one per sub-agent call,
@@ -169,9 +172,14 @@ two cases. The rest of this section describes the `pi` breakdown.
 - **What stays parent-only.** `num_turns` and `tool_calls` are read from the parent's stream and are
   not broken down or added to per model — a child's turns and tool calls are recorded in its own
   session transcript (`transcripts/<agent>-sub<seq>-*.jsonl`) instead.
-- A model spec of `unknown` is a usage record that carries no model spec at all; its cost is
-  bucketed there rather than dropped. A dispatch rejected *before* a model was resolved writes
-  no record, so it never reaches the breakdown.
+- A model spec of `unknown` is a pi usage record, or a codex child rollout, that carries no model
+  at all; its usage is bucketed there rather than dropped. A dispatch rejected *before* a model was
+  resolved writes no record, so it never reaches the breakdown.
+- **On codex.** `cost_usd` is `0` in every entry: codex reports no dollar cost, so compare tokens
+  there. `requests` counts one per child thread that reported usage; `wait`, `send_input` and
+  `close_agent` calls add none, and a child that errored before its first response has no usage
+  and adds no `requests`. A codex run that is cancelled or times out reports the parent's tokens
+  only.
 
 ## Budget and deadline
 

@@ -607,6 +607,11 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 		}
 	}
 
+	// Child thread ids come off a tee of the stream: the parser's events
+	// carry no thread id.
+	childIDs := &codexChildIDs{}
+	reader = io.TeeReader(reader, childIDs)
+
 	handler := params.OnEvent
 	if handler == nil {
 		renderer := NewEventRenderer(printer)
@@ -652,6 +657,21 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 		return exitCode, fmt.Errorf(
 			"codex config.toml in %s no longer pins the run-scoped provider endpoint, its auth command, or leaves the project untrusted; refusing to run because any of those can redirect or replace the runner's credential (did the agent write there between iterations?)",
 			r.ConfigDir())
+	}
+
+	// Children are separate threads whose tokens never reached the stream
+	// just parsed; their rollouts are the only record. Read only after a
+	// clean exit: a killed, cancelled or timed-out iteration reports the
+	// parent's tokens only. A read failure costs the breakdown, not the
+	// iteration.
+	if exitCode == 0 && (digests.delegating() || len(childIDs.IDs) > 0) {
+		n, ferr := r.foldCodexChildUsage(params.SandboxName, childIDs.IDs, metrics)
+		if ferr != nil {
+			printer.StepWarn("Could not read the sub-agent usage: " + sanitizeOutput(ferr.Error()))
+		}
+		if n > 0 {
+			printer.StepInfo(fmt.Sprintf("%d sub-agent thread(s) folded into the run metrics", n))
+		}
 	}
 
 	if exitCode == 0 && lastResult != nil && lastResult.IsError {
