@@ -143,17 +143,8 @@ func (r OpenCodeRuntime) Bootstrap(input BootstrapInput) error {
 		return err
 	}
 
-	if err := duplicateDestinationNameError("skill", input.SkillDirs()); err != nil {
+	if err := uploadHarnessSkills(sandboxName, r.openCodeSkillsPath(), input.SkillDirs()); err != nil {
 		return err
-	}
-	for _, skillPath := range input.SkillDirs() {
-		if skillPath == "" {
-			continue
-		}
-		if err := sandbox.Upload(sandboxName, skillPath, r.openCodeSkillsPath()+"/"); err != nil {
-			return fmt.Errorf("copying skill %q: %w", skillPath, err)
-		}
-		fmt.Fprintf(os.Stderr, "Skill %q: uploaded to sandbox\n", resolveSkillDisplayName(skillPath))
 	}
 
 	for _, p := range input.Plugins() {

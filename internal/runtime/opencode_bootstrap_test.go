@@ -266,14 +266,14 @@ func TestOpenCodeRuntimeBootstrap_DuplicateSkillName(t *testing.T) {
 	store := filepath.Join(work, "store")
 	fakeOpenshellOpenCode(t, logPath, store)
 
-	// Two different skill paths that both resolve to the same sandbox
-	// basename should fail (duplicateDestinationNameError checks base != p).
+	// Two different skill paths that declare the same SKILL.md name land
+	// on the same sandbox destination and should fail.
 	skillDir1 := filepath.Join(t.TempDir(), "my-skill")
 	skillDir2 := filepath.Join(t.TempDir(), "my-skill")
 	require.NoError(t, os.MkdirAll(skillDir1, 0o755))
 	require.NoError(t, os.MkdirAll(skillDir2, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(skillDir1, "SKILL.md"), []byte("---\nname: a\n---\n# a"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(skillDir2, "SKILL.md"), []byte("---\nname: b\n---\n# b"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir1, "SKILL.md"), []byte("---\nname: my-skill\n---\n# a"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir2, "SKILL.md"), []byte("---\nname: my-skill\n---\n# b"), 0o644))
 
 	in := bootstrapInput{
 		sandboxName: "sb",
