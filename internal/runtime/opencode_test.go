@@ -103,6 +103,21 @@ func TestMergedOpenCodeModelAliases(t *testing.T) {
 	assert.Equal(t, openCodeModelAliases["haiku"], merged["haiku"], "fleet default preserved")
 }
 
+func TestOpenCodeModelAliases_CoversDocumentedAliases(t *testing.T) {
+	t.Setenv(openCodeProviderEnv, "")
+	for alias := range openCodeDocumentedAliases {
+		t.Run(alias, func(t *testing.T) {
+			id, ok := openCodeModelAliases[alias]
+			require.True(t, ok, "documented alias %q missing from openCodeModelAliases", alias)
+			require.NotEmpty(t, id, "openCodeModelAliases[%q] must not be empty", alias)
+			spec := translateOpenCodeModel(alias, nil)
+			require.Contains(t, spec, "/", "translated spec must be provider/id, got %q", spec)
+			require.NotEqual(t, openCodeDefaultProvider+"/"+alias, spec,
+				"alias %q should not pass through as bare id", alias)
+		})
+	}
+}
+
 func TestOpenCodeBareModelID(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "claude-opus-4-6@default", openCodeBareModelID("google-vertex-anthropic/claude-opus-4-6@default"))
@@ -194,22 +209,24 @@ func TestIntersectPermissionRecord(t *testing.T) {
 	assert.Equal(t, "deny", capped4["read"], "wildcard deny still applies")
 
 	// Pattern-map tool with wildcard deny: bash has a pattern map in the
-	// global config, so the wildcard "*": "deny" must not cap it. The
-	// global pattern-map rule is the source of truth at runtime.
+	// global config, so the agent's flat bash entry must be DELETED from
+	// the frontmatter — leaving it would override the global pattern-map
+	// via findLast, widening bash to every command.
 	rec5 := openCodePermissionRecord([]string{"Bash", "Read"})
 	patternMapDenyPolicy := map[string]string{"*": "deny"}
 	bashPatternMap := map[string]bool{"bash": true}
 	capped5 := intersectPermissionRecord(rec5, patternMapDenyPolicy, bashPatternMap)
-	assert.Equal(t, "allow", capped5["bash"], "bash has pattern map, wildcard must not cap it")
+	_, hasBash5 := capped5["bash"]
+	assert.False(t, hasBash5, "bash in patternMapTools must be removed from agent frontmatter")
 	assert.Equal(t, "deny", capped5["read"], "read has no pattern map, wildcard deny applies")
 
-	// Pattern-map tool without wildcard: bash pattern map with no wildcard
-	// in the flat policy — agent's allow passes through (global pattern
-	// map applies at runtime via findLast).
+	// Pattern-map tool without wildcard: bash entry must still be deleted
+	// regardless of whether a wildcard exists in the flat policy.
 	rec6 := openCodePermissionRecord([]string{"Bash", "Read"})
 	noWildcardPolicy := map[string]string{"read": "allow"}
 	capped6 := intersectPermissionRecord(rec6, noWildcardPolicy, bashPatternMap)
-	assert.Equal(t, "allow", capped6["bash"], "bash has pattern map, no wildcard to fall back to")
+	_, hasBash6 := capped6["bash"]
+	assert.False(t, hasBash6, "bash in patternMapTools must be removed even without a wildcard")
 	assert.Equal(t, "allow", capped6["read"], "read explicitly allowed")
 }
 

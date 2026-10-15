@@ -87,6 +87,8 @@ content that must be updated whenever a runtime is added or renamed.
   valid-values list if the page documents runtime flags.
 - [x] `docs/cli/github.md` — same as `run.md` if this page documents
   runtime flags.
+- [x] `docs/cli/agent.md` — update the `--runtime` flag tables in the
+  `agent new` and `agent set` command references.
 - [x] `docs/guides/infrastructure/layered-config-reference.md` — update
   the `runtime` field's valid values in the config-key table.
 
@@ -145,8 +147,8 @@ flowchart TB
 
 | Feature | Where it runs | Claude Code | OpenCode | Pi | Codex | Notes for future runtimes |
 |---------|---------------|-------------|-----------------|----|-------|---------------------------|
-| **Host-side context injection scan** (unicode, SSRF patterns on repo context files) | Host + sandbox `scan context` | ✓ | ✓ — runner-side, so identical to other runtimes | ✓ | ✓ — runner-side, so identical to Claude Code and pi | Harness `security.host_scanners`; heuristic scanners only — the DeBERTa ML model was removed from the sandbox in #6522 (its only consumer is the host-side `scan input`, not `scan context`) |
-| **Host-side runtime content scan** (agent def, SKILL.md, and every text file of each declared plugin — `node_modules` included — before upload) | Host (`scanRuntimeContent`) | ✓ | ✓ — runner-side, so identical to other runtimes | ✓ | ✓ — runner-side, so identical to Claude Code and pi | Uses `security.InputPipeline()`; not part of the `Runtime` interface. Extension files over 1 MiB are noted and skipped, and a tree above 20k files is refused in either `fail_mode` |
+| **Host-side context injection scan** (unicode, SSRF patterns on repo context files) | Host + sandbox `scan context` | ✓ | ✗ — disabled by the required `security.enabled: false` workaround; the host scanner and `scan context` pass do not run until #515 lands (see [docs/runtimes/opencode.md](../runtimes/opencode.md)) | ✓ | ✓ — runner-side, so identical to Claude Code and pi | Harness `security.host_scanners`; heuristic scanners only — the DeBERTa ML model was removed from the sandbox in #6522 (its only consumer is the host-side `scan input`, not `scan context`) |
+| **Host-side runtime content scan** (agent def, SKILL.md, and every text file of each declared plugin — `node_modules` included — before upload) | Host (`scanRuntimeContent`) | ✓ | ✗ — disabled by the required `security.enabled: false` workaround; the pre-upload scan does not run until #515 lands (see [docs/runtimes/opencode.md](../runtimes/opencode.md)) | ✓ | ✓ — runner-side, so identical to Claude Code and pi | Uses `security.InputPipeline()`; not part of the `Runtime` interface. Extension files over 1 MiB are noted and skipped, and a tree above 20k files is refused in either `fail_mode` |
 | **Prompt injection (DeBERTa)** | Host `fullsend scan input` only | ✓ in the runner image (built `CGO_ENABLED=1 -tags ORT` with `libtokenizers.a` + ONNX Runtime >= 1.28); ✗ in the release tarballs, which stay `CGO_ENABLED=0` and untagged (#6522) | Same as Claude Code — host-side, not a runtime distinction | Same as Claude Code — host-side, not a runtime distinction | Same as Claude Code — host-side, not a runtime distinction | Shipped enabled only in `ghcr.io/fullsend-ai/fullsend-runner`; the release tarball the composite action downloads has it compiled out, so CI runs never reach it. **Not an active control on the `fullsend run` path either way**: `RunMLScan` is called only from `fullsend scan input`, which nothing in this repo or `fullsend-ai/agents` invokes. See #6506 (decision), #6522 (build constraints) |
 
 ### Sandbox tool hooks (per runtime)

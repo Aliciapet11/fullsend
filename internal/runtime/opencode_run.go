@@ -36,7 +36,16 @@ const (
 var openCodeModelAliases = map[string]string{
 	"opus":   "claude-opus-4-6@default",
 	"sonnet": "claude-sonnet-4-6@default",
-	"haiku":  "claude-haiku-4-5@default",
+	"haiku":  "claude-haiku-4-5@20251001",
+	"fable":  "claude-fable-5-1@default",
+}
+
+// openCodeDocumentedAliases is the set of alias keys the opencode docs and
+// config.ValidModelAliasKeys expose. Every key here must have an entry in
+// openCodeModelAliases; a missing entry causes a live run to pass the bare
+// alias as a provider id and fail at the first model call.
+var openCodeDocumentedAliases = map[string]bool{
+	"opus": true, "sonnet": true, "haiku": true, "fable": true,
 }
 
 // translateOpenCodeModel resolves the harness/agent model into OpenCode's

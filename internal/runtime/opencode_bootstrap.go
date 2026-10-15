@@ -354,10 +354,10 @@ func parseTrustedPermissionPolicy(configContent string) (policy map[string]strin
 //   - The wildcard "*" entry in the trusted policy applies to any tool not
 //     explicitly listed in the policy and not in patternMapTools.
 //   - Tools in patternMapTools are governed by a global pattern-map rule
-//     (e.g. bash: {"gh *": "allow", "*": "deny"}). The wildcard fallback
-//     must not apply to them — the global pattern map is the source of truth
-//     at runtime, and a flat deny/ask from the wildcard would override the
-//     per-command allows the pattern map defines.
+//     (e.g. bash: {"gh *": "allow", "*": "deny"}). The agent's flat allow
+//     must be deleted from the frontmatter — leaving it would override the
+//     global pattern-map via findLast, widening bash to every command. The
+//     wildcard fallback must also not apply, for the same reason.
 //
 // An empty rec (unrestricted agent) is left empty — the global policy applies.
 func intersectPermissionRecord(rec map[string]string, trustedPolicy map[string]string, patternMapTools map[string]bool) map[string]string {
@@ -367,10 +367,12 @@ func intersectPermissionRecord(rec map[string]string, trustedPolicy map[string]s
 	for tool, agentAction := range rec {
 		policyAction, ok := trustedPolicy[tool]
 		if !ok {
-			// Tools with a pattern-map rule in the global config must
-			// not fall back to the wildcard — the per-command pattern
-			// map is more specific and applies at runtime.
+			// Tools governed by a global pattern-map must be removed from
+			// the agent frontmatter entirely. A flat allow left in the
+			// frontmatter overrides the pattern-map via findLast, widening
+			// the tool to every command rather than just the allowed ones.
 			if patternMapTools[tool] {
+				delete(rec, tool)
 				continue
 			}
 			// Fall back to the wildcard entry.

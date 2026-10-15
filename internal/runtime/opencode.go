@@ -43,10 +43,12 @@ func (OpenCodeRuntime) System() string { return "opencode" }
 // and lives outside the cloned repo tree so the target repo cannot pre-seed
 // it and a workspace reset does not clear it (path convention pinned by #515).
 //
-// The directory is owned by root and has mode 0750 (group sandbox), so the
-// sandbox user can read and traverse it but cannot write or create files
-// inside it. Bootstrap uploads runner-owned files (opencode.json, skill files,
-// the hook plugin adapter) via openshell, which runs as root on the host side.
+// The directory is owned by root and has mode 0775 (group sandbox), so the
+// sandbox user (gid sandbox) can create subdirectories and write files inside
+// it. The run prelude writes opencode.json here on each iteration; Bootstrap
+// additionally uploads agent definitions and skills via openshell. Full
+// config-dir lockdown (dropping to 0750 with all writes via openshell) is
+// deferred to #7824 alongside the hook adapter.
 //
 // OpenCode treats a directory as a config dir when it ends in ".opencode" or
 // equals OPENCODE_CONFIG_DIR (config/config.ts:425), so the runner-owned dir

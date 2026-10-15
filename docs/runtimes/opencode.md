@@ -49,9 +49,17 @@ same Vertex WIF credentials cover the Anthropic-on-Vertex provider the injected 
 
 ## Config discovery
 
-OpenCode's config directory is **runner-owned**, off the agent-writable workspace, and pointed at
-OpenCode with `OPENCODE_CONFIG_DIR` (`/sandbox/opencode-config`). The target repo cannot pre-seed it
-and a workspace reset does not clear it. The injected `OPENCODE_CONFIG_CONTENT` (Vertex provider +
+OpenCode's config directory is off the agent-writable workspace and pointed at OpenCode with
+`OPENCODE_CONFIG_DIR` (`/sandbox/opencode-config`). The target repo cannot pre-seed it and a
+workspace reset does not clear it.
+
+> **Current limitation (#7824).** The directory is group-writable (mode 0775, group sandbox), so
+> the sandbox user can replace `agent/<name>.md` or add files under `plugins/` and `skills/`.
+> Changes written within a run carry over to later iterations. Full lockdown (mode 0750, all writes
+> via openshell as root) is deferred to #7824 alongside the hook adapter. Until it lands, use
+> OpenCode only with read-only agents on disposable repos.
+
+The injected `OPENCODE_CONFIG_CONTENT` (Vertex provider +
 tool-permission policy) provides the global defaults in OpenCode's config stack.
 
 Agent-level permission records (emitted in the agent frontmatter by Bootstrap) are evaluated after
