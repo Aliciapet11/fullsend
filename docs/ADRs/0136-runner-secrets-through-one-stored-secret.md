@@ -76,6 +76,13 @@ These rules apply to names in the GitHub object:
   guarded only by `runtime.forge` and `config`, until ADR 0112's guarded-field
   check is implemented.
 
+> **Note (2026-10, [#3373](https://github.com/fullsend-ai/fullsend/issues/3373)):**
+> "Sandbox-reserved" in the refused-names rule above meant the
+> runner-infrastructure names; "credential" meant the OIDC and provider-only
+> keys, not the wider credential-class deny-list. The later merge of that
+> deny-list into `reservedSandboxKeys` was decoupled from this refusal; see
+> the harness reference for the current split.
+
 GitLab is unchanged: a JSON bundle does not fit GitLab's per-variable masking,
 each secret stays its own masked CI/CD variable, and none of these rules apply
 there. Keeping fullsend's own credentials out of GitLab host-side scripts is

@@ -14,6 +14,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/harness"
 	"github.com/fullsend-ai/fullsend/internal/prescript"
+	"github.com/fullsend-ai/fullsend/internal/sandbox"
 	"github.com/fullsend-ai/fullsend/internal/security"
 	"github.com/fullsend-ai/fullsend/internal/ui"
 	"gopkg.in/yaml.v3"
@@ -406,6 +407,119 @@ func TestRunnerSecretNameRefused_AllowsOrdinaryNames(t *testing.T) {
 	for _, name := range []string{"JIRA_TOKEN", "JIRA_USER_EMAIL", "JIRA_BASE_URL", "OTEL_EXPORTER_OTLP_HEADERS",
 		"GIT_BOT_EMAIL", "OPENSHELL_VERSION", "TARGET_REPO_DIR", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CORE_PROJECT"} {
 		assert.True(t, runnerSecretNameRefused(name), name)
+	}
+}
+
+// TestRunnerSecretNameRefused_AllowsCredentialClassNames pins the two-door
+// split introduced with #3373: credential-class names are refused by the
+// env.sandbox gate (isReservedSandboxKey) because they are dangerous inside
+// the sandbox child, but they are accepted as runner-secret keys because
+// runner secrets stay on the host side for host-side scripts. Before this
+// split, runnerSecretNameRefused read reservedSandboxKeys directly, so the
+// #3373 merge made every credential name also fail the runner-secret bundle
+// check, breaking legitimate host-side proxy and CA configuration.
+//
+// The credential half reads sandbox.ReservedCredentialKeys() live rather
+// than copying names, following the package's drift-guard convention: a
+// name added to the credential list is pinned for both doors the moment
+// it is added. Names that are dual-class — both credential-list entries
+// and runner infrastructure — are asserted as refused at both doors, not
+// skipped. The dual-class set comes from reservedInfraSandboxKeys
+// (run_reserved_credential_env_test.go), which is maintained by hand: a
+// name later added to both the credential list and the infrastructure
+// literals fails this test until that slice is updated. LD_- and
+// DYLD_-prefixed credential names are refused at the runner-secret door by
+// the matching prefixes in runnerSecretRefusedPrefixes, because the dynamic
+// loader reads them on the host side too.
+func TestRunnerSecretNameRefused_AllowsCredentialClassNames(t *testing.T) {
+	t.Parallel()
+
+	credentialKeys := sandbox.ReservedCredentialKeys()
+	require.NotEmpty(t, credentialKeys, "no credential names to probe; this test is vacuous")
+
+	// Dual-class names: in the credential list AND the runner infrastructure
+	// literals, taken from the hand-maintained reservedInfraSandboxKeys.
+	dualClass := make(map[string]bool, len(reservedInfraSandboxKeys))
+	for _, name := range reservedInfraSandboxKeys {
+		dualClass[name] = true
+	}
+
+	for _, name := range credentialKeys {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.True(t, isReservedSandboxKey(name),
+				"%s must be refused by the env.sandbox gate", name)
+
+			if dualClass[name] || strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_") {
+				// Also refused as a runner-secret key: runner infrastructure
+				// (PATH, HOME, SHELL, BASH_ENV, ENV) or dynamic-loader names.
+				assert.True(t, runnerSecretNameRefused(name),
+					"%s is dual-class (credential and infrastructure) and must stay refused at both doors", name)
+			} else {
+				assert.False(t, runnerSecretNameRefused(name),
+					"%s is credential-class only: refused in env.sandbox, not as a runner-secret key for host-side scripts", name)
+			}
+		})
+	}
+
+	// Runner-only infrastructure names (not in the credential list) stay
+	// refused at both doors.
+	t.Run("TRACEPARENT", func(t *testing.T) {
+		t.Parallel()
+
+		assert.True(t, runnerSecretNameRefused("TRACEPARENT"),
+			"TRACEPARENT is runner infrastructure and must stay refused as a runner-secret key")
+		assert.True(t, isReservedSandboxKey("TRACEPARENT"),
+			"TRACEPARENT must also stay refused by the env.sandbox gate")
+	})
+}
+
+// TestRunnerSecretNameRefused_CoversNonCredentialSandboxNames is the drift
+// guard for the two-door split: every name in reservedSandboxKeys that does
+// not come from sandbox.ReservedCredentialKeys() must still be refused as a
+// runner-secret key. Before the split, reading reservedSandboxKeys directly
+// provided this coverage for free. Now that runnerSecretNameRefused uses its
+// own set, a non-prefixed infrastructure name added to the sandbox map
+// without a corresponding runnerSecretRefusedNames entry would silently
+// stop being refused here. This test catches that divergence the same way
+// TestReservedSandboxKeys_CoversReservedCredentialKeys pins the credential
+// merge and internal/sandbox/reserved_env_drift_test.go pins the
+// plugin-superset invariant.
+func TestRunnerSecretNameRefused_CoversNonCredentialSandboxNames(t *testing.T) {
+	t.Parallel()
+
+	keys := sandbox.ReservedCredentialKeys()
+	credentialNames := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		credentialNames[k] = true
+	}
+	require.NotEmpty(t, credentialNames, "no credential names to exclude; the drift check is vacuous")
+
+	for name := range reservedSandboxKeys {
+		if credentialNames[name] {
+			// Dual-class names (PATH, HOME, SHELL, LD_PRELOAD, etc.) are
+			// pinned in AllowsCredentialClassNames above; names that are
+			// credential-only are deliberately allowed at this door. This
+			// test covers the non-credential infrastructure half only.
+			continue
+		}
+		assert.True(t, runnerSecretNameRefused(name),
+			"%s is in reservedSandboxKeys but not from the credential list; it must stay refused as a runner-secret key. Add it to runnerSecretRefusedNames or a refused prefix.", name)
+	}
+}
+
+// TestRunnerSecretNameRefused_CaseInsensitive pins the case fold: a
+// lowercase or mixed-case key is refused exactly when its uppercase form
+// is, and credential-class names stay allowed in any case.
+func TestRunnerSecretNameRefused_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"path", "Home", "github_x", "ld_preload", "dyld_library_path", "fullsend_x", "jira_token"} {
+		assert.True(t, runnerSecretNameRefused(name), "%s must be refused regardless of case", name)
+	}
+	for _, name := range []string{"https_proxy", "ssl_cert_file", "my_secret"} {
+		assert.False(t, runnerSecretNameRefused(name), "%s must stay allowed", name)
 	}
 }
 

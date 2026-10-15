@@ -37,6 +37,9 @@ var runnerSecretRefusedPrefixes = []string{
 	"RUNNER_",
 	"CI_",
 	"LD_",
+	// macOS dynamic-linker injection (#3373). The plugin door refuses the
+	// whole prefix; the env.sandbox gate refuses only DYLD_INSERT_LIBRARIES.
+	"DYLD_",
 	"OTEL_",
 	// google-github-actions/auth exports these for the job.
 	"GOOGLE_",
@@ -66,14 +69,35 @@ var workflowSetEnvNames = []string{
 
 // runnerSecretRefusedNames are minted role tokens and other runner-owned
 // names outside the refused families: GH_TOKEN, every role token in
-// roleTokenVars, GITLAB_TOKEN, PATH and workflowSetEnvNames. oidcDenyKeys, providerOnlyKeys and
-// reservedSandboxKeys are refused as well (runnerSecretNameRefused), which
-// keeps GH_WORKFLOW_TOKEN (ADR 0114) unforgeable.
+// roleTokenVars, GITLAB_TOKEN, PATH and workflowSetEnvNames. oidcDenyKeys and
+// providerOnlyKeys are refused as well via harnessExpansionDenied
+// (runnerSecretNameRefused), which keeps GH_WORKFLOW_TOKEN (ADR 0114)
+// unforgeable. The runner infrastructure names HOME, SHELL, BASH_ENV, ENV and
+// TRACEPARENT are listed here rather than read from reservedSandboxKeys:
+// #3373 widened that map with credential-class names (proxy, TLS trust, git,
+// interpreter, loader and shell-behavior) that are dangerous inside the
+// sandbox child but not as host-side runner-secret keys for host-side
+// scripts. Sharing the map made every credential name also fail the
+// runner-secret bundle check after the merge, breaking legitimate host-side
+// proxy and CA configuration. The two doors keep separate name sets on
+// purpose.
+//
+// NOTE: HOME, SHELL, BASH_ENV, ENV and TRACEPARENT are also literals in
+// reservedSandboxKeys in run.go; keep both sites in sync. The four
+// process-loading names (HOME, SHELL, BASH_ENV, ENV) are pinned at this
+// door by TestRunnerSecretNameRefused_AllowsCredentialClassNames (the
+// dualClass set); TRACEPARENT is pinned by
+// TestRunnerSecretNameRefused_CoversNonCredentialSandboxNames.
 var runnerSecretRefusedNames = func() map[string]bool {
 	names := map[string]bool{
 		"GH_TOKEN":     true,
 		"GITLAB_TOKEN": true,
 		"PATH":         true,
+		"HOME":         true,
+		"SHELL":        true,
+		"BASH_ENV":     true,
+		"ENV":          true,
+		"TRACEPARENT":  true,
 	}
 	for _, n := range workflowSetEnvNames {
 		names[n] = true
@@ -98,13 +122,17 @@ func runnerSecretDisplayName(name string) string {
 
 // runnerSecretNameRefused reports whether name is runner-owned and so may
 // neither be a key in FULLSEND_GITHUB_RUNNER_SECRETS nor receive a runner secret
-// value as an env.runner key.
+// value as an env.runner key. Matched case-insensitively, consistent with
+// the env.sandbox gate (isReservedSandboxKey), so "path" is refused like
+// "PATH" (zsh ties a few lowercase arrays such as path to their uppercase
+// scalars).
 func runnerSecretNameRefused(name string) bool {
-	if harnessExpansionDenied(name) || reservedSandboxKeys[name] || runnerSecretRefusedNames[name] {
+	upper := strings.ToUpper(name)
+	if harnessExpansionDenied(upper) || runnerSecretRefusedNames[upper] {
 		return true
 	}
 	for _, p := range runnerSecretRefusedPrefixes {
-		if strings.HasPrefix(name, p) {
+		if strings.HasPrefix(upper, p) {
 			return true
 		}
 	}
