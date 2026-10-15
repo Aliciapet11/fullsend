@@ -9,7 +9,9 @@ Guides for onboarding organizations and configuring GitHub or GitLab — the fir
 - [Mint enrollment](getting-started/README.md) — Enroll your repo in a token mint before configuring anything else
 - [Getting Inference](getting-started/getting-inference.md) — Provision GCP inference access for your org or repo
 - [Configuring GitHub](getting-started/configuring-github.md) — Install GitHub Apps and run the setup CLI
-- [Configuring GitLab](getting-started/configuring-gitlab.md) — Install via `repos install --forge gitlab`, runners, polling, and role-credential lifecycle
+- [Configuring GitLab](getting-started/configuring-gitlab.md) — Declare the project in `repos.yaml`, install with `repos install`, runners, polling, and role-credential lifecycle
+- [Repo Management](getting-started/repo-management.md) — Manage many repositories from a declarative `repos.yaml` manifest
+- [Migrating to manifest-driven `repos install`](getting-started/migrating-from-github-setup.md) — Move `github setup` installations and flag-driven `repos install` scripts to `repos.yaml`
 
 ## Operations & Advanced Setup
 

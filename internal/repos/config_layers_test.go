@@ -279,45 +279,6 @@ func TestEnsureManagedConfigDefaults_ReadOnlyLocalManifestFailsBeforeWrite(t *te
 	}
 }
 
-func TestRequireWritableManifestForCarved(t *testing.T) {
-	ctx := context.Background()
-	for _, f := range layerForges {
-		t.Run(f, func(t *testing.T) {
-			m := &Manifest{Version: 1, Defaults: testInferenceDefaults()}
-			platform := m.EnsurePlatform(f)
-			platform.Repos = []RepoEntry{
-				{Name: "acme/*", Config: mustManagedConfig(t, "runtime: pi\n")},
-				{Name: "acme/api", Config: mustManagedConfig(t, "runtime: pi\n"), Vendor: boolPtr(true)},
-			}
-			fc := newFakeClientForBatch("acme/api")
-
-			require.NoError(t, RequireWritableManifestForCarved(ctx, m, filepath.Join(t.TempDir(), "repos.yaml"), []string{"acme/api"}, newTestClientFactory(fc), nil, false),
-				"a writable manifest needs no suggestion")
-			require.NoError(t, RequireWritableManifestForCarved(ctx, m, "https://example.com/repos.yaml", nil, newTestClientFactory(fc), nil, false))
-
-			err := RequireWritableManifestForCarved(ctx, m, "https://example.com/repos.yaml", []string{"acme/api"}, newTestClientFactory(fc), []string{"triage"}, true)
-			require.Error(t, err)
-			msg := err.Error()
-			assert.Contains(t, msg, "read-only")
-			assert.Contains(t, msg, f+".repos")
-			for _, want := range []string{"name: acme/api", "runtime: pi", "vendor: true", "- fullsend-ai/fullsend", "- triage"} {
-				assert.Contains(t, msg, want, "the exact carved entry with other per-entry flags and install defaults")
-			}
-
-			fc.FileContents["acme/api/"+preset.OverlayPath] = []byte(managedConfigMarker + "{}\n")
-			err = RequireWritableManifestForCarved(ctx, m, "https://example.com/repos.yaml", []string{"acme/api"}, newTestClientFactory(fc), nil, false)
-			require.Error(t, err)
-			assert.NotContains(t, err.Error(), "fullsend-ai/fullsend", "no install defaults once an overlay exists")
-		})
-	}
-
-	m := newConvergeManifest("acme/api")
-	err := RequireWritableManifestForCarved(ctx, m, "https://example.com/repos.yaml", []string{"acme/api"}, failingFactory{}, nil, false)
-	require.Error(t, err)
-}
-
-func boolPtr(b bool) *bool { return &b }
-
 func TestStatus_BothLayersReportedBeforeInstall(t *testing.T) {
 	ctx := context.Background()
 	presetPath := writePresetFile(t, relaxingPreset)

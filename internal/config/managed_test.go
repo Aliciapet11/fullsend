@@ -313,6 +313,47 @@ func TestLayerOnBase_EmptyBaseUsesCodeDefaults(t *testing.T) {
 	assert.Equal(t, PerRepoDefaultRoles(), effective.ConfigRoles())
 }
 
+func TestDeclaredInfrastructureValues_OverlayWinsOverBaseWithoutCodeDefaults(t *testing.T) {
+	var overlay ManagedConfig
+	require.NoError(t, yaml.Unmarshal([]byte(`
+inference:
+  region: us-east5
+`), &overlay))
+	base := []byte(`
+mint_url: https://base.example.com
+inference:
+  project: base-project
+  region: europe-west1
+  wif_provider: projects/1/locations/global/workloadIdentityPools/p/providers/x
+`)
+	got, err := DeclaredInfrastructureValues(overlay.Writer(), base)
+	require.NoError(t, err)
+	assert.Equal(t, DeclaredInfrastructure{
+		MintURL:              "https://base.example.com",
+		InferenceProject:     "base-project",
+		InferenceRegion:      "us-east5",
+		InferenceWIFProvider: "projects/1/locations/global/workloadIdentityPools/p/providers/x",
+	}, got)
+	// The overlay is not mutated by the computation.
+	assert.Equal(t, DefaultPerRepoMintURL, overlay.Writer().ConfigMintURL())
+}
+
+func TestDeclaredInfrastructureValues_NothingDeclaredIsEmpty(t *testing.T) {
+	got, err := DeclaredInfrastructureValues(nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, DeclaredInfrastructure{}, got, "code defaults (public mint, global region) are not declared values")
+
+	got, err = DeclaredInfrastructureValues(NewEmptyPerRepoOverlay(), []byte("roles: [triage]\n"))
+	require.NoError(t, err)
+	assert.Equal(t, DeclaredInfrastructure{}, got)
+}
+
+func TestDeclaredInfrastructureValues_InvalidBase(t *testing.T) {
+	_, err := DeclaredInfrastructureValues(nil, []byte("mint_url: [unterminated"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parsing base config")
+}
+
 func TestManagedConfig_RejectsNestedUnknownField(t *testing.T) {
 	var o ManagedConfig
 	err := yaml.Unmarshal([]byte("inference:\n  bogus: true\n"), &o)
@@ -528,7 +569,7 @@ func TestManagedConfig_MarshalOmitsUnset(t *testing.T) {
 	assert.False(t, strings.Contains(string(encoded), "config:"), "unset overlay must be omitted")
 }
 
-func TestManagedConfig_WithCreateIssuesReposAndRoles(t *testing.T) {
+func TestManagedConfig_WithCreateIssuesRepos(t *testing.T) {
 	var base ManagedConfig
 	require.NoError(t, yaml.Unmarshal([]byte("keep_history: false\n"), &base))
 
@@ -540,15 +581,11 @@ func TestManagedConfig_WithCreateIssuesReposAndRoles(t *testing.T) {
 	assert.False(t, withIssues.Writer().ConfigKeepHistory(), "existing values are kept")
 	assert.Nil(t, base.Writer().IssueCreationConfig(), "the receiver is not modified")
 
-	withRoles := withIssues.WithRoles([]string{"fix"})
-	assert.Equal(t, []string{"fix"}, withRoles.Writer().ConfigRoles())
-	assert.NotNil(t, withRoles.Writer().IssueCreationConfig())
-
 	// An unset receiver yields a set, otherwise-empty configuration.
-	fromZero := ManagedConfig{}.WithRoles([]string{"triage"})
+	fromZero := ManagedConfig{}.WithCreateIssuesRepos([]string{"fullsend-ai/fullsend"})
 	require.True(t, fromZero.IsSet())
-	assert.Equal(t, []string{"triage"}, fromZero.Writer().ConfigRoles())
-	assert.Nil(t, fromZero.Writer().IssueCreationConfig())
+	assert.NotNil(t, fromZero.Writer().IssueCreationConfig())
+	assert.Equal(t, PerRepoDefaultRoles(), fromZero.Writer().ConfigRoles(), "roles are not declared")
 }
 
 func TestManagedConfig_ExplicitAllowedRemoteResources(t *testing.T) {

@@ -297,6 +297,18 @@ inference:
 #   inference.wif_provider: ...base... (from base)
 ```
 
+`fullsend repos install` resolves `mint_url`, `inference.project`,
+`inference.region`, and `inference.wif_provider` the same way from the
+managed configuration layered over the declared preset (the layers it
+commits), and uses the declared values for the installed
+`FULLSEND_MINT_URL` and `FULLSEND_GCP_REGION` variables and the
+`FULLSEND_GCP_PROJECT_ID` / `FULLSEND_GCP_WIF_PROVIDER` secrets, so the
+committed configuration and the repository variables agree. Install, dry
+run and `repos status` use the same values. The code-default `global`
+region is not treated as declared: without a declared `inference.region`,
+install keeps an existing `FULLSEND_GCP_REGION`. See
+[Effective infrastructure values](../../cli/repos.md#effective-infrastructure-values).
+
 ### `models.aliases` — per-key merge
 
 `models.aliases` overrides fullsend's pinned model alias table per key

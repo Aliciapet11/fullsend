@@ -45,8 +45,9 @@ provider, that guide's Route C uses a `FULLSEND_OPENAI_API_KEY` repository secre
 
 For **GitLab repos**, create the GCP project as described below, but skip
 `fullsend inference provision`, which is GitHub-only. A platform operator creates a shared
-`gitlab-oidc` provider and its IAM bindings, and `repos install --vertex-project` only writes the
-CI/CD variables that reference it. See [Configuring GitLab](configuring-gitlab.md#inference-setup).
+`gitlab-oidc` provider and its IAM bindings. Declare `inference.project` in
+`repos.yaml` or pass `repos install --vertex-project` to write the CI/CD variables
+that reference it. See [Configuring GitLab](configuring-gitlab.md#inference-setup).
 If GCP cannot reach your GitLab instance over the public internet, see
 [Private OIDC issuers (uploaded JWKS)](configuring-gitlab.md#private-oidc-issuers-uploaded-jwks).
 

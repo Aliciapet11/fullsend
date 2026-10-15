@@ -625,13 +625,12 @@ func TestBuildScaffoldFiles_WithPreset(t *testing.T) {
 // the preset's own roles/allowed_remote_resources — the same bug
 // `github setup --config` avoids via buildPresetOverlay's stub overlay.
 // When the caller did not explicitly request roles (cfg.Roles is empty,
-// matching converge.go's fresh-install path when --roles was not
-// passed), the overlay must leave roles/allowed_remote_resources unset
+// matching converge.go's fresh-install path with a declared preset), the overlay must leave roles/allowed_remote_resources unset
 // so the preset's values take effect through the overlay -> base
 // fallback chain.
 func TestBuildScaffoldFiles_PresetOverlayDoesNotShadowPresetRoles(t *testing.T) {
 	cfg := baseCfg()
-	cfg.Roles = nil // no explicit --roles override
+	cfg.Roles = nil // no explicit roles
 	presetYAML := "version: \"1\"\n" +
 		"roles:\n  - triage\n  - review\n" +
 		"allowed_remote_resources:\n  - https://raw.githubusercontent.com/acme/private-agents/\n"

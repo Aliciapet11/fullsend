@@ -568,8 +568,9 @@ func deleteGitLabPollStateBranches(ctx context.Context, client forge.Client, own
 // that accept glob patterns must filter them out before calling this.
 //
 // Validation uses gitlabRepoNamePattern (2+ segments) rather than the
-// stricter repoNamePattern because splitOwnerRepo runs before the forge
-// is resolved; forge-specific validation already occurs at install time.
+// stricter two-segment GitHub owner/repo format because splitOwnerRepo
+// runs before the forge is resolved; forge-specific validation already
+// occurs at install time.
 func splitOwnerRepo(fullName string) (string, string, error) {
 	if !gitlabRepoNamePattern.MatchString(fullName) {
 		return "", "", fmt.Errorf("invalid repo format %q: expected owner/repo[/subgroup/...] using alphanumeric, dash, dot, or underscore characters", fullName)

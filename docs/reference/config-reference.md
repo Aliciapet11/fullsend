@@ -273,11 +273,29 @@ set this to their own URL. See
 [Standalone Mint](../guides/infrastructure/standalone-mint.md) and
 [Mint Administration](../guides/infrastructure/mint-administration.md).
 
+For GitHub repositories managed with `fullsend repos install`, a `mint_url`
+declared in the managed configuration (`config.mint_url` in `repos.yaml`) or
+the `config_base` preset also sets the `FULLSEND_MINT_URL` repository
+variable. Install, dry run and `repos status` report a conflict when it
+differs from the manifest's own `mint_url`. See
+[Effective infrastructure values](../cli/repos.md#effective-infrastructure-values).
+
 ### `inference`
 
 Groups inference backend settings under a single key. Each subfield resolves
 independently through the layered config system (an overlay can override
 `project` without restating `provider`).
+
+For repositories managed with `fullsend repos install`, `project`, `region`
+and `wif_provider` in the managed configuration or `config_base` preset
+feed the installed credentials: a declared `region` manages the
+`FULLSEND_GCP_REGION` variable for `vertex-wif` and `openai-wif`
+repositories (with none declared, an existing variable is kept and
+`global` is written only where it is missing), and `project` / `wif_provider` are written to the
+`FULLSEND_GCP_PROJECT_ID` / `FULLSEND_GCP_WIF_PROVIDER` secrets unless
+`--vertex-project` / `--vertex-wif-provider` supply them (a disagreeing
+flag is an error). See
+[Effective infrastructure values](../cli/repos.md#effective-infrastructure-values).
 
 - **`provider`** — Inference backend identifier. Currently only `vertex`.
   Default: `vertex`.

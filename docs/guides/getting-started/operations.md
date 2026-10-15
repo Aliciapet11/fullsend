@@ -48,25 +48,26 @@ edit them in GitHub's repository Actions variables settings rather than using `f
 
 `FULLSEND_APP_SET` (GitHub App set prefix; apps named `{app-set}-{role}`,
 defaulting to `fullsend-ai`) is not one of the keys `fullsend github set`
-accepts. It is set by the installer from `--app-set` / `app_set`, and
-reruns preserve a custom value and repair drift or absence; to change it
-after the fact, update `app_set` in `repos.yaml` and run
-`fullsend repos install`, or use `fullsend github setup --app-set`.
+accepts. It is set by `fullsend github setup --app-set` or, for manifest-managed
+repositories, from `app_set` in `repos.yaml`, and reruns preserve a custom value
+and repair drift or absence. To change it after the fact, run
+`fullsend repos set github.app_set <prefix>` (or set it on the repository entry)
+and then `fullsend repos install`, or use `fullsend github setup --app-set`.
 
 ### GitLab
 
-For initial GitLab setup, see [Configuring GitLab](configuring-gitlab.md). Secrets are checked for presence only, so `repos install` cannot update the *value* of an existing `FULLSEND_GCP_PROJECT_ID` or `FULLSEND_GCP_WIF_PROVIDER` — once those CI/CD secrets exist, a new `--vertex-project` is a silent no-op for them. To change either one, edit the CI/CD variable directly in GitLab (Settings → CI/CD → Variables), since converge cannot read secret values back to compare or overwrite them.
+For initial GitLab setup, see [Configuring GitLab](configuring-gitlab.md). Secrets are checked for presence only: converge cannot read secret values back to compare them, so it never reports drift in `FULLSEND_GCP_PROJECT_ID` or `FULLSEND_GCP_WIF_PROVIDER`. Instead, whenever a project is supplied, by `--vertex-project` or by an `inference.project` declared in the managed configuration, every install rewrites both secrets from the supplied values. To change the project or WIF provider, update the declared `inference.project` / `inference.wif_provider` in `repos.yaml` (or pass the new value with `--vertex-project` / `--vertex-wif-provider` when nothing is declared) and run `fullsend repos install`. When neither supplies a project, existing secrets are reused unchanged.
 
-`FULLSEND_GCP_REGION` is also a variable (not a secret), but converge treats
-`--vertex-project` and `--vertex-region` as an all-or-nothing set when
-`--vertex-wif-provider` isn't set — passing
-`--vertex-region` alone fails with `incomplete inference flags`. To update
-the region through converge, pass both flags, for example
-`fullsend repos install <group/project> --vertex-project <id>
---vertex-region <region>`. This updates the plain `FULLSEND_GCP_REGION`
-variable; the presence-only-checked project and WIF-provider secrets still
-must be edited directly in GitLab (Settings → CI/CD → Variables). Editing the
-region there remains an alternative.
+`FULLSEND_GCP_REGION` is a plain variable. To change the region through
+converge, declare it in `repos.yaml`, for example
+`fullsend repos set 'gitlab.repos["<group/project>"].config.inference.region' us-east5`,
+then run `fullsend repos install`. A declared region is managed: install
+repairs a value that differs and `repos status` reports the drift. Without
+a declared region, install keeps the existing variable as it is (so a
+region edited by hand in Settings → CI/CD → Variables stays) and writes
+`global` only where the variable is missing and Vertex credentials are
+being written. See
+[Effective infrastructure values](../../cli/repos.md#effective-infrastructure-values).
 
 | Key | Storage Type | Description | Example value |
 |-----|-------------|-------------|---------------|
@@ -88,7 +89,7 @@ region there remains an alternative.
 
 ### Per-repo configuration in `repos.yaml`
 
-For repositories managed through `repos.yaml` (every GitLab install, and GitHub fleets), `.fullsend/config.yaml` is managed: change per-repo config values — including `runtime` and `allowed_remote_resources` — in `defaults.config`, `github.config`, `gitlab.config`, or the repository entry's `config`, then run `fullsend repos install`. `repos install` has no `--runtime` or `--allowed-remote-resources` flag; edit the manifest by hand or with `fullsend repos set` (for example `fullsend repos set defaults.config.runtime claude`). The former sibling keys (`defaults.runtime`, `defaults.allowed_remote_resources`, and their repository-entry equivalents) are rejected with the replacement path. See [Repo Management — Managed configuration](repo-management.md#managed-configuration).
+For repositories managed through `repos.yaml` (every GitLab install, and GitHub fleets), `.fullsend/config.yaml` is managed: change per-repo config values — including `runtime` and `allowed_remote_resources` — in `defaults.config`, `github.config`, `gitlab.config`, or the repository entry's `config`, then run `fullsend repos install`. `repos install` has no configuration flags (no `--runtime`, `--allowed-remote-resources`, `--roles`, `--vertex-region`, or the other removed flags listed in [`fullsend repos`](../../cli/repos.md#removed-configuration-flags-breaking)); edit the manifest by hand or with `fullsend repos set` (for example `fullsend repos set defaults.config.runtime claude`). The former sibling keys (`defaults.runtime`, `defaults.allowed_remote_resources`, and their repository-entry equivalents) are rejected with the replacement path. See [Repo Management — Managed configuration](repo-management.md#managed-configuration).
 
 ## Syncing workflow templates
 
