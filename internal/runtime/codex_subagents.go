@@ -1,0 +1,286 @@
+package runtime
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/fullsend-ai/fullsend/internal/sandbox"
+)
+
+// Native child accounting for the Codex runtime.
+//
+// A Codex child is a separate thread. Its tokens never reach the parent's
+// `exec --json` stream (turn.completed.usage excludes children — #6970, probe
+// of 2026-09-03), and codex records them only in that thread's rollout under
+// $CODEX_HOME/sessions/: the running total in `event_msg`/`token_count`
+// lines (`info.total_token_usage`, the stream's five usage fields plus
+// total_tokens), the model in the `turn_context` line, and the thread id in
+// the file name (rollout-<start time>-<thread id>.jsonl). Run reads those
+// lines back with one bounded command after codex exits and folds them into
+// RunMetrics, so metrics.json carries the children (#6970, transcripts and
+// usage).
+//
+// The fold covers the fields a per-model entry has: input, output,
+// cache-creation and cache-read tokens, and cost, which is 0 on codex. Child
+// reasoning tokens go to the run-level ReasoningTokens only, as on pi:
+// RunMetrics has no per-model reasoning field.
+
+// codexChildUsageMarker starts the line the read command prints before each
+// child's rollout lines, so the parser knows where one child's lines end and
+// the next child's begin. A rollout line that imitates it can only
+// misattribute that child's own lines.
+const codexChildUsageMarker = "fullsend-child"
+
+// codexChildUsageMaxBytes bounds the read. The sessions directory is
+// agent-writable, so an unbounded read is an unbounded allocation in the
+// runner (the reason piSubagentUsageMaxBytes exists). The command selects at
+// most two lines per child, so a real read is a few kilobytes.
+const codexChildUsageMaxBytes = 1 << 20
+
+// codexChildUsageThreadID is the shape of a codex thread id (UUID text). A
+// child id comes off the stream and goes into a shell command, so nothing
+// else is accepted; shellQuote wraps it as well.
+var codexChildUsageThreadID = regexp.MustCompile(`^[0-9a-f-]{36}$`)
+
+// codexChildUsage is what one child's rollout reported.
+type codexChildUsage struct {
+	ID string
+	// Model is turn_context.payload.model of the child's first turn; ""
+	// when the rollout has no turn_context.
+	Model string
+	// Usage is info.total_token_usage of the child's last token_count: the
+	// thread's cumulative total, so one snapshot is the whole child.
+	Usage codexUsage
+	// HasUsage is false for a child that never reported a token_count: it
+	// errored before its first response (the provider rejected its model in
+	// the 2026-09-29 paid probe) and contributes nothing, not even a request.
+	HasUsage bool
+}
+
+// codexChildUsageReadCommand renders the one in-sandbox command that reads
+// the children's rollouts. For each id, sorted and once, it finds the
+// thread's rollout by name, prints a marker line, then the rollout's first
+// turn_context line and its last token_count line. Two greps rather than a
+// cat: a review child's rollout is megabytes and the two lines are all the
+// fold needs, so the head -c bound is a safety net, not the usual limit.
+// `command -p` bypasses shell functions and uses the system PATH, as the
+// launch guards do.
+func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error) {
+	ids = slices.Clone(ids)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	quoted := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !codexChildUsageThreadID.MatchString(id) {
+			return "", fmt.Errorf("child thread id %q is not a codex thread id", id)
+		}
+		quoted = append(quoted, shellQuote(id))
+	}
+	return fmt.Sprintf(
+		`for id in %s; do command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null | while IFS= read -r f; do printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p head -n 1; command -p grep -a -e '"type":"token_count"' -- "$f" 2>/dev/null | command -p tail -n 1; done; done | command -p head -c %d`,
+		strings.Join(quoted, " "), shellQuote(sessionsDir), shellQuote(codexChildUsageMarker), codexChildUsageMaxBytes), nil
+}
+
+// parseCodexChildUsage decodes the read command's output: a marker line per
+// child, then that child's turn_context and token_count lines. A line before
+// the first marker belongs to nobody; a line that is not JSON (the head -c
+// cut, or something planted in the agent-writable directory) is skipped.
+func parseCodexChildUsage(data []byte) []codexChildUsage {
+	var out []codexChildUsage
+	marker := []byte(codexChildUsageMarker + " ")
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLineSize)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		if id, ok := bytes.CutPrefix(line, marker); ok {
+			out = append(out, codexChildUsage{ID: string(id)})
+			continue
+		}
+		if len(out) == 0 {
+			continue
+		}
+		var env struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Type  string `json:"type"`
+				Model string `json:"model"`
+				Info  struct {
+					Total codexUsage `json:"total_token_usage"`
+				} `json:"info"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(line, &env) != nil {
+			continue
+		}
+		cur := &out[len(out)-1]
+		switch {
+		case env.Type == "turn_context":
+			if cur.Model == "" {
+				cur.Model = strings.TrimSpace(env.Payload.Model)
+			}
+		case env.Type == "event_msg" && env.Payload.Type == "token_count":
+			cur.Usage = env.Payload.Info.Total
+			cur.HasUsage = true
+		}
+	}
+	return out
+}
+
+// codexChildIDs collects the thread ids of the children the parent spawned.
+// It is an io.Writer that Run feeds through a tee of the `exec --json`
+// stream: the parser's events carry no thread id (ToolUseEvent is a name and
+// a summary) and parseCodexStream's signature is shared with pi's, so the
+// ids are read here, one line at a time, from the completed spawn_agent
+// items (codexCollabToolCallItem). A spawn that failed made no thread.
+//
+// A final line with no newline is not scanned; in a codex stream the last
+// line is the terminal event, never an item.
+type codexChildIDs struct {
+	IDs      []string
+	line     []byte
+	overlong bool
+}
+
+func (c *codexChildIDs) Write(p []byte) (int, error) {
+	rest := p
+	for {
+		i := bytes.IndexByte(rest, '\n')
+		if i < 0 {
+			c.take(rest)
+			return len(p), nil
+		}
+		c.take(rest[:i])
+		if !c.overlong {
+			c.scan(c.line)
+		}
+		c.line, c.overlong = c.line[:0], false
+		rest = rest[i+1:]
+	}
+}
+
+// take appends to the pending line, dropping it once it passes the parser's
+// own line bound (streamBufSize): parseCodexStream skips such a line too.
+func (c *codexChildIDs) take(b []byte) {
+	if c.overlong || len(c.line)+len(b) > streamBufSize {
+		c.overlong = true
+		c.line = c.line[:0]
+		return
+	}
+	c.line = append(c.line, b...)
+}
+
+func (c *codexChildIDs) scan(line []byte) {
+	// Cheap pre-filter: almost no line of a stream names the tool.
+	if !bytes.Contains(line, []byte("spawn_agent")) {
+		return
+	}
+	var evt struct {
+		Type string `json:"type"`
+		Item struct {
+			codexCollabToolCallItem
+			Type string `json:"type"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(line, &evt) != nil || evt.Type != "item.completed" || evt.Item.Type != "collab_tool_call" ||
+		evt.Item.Tool != "spawn_agent" || evt.Item.Status != "completed" {
+		return
+	}
+	c.IDs = append(c.IDs, evt.Item.ReceiverThreadIDs...)
+}
+
+// foldCodexChildUsage adds the parent's own entry to m.PerModelUsage and,
+// when the parent spawned children, reads their rollouts with one bounded
+// sandbox command and folds each child's last cumulative usage into the
+// totals and the breakdown. It returns how many child threads reported
+// usage. An error is a read that did not happen or did not finish; the
+// caller reports it and keeps the run, because losing the breakdown must not
+// fail an iteration that succeeded. No sandbox command runs when childIDs is
+// empty.
+//
+// The parent's entry is added first and always. Iterations are summed
+// (internal/cli aggregateRunMetrics), so an iteration that dispatched
+// nothing, or whose read failed, still has to be in the breakdown or the
+// run's per_model_usage stops summing to its totals across a retry.
+//
+// Requests: one for the parent iteration, one per child thread with usage
+// (the invocation-count semantics of the pi fold). A child that never
+// reported a token_count contributes nothing. A child whose rollout names
+// no model is bucketed under piSubagentUnknownModel, as pi does for a
+// record without one. Child reasoning tokens go to the run-level total
+// only. The figures come from an agent-writable directory, so every counter
+// is floored at zero before it is added, as pi's fold clamps its records.
+func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string, m *RunMetrics) (folded int, err error) {
+	per := m.PerModelUsage
+	if per == nil {
+		per = make(map[string]ModelUsage, len(childIDs)+1)
+	}
+	add := func(key string, u ModelUsage) {
+		entry := per[key]
+		entry.Add(u)
+		per[key] = entry
+	}
+	parent := m.Model
+	if parent == "" {
+		parent = piSubagentUnknownModel
+	}
+	add(parent, ModelUsage{
+		Requests:                 1,
+		InputTokens:              m.InputTokens,
+		OutputTokens:             m.OutputTokens,
+		CacheCreationInputTokens: m.CacheCreationInputTokens,
+		CacheReadInputTokens:     m.CacheReadInputTokens,
+		CostUSD:                  m.TotalCostUSD,
+	})
+	m.PerModelUsage = per
+	if len(childIDs) == 0 {
+		return 0, nil
+	}
+
+	cmd, err := codexChildUsageReadCommand(r.codexSessionsDir(), childIDs)
+	if err != nil {
+		return 0, err
+	}
+	stdout, stderr, exitCode, err := sandbox.Exec(sandboxName, cmd, 10*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("reading the child rollouts: %w", err)
+	}
+	if exitCode != 0 {
+		return 0, fmt.Errorf("reading the child rollouts: exited %d: %s", exitCode, strings.TrimSpace(sanitizeOutput(stderr)))
+	}
+	for _, child := range parseCodexChildUsage([]byte(stdout)) {
+		if !child.HasUsage {
+			continue
+		}
+		// counters() floors only its two subtractions; the three raw fields
+		// are floored here.
+		c := child.Usage.counters()
+		reasoning, cacheWrite, cacheRead := nonNegative(c.Reasoning), nonNegative(c.CacheWrite), nonNegative(c.CacheRead)
+		key := child.Model
+		if key == "" {
+			key = piSubagentUnknownModel
+		}
+		add(key, ModelUsage{
+			Requests:                 1,
+			InputTokens:              c.Input,
+			OutputTokens:             c.Output,
+			CacheCreationInputTokens: cacheWrite,
+			CacheReadInputTokens:     cacheRead,
+		})
+		m.InputTokens += c.Input
+		m.OutputTokens += c.Output
+		m.ReasoningTokens += reasoning
+		m.CacheCreationInputTokens += cacheWrite
+		m.CacheReadInputTokens += cacheRead
+		folded++
+	}
+	return folded, nil
+}

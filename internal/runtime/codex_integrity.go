@@ -78,6 +78,10 @@ type codexRunnerHeldDigestSet struct {
 	RoleFiles map[string]string
 }
 
+// delegating reports whether Bootstrap registered native sub-agent roles for
+// this run. It reads the runner-held record, never the manifest.
+func (d codexRunnerHeldDigestSet) delegating() bool { return len(d.RoleFiles) > 0 }
+
 // codexEnvPair is one runner-owned environment assignment.
 type codexEnvPair struct {
 	Key   string
