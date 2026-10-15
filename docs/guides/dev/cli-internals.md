@@ -6,14 +6,12 @@ This guide provides implementation details for fullsend CLI internals: command s
 
 ```
 fullsend
-├── admin                                    # All-in-one setup (GCP + GitHub)
+├── admin                                    # Manage fullsend installation for a repository
 │   ├── install      <org|owner/repo>        # Full infrastructure setup
-│   ├── uninstall    <org>                   # Tear down (reverse layer order)
-│   ├── analyze      <org>                   # Health check installed state
-│   ├── enable
-│   │   └── repos    <org> [repo...]         # Enable agent on repos
-│   └── disable
-│       └── repos    <org> [repo...]         # Disable agent on repos
+│   └── foreign                              # Cross-org mint authorization (FULLSEND_FOREIGN_<ROLE>_REPOS)
+│       ├── allow                            # Authorize a foreign org/repo to mint for a role
+│       ├── list                             # List foreign caller allowlists
+│       └── revoke                           # Remove a foreign caller from a role allowlist
 ├── mint                                     # Token mint management
 │   ├── deploy                               # Deploy/update mint Cloud Function
 │   ├── delete                               # Tear down mint infrastructure
@@ -764,7 +762,7 @@ var executableFiles = map[string]struct{}{
 | File | Lines | Purpose |
 |------|-------|---------|
 | `internal/cli/root.go` | ~34 | CLI entry point, command registration |
-| `internal/cli/admin.go` | ~2415 | Install/uninstall/analyze/enable/disable |
+| `internal/cli/admin.go` | ~1400 | `admin` command group and `admin install` |
 | `internal/cli/mint.go` | ~1022 | Mint deploy/enroll/unenroll/status |
 | `internal/cli/inference.go` | ~408 | Inference WIF provision/status (GCP) |
 | `internal/cli/inference_openai.go` | ~900 | OpenAI WIF enrolment: request document, reply import, status/exchange |
