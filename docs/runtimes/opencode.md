@@ -167,10 +167,12 @@ fullsend run triage \
   When the trusted `OPENCODE_CONFIG_CONTENT` policy gives a tool a pattern map
   (`bash: {"gh *": "allow", "*": "deny"}`), an agent that declares the tool gets that same pattern
   map in its record, so the agent can never widen it.
-- **The agent file is restored before every iteration.** `Run` re-uploads the translated
-  `agent/<name>.md`, and an iteration fails when OpenCode prints
-  `Falling back to default agent`, so an earlier iteration cannot switch the run to OpenCode's
-  default agent.
+- **The agent is restored before every iteration.** `Run` removes the other places OpenCode
+  loads agent overrides from (`agent/`, `agents/`, `mode/`, `modes/` and `opencode.jsonc` in the
+  config directory, `~/.opencode` and `~/.config/opencode`), re-uploads the translated
+  `agent/<name>.md`, and checks with `opencode debug agent` that it loads as the primary agent.
+  An iteration also fails when OpenCode prints `Falling back to default agent`. Other files in
+  the config directory, such as `plugins/` and `skills/`, stay agent-writable until #7824.
 - **`plugins:` are unsupported** — the Claude marketplace layout is warned and skipped.
 - **Effort maps to `--variant`** — the harness `effort` value selects OpenCode's model reasoning
   variant.

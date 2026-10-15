@@ -18,9 +18,8 @@ type openCodeTrustedEnv struct {
 	ConfigContent   string
 	CredentialsPath string
 	// AgentPath and AgentDefinition are the translated agent file Bootstrap
-	// uploaded. Run re-uploads it before every iteration, so an earlier
-	// iteration that deleted or rewrote it cannot select OpenCode's default
-	// agent.
+	// uploaded. Run clears agent overrides, re-uploads it and re-verifies it
+	// before every iteration (restoreOpenCodeAgent).
 	AgentPath       string
 	AgentDefinition string
 }

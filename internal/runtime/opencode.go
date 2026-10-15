@@ -77,7 +77,7 @@ func (OpenCodeRuntime) WorkspaceDir() string { return sandbox.SandboxWorkspace }
 //     overrides from widening the policy at the env-var layer.
 //     IMPORTANT: a non-interactive `opencode run` (Run, below) has no TTY, so
 //     opencode auto-REJECTS every permission request that is not pre-resolved
-//     by config (run.ts:810-819). The injected policy must therefore ALLOW the
+//     by config (run.ts:795-808). The injected policy must therefore ALLOW the
 //     tools a read-only agent needs (read, grep, glob, and read-only
 //     bash) — a bare "deny" policy makes every tool call fail. Write-path
 //     denial + the compensating hook adapter are unbound-force#515.

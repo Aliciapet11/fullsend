@@ -467,8 +467,9 @@ func TestOpenCodeRuntimeRun_HappyPath(t *testing.T) {
 	assert.EqualValues(t, 1, metrics.ToolCalls.Load())
 }
 
-// Each iteration re-uploads the agent file Bootstrap wrote, and a run where
-// OpenCode reports falling back to its default agent fails.
+// Each iteration clears agent overrides, re-uploads and re-verifies the agent
+// file Bootstrap wrote, and a run where OpenCode reports falling back to its
+// default agent fails.
 func TestOpenCodeRuntimeRun_RestoresAgentAndRejectsFallback(t *testing.T) {
 	t.Setenv(openCodeProviderEnv, "")
 	agentPath := OpenCodeRuntime{}.openCodeAgentPath("triage")
@@ -485,6 +486,7 @@ func TestOpenCodeRuntimeRun_RestoresAgentAndRejectsFallback(t *testing.T) {
 printf '%s\n' "$*" >> '` + logPath + `'
 for last; do :; done
 case "$last" in
+  *"debug agent"*) printf '{"mode": "primary"}\n' ;;
   *"--format json"*)
     printf '! agent "triage" not found. Falling back to default agent\n' >&2
     printf '%s\n' '{"type":"step_finish","timestamp":1,"sessionID":"s1","part":{"reason":"stop","tokens":{"input":1,"output":1}}}' ;;
@@ -501,7 +503,9 @@ exit 0
 
 	calls, readErr := os.ReadFile(logPath)
 	require.NoError(t, readErr)
+	assert.Contains(t, string(calls), OpenCodeRuntime{}.ConfigDir()+"/mode", "agent overrides cleared before the run")
 	assert.Contains(t, string(calls), agentPath, "agent file re-uploaded before the run")
+	assert.Contains(t, string(calls), "debug agent", "agent re-verified before the run")
 }
 
 func TestOpenCodeRuntimeRun_TeesToOutputPath(t *testing.T) {

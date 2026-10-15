@@ -485,8 +485,8 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 		return -1, fmt.Errorf("opencode run: trusted environment was not recorded during bootstrap")
 	}
 	if trustedEnv.AgentDefinition != "" {
-		if err := uploadBytes(params.SandboxName, trustedEnv.AgentPath, []byte(trustedEnv.AgentDefinition)); err != nil {
-			return -1, fmt.Errorf("opencode run: restoring agent definition: %w", err)
+		if err := r.restoreOpenCodeAgent(params.SandboxName, agentName, trustedEnv); err != nil {
+			return -1, fmt.Errorf("opencode run: %w", err)
 		}
 	}
 	cmd := buildOpenCodeRunCommand(params, agentName, trustedEnv)
@@ -569,6 +569,11 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	if waitErr != nil && execCmd.ProcessState == nil {
 		return exitCode, fmt.Errorf("openshell exec failed: %w", waitErr)
 	}
+	if !fallback.fellBack && params.Debug != "" {
+		// In debug mode opencode's stderr goes to the debug log, not to the
+		// watcher.
+		fallback.fellBack = openCodeDebugLogHasFallback(params.SandboxName, r.WorkspaceDir()+"/"+openCodeDebugLogFile)
+	}
 	if fallback.fellBack {
 		return 1, fmt.Errorf("opencode ran its default agent instead of %q; refusing the result", agentName)
 	}
@@ -596,6 +601,41 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 		return 1, nil
 	}
 	return exitCode, nil
+}
+
+// restoreOpenCodeAgent undoes agent overrides an earlier iteration could have
+// left: it removes every other place OpenCode loads agent or config overrides
+// from (agent/, agents/, mode/, modes/ and opencode.jsonc under the config
+// dir, and the user-level config dirs), re-uploads the agent file Bootstrap
+// wrote, and checks that OpenCode loads it as the primary agent.
+func (r OpenCodeRuntime) restoreOpenCodeAgent(sandboxName, agentName string, env openCodeTrustedEnv) error {
+	cfg := r.ConfigDir()
+	clearCmd := "rm -rf --"
+	for _, p := range []string{"agent", "agents", "mode", "modes", "opencode.jsonc"} {
+		clearCmd += " " + shellQuote(cfg+"/"+p)
+	}
+	clearCmd += ` "$HOME/.opencode" "$HOME/.config/opencode"`
+	_, stderr, exitCode, err := sandbox.Exec(sandboxName, clearCmd, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("clearing opencode agent overrides: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("clearing opencode agent overrides: exited %d: %s", exitCode, strings.TrimSpace(sanitizeOutput(stderr)))
+	}
+	if err := uploadBytes(sandboxName, env.AgentPath, []byte(env.AgentDefinition)); err != nil {
+		return fmt.Errorf("restoring agent definition: %w", err)
+	}
+	return openCodeVerifyAgent(sandboxName, agentName, r)
+}
+
+// openCodeDebugLogHasFallback reports whether the sandbox debug log holds
+// OpenCode's default-agent fallback warning. A failed check counts as a
+// fallback, so the run fails closed.
+func openCodeDebugLogHasFallback(sandboxName, logPath string) bool {
+	// grep exits 0 on a match, 1 on none, 2 on an error.
+	_, _, exitCode, err := sandbox.Exec(sandboxName,
+		"grep -qF -- "+shellQuote(openCodeAgentFallbackMarker)+" "+shellQuote(logPath), 10*time.Second)
+	return err != nil || exitCode != 1
 }
 
 // ClearIterationArtifacts terminates processes the previous iteration left
