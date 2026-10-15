@@ -650,6 +650,8 @@ func TestBuildOpenCodeRunCommand_ResetsOverridesAfterEnv(t *testing.T) {
 	require.NotEqual(t, -1, resetIdx)
 	require.NotEqual(t, -1, guardIdx)
 	assert.Greater(t, resetIdx, envIdx, "reset must run after .env")
+	configPath := OpenCodeRuntime{}.ConfigDir() + "/" + openCodeConfigFile
+	assert.Greater(t, strings.Index(cmd, "> "+shellQuote(configPath)), resetIdx, "the reset clears opencode.json before the runner rewrites it")
 	assert.Less(t, guardIdx, strings.Index(cmd, " run --format json"), "agent is checked before opencode starts")
 	assert.NotContains(t, cmd, shellQuote(env.AgentDefinition), "the agent body is not inlined (openshell argument limit)")
 }

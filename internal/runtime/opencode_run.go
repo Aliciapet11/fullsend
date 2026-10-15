@@ -520,7 +520,7 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 // must keep its adapter); skills/ holds the runner's skills and stays
 // writable until #7824.
 func (r OpenCodeRuntime) openCodeOverridePaths(withAgentDir bool) string {
-	dirs := []string{"agents", "mode", "modes", "tool", "tools", "command", "commands", "plugin", "plugins", "skill", "opencode.jsonc"}
+	dirs := []string{"agents", "mode", "modes", "tool", "tools", "command", "commands", "plugin", "plugins", "skill", "opencode.json", "opencode.jsonc"}
 	if withAgentDir {
 		dirs = append([]string{openCodeAgentDir}, dirs...)
 	}
