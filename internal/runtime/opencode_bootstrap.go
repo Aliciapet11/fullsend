@@ -131,8 +131,8 @@ func (r OpenCodeRuntime) Bootstrap(input BootstrapInput) error {
 		return err
 	}
 
-	trustedPolicy, patternMapTools := parseTrustedPermissionPolicy(trustedEnv.ConfigContent)
-	agentMD, err := openCodeAgentMarkdown(agentName, def, trustedPolicy, patternMapTools)
+	trustedPolicy, patternMaps := parseTrustedPermissionPolicy(trustedEnv.ConfigContent)
+	agentMD, err := openCodeAgentMarkdown(agentName, def, trustedPolicy, patternMaps)
 	if err != nil {
 		return err
 	}
@@ -170,6 +170,8 @@ func (r OpenCodeRuntime) Bootstrap(input BootstrapInput) error {
 	// plugin adapter path is reserved at openCodeHooksExtensionPath(). Nothing
 	// is installed here.
 
+	trustedEnv.AgentPath = r.openCodeAgentPath(agentName)
+	trustedEnv.AgentDefinition = string(agentMD)
 	recordOpenCodeTrustedEnv(sandboxName, trustedEnv)
 	return nil
 }
@@ -184,10 +186,10 @@ func (r OpenCodeRuntime) Bootstrap(input BootstrapInput) error {
 // The deprecated `tools:` key is not emitted; `permission:` is the current
 // upstream schema (agent.ts).
 type openCodeAgentFrontmatter struct {
-	Description string            `json:"description,omitempty"`
-	Mode        string            `json:"mode"`
-	Model       string            `json:"model,omitempty"`
-	Permission  map[string]string `json:"permission"`
+	Description string         `json:"description,omitempty"`
+	Mode        string         `json:"mode"`
+	Model       string         `json:"model,omitempty"`
+	Permission  map[string]any `json:"permission"`
 }
 
 // openCodeAgentMarkdown renders the translated agent definition as a markdown
@@ -195,18 +197,17 @@ type openCodeAgentFrontmatter struct {
 // YAML; JSON is valid YAML) followed by the Claude body as the prompt.
 //
 // trustedPolicy is the parsed permission section from OPENCODE_CONFIG_CONTENT.
-// patternMapTools is the set of tools that have pattern-map rules in the
-// global config. The agent-level permission record is intersected with the
+// patternMaps holds the tools that have pattern-map rules in the global
+// config, with the raw rule maps. The agent-level permission record is intersected with the
 // trusted policy so that agent frontmatter can only narrow, never widen, the
 // global gate.
-func openCodeAgentMarkdown(agentName string, def *piAgentDef, trustedPolicy map[string]string, patternMapTools map[string]bool) ([]byte, error) {
+func openCodeAgentMarkdown(agentName string, def *piAgentDef, trustedPolicy map[string]string, patternMaps map[string]json.RawMessage) ([]byte, error) {
 	rec := openCodePermissionRecord(def.Tools)
-	rec = intersectPermissionRecord(rec, trustedPolicy, patternMapTools)
 	fm := openCodeAgentFrontmatter{
 		Description: def.Description,
 		Mode:        "primary",
 		Model:       def.Model,
-		Permission:  rec,
+		Permission:  intersectPermissionRecord(rec, trustedPolicy, patternMaps),
 	}
 	front, err := json.MarshalIndent(fm, "", "  ")
 	if err != nil {
@@ -312,13 +313,10 @@ func openCodeToolNamesSorted(rec map[string]string) []string {
 // by validateOpenCodeTrustedEnv, so parse errors return an empty map (the
 // intersection becomes a no-op and the global policy still applies at
 // runtime). Pattern-map values (e.g. bash: {"gh *": "allow", "*": "deny"})
-// are omitted from the flat result and their tool names are returned in
-// patternMapTools so intersectPermissionRecord can skip wildcard fallback
-// for them — the global config-level pattern map is the source of truth at
-// runtime. Collapsing pattern maps to "deny" would override the global
-// pattern-map's per-command allowances in the agent frontmatter; falling
-// back to a wildcard deny for them would have the same over-deny effect.
-func parseTrustedPermissionPolicy(configContent string) (policy map[string]string, patternMapTools map[string]bool) {
+// are omitted from the flat result and returned verbatim in patternMaps, so
+// intersectPermissionRecord can copy them into the agent record. The raw
+// bytes keep the rule order, which matters because OpenCode's last match wins.
+func parseTrustedPermissionPolicy(configContent string) (policy map[string]string, patternMaps map[string]json.RawMessage) {
 	var config struct {
 		Permission map[string]json.RawMessage `json:"permission"`
 	}
@@ -326,20 +324,16 @@ func parseTrustedPermissionPolicy(configContent string) (policy map[string]strin
 		return nil, nil
 	}
 	policy = make(map[string]string, len(config.Permission))
-	patternMapTools = make(map[string]bool)
+	patternMaps = make(map[string]json.RawMessage)
 	for tool, raw := range config.Permission {
 		var action string
 		if err := json.Unmarshal(raw, &action); err == nil {
 			policy[tool] = action
 		} else {
-			// Pattern map — record the tool name so the intersection
-			// skips wildcard fallback for it. The global config-level
-			// rule (which carries the full pattern map) applies at
-			// runtime via findLast ordering.
-			patternMapTools[tool] = true
+			patternMaps[tool] = raw
 		}
 	}
-	return policy, patternMapTools
+	return policy, patternMaps
 }
 
 // intersectPermissionRecord caps the agent-level permission record so that any
@@ -355,47 +349,37 @@ func parseTrustedPermissionPolicy(configContent string) (policy map[string]strin
 //     is preserved (it can narrow to "deny" but not widen to "allow" if the
 //     tool isn't in its allowlist).
 //   - The wildcard "*" entry in the trusted policy applies to any tool not
-//     explicitly listed in the policy and not in patternMapTools.
-//   - Tools in patternMapTools are governed by a global pattern-map rule
-//     (e.g. bash: {"gh *": "allow", "*": "deny"}). A flat "allow" for such
-//     a tool must be deleted from the agent frontmatter — leaving it would
-//     override the global pattern-map via findLast, widening bash to every
-//     command. A flat "deny" is kept as-is because it is already more
-//     restrictive than any pattern-map rule. This pass runs before the
-//     trustedPolicy early return so a policy whose rules are entirely
-//     pattern-map-based still strips flat allows.
+//     explicitly listed in the policy and not in patternMaps.
+//   - Tools in patternMaps are governed by a global pattern-map rule
+//     (e.g. bash: {"gh *": "allow", "*": "deny"}). An agent "allow" for such
+//     a tool is replaced by a copy of the trusted pattern map. A flat
+//     "allow" would widen the tool to every pattern, and deleting the key
+//     would let the agent's own "*": "deny" (evaluated after the global
+//     rules) deny the tool outright. A flat "deny" is kept as-is because it
+//     is already more restrictive than any pattern-map rule.
 //
 // An empty rec (unrestricted agent) is left empty — the global policy applies.
-func intersectPermissionRecord(rec map[string]string, trustedPolicy map[string]string, patternMapTools map[string]bool) map[string]string {
-	if len(rec) == 0 {
-		return rec
-	}
-	// First pass: remove flat allows for pattern-map tools. Must happen before
-	// the trustedPolicy length check so that a trusted config whose permission
-	// block consists entirely of pattern-map rules (trustedPolicy empty after
-	// parsing) still strips the agent's flat allows.
+func intersectPermissionRecord(rec map[string]string, trustedPolicy map[string]string, patternMaps map[string]json.RawMessage) map[string]any {
+	out := make(map[string]any, len(rec))
 	for tool, agentAction := range rec {
-		if patternMapTools[tool] && agentAction == "allow" {
-			delete(rec, tool)
-		}
-	}
-	if len(trustedPolicy) == 0 {
-		return rec
-	}
-	// Second pass: cap remaining entries against the flat trusted policy.
-	for tool, agentAction := range rec {
-		if patternMapTools[tool] {
-			continue // already handled; a surviving deny is intentionally kept
+		if raw, ok := patternMaps[tool]; ok {
+			if agentAction == "allow" {
+				out[tool] = raw
+			} else {
+				out[tool] = agentAction
+			}
+			continue
 		}
 		policyAction, ok := trustedPolicy[tool]
 		if !ok {
 			policyAction = trustedPolicy["*"]
 		}
 		if (policyAction == "deny" || policyAction == "ask") && agentAction == "allow" {
-			rec[tool] = policyAction
+			agentAction = policyAction
 		}
+		out[tool] = agentAction
 	}
-	return rec
+	return out
 }
 
 // openCodeInstructionsConfig returns the JSON body of a runner-owned
@@ -419,8 +403,8 @@ func openCodeBashAllowlistWarning(allowlist []string) string {
 }
 
 // openCodeVerifyAgent runs `opencode debug agent <name>` in the sandbox and
-// verifies the agent loaded as mode "primary" with the expected permission
-// record. This catches cases where OpenCode silently falls back to its default
+// verifies the agent loaded as mode "primary". Run re-uploads the agent file
+// and rejects OpenCode's fallback warning on every later iteration. This catches cases where OpenCode silently falls back to its default
 // agent (*:allow) due to frontmatter parse failures, file deletion, or
 // redefinition as mode:subagent — scenarios the name-mismatch guard does not
 // cover.

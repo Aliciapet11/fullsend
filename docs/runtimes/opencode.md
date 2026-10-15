@@ -4,7 +4,7 @@
 `AGENTS.md` natively.
 
 ```bash
-fullsend run triage --runtime opencode --model google-vertex-anthropic/claude-opus-4-6@default
+fullsend run triage --runtime opencode --model google-vertex-anthropic/claude-opus-5-5@default
 ```
 
 Selecting it, and how it compares to Claude Code and pi, is in [Agent runtimes](../runtimes.md). This
@@ -41,7 +41,7 @@ resolve through fullsend's table, and a bare id gets the provider from `FULLSEND
 
 | Model | Spec |
 |---|---|
-| Claude | `google-vertex-anthropic/claude-opus-4-6@default` |
+| Claude | `google-vertex-anthropic/claude-opus-5-5@default` |
 | Alias | `opus`, `sonnet`, `haiku` (resolve to the catalog ids) |
 
 Harness `model:` and `agents:` entry `model:` values accept the `provider/model` form directly. The
@@ -164,6 +164,13 @@ fullsend run triage \
   tool names are mapped to OpenCode tool ids; names without an OpenCode equivalent are dropped with
   a warning. Per-argument Bash restrictions currently collapse to a bare `bash: "allow"`; bootstrap
   warns when this occurs, and enforcement is grouped with the hook adapter in unbound-force#515.
+  When the trusted `OPENCODE_CONFIG_CONTENT` policy gives a tool a pattern map
+  (`bash: {"gh *": "allow", "*": "deny"}`), an agent that declares the tool gets that same pattern
+  map in its record, so the agent can never widen it.
+- **The agent file is restored before every iteration.** `Run` re-uploads the translated
+  `agent/<name>.md`, and an iteration fails when OpenCode prints
+  `Falling back to default agent`, so an earlier iteration cannot switch the run to OpenCode's
+  default agent.
 - **`plugins:` are unsupported** — the Claude marketplace layout is warned and skipped.
 - **Effort maps to `--variant`** — the harness `effort` value selects OpenCode's model reasoning
   variant.

@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,12 @@ const openCodeEnvReadSeparator = "|fullsend-opencode-env-sep|"
 type openCodeTrustedEnv struct {
 	ConfigContent   string
 	CredentialsPath string
+	// AgentPath and AgentDefinition are the translated agent file Bootstrap
+	// uploaded. Run re-uploads it before every iteration, so an earlier
+	// iteration that deleted or rewrote it cannot select OpenCode's default
+	// agent.
+	AgentPath       string
+	AgentDefinition string
 }
 
 // openCodeRunnerEnv holds values Bootstrap reads before the first agent
@@ -117,4 +125,32 @@ func validateOpenCodePermissionPolicy(raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// openCodeAgentFallbackMarker is the stderr text `opencode run --agent`
+// prints (cli/cmd/run.ts) when the named agent is missing or is a subagent
+// and it runs OpenCode's default agent instead.
+const openCodeAgentFallbackMarker = "Falling back to default agent"
+
+// openCodeFallbackWatcher passes stderr through and records whether OpenCode
+// reported an agent fallback. It keeps a short tail so a marker split across
+// writes is still seen.
+type openCodeFallbackWatcher struct {
+	w        io.Writer
+	tail     []byte
+	fellBack bool
+}
+
+func (f *openCodeFallbackWatcher) Write(p []byte) (int, error) {
+	if !f.fellBack {
+		buf := append(f.tail, p...)
+		if bytes.Contains(buf, []byte(openCodeAgentFallbackMarker)) {
+			f.fellBack = true
+		}
+		if keep := len(openCodeAgentFallbackMarker) - 1; len(buf) > keep {
+			buf = buf[len(buf)-keep:]
+		}
+		f.tail = append(f.tail[:0], buf...)
+	}
+	return f.w.Write(p)
 }

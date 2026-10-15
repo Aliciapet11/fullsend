@@ -34,9 +34,9 @@ const (
 )
 
 var openCodeModelAliases = map[string]string{
-	"opus":   "claude-opus-4-6@default",
-	"sonnet": "claude-sonnet-4-6@default",
-	"haiku":  "claude-haiku-4-5@20251001",
+	"opus":   "claude-opus-5-5@default",
+	"sonnet": "claude-sonnet-5-5@default",
+	"haiku":  "claude-haiku-5-5@default",
 	"fable":  "claude-fable-5-1@default",
 }
 
@@ -229,7 +229,7 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 		// an unconditional export of "" wins over the upstream JS ?? "global"
 		// fallback (JS ?? treats "" as a value, not as absent).
 		`&& export GOOGLE_CLOUD_PROJECT="${ANTHROPIC_VERTEX_PROJECT_ID:-$GOOGLE_CLOUD_PROJECT}"`,
-		`&& { _gcl="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"; [ -n "$_gcl" ] && export GOOGLE_CLOUD_LOCATION="$_gcl" || true; }`,
+		"&& "+openCodeCloudLocationExport,
 		`&& "$`+openCodePrintfVar+`" '%s' `+shellQuote(configJSON)+" > "+shellQuote(configPath),
 		"&& export "+openCodeRuntimeEnv+"=opencode",
 	)
@@ -334,6 +334,11 @@ func openCodeBinaryPin() string {
 	return `readonly ` + openCodeBinaryVar + `="$(command -v opencode)" && if test -n "$` + openCodeBinaryVar +
 		`"; then :; else echo 'fullsend: opencode not found on PATH' >&2; exit 127; fi`
 }
+
+// openCodeCloudLocationExport sets GOOGLE_CLOUD_LOCATION from
+// CLOUD_ML_REGION only when the result is non-empty, so OpenCode keeps its
+// own "global" default when neither is set.
+const openCodeCloudLocationExport = `{ _gcl="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"; [ -n "$_gcl" ] && export GOOGLE_CLOUD_LOCATION="$_gcl" || true; }`
 
 func openCodeUtilityPin() string {
 	utilities := []struct {
@@ -479,9 +484,15 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	if !ok {
 		return -1, fmt.Errorf("opencode run: trusted environment was not recorded during bootstrap")
 	}
+	if trustedEnv.AgentDefinition != "" {
+		if err := uploadBytes(params.SandboxName, trustedEnv.AgentPath, []byte(trustedEnv.AgentDefinition)); err != nil {
+			return -1, fmt.Errorf("opencode run: restoring agent definition: %w", err)
+		}
+	}
 	cmd := buildOpenCodeRunCommand(params, agentName, trustedEnv)
 
-	stdout, execCmd, cancel, err := sandbox.ExecStreamReader(ctx, params.SandboxName, cmd, params.Timeout, os.Stderr)
+	fallback := &openCodeFallbackWatcher{w: os.Stderr}
+	stdout, execCmd, cancel, err := sandbox.ExecStreamReader(ctx, params.SandboxName, cmd, params.Timeout, fallback)
 	if err != nil {
 		return -1, err
 	}
@@ -557,6 +568,9 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	}
 	if waitErr != nil && execCmd.ProcessState == nil {
 		return exitCode, fmt.Errorf("openshell exec failed: %w", waitErr)
+	}
+	if fallback.fellBack {
+		return 1, fmt.Errorf("opencode ran its default agent instead of %q; refusing the result", agentName)
 	}
 	if exitCode == openCodeHooksMissingExit && params.HooksSettingsPath != "" {
 		return exitCode, fmt.Errorf("opencode hook adapter missing or modified in %s; refusing to run unhooked (was Bootstrap run, or did the agent change it?)", r.ConfigDir())

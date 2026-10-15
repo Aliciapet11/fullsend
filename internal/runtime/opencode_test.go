@@ -58,13 +58,22 @@ func TestOpenCodeRuntimeResolvesFromRegistry(t *testing.T) {
 	assert.True(t, isTX, "Transcripts should be OpenCodeRuntime")
 }
 
+// The opencode alias table must resolve to the same model generation as the
+// other Claude-family runtimes; only the Vertex catalog suffix differs.
+func TestOpenCodeAliasesMatchClaudeDefaults(t *testing.T) {
+	for alias, want := range claudeAliasDefaults {
+		got, _, _ := strings.Cut(openCodeModelAliases[alias], "@")
+		assert.Equal(t, want, got, "alias %q", alias)
+	}
+}
+
 func TestTranslateOpenCodeModel(t *testing.T) {
 	t.Setenv(openCodeProviderEnv, "")
 
-	assert.Equal(t, "google-vertex-anthropic/claude-opus-4-6@default", translateOpenCodeModel("opus", nil))
-	assert.Equal(t, "google-vertex-anthropic/claude-sonnet-4-6@default", translateOpenCodeModel("sonnet", nil))
+	assert.Equal(t, "google-vertex-anthropic/claude-opus-5-5@default", translateOpenCodeModel("opus", nil))
+	assert.Equal(t, "google-vertex-anthropic/claude-sonnet-5-5@default", translateOpenCodeModel("sonnet", nil))
 	// Empty falls back to the default alias.
-	assert.Equal(t, "google-vertex-anthropic/claude-opus-4-6@default", translateOpenCodeModel("", nil))
+	assert.Equal(t, "google-vertex-anthropic/claude-opus-5-5@default", translateOpenCodeModel("", nil))
 	// A bare (non-alias) id gets the provider prefix.
 	assert.Equal(t, "google-vertex-anthropic/claude-3-5", translateOpenCodeModel("claude-3-5", nil))
 	// A provider/model spec passes through unchanged.
@@ -72,7 +81,7 @@ func TestTranslateOpenCodeModel(t *testing.T) {
 
 	// Provider override from the environment.
 	t.Setenv(openCodeProviderEnv, "myprov")
-	assert.Equal(t, "myprov/claude-opus-4-6@default", translateOpenCodeModel("opus", nil))
+	assert.Equal(t, "myprov/claude-opus-5-5@default", translateOpenCodeModel("opus", nil))
 }
 
 func TestTranslateOpenCodeModel_ConfigAliases(t *testing.T) {
@@ -82,7 +91,7 @@ func TestTranslateOpenCodeModel_ConfigAliases(t *testing.T) {
 	overrides := map[string]string{"sonnet": "claude-sonnet-5"}
 	assert.Equal(t, "google-vertex-anthropic/claude-sonnet-5", translateOpenCodeModel("sonnet", overrides))
 	// An alias not overridden still uses the built-in.
-	assert.Equal(t, "google-vertex-anthropic/claude-opus-4-6@default", translateOpenCodeModel("opus", overrides))
+	assert.Equal(t, "google-vertex-anthropic/claude-opus-5-5@default", translateOpenCodeModel("opus", overrides))
 	// A per-repo alias that maps to a provider/id spec passes through.
 	overrides = map[string]string{"sonnet": "xai/grok-4.6"}
 	assert.Equal(t, "xai/grok-4.6", translateOpenCodeModel("sonnet", overrides))
@@ -120,7 +129,7 @@ func TestOpenCodeModelAliases_CoversDocumentedAliases(t *testing.T) {
 
 func TestOpenCodeBareModelID(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "claude-opus-4-6@default", openCodeBareModelID("google-vertex-anthropic/claude-opus-4-6@default"))
+	assert.Equal(t, "claude-opus-5-5@default", openCodeBareModelID("google-vertex-anthropic/claude-opus-5-5@default"))
 	assert.Equal(t, "gpt-5", openCodeBareModelID("openai/gpt-5"))
 	assert.Equal(t, "bare", openCodeBareModelID("bare"))
 }
@@ -211,44 +220,26 @@ func TestIntersectPermissionRecord(t *testing.T) {
 	assert.Equal(t, "ask", capped4["bash"], "ask policy must cap allow to ask")
 	assert.Equal(t, "deny", capped4["read"], "wildcard deny still applies")
 
-	// Pattern-map tool with wildcard deny: bash has a pattern map in the
-	// global config, so the agent's flat bash entry must be DELETED from
-	// the frontmatter — leaving it would override the global pattern-map
-	// via findLast, widening bash to every command.
-	rec5 := openCodePermissionRecord([]string{"Bash", "Read"})
-	patternMapDenyPolicy := map[string]string{"*": "deny"}
-	bashPatternMap := map[string]bool{"bash": true}
-	capped5 := intersectPermissionRecord(rec5, patternMapDenyPolicy, bashPatternMap)
-	_, hasBash5 := capped5["bash"]
-	assert.False(t, hasBash5, "bash in patternMapTools must be removed from agent frontmatter")
-	assert.Equal(t, "deny", capped5["read"], "read has no pattern map, wildcard deny applies")
+	// Pattern-map tool: the agent's bash allow becomes a copy of the trusted
+	// pattern map, byte for byte. A flat allow would widen bash; deleting the
+	// key would let the agent's own "*": "deny" (evaluated after the global
+	// rules) deny bash outright.
+	bashMap := json.RawMessage(`{"gh *":"allow","*":"deny"}`)
+	bashPatternMap := map[string]json.RawMessage{"bash": bashMap}
+	for name, policy := range map[string]map[string]string{
+		"wildcard deny": {"*": "deny"},
+		"no wildcard":   {"read": "allow"},
+		"pattern only":  {},
+	} {
+		capped5 := intersectPermissionRecord(openCodePermissionRecord([]string{"Bash", "Read"}), policy, bashPatternMap)
+		assert.Equal(t, bashMap, capped5["bash"], name)
+		assert.Equal(t, "deny", capped5["*"], name)
+	}
 
-	// Pattern-map tool without wildcard: bash entry must still be deleted
-	// regardless of whether a wildcard exists in the flat policy.
-	rec6 := openCodePermissionRecord([]string{"Bash", "Read"})
-	noWildcardPolicy := map[string]string{"read": "allow"}
-	capped6 := intersectPermissionRecord(rec6, noWildcardPolicy, bashPatternMap)
-	_, hasBash6 := capped6["bash"]
-	assert.False(t, hasBash6, "bash in patternMapTools must be removed even without a wildcard")
-	assert.Equal(t, "allow", capped6["read"], "read explicitly allowed")
-
-	// Agent WITHOUT Bash (bash: "deny" from deny-all-first) plus a bash
-	// pattern-map in the trusted config: the deny must be kept, not deleted.
-	// Deleting it would leave no agent-level bash rule, and the global
-	// pattern-map's "gh *": allow would apply via findLast — widening bash
-	// for an agent that never asked for it.
-	recNoBash := openCodePermissionRecord([]string{"Read"})
-	assert.Equal(t, "deny", recNoBash["bash"], "bash starts as deny for agent without Bash")
-	cappedNoBash := intersectPermissionRecord(recNoBash, patternMapDenyPolicy, bashPatternMap)
-	assert.Equal(t, "deny", cappedNoBash["bash"], "bash deny must survive patternMapTools pass")
-
-	// Pattern-map-only trusted policy (flat trustedPolicy is empty after
-	// parsing): the agent's flat bash allow must still be deleted.
-	recPMOnly := openCodePermissionRecord([]string{"Bash", "Read"})
-	cappedPMOnly := intersectPermissionRecord(recPMOnly, map[string]string{}, bashPatternMap)
-	_, hasBashPMOnly := cappedPMOnly["bash"]
-	assert.False(t, hasBashPMOnly, "flat allow deleted even when trustedPolicy is empty (pattern-map-only config)")
-	assert.Equal(t, "allow", cappedPMOnly["read"], "read unaffected by pattern-map-only pass")
+	// Agent WITHOUT Bash keeps its deny: copying the pattern map would widen
+	// bash for an agent that never asked for it.
+	cappedNoBash := intersectPermissionRecord(openCodePermissionRecord([]string{"Read"}), map[string]string{"*": "deny"}, bashPatternMap)
+	assert.Equal(t, "deny", cappedNoBash["bash"], "bash deny must survive the pattern-map pass")
 }
 
 func TestParseTrustedPermissionPolicy(t *testing.T) {
@@ -261,13 +252,14 @@ func TestParseTrustedPermissionPolicy(t *testing.T) {
 	assert.Equal(t, "deny", policy["*"])
 	assert.Empty(t, pmTools, "no pattern maps in flat-only config")
 
-	// Pattern map omitted from policy, recorded in patternMapTools.
+	// Pattern map omitted from policy, recorded in patternMaps.
 	policy2, pmTools2 := parseTrustedPermissionPolicy(`{"permission":{"bash":{"gh *":"allow","*":"deny"},"read":"allow"}}`)
 	_, hasBash := policy2["bash"]
 	assert.False(t, hasBash, "pattern map should be omitted so global rule applies")
 	assert.Equal(t, "allow", policy2["read"], "flat action preserved")
-	assert.True(t, pmTools2["bash"], "bash should be in patternMapTools")
-	assert.False(t, pmTools2["read"], "read is flat, not a pattern map")
+	assert.JSONEq(t, `{"gh *":"allow","*":"deny"}`, string(pmTools2["bash"]), "bash pattern map kept verbatim")
+	_, readIsMap := pmTools2["read"]
+	assert.False(t, readIsMap, "read is flat, not a pattern map")
 
 	// Invalid JSON → nil, nil.
 	nilPolicy, nilPM := parseTrustedPermissionPolicy("not json")
@@ -315,7 +307,7 @@ func TestOpenCodeAgentMarkdown(t *testing.T) {
 func TestOpenCodeValidatedArg(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "google-vertex-anthropic/claude-opus-4-6@default", openCodeValidatedArg("google-vertex-anthropic/claude-opus-4-6@default"))
+	assert.Equal(t, "google-vertex-anthropic/claude-opus-5-5@default", openCodeValidatedArg("google-vertex-anthropic/claude-opus-5-5@default"))
 	assert.Equal(t, "high", openCodeValidatedArg("high"))
 	// Control characters and shell metacharacters are stripped.
 	assert.Equal(t, "opusrm -rf", openCodeValidatedArg("opus;rm -rf"))
@@ -358,7 +350,7 @@ func TestBuildOpenCodeRunCommand(t *testing.T) {
 	// opencode runs inside the tee pipeline so its stream lands in a sandbox
 	// transcript file for ExtractTranscripts while still streaming to the host.
 	assert.Contains(t, cmd, `"$`+openCodeBinaryVar+`" run --format json --thinking`)
-	assert.Contains(t, cmd, "--model "+shellQuote("google-vertex-anthropic/claude-opus-4-6@default"))
+	assert.Contains(t, cmd, "--model "+shellQuote("google-vertex-anthropic/claude-opus-5-5@default"))
 	assert.Contains(t, cmd, "--variant "+shellQuote("high"))
 	assert.Contains(t, cmd, "--agent "+shellQuote("triage"))
 	assert.Contains(t, cmd, shellQuote(DefaultAgentPrompt))
@@ -374,7 +366,7 @@ func TestBuildOpenCodeRunCommand(t *testing.T) {
 	// No hooks signal → no integrity guard.
 	assert.NotContains(t, cmd, "refusing to run unhooked")
 	// CLOUD_ML_REGION is mapped to GOOGLE_CLOUD_LOCATION for Vertex region parity.
-	assert.Contains(t, cmd, `export GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"`)
+	assert.Contains(t, cmd, openCodeCloudLocationExport)
 
 	// Runner-owned opencode.json with instructions pointing at workspace
 	// AGENTS.md is rewritten after .env is sourced.
@@ -419,7 +411,31 @@ func TestOpenCodeBinaryPin(t *testing.T) {
 	assert.Equal(t, "REAL", strings.TrimSpace(string(out)))
 }
 
+func TestOpenCodeCloudLocationExport(t *testing.T) {
+	probe := openCodeCloudLocationExport + ` && echo "${GOOGLE_CLOUD_LOCATION-unset}"`
+	for _, tc := range []struct{ region, want string }{{"", "unset"}, {"us-east5", "us-east5"}} {
+		cmd := exec.Command("sh", "-c", probe)
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "CLOUD_ML_REGION=" + tc.region}
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", out)
+		assert.Equal(t, tc.want, strings.TrimSpace(string(out)), "CLOUD_ML_REGION=%q", tc.region)
+	}
+}
+
+// requirePinnedSha256sum skips tests that run openCodeUtilityPin on hosts
+// (macOS) where the pinned directories have no sha256sum.
+func requirePinnedSha256sum(t *testing.T) {
+	t.Helper()
+	for _, d := range []string{"/usr/local/bin", "/usr/bin", "/bin"} {
+		if _, err := os.Stat(d + "/sha256sum"); err == nil {
+			return
+		}
+	}
+	t.Skip("no sha256sum in the pinned utility directories")
+}
+
 func TestOpenCodeExitPipeline(t *testing.T) {
+	requirePinnedSha256sum(t)
 	rcFile := filepath.Join(t.TempDir(), "run-rc")
 	transcript := filepath.Join(t.TempDir(), "output.jsonl")
 	shadow := `command() { printf FAKE; }; printf() { :; }; tee() { :; }; cat() { printf 0; }; `
@@ -439,6 +455,7 @@ func TestOpenCodeExitPipeline(t *testing.T) {
 }
 
 func TestOpenCodeHooksGuardUsesUnshadowableCommands(t *testing.T) {
+	requirePinnedSha256sum(t)
 	missing := filepath.Join(t.TempDir(), "missing-hooks.ts")
 	shadow := `command() { return 0; }; test() { return 0; }; printf() { return 0; }; sha256sum() { return 0; }; cut() { return 0; }; `
 	cmd := exec.Command("sh", "-c", openCodeUtilityPin()+" && "+shadow+openCodeHooksGuard(missing))
@@ -526,6 +543,7 @@ exit 0
 }
 
 func TestOpenCodeTrustedEnvReadCommand(t *testing.T) {
+	requirePinnedSha256sum(t)
 	want := openCodeTrustedEnv{
 		ConfigContent:   "{\"permission\":{\"bash\":\"allow\"},\"quote\":\"'\",\"line\":\"a\\nb\"}",
 		CredentialsPath: "/runner/path with spaces/adc.json",

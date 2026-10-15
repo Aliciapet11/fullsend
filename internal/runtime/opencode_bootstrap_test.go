@@ -456,8 +456,8 @@ func TestOpenCodeRuntimeRun_HappyPath(t *testing.T) {
 	require.NotEmpty(t, events)
 	init, ok := events[0].(InitEvent)
 	require.True(t, ok, "first event should be InitEvent")
-	assert.Equal(t, "claude-opus-4-6@default", init.Model)
-	assert.Equal(t, "claude-opus-4-6@default", metrics.Model)
+	assert.Equal(t, "claude-opus-5-5@default", init.Model)
+	assert.Equal(t, "claude-opus-5-5@default", metrics.Model)
 
 	// Metrics captured from the stream.
 	assert.Equal(t, 1, metrics.NumTurns)
@@ -465,6 +465,43 @@ func TestOpenCodeRuntimeRun_HappyPath(t *testing.T) {
 	assert.Equal(t, 100, metrics.InputTokens)
 	assert.Equal(t, 50, metrics.OutputTokens)
 	assert.EqualValues(t, 1, metrics.ToolCalls.Load())
+}
+
+// Each iteration re-uploads the agent file Bootstrap wrote, and a run where
+// OpenCode reports falling back to its default agent fails.
+func TestOpenCodeRuntimeRun_RestoresAgentAndRejectsFallback(t *testing.T) {
+	t.Setenv(openCodeProviderEnv, "")
+	agentPath := OpenCodeRuntime{}.openCodeAgentPath("triage")
+	recordOpenCodeTrustedEnv("sb", openCodeTrustedEnv{
+		ConfigContent:   `{"permission":{"*":"deny"}}`,
+		CredentialsPath: "/runner/adc.json",
+		AgentPath:       agentPath,
+		AgentDefinition: "---\n{\"mode\":\"primary\"}\n---\n",
+	})
+	t.Cleanup(func() { forgetOpenCodeTrustedEnv("sb") })
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "calls.log")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> '` + logPath + `'
+for last; do :; done
+case "$last" in
+  *"--format json"*)
+    printf '! agent "triage" not found. Falling back to default agent\n' >&2
+    printf '%s\n' '{"type":"step_finish","timestamp":1,"sessionID":"s1","part":{"reason":"stop","tokens":{"input":1,"output":1}}}' ;;
+esac
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	params := RunParams{SandboxName: "sb", AgentBaseName: "triage", Model: "opus", Timeout: 30 * time.Second, OnEvent: func(AgentEvent) {}}
+	_, err := OpenCodeRuntime{}.Run(context.Background(), params, ui.New(&strings.Builder{}), time.Now(), &RunMetrics{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default agent")
+
+	calls, readErr := os.ReadFile(logPath)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(calls), agentPath, "agent file re-uploaded before the run")
 }
 
 func TestOpenCodeRuntimeRun_TeesToOutputPath(t *testing.T) {
