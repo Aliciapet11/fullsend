@@ -23,9 +23,13 @@ import (
 // It replaces the former two-phase architecture where BatchInstall
 // handled new repos and Upgrade + Sync handled already-installed repos.
 type ConvergeConfig struct {
-	Manifest       *Manifest
-	DryRun         bool
-	RepoFilter     []string
+	Manifest   *Manifest
+	DryRun     bool
+	RepoFilter []string
+	// ExcludeRepos lists owner/repo names (case-insensitive) that Converge
+	// skips entirely, such as repos whose GitLab trigger-account containment
+	// failed: they take no scaffold, config, variable, or schedule write.
+	ExcludeRepos   []string
 	MaxConcurrency int
 
 	// UpstreamRef is the git ref (SHA) used to pin scaffold workflow refs.
@@ -774,6 +778,19 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 		if err != nil {
 			return nil, err
 		}
+	}
+	if len(cfg.ExcludeRepos) > 0 {
+		excluded := make(map[string]bool, len(cfg.ExcludeRepos))
+		for _, name := range cfg.ExcludeRepos {
+			excluded[strings.ToLower(name)] = true
+		}
+		kept := make([]ResolvedRepo, 0, len(repos))
+		for _, rr := range repos {
+			if !excluded[strings.ToLower(rr.Owner+"/"+rr.Repo)] {
+				kept = append(kept, rr)
+			}
+		}
+		repos = kept
 	}
 	if len(repos) == 0 {
 		return &ConvergeBatchResult{}, nil

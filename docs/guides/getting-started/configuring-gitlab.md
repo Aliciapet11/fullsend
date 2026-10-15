@@ -679,6 +679,85 @@ and the
 [role-credential contract](../../contributing/gitlab-role-credentials.md#project-service-accounts)
 for details.
 
+### Trigger-only service account
+
+`repos install` also sets up a separate, trigger-only project service account
+for the protected-branch dispatch route that
+[#8438](https://github.com/fullsend-ai/fullsend/issues/8438) will activate.
+Nothing reads its trigger token yet, so polling and the existing webhook fast
+path behave as before. It needs only project Maintainer (or Owner) access: no
+instance administrator and no persistent Maintainer token or private key.
+
+Install creates the account (`fullsend-trigger-<nonce>`), temporarily raises it
+to Maintainer so it can own a deploy key and a pipeline trigger token, revokes
+its short-lived token and returns it to Developer, grants the deploy key push
+on the exact-name protected default branch, and stores the trigger token in the
+masked, protected `FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN` variable. It is
+never the Poller account. A ledger variable,
+`FULLSEND_GITLAB_TRIGGER_ACCOUNT`, records every resource before it is created,
+so an interrupted run is finished by running install again.
+
+Install defers, creates nothing, and reports the reason (polling stays in
+place) when the default branch is covered only by a wildcard protected-branch
+rule (fullsend does not edit wildcard rules), when project service accounts are
+unavailable, when `ci_pipeline_variables_minimum_override_role` is not
+`no_one_allowed` (no trigger credential is published while pipeline variable
+overrides are allowed, and a rotation defers before it starts), or when the
+protected default branch is not the one the ledger recorded. Install fails instead, before the account is raised, when the account
+owns an SSH key, a pipeline schedule, or a trigger token that fullsend did not
+create, or when any pipeline trigger token or schedule has no reported owner
+(its ID is named; fullsend never deletes it by inference); remove or reassign
+it, then re-run install. As soon as the manifest and forge clients are
+available, every install runs a containment-only recovery that revokes an
+unfinished bootstrap token and restores Developer access without creating
+anything, before the configuration preflights and every later stage can fail.
+The same early pass removes a published token variable and revokes the owned
+triggers across the current and retired generations when the override role is
+weakened or unreadable or the variable is unsafe, so a later stage failure
+cannot leave a published credential live.
+Only validation of command-line flags and loading the manifest come first.
+`repos status` shows the account as `not-installed`, `ready`, `drifted`,
+`deferred`, `in-progress`, `cleanup-pending`, or `unreadable` with the exact
+reason and resource IDs.
+
+- **Rotate:** `repos install --rotate-gitlab-trigger-account` replaces the
+  whole identity with a fresh account generation (account, deploy key, push
+  entry, and trigger token) and retires the previous generation after the new
+  token is published. A published identity is never raised to Maintainer again,
+  because a trigger request accepted earlier can still become a job. Install
+  does the same when the token variable is missing or unsafe (not masked, not
+  protected, file-typed, or environment-scoped) or the deploy key is gone. If a
+  rotation or retirement was interrupted, run install or the same command
+  again.
+- **GitLab.com Free:** GitLab refuses the legacy per-user protected-branch
+  merge grant for the Poller. Install still prepares the trigger account in
+  that case. The Poller access failure is reported once for the repo, and the
+  dispatch-route stages that follow it (the webhook fast path) stay skipped.
+- **Deferral and unsafe token variable:** a branch-change, override-role, or
+  capability deferral first removes an unsafe published token variable and
+  revokes its ownership-verified trigger. A weakened or unreadable override
+  role removes the variable and revokes the trigger whatever the variable's
+  attributes. The ledger keeps the cleanup obligation, and
+  `repos status` keeps reporting that the token was removed until install
+  publishes a replacement.
+- **Change the default branch:** run `repos uninstall` (it removes the
+  resources from the recorded branch), then `repos install`.
+- **Uninstall:** `repos uninstall` removes the published token, trigger token,
+  push entry, deploy key, and account, then the ledger. It does not delete the
+  account while it still owns an active personal access token, SSH key,
+  pipeline schedule, or trigger token that fullsend did not create, and
+  rotation retires a previous account under the same rule; remove the
+  reported resource, then re-run. If it stops, the
+  ledger stays; fix the reported cause (for example a resource that no longer
+  matches what fullsend recorded, which is left for you to inspect) and run
+  uninstall again. Do not edit or delete `FULLSEND_GITLAB_TRIGGER_ACCOUNT` by
+  hand.
+- Resources of other accounts (administrator-owned keys, push entries, tokens,
+  triggers) are never touched.
+
+See [GitLab role credentials](../../contributing/gitlab-role-credentials.md#trigger-only-service-account)
+for the ownership proofs and recovery details.
+
 ### Off-system polling
 
 `fullsend poll` is a **hidden command** — it won't appear in `fullsend

@@ -587,6 +587,38 @@ fullsend repos set defaults.signoff true
 fullsend repos install -f repos.yaml
 ```
 
+#### GitLab trigger-only service account
+
+For GitLab repos, install also converges a dedicated trigger-only service
+account that owns a push-capable deploy key on the default branch's
+exact-name protected-branch rule and a pipeline trigger token. It uses only
+project-scoped authority, so it works on GitLab.com Free. Details are in
+[Configuring GitLab](configuring-gitlab.md) and the
+[`repos install` reference](../../cli/repos.md).
+
+- **Install and recovery:** re-run `repos install`. Every install first runs a
+  containment-only recovery that revokes an unfinished bootstrap token and
+  restores Developer access for the account, before the configuration
+  preflights and every later stage. The same early pass removes an already
+  published token variable and revokes the owned triggers across the current
+  and retired generations when the override role is weakened or unreadable or
+  the variable is unsafe, even when a later install stage fails. Deletion and
+  revocation are attempted independently. A repo whose containment fails is reported
+  as failed and takes no scaffold, configuration, or role change in that run.
+  A glob that cannot be expanded does not stop containment of explicitly
+  listed repos or of repos another glob resolved.
+- **Deferral:** install defers, and polling stays the dispatch path, when the
+  default branch has no exact-name protection rule, when project service
+  accounts are unavailable, when the pipeline-variable override role is not
+  `no_one_allowed`, or when the recorded branch differs from the
+  default branch. A deferral is not a failure. Before it returns, an unsafe
+  published token variable is removed and its trigger revoked.
+- **Rotation:** `fullsend repos install --rotate-gitlab-trigger-account`
+  replaces the account, deploy key, push entry, and trigger token with a fresh
+  generation. The previous account is first confirmed at Developer access, and
+  rotation stops without replacing anything when that cannot be verified.
+- **Branch change:** run `repos uninstall`, then `repos install`.
+
 ## Day-2 operations
 
 ### Checking installation status
@@ -612,6 +644,14 @@ Inference credentials are checked against each repo's own
 leftover Fullsend-managed secret of the other method are both reported as
 drift, by name only. See
 [`repos status` output](../../cli/repos.md#output).
+
+For GitLab repos, status also reports the trigger-only service account as
+`not-installed`, `ready`, `drifted`, `deferred`, `in-progress`,
+`cleanup-pending`, or `unreadable`, with the reason and resource IDs and never
+a token value. Every state except `not-installed`, `deferred`, and `ready` is
+drift. The managed `FULLSEND_TRIGGER_TOKEN` and `FULLSEND_WEBHOOK_SECRET`
+variables are not reported as orphans; any other unrecognised `FULLSEND_`
+variable still is.
 
 Use `--json` for machine-readable output:
 
@@ -729,7 +769,7 @@ See [Managed configuration](#managed-configuration) and the
 
 ### Removing repos
 
-Remove a repo from the manifest and tear down its installation. File deletions open a PR by default (variables and secrets are deleted immediately via the API). For GitLab repos, uninstall also deletes the `fullsend-poll-state-slash` and `fullsend-poll-state-events` branches, deletes the Fullsend-owned webhook fast-path project webhook, revokes its managed pipeline trigger token, and deletes the `FULLSEND_TRIGGER_TOKEN` and `FULLSEND_WEBHOOK_SECRET` variables; if that cleanup fails, the scaffold is not removed and the manifest entry is kept for retry. Before deleting anything, GitLab uninstall reads the `FULLSEND_GITLAB_ROLE_ROTATION` ownership variable and stops if it is unreadable or malformed. It then revokes role project access tokens and deletes verified Fullsend-managed service accounts, leaving administrator-supplied accounts and their credentials in place. The rotation variable is removed last, or kept as an exclusions-only document when it records administrator-supplied service accounts. Pass `--direct` to push file deletions to the default branch:
+Remove a repo from the manifest and tear down its installation. File deletions open a PR by default (variables and secrets are deleted immediately via the API). For GitLab repos, uninstall also deletes the `fullsend-poll-state-slash` and `fullsend-poll-state-events` branches, deletes the Fullsend-owned webhook fast-path project webhook, revokes its managed pipeline trigger token, and deletes the `FULLSEND_TRIGGER_TOKEN` and `FULLSEND_WEBHOOK_SECRET` variables; if that cleanup fails, the scaffold is not removed and the manifest entry is kept for retry. After the webhook fast path is removed and before role cleanup, GitLab uninstall removes the trigger-only service account: the published `FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN` variable, the trigger token, the protected-branch push entry, the deploy key, the service account, and finally the `FULLSEND_GITLAB_TRIGGER_ACCOUNT` ledger. When a ledger exists, uninstall requires the dedicated trigger-account removal capability, and it keeps the ledger until cleanup succeeds, so a failed uninstall stops, keeps the manifest entry, and a retry resumes. Generic role-variable cleanup never deletes the ledger or the token variable. Before deleting anything, GitLab uninstall reads the `FULLSEND_GITLAB_ROLE_ROTATION` ownership variable and stops if it is unreadable or malformed. It then revokes role project access tokens and deletes verified Fullsend-managed service accounts, leaving administrator-supplied accounts and their credentials in place. The rotation variable is removed last, or kept as an exclusions-only document when it records administrator-supplied service accounts. Pass `--direct` to push file deletions to the default branch:
 
 ```bash
 fullsend repos uninstall acme/old-api

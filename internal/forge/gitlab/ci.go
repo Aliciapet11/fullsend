@@ -174,7 +174,7 @@ func (c *LiveClient) updateRepoSecret(ctx context.Context, owner, repo, name, va
 // error rather than a reason to retry with masked=false.
 func maskingRequired(name string) bool {
 	switch name {
-	case forge.SecretOpenAIAPIKey, forge.SecretTriggerToken, forge.SecretWebhookSecret,
+	case forge.SecretOpenAIAPIKey, forge.SecretTriggerToken, forge.SecretWebhookSecret, forge.SecretGitLabTriggerAccountToken,
 		forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken:
 		return true
 	}
