@@ -614,9 +614,12 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 	// (other/* next to a declared acme/*) fails here even when another
 	// selector matches. This only reads from the forge, so dry run and live
 	// install fail identically before any manifest or forge write.
-	if err := repos.RequireDeclaredSelections(ctx, manifest, clients, opts.repoFilter); err != nil {
-		return fmt.Errorf("matching repository selection: %w; repos install only selects repositories the manifest declares; nothing was changed. Declare a missing repository first, for example:\n  fullsend repos set 'github.repos[\"owner/repo\"]' '{}'", err)
-	}
+	//
+	// The error is held, not returned, until the containment-only recovery
+	// below has run for the repositories that did resolve: an unrelated glob
+	// that cannot be listed must not leave an explicit repository's interrupted
+	// bootstrap uncontained. Normal installation stages stay blocked.
+	selectionMatchErr := repos.RequireDeclaredSelections(ctx, manifest, clients, opts.repoFilter)
 
 	// Containment-only recovery of an interrupted GitLab trigger-account
 	// bootstrap (#8437). It runs for every targeted GitLab repository as soon as
@@ -658,6 +661,13 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 				Error: fmt.Errorf("GitLab trigger account recovery: %w", cErr),
 			})
 		}
+	}
+	if selectionMatchErr != nil {
+		errs := []error{fmt.Errorf("matching repository selection: %w; repos install only selects repositories the manifest declares; nothing was changed. Declare a missing repository first, for example:\n  fullsend repos set 'github.repos[\"owner/repo\"]' '{}'", selectionMatchErr)}
+		for _, r := range containFailedRepos {
+			errs = append(errs, r.Error)
+		}
+		return errors.Join(errs...)
 	}
 
 	// Preflight the existing configuration layers of manifest-tracked repos

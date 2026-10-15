@@ -792,42 +792,55 @@ func (op *gitLabTriggerAccountOp) containUnsafePublishedSink(ctx context.Context
 	if !op.exists || op.retired || !op.sinkOwned() {
 		return nil
 	}
+	// A distributed trigger value is only safe while its account holds exactly
+	// Developer access, whatever the sink and the override role look like. The
+	// access of every publication-owning generation is therefore restored
+	// first, independently of every sink and role read below, so an unreadable,
+	// missing or unsafe sink never leaves an account raised out of band. A step
+	// that fails does not suppress the others and every error is joined.
+	accessErr := op.restorePublishedAccessToDeveloper(ctx)
+	contained, sinkErr := op.containBySinkState(ctx)
+	errs := []error{sinkErr}
+	if accessErr != nil {
+		errs = append(errs, fmt.Errorf("GitLab trigger account: Developer access of a publishing generation could not be verified, so its published credential was contained: %w", accessErr))
+		if !contained {
+			// Developer access cannot be established, so the sink is removed
+			// and the owned triggers are revoked independently, keeping the
+			// retry obligations.
+			errs = append(errs, op.removeRevokeAndSave(ctx, true))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// containBySinkState removes the sink and revokes the owned triggers when the
+// override role or the sink attributes make the published credential unsafe,
+// and retries the revocation for a missing sink. contained reports whether the
+// removal and revocation ran, so the caller does not repeat them.
+func (op *gitLabTriggerAccountOp) containBySinkState(ctx context.Context) (contained bool, err error) {
 	reason, roleErr := op.overrideRoleDeferral(ctx)
 	if roleErr != nil || reason != "" {
-		return op.removeRevokeAndSave(ctx, true)
+		return true, op.removeRevokeAndSave(ctx, true)
 	}
 	prot, err := op.opts.State.GetRepoSecretProtection(ctx, op.opts.Owner, op.opts.Repo, forge.SecretGitLabTriggerAccountToken)
 	if err != nil {
-		return safeAPIError("reading "+forge.SecretGitLabTriggerAccountToken, err)
+		return false, safeAPIError("reading "+forge.SecretGitLabTriggerAccountToken, err)
 	}
 	if !prot.Exists {
 		// The variable may already be gone because an earlier containment
 		// deleted it and then failed to revoke the trigger. A missing sink
 		// holds no recoverable value, so retry the ownership-verified
 		// revocation before the deferral stands; it is idempotent.
-		return op.removeRevokeAndSave(ctx, false)
+		return true, op.removeRevokeAndSave(ctx, false)
 	}
 	problems, err := triggerSinkProblems(ctx, op.opts.State, op.opts.Owner, op.opts.Repo)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(problems) > 0 {
-		return op.removeRevokeAndSave(ctx, true)
+		return true, op.removeRevokeAndSave(ctx, true)
 	}
-	// A healthy sink and role do not bound what the account can do: a
-	// distributed trigger value is only safe while its account holds exactly
-	// Developer access. An account raised out of band is restored here, for
-	// every publication-owning generation, before any deferral or unrelated
-	// readiness check can return. When Developer access cannot be established
-	// the sink is removed and the owned triggers are revoked independently,
-	// keeping the retry obligations.
-	if accessErr := op.restorePublishedAccessToDeveloper(ctx); accessErr != nil {
-		return errors.Join(
-			fmt.Errorf("GitLab trigger account: Developer access of a publishing generation could not be verified, so its published credential was contained: %w", accessErr),
-			op.removeRevokeAndSave(ctx, true),
-		)
-	}
-	return nil
+	return false, nil
 }
 
 // removeAndRevokePublished optionally removes the token sink, then revokes the
@@ -841,15 +854,19 @@ func (op *gitLabTriggerAccountOp) containUnsafePublishedSink(ctx context.Context
 // the others. A generation's TriggerPublished marker is cleared only after its
 // own revocation succeeded, and every error is joined. The caller persists the
 // ledger even when an error is returned.
+//
+// The sink deletion and each generation's revocation run on their own bounded
+// context detached from ctx's cancellation (as endBootstrap does), so a step
+// that exhausts its deadline never suppresses the following ones.
 func (op *gitLabTriggerAccountOp) removeAndRevokePublished(ctx context.Context, removeSink bool) error {
 	var errs []error
 	if removeSink && op.opts.UnpublishTriggerToken != nil {
-		if err := op.opts.UnpublishTriggerToken(ctx); err != nil {
+		if err := gitlabCleanupStep(ctx, op.opts.UnpublishTriggerToken); err != nil {
 			errs = append(errs, safeAPIError("removing the unsafe pipeline trigger token variable", err))
 		}
 	}
 	if op.st.PublishStarted {
-		if err := op.revokeOwnedTriggers(ctx); err != nil {
+		if err := gitlabCleanupStep(ctx, op.revokeOwnedTriggers); err != nil {
 			errs = append(errs, err)
 		} else {
 			op.st.TriggerPublished = false
@@ -860,7 +877,7 @@ func (op *gitLabTriggerAccountOp) removeAndRevokePublished(ctx context.Context, 
 			continue
 		}
 		sub := &gitLabTriggerAccountOp{opts: op.opts, st: op.st.Retired[i], exists: true, retired: true}
-		if err := sub.revokeOwnedTriggers(ctx); err != nil {
+		if err := gitlabCleanupStep(ctx, sub.revokeOwnedTriggers); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -869,12 +886,21 @@ func (op *gitLabTriggerAccountOp) removeAndRevokePublished(ctx context.Context, 
 	return errors.Join(errs...)
 }
 
+// gitlabCleanupStep runs fn on its own bounded context detached from ctx's
+// cancellation, so a failed, canceled or deadline-exhausting step never
+// skips the next one.
+func gitlabCleanupStep(ctx context.Context, fn func(context.Context) error) error {
+	cctx, cancel := gitlabCleanupContext(ctx)
+	defer cancel()
+	return fn(cctx)
+}
+
 // removeRevokeAndSave runs removeAndRevokePublished and persists the ledger
 // whether or not it failed, so the generations whose revocation completed are
 // recorded and the unresolved obligations stay for an idempotent retry.
 func (op *gitLabTriggerAccountOp) removeRevokeAndSave(ctx context.Context, removeSink bool) error {
 	err := op.removeAndRevokePublished(ctx, removeSink)
-	if sErr := op.save(ctx); sErr != nil {
+	if sErr := gitlabCleanupStep(ctx, op.save); sErr != nil {
 		err = errors.Join(err, sErr)
 	}
 	return err

@@ -182,7 +182,7 @@ func TestGitLabTriggerAccount_UnverifiedRestorationFailsClosedBeforeReplacement(
 			e.f.fail["UpdateProjectMemberAccessLevel"] = true // restoration cannot happen
 
 			err = replace(e)
-			require.ErrorContains(t, err, "could not be verified at Developer access")
+			require.ErrorContains(t, err, "could not be verified")
 			after, _ := e.ledger(t)
 			assert.Equal(t, before.Nonce, after.Nonce, "no replacement generation was started")
 			assert.Empty(t, after.Retired)
@@ -198,14 +198,18 @@ func TestConvergeGitLabTriggerAccount_UnsafeSinkIsContainedBeforeDeferral(t *tes
 	deferrals := map[string]struct {
 		setup func(e *trigEnv, o *GitLabTriggerAccountOptions)
 		want  string
+		// unverified marks a case where the publishing account's access cannot
+		// be read, so the contained credential is reported as an error rather
+		// than a deferral.
+		unverified bool
 	}{
 		"branch change": {
 			setup: func(_ *trigEnv, o *GitLabTriggerAccountOptions) { o.Branch = "release" },
 			want:  "not \"release\"",
 		},
 		"capability": {
-			setup: func(e *trigEnv, _ *GitLabTriggerAccountOptions) { e.f.saDisabled = true },
-			want:  "service accounts are unavailable",
+			setup:      func(e *trigEnv, _ *GitLabTriggerAccountOptions) { e.f.saDisabled = true },
+			unverified: true,
 		},
 	}
 	for name, d := range deferrals {
@@ -224,8 +228,12 @@ func TestConvergeGitLabTriggerAccount_UnsafeSinkIsContainedBeforeDeferral(t *tes
 			o := e.unpublishClearsAttributes(e.opts())
 			d.setup(e, &o)
 			got, err := ConvergeGitLabTriggerAccount(ctx, o)
-			require.NoError(t, err)
-			assert.Contains(t, got.Deferred, d.want)
+			if d.unverified {
+				require.ErrorContains(t, err, "could not be verified")
+			} else {
+				require.NoError(t, err)
+				assert.Contains(t, got.Deferred, d.want)
+			}
 
 			assert.False(t, e.sinkPresent(), "the unsafe variable is removed")
 			assert.NotContains(t, e.f.triggers, res.TriggerTokenID, "the owned trigger is revoked")
