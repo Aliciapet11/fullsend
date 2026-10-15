@@ -163,6 +163,7 @@ func (r OpenCodeRuntime) Bootstrap(input BootstrapInput) error {
 
 	trustedEnv.AgentPath = r.openCodeAgentPath(agentName)
 	trustedEnv.AgentDefinition = string(agentMD)
+	trustedEnv.AgentModel = def.Model
 	recordOpenCodeTrustedEnv(sandboxName, trustedEnv)
 	return nil
 }

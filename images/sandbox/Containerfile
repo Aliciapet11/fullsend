@@ -373,7 +373,8 @@ RUN case "$TARGETARCH" in \
 # lockdown is deferred to the hook adapter (#7824).
 RUN install -d -o root -g sandbox -m 0775 /sandbox/opencode-config
 # OPENCODE_DISABLE_MODELS_FETCH: the sandbox cannot reach models.opencode.ai,
-# so use the model catalog built into the pinned binary without a refresh.
+# so skip the refresh. With no cached models.json (the runner removes it
+# before each iteration), OpenCode uses the catalog built into the binary.
 ENV OPENCODE_CONFIG_DIR="/sandbox/opencode-config" \
     OPENCODE_DISABLE_PROJECT_CONFIG="true" \
     OPENCODE_DISABLE_MODELS_FETCH="true"

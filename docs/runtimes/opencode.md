@@ -10,7 +10,7 @@ fullsend run triage --runtime opencode --model google-vertex-anthropic/claude-op
 Selecting it, and how it compares to Claude Code and pi, is in [Agent runtimes](../runtimes.md). This
 page is what changes once you are on it.
 
-> **Planned: write-path support.** OpenCode is enabled for read-only agents (`triage`,
+> **Planned:** write-path support. OpenCode is enabled for read-only agents (`triage`,
 > `prioritize`). Write-capable agents (`code`, `fix`) are gated on the security-hook adapter, tracked
 > in [unbound-force#515](https://github.com/unbound-force/unbound-force/issues/515): OpenCode has no
 > native PreToolUse/PostToolUse hooks, so until the runner-owned, sha256-gated plugin adapter lands,
@@ -168,8 +168,10 @@ fullsend run triage \
   (`bash: {"gh *": "allow", "*": "deny"}`), an agent that declares the tool gets that same pattern
   map in its record, so the agent can never widen it.
 - **The agent is restored before every iteration.** `Run` removes the other places OpenCode
-  loads agent overrides from (`agent/`, `agents/`, `mode/`, `modes/` and `opencode.jsonc` in the
-  config directory, `~/.opencode` and `~/.config/opencode`), re-uploads the translated
+  loads agents, tools, commands or config from (`agent/`, `agents/`, `mode/`, `modes/`, `tool/`,
+  `tools/`, `command/`, `commands/` and `opencode.jsonc` in the config directory, `~/.opencode`,
+  `~/.config/opencode`, a cached `~/.cache/opencode/models.json`, which OpenCode would prefer over
+  its built-in model catalog, and `~/.local/share/opencode/auth.json`), re-uploads the translated
   `agent/<name>.md`, and checks with `opencode debug agent` that it loads as the primary agent.
   An iteration also fails when OpenCode prints `Falling back to default agent`. Other files in
   the config directory, such as `plugins/` and `skills/`, stay agent-writable until #7824.

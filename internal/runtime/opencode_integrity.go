@@ -22,6 +22,9 @@ type openCodeTrustedEnv struct {
 	// before every iteration (restoreOpenCodeAgent).
 	AgentPath       string
 	AgentDefinition string
+	// AgentModel is the agent definition's frontmatter model. A harness or
+	// CLI model wins over it (EffectiveModel), as on Claude Code and Codex.
+	AgentModel string
 }
 
 // openCodeRunnerEnv holds values Bootstrap reads before the first agent

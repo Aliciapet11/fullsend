@@ -413,9 +413,14 @@ func TestOpenCodeBinaryPin(t *testing.T) {
 
 func TestOpenCodeCloudLocationExport(t *testing.T) {
 	probe := openCodeCloudLocationExport + ` && echo "${GOOGLE_CLOUD_LOCATION-unset}"`
-	for _, tc := range []struct{ region, want string }{{"", "unset"}, {"us-east5", "us-east5"}} {
+	for _, tc := range []struct{ location, region, want string }{
+		{"", "", "unset"}, {"", "us-east5", "us-east5"}, {"GOOGLE_CLOUD_LOCATION=", "", "unset"},
+	} {
 		cmd := exec.Command("sh", "-c", probe)
 		cmd.Env = []string{"PATH=/usr/bin:/bin", "CLOUD_ML_REGION=" + tc.region}
+		if tc.location != "" {
+			cmd.Env = append(cmd.Env, tc.location)
+		}
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "%s", out)
 		assert.Equal(t, tc.want, strings.TrimSpace(string(out)), "CLOUD_ML_REGION=%q", tc.region)
@@ -663,6 +668,17 @@ func TestBuildOpenCodeRunCommand_HooksGuard(t *testing.T) {
 	assert.Contains(t, cmd, "exit 97")
 }
 
+func TestBuildOpenCodeRunCommand_AgentModelPrecedence(t *testing.T) {
+	t.Setenv(openCodeProviderEnv, "")
+
+	env := openCodeTrustedEnv{AgentModel: "haiku"}
+	cmd := buildOpenCodeRunCommand(RunParams{AgentBaseName: "triage", RepoDir: "/repo"}, "triage", env)
+	assert.Contains(t, cmd, "--model "+shellQuote("google-vertex-anthropic/claude-haiku-5-5@default"))
+
+	cmd = buildOpenCodeRunCommand(RunParams{AgentBaseName: "triage", RepoDir: "/repo", Model: "sonnet"}, "triage", env)
+	assert.Contains(t, cmd, "--model "+shellQuote("google-vertex-anthropic/claude-sonnet-5-5@default"))
+}
+
 func TestBuildOpenCodeRunCommand_DebugMode(t *testing.T) {
 	t.Setenv(openCodeProviderEnv, "")
 
@@ -805,6 +821,13 @@ func TestParseOpenCodeTranscriptFile(t *testing.T) {
 	te, ok = parseOpenCodeTranscriptFile(zeroPath)
 	require.True(t, ok)
 	assert.True(t, te.IsError, "zero-turn stream should be flagged as error")
+
+	// A malformed line beside a completed turn is still an error, as in Run.
+	corruptPath := filepath.Join(dir, "corrupt.jsonl")
+	require.NoError(t, os.WriteFile(corruptPath, []byte("{not json\n"+okStream), 0o644))
+	te, ok = parseOpenCodeTranscriptFile(corruptPath)
+	require.True(t, ok)
+	assert.True(t, te.IsError, "malformed line should be flagged as error")
 
 	// An empty file yields ok=false.
 	emptyPath := filepath.Join(dir, "empty.jsonl")

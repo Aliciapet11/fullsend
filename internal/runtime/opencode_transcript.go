@@ -124,13 +124,23 @@ func parseOpenCodeTranscriptFile(path string) (TranscriptError, bool) {
 	}
 	source := filepath.Base(path)
 	var result *ResultEvent
-	_, _, _ = parseOpenCodeStream(bytes.NewReader(data), func(evt AgentEvent) {
+	_, malformed, parseErr := parseOpenCodeStream(bytes.NewReader(data), func(evt AgentEvent) {
 		if e, ok := evt.(ResultEvent); ok {
 			result = &e
 		}
 	})
 	if result == nil {
 		return TranscriptError{}, false
+	}
+	// Run fails a stream with malformed lines or a read error even when a
+	// turn completed, so the artifact verdict must not read as clean either.
+	if parseErr != nil || malformed > 0 {
+		return TranscriptError{
+			Source:       source,
+			IsError:      true,
+			ErrorMessage: fmt.Sprintf("corrupt opencode stream: %d malformed line(s), read error: %v", malformed, parseErr),
+			Subtype:      result.Subtype,
+		}, true
 	}
 	return TranscriptError{
 		Source:       source,

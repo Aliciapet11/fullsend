@@ -173,7 +173,7 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 	envFile := sandbox.SandboxWorkspace + "/.env"
 	hooksEnabled := params.HooksSettingsPath != ""
 
-	modelSpec := translateOpenCodeModel(params.Model, params.ModelAliases)
+	modelSpec := translateOpenCodeModel(EffectiveModel(params.Model, trustedEnv.AgentModel), params.ModelAliases)
 
 	// Prelude: the setup that must run in the top-level shell (not the pipe
 	// subshell) so its exit codes propagate directly. In particular the hook
@@ -336,9 +336,10 @@ func openCodeBinaryPin() string {
 }
 
 // openCodeCloudLocationExport sets GOOGLE_CLOUD_LOCATION from
-// CLOUD_ML_REGION only when the result is non-empty, so OpenCode keeps its
-// own "global" default when neither is set.
-const openCodeCloudLocationExport = `{ _gcl="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"; [ -n "$_gcl" ] && export GOOGLE_CLOUD_LOCATION="$_gcl" || true; }`
+// CLOUD_ML_REGION only when the result is non-empty, and otherwise unsets
+// it (an exported "" would also win over the JS ?? default), so OpenCode
+// keeps its own "global" default when neither is set.
+const openCodeCloudLocationExport = `{ _gcl="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"; [ -n "$_gcl" ] && export GOOGLE_CLOUD_LOCATION="$_gcl" || unset GOOGLE_CLOUD_LOCATION; }`
 
 func openCodeUtilityPin() string {
 	utilities := []struct {
@@ -515,7 +516,7 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 		handler = renderer.Handle
 	}
 
-	modelSpec := translateOpenCodeModel(params.Model, params.ModelAliases)
+	modelSpec := translateOpenCodeModel(EffectiveModel(params.Model, trustedEnv.AgentModel), params.ModelAliases)
 	// Telemetry and the renderer get the bare model id, as they do for Claude
 	// Code and pi, so runs group by model across runtimes; the provider is
 	// gen_ai.system's job and stays visible on the command line.
@@ -603,18 +604,21 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	return exitCode, nil
 }
 
-// restoreOpenCodeAgent undoes agent overrides an earlier iteration could have
-// left: it removes every other place OpenCode loads agent or config overrides
-// from (agent/, agents/, mode/, modes/ and opencode.jsonc under the config
-// dir, and the user-level config dirs), re-uploads the agent file Bootstrap
-// wrote, and checks that OpenCode loads it as the primary agent.
+// restoreOpenCodeAgent undoes overrides an earlier iteration could have
+// left: it removes the other places OpenCode loads agents, tools, commands or
+// config from (agent/, agents/, mode/, modes/, tool/, tools/, command/,
+// commands/ and opencode.jsonc under the config dir, the user-level config
+// dirs, a cached models.json, which OpenCode prefers over its built-in
+// catalog, and auth.json), re-uploads the agent file Bootstrap wrote, and
+// checks that OpenCode loads it as the primary agent. plugins/ and skills/
+// stay writable until #7824.
 func (r OpenCodeRuntime) restoreOpenCodeAgent(sandboxName, agentName string, env openCodeTrustedEnv) error {
 	cfg := r.ConfigDir()
 	clearCmd := "rm -rf --"
-	for _, p := range []string{"agent", "agents", "mode", "modes", "opencode.jsonc"} {
+	for _, p := range []string{"agent", "agents", "mode", "modes", "tool", "tools", "command", "commands", "opencode.jsonc"} {
 		clearCmd += " " + shellQuote(cfg+"/"+p)
 	}
-	clearCmd += ` "$HOME/.opencode" "$HOME/.config/opencode"`
+	clearCmd += ` "$HOME/.opencode" "$HOME/.config/opencode" "$HOME/.cache/opencode/models.json" "$HOME/.local/share/opencode/auth.json"`
 	_, stderr, exitCode, err := sandbox.Exec(sandboxName, clearCmd, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("clearing opencode agent overrides: %w", err)

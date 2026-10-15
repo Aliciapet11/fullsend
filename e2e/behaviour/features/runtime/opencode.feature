@@ -50,7 +50,7 @@ Feature: OpenCode runtime runs an agent unattended
           GOOGLE_CLOUD_PROJECT: ${ANTHROPIC_VERTEX_PROJECT_ID}
           CLOUD_ML_REGION: ${CLOUD_ML_REGION}
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/.gcp-credentials.json
-          OPENCODE_CONFIG_CONTENT: '{"provider":{"google-vertex-anthropic":{"id":"google-vertex-anthropic"}},"permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","bash":{"*":"deny","ls *":"allow","ls":"allow","mkdir *":"allow","cat *":"allow"}}}'
+          OPENCODE_CONFIG_CONTENT: '{"provider":{"google-vertex-anthropic":{"id":"google-vertex-anthropic"}},"permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","bash":{"*":"deny","ls *":"allow","ls":"allow","cat *":"allow"}}}'
       """
     And an opencode agent "opencode-smoke" defined as:
       """
@@ -64,9 +64,8 @@ Feature: OpenCode runtime runs an agent unattended
       modify any other file.
 
       1. Using the bash tool, run: ls .
-      2. Using the bash tool, run: mkdir -p /sandbox/workspace/output
-      3. Using the bash tool, write the file /sandbox/workspace/output/agent-result.json
-         with `cat > /sandbox/workspace/output/agent-result.json <<'EOF'`, containing
+      2. Using the bash tool, write the file "$FULLSEND_OUTPUT_DIR/agent-result.json"
+         with `cat > "$FULLSEND_OUTPUT_DIR/agent-result.json" <<'EOF'`, containing
          exactly this content and nothing else:
 
       {{fixture:fixtures/triage/sufficient.json}}
