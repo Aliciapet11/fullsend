@@ -12,22 +12,15 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/sandbox"
 )
 
-// openCodeOutputFile is the basename of the tee'd --format json stream Run
-// writes inside the sandbox (see openCodeSandboxTranscriptPath in
-// opencode_run.go). ExtractTranscripts downloads it as the interim transcript;
-// the full-fidelity TranscriptHandler / TraceRecord redesign is deferred to
-// unbound-force#513.
-//
-// Note: this is distinct from RunParams.OutputPath, which is a host path the
-// runner tees the same stream to for the exit-0 override. The sandbox copy
-// exists because ExtractTranscripts runs after Run and can only pull files
-// from the sandbox, not the host.
+// openCodeOutputFile is the basename of the sandbox copy of the --format json
+// stream (openCodeSandboxTranscriptPath), distinct from the host-side
+// RunParams.OutputPath. It is the interim transcript; the full-fidelity
+// redesign is unbound-force#513.
 const openCodeOutputFile = "output.jsonl"
 
-// ExtractTranscripts downloads the tee'd output.jsonl (OpenCode's --format
-// json stream captured during Run) into outputDir as <agentLabel>-output.jsonl,
-// with the same path containment as the Claude and pi handlers. This is the
-// interim tee approach; the full-fidelity redesign is unbound-force#513.
+// ExtractTranscripts downloads the tee'd output.jsonl into outputDir as
+// <agentLabel>-output.jsonl, with the same path containment as the Claude and
+// pi handlers.
 func (r OpenCodeRuntime) ExtractTranscripts(sandboxName, agentLabel, outputDir string) error {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("creating output dir: %w", err)
@@ -78,7 +71,7 @@ func (r OpenCodeRuntime) ExtractDebugLog(sandboxName, localPath, debug string) e
 }
 
 // ParseTranscriptErrors scans every JSONL file in transcriptDir (the extracted
-// output.jsonl teee) and reports those whose stream ended in error.
+// output.jsonl tee) and reports those whose stream ended in error.
 func (OpenCodeRuntime) ParseTranscriptErrors(transcriptDir string) []TranscriptError {
 	entries, err := os.ReadDir(transcriptDir)
 	if err != nil {
@@ -108,12 +101,8 @@ func (OpenCodeRuntime) EmitTranscriptErrors(w io.Writer, summaries []TranscriptE
 }
 
 // parseOpenCodeTranscriptFile replays an output.jsonl capture through
-// parseOpenCodeStream and returns the last synthesized ResultEvent as a
-// TranscriptError. A file the parser produces no ResultEvent for (empty or
-// unrecognized) yields ok=false. Because parseOpenCodeStream synthesizes a
-// ResultEvent even for a truncated-but-clean stream, IsError also trips on a
-// zero-turn capture, the same false-success guard the Run exit-0 override
-// relies on.
+// parseOpenCodeStream and returns the last ResultEvent as a TranscriptError,
+// or ok=false when there is none. A zero-turn capture counts as an error.
 func parseOpenCodeTranscriptFile(path string) (TranscriptError, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {

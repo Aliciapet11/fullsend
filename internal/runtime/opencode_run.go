@@ -15,21 +15,15 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
-// Model selection for OpenCode. The fleet's harnesses name Claude-style
-// aliases (opus, sonnet, ...), which are mapped onto OpenCode's provider/model
-// form here; a harness or agents: entry may also give provider/model
-// directly. The provider defaults to the Vertex-backed Anthropic provider the
-// injected OPENCODE_CONFIG_CONTENT registers. Both the provider and the final
-// model string can be overridden from the runner environment.
+// Model selection. Claude-style aliases (opus, sonnet, ...) map to OpenCode's
+// provider/model form; provider/model specs pass through. The default provider
+// is the Vertex-backed Anthropic one OPENCODE_CONFIG_CONTENT registers.
 const (
 	openCodeDefaultProvider = "google-vertex-anthropic"
 	openCodeDefaultModel    = "opus"
-	// openCodeProviderEnv overrides the provider prefix applied to bare model
-	// ids. The model itself is resolved once by the CLI (--model,
-	// FULLSEND_MODEL) and arrives in RunParams.Model.
+	// openCodeProviderEnv overrides the provider prefix for bare model ids.
 	openCodeProviderEnv = "FULLSEND_OPENCODE_PROVIDER"
-	// openCodeRuntimeEnv tells skills running inside the sandbox which runtime
-	// they are on, so a skill can take a runtime-specific path deliberately.
+	// openCodeRuntimeEnv tells in-sandbox skills which runtime they are on.
 	openCodeRuntimeEnv = "FULLSEND_RUNTIME"
 )
 
@@ -40,20 +34,16 @@ var openCodeModelAliases = map[string]string{
 	"fable":  "claude-fable-5-1@default",
 }
 
-// openCodeDocumentedAliases is the set of alias keys the opencode docs and
-// config.ValidModelAliasKeys expose. Every key here must have an entry in
-// openCodeModelAliases; a missing entry causes a live run to pass the bare
-// alias as a provider id and fail at the first model call.
+// openCodeDocumentedAliases is the set of alias keys the docs and
+// config.ValidModelAliasKeys expose. Each must exist in openCodeModelAliases,
+// or a live run fails at the first model call.
 var openCodeDocumentedAliases = map[string]bool{
 	"opus": true, "sonnet": true, "haiku": true, "fable": true,
 }
 
-// translateOpenCodeModel resolves the harness/agent model into OpenCode's
-// --model value: aliases map to catalog ids, bare ids get the provider
-// prefix, provider/model passes through unchanged.
-//
-// configAliases, when non-nil, overrides openCodeModelAliases per key — a
-// repo can remap "sonnet" to a different generation without restating "opus"
+// translateOpenCodeModel resolves the model into OpenCode's --model value:
+// aliases map to catalog ids, bare ids get the provider prefix, provider/model
+// passes through. configAliases overrides openCodeModelAliases per key
 // (#6882, models.aliases in .fullsend/config.yaml).
 func translateOpenCodeModel(model string, configAliases map[string]string) string {
 	provider := strings.TrimSpace(os.Getenv(openCodeProviderEnv))
@@ -64,9 +54,8 @@ func translateOpenCodeModel(model string, configAliases map[string]string) strin
 	if model == "" {
 		model = openCodeDefaultModel
 	}
-	// Resolve the alias first, then check for provider/model passthrough:
-	// an alias may map to a provider/id spec (config.ValidateModelAliases
-	// accepts it), and checking "/" before alias resolution would miss it.
+	// Resolve the alias before the "/" check: an alias may map to a
+	// provider/id spec.
 	if id, ok := mergedOpenCodeModelAliases(configAliases)[model]; ok {
 		model = id
 	}
@@ -76,18 +65,16 @@ func translateOpenCodeModel(model string, configAliases map[string]string) strin
 	return provider + "/" + model
 }
 
-// mergedOpenCodeModelAliases returns a copy of openCodeModelAliases with
-// per-key overrides from configAliases applied. Always a fresh map, so a
-// caller can never mutate the package-level table through it.
+// mergedOpenCodeModelAliases returns a fresh copy of openCodeModelAliases with
+// configAliases applied, so callers cannot mutate the package table.
 func mergedOpenCodeModelAliases(configAliases map[string]string) map[string]string {
 	merged := maps.Clone(openCodeModelAliases)
 	maps.Copy(merged, configAliases)
 	return merged
 }
 
-// openCodeBareModelID strips the provider prefix from an OpenCode model spec,
-// mirroring piBareModelID: only the first segment (the provider) is removed,
-// so a publisher-qualified id keeps its remaining segments.
+// openCodeBareModelID strips only the first (provider) segment, like
+// piBareModelID, so a publisher-qualified id keeps the rest.
 func openCodeBareModelID(spec string) string {
 	if _, after, ok := strings.Cut(spec, "/"); ok {
 		return after
@@ -95,11 +82,9 @@ func openCodeBareModelID(spec string) string {
 	return spec
 }
 
-// openCodeHooksMissingExit is the exit code the run command uses when #515's
-// hook plugin adapter is expected but is not where it should be, or its
-// SHA-256 does not match the runner-vetted copy. Mirrors pi's
-// piHooksMissingExit (97). #510 reserves the code and the guard shape; #515
-// supplies the embedded adapter bytes the guard compares against.
+// openCodeHooksMissingExit is the exit code when #515's hook plugin adapter is
+// expected but missing or its SHA-256 does not match (same as pi's
+// piHooksMissingExit).
 const openCodeHooksMissingExit = 97
 
 const (
@@ -116,14 +101,10 @@ const (
 	openCodePathPinVar            = "FULLSEND_OPENCODE_PATH"
 )
 
-// Sandbox-side layout. Run tees opencode's --format json stream into a file
-// under openCodeRunnerSubdir (inside WorkspaceDir); ExtractTranscripts
-// downloads it after the run. openCodeRunRCFile holds opencode's exit code so
-// the tee pipeline can re-raise it (see buildOpenCodeRunCommand). Both live
-// under openCodeRunnerSubdir, not openCodeOutputSubdir, so
-// ExtractOutputFiles does not collect them as agent output files and
-// ClearIterationArtifacts wipes them between iterations, preventing a stale
-// rc from masking prelude failures.
+// Sandbox-side layout. The transcript and the exit-code file live under
+// openCodeRunnerSubdir, not output/, so ExtractOutputFiles does not collect
+// them and ClearIterationArtifacts wipes them each iteration (a stale rc
+// could otherwise mask a prelude failure).
 const (
 	openCodeOutputSubdir = "output"
 	openCodeRunnerSubdir = "runner-state"
@@ -131,18 +112,14 @@ const (
 )
 
 // openCodeSandboxTranscriptPath is the sandbox file Run tees the --format json
-// stream into and ExtractTranscripts downloads from. It lives under the
-// runner-owned runner-state dir (not output/) so ExtractOutputFiles does not
-// collect it as an agent output file.
+// stream into and ExtractTranscripts downloads.
 func openCodeSandboxTranscriptPath() string {
 	return sandbox.SandboxWorkspace + "/" + openCodeRunnerSubdir + "/" + openCodeOutputFile
 }
 
-// openCodeEffortVariants maps fullsend effort levels to OpenCode's --variant
-// values. OpenCode's variant names are provider-specific; the Vertex-backed
-// Anthropic provider on opus/sonnet 4-6 accepts "low", "medium", "high", and
-// "max". Values not in this map are dropped with a warning rather than passed
-// through, because an unrecognized --variant silently has no effect.
+// openCodeEffortVariants maps fullsend effort levels to OpenCode's
+// provider-specific --variant values. Unmapped levels are dropped with a
+// warning because an unrecognized --variant silently has no effect.
 var openCodeEffortVariants = map[string]string{
 	"low":    "low",
 	"medium": "medium",
@@ -151,23 +128,18 @@ var openCodeEffortVariants = map[string]string{
 	"max":    "max",
 }
 
-// openCodeEffortFor maps a fullsend effort level to an OpenCode --variant
-// value. Returns ("", false) when the effort has no variant equivalent (e.g.
-// "off", "minimal") — the caller should omit --variant entirely.
+// openCodeEffortFor returns the --variant for an effort level, or ("", false)
+// when there is none (e.g. "off", "minimal").
 func openCodeEffortFor(effort string) (string, bool) {
 	v, ok := openCodeEffortVariants[effort]
 	return v, ok
 }
 
-// buildOpenCodeRunCommand renders the in-sandbox command line for one
-// iteration. Security-relevant construction: every interpolated value is
-// shell-escaped (single-quote with the classic '\” escape) because the
-// sandbox boundary is sandbox.ExecStreamReader → openshell sandbox exec -- sh
-// -c <command>, i.e. the in-sandbox process receives a single shell string,
-// not an argv array. When #515's hook plugin is enabled
-// (params.HooksSettingsPath != "", the same runner signal ClaudeRuntime and
-// PiRuntime use), the command SHA-256-verifies the runner-owned adapter
-// before sourcing the agent-writable .env and fails closed otherwise.
+// buildOpenCodeRunCommand renders the in-sandbox command for one iteration.
+// Every interpolated value is shell-quoted because the sandbox receives a
+// single `sh -c` string, not an argv array. With hooks enabled
+// (params.HooksSettingsPath != ""), the command verifies the adapter's
+// SHA-256 before sourcing .env and fails closed.
 func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv openCodeTrustedEnv) string {
 	r := OpenCodeRuntime{}
 	envFile := sandbox.SandboxWorkspace + "/.env"
@@ -175,29 +147,19 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 
 	modelSpec := translateOpenCodeModel(EffectiveModel(params.Model, trustedEnv.AgentModel), params.ModelAliases)
 
-	// Prelude: the setup that must run in the top-level shell (not the pipe
-	// subshell) so its exit codes propagate directly. In particular the hook
-	// integrity guard exits openCodeHooksMissingExit (97) via `|| { …; exit 97; }`;
-	// were it inside the tee pipeline, that exit would only leave the pipe's
-	// left-hand subshell and be masked. Joined by && so a failed guard or a
+	// The prelude runs in the top-level shell, not the pipe subshell, so the
+	// guard's exit 97 is not masked by tee. Joined by && so a failed guard or
 	// missing .env short-circuits before opencode runs.
 	sandboxTranscript := openCodeSandboxTranscriptPath()
 	sandboxTranscriptDir := sandbox.SandboxWorkspace + "/" + openCodeRunnerSubdir
 	rcFile := sandbox.SandboxWorkspace + "/" + openCodeRunRCFile
 
-	// Write the runner-owned opencode.json that re-attaches workspace
-	// AGENTS.md. OPENCODE_DISABLE_PROJECT_CONFIG=true (EnvExports) blocks
-	// OpenCode's project-level instruction walk to prevent a hostile repo's
-	// .opencode/opencode.json from widening permissions, but it also
-	// suppresses AGENTS.md discovery. config.instructions with an absolute
-	// path bypasses the flag (instruction.ts:140-145), so we inject the
-	// workspace path explicitly after .env is sourced, overwriting any change
-	// an agent-rewritten file attempted.
+	// The opencode.json that re-attaches AGENTS.md is written after .env is
+	// sourced, overwriting any agent edit to it.
 	configJSON := openCodeInstructionsConfig(params.RepoDir)
 	configPath := r.ConfigDir() + "/" + openCodeConfigFile
 	prelude := []string{
 		"cd " + shellQuote(params.RepoDir),
-		// Ensure the transcript directory exists before tee writes into it.
 		"&& mkdir -p " + shellQuote(sandboxTranscriptDir),
 		"&& " + openCodeBinaryPin(),
 		"&& " + openCodeUtilityPin(),
@@ -205,74 +167,43 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 	}
 	if hooksEnabled {
 		// Before .env: that file is agent-writable and could otherwise shadow
-		// the guard's tools with functions or a PATH entry. #515 supplies the
-		// embedded adapter bytes; until then the guard is only emitted when
-		// the runner signals hooks are on, and #515 wires the real hash.
+		// the guard's tools with functions or a PATH entry.
 		prelude = append(prelude, "&& "+openCodeHooksGuard(r.openCodeHooksExtensionPath()))
 	}
 	prelude = append(prelude,
 		"&& . "+shellQuote(envFile),
-		// .env is agent-writable; re-pin the runner-owned config locations
-		// after it so a rewritten .env cannot move OpenCode's config dir out
-		// from under the guards (mirrors pi_run.go:394 and codex_run.go:313).
-		// openCodeTrustedEnvRestore first unsets dangerous OPENCODE_* vars an
-		// agent could inject (OPENCODE_PERMISSION, OPENCODE_CONFIG, etc.) then
-		// restores OPENCODE_CONFIG_CONTENT and GOOGLE_APPLICATION_CREDENTIALS
-		// from the runner-pinned readonly copies.
+		// .env is agent-writable: re-pin the config exports, unset injected
+		// overrides, and restore the pinned trusted values.
 		"&& "+strings.Join(r.EnvExports(), " && "),
 		"&& "+openCodeTrustedEnvRestore(),
-		// Map fleet env vars to the names OpenCode's google-vertex-anthropic
-		// provider reads (mirrors pi_run.go:519 and pi_run.go:464).
-		// GOOGLE_CLOUD_PROJECT: upstream reads GOOGLE_CLOUD_PROJECT ?? GCP_PROJECT
-		// ?? GCLOUD_PROJECT; it does not read ANTHROPIC_VERTEX_PROJECT_ID.
-		// GOOGLE_CLOUD_LOCATION: export only when the resolved value is non-empty;
-		// an unconditional export of "" wins over the upstream JS ?? "global"
-		// fallback (JS ?? treats "" as a value, not as absent).
+		// Map fleet env vars to the names the google-vertex-anthropic provider
+		// reads; it does not read ANTHROPIC_VERTEX_PROJECT_ID.
 		`&& export GOOGLE_CLOUD_PROJECT="${ANTHROPIC_VERTEX_PROJECT_ID:-$GOOGLE_CLOUD_PROJECT}"`,
 		"&& "+openCodeCloudLocationExport,
 		`&& "$`+openCodePrintfVar+`" '%s' `+shellQuote(configJSON)+" > "+shellQuote(configPath),
 		"&& export "+openCodeRuntimeEnv+"=opencode",
 	)
 	if hooksEnabled {
-		// .env can execute arbitrary commands, so verify the adapter again after
-		// sourcing it and restoring runner-owned state.
+		// .env can run arbitrary commands, so verify the adapter again.
 		prelude = append(prelude, "&& "+openCodeHooksGuard(r.openCodeHooksExtensionPath()))
 	}
 
-	// The opencode invocation itself, whose stdout is the --format json stream.
 	invocation := []string{
 		`"$` + openCodeBinaryVar + `"`,
 	}
 	if params.Debug != "" {
-		// OpenCode's structured logs need OPENCODE_PRINT_LOGS=1 to reach
-		// stderr (logging.ts). --print-logs sets that flag, and --log-level
-		// selects verbosity. Placed before `run` so they apply globally.
+		// Global flags, so they go before `run`; --print-logs sends logs to
+		// stderr.
 		invocation = append(invocation, "--print-logs", "--log-level", "DEBUG")
 	}
 	invocation = append(invocation,
 		"run",
-		// `--format json` emits raw JSON events on stdout (`opencode run --help`:
-		// format choices default|json), which parseOpenCodeStream normalizes.
 		"--format json",
-		// --thinking surfaces reasoning/thinking blocks in the event stream
-		// (`opencode run --help`: "show thinking blocks", boolean). Without it,
-		// thinking parts are dropped from the transcript and UI, and
-		// parseOpenCodeStream only emits ThinkingEvent when opencode streams
-		// "reasoning" parts (opencode_progress.go).
+		// Without --thinking, reasoning parts are dropped from the stream.
 		"--thinking",
 	)
-	// translateOpenCodeModel never returns empty (it falls back to the default
-	// alias), so --model is always supplied; opencode's own resolution is a
-	// backstop, not the primary path. --model takes provider/model
-	// (`opencode run --help`).
 	invocation = append(invocation, "--model "+shellQuote(openCodeValidatedArg(modelSpec)))
 	if params.Effort != "" {
-		// OpenCode maps reasoning effort onto the model variant (`opencode run
-		// --help`: --variant "model variant (provider-specific reasoning
-		// effort, e.g., high, max, minimal)"). openCodeEffortFor maps fullsend
-		// effort levels to their OpenCode equivalents; unmapped values are
-		// dropped with a warning rather than passed through, because an
-		// unrecognized --variant silently has no effect.
 		if variant, ok := openCodeEffortFor(params.Effort); ok {
 			invocation = append(invocation, "--variant "+shellQuote(openCodeValidatedArg(variant)))
 		} else {
@@ -281,43 +212,26 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 	}
 	invocation = append(invocation, "--agent "+shellQuote(openCodeValidatedArg(agentName)))
 
-	// The validation loop replaces the prompt on a retry iteration to inject
-	// the previous failure (#1050/#6494); every runtime must honour it, or
-	// feedback_mode silently degrades to a blind retry.
+	// Retry iterations inject the previous failure via params.Prompt
+	// (#1050/#6494); ignoring it degrades feedback_mode to a blind retry.
 	prompt := DefaultAgentPrompt
 	if params.Prompt != "" {
 		prompt = params.Prompt
 	}
 	invocation = append(invocation, shellQuote(prompt))
 
-	// Close stdin so a non-TTY pipe held open by the sandbox exec cannot make
-	// opencode block reading piped input (run.ts reads Bun.stdin when not a
-	// TTY), the same hazard pi's </dev/null guards against. The debug redirect
-	// keeps opencode's stderr out of the tee'd stdout transcript.
+	// Close stdin: run.ts reads Bun.stdin when not a TTY and would block on the
+	// pipe the sandbox exec holds open.
 	invocation = append(invocation, "</dev/null")
 	if params.Debug != "" {
 		invocation = append(invocation, "2>>"+shellQuote(sandbox.SandboxWorkspace+"/"+openCodeDebugLogFile))
 	}
 
-	// The --format json stream is consumed live on the host (streamed to the
-	// parser and host-side tee'd to RunParams.OutputPath). ExtractTranscripts,
-	// however, runs after Run and downloads the transcript from a sandbox file,
-	// so the stream must also land in a sandbox-side path. Pipe opencode's
-	// stdout through tee into the runner-owned sandbox transcript file
-	// (openCodeSandboxTranscriptPath), which ExtractTranscripts downloads.
-	//
-	// A bare pipe would mask opencode's exit code with tee's (effectively
-	// always 0), breaking the stream-error exit handling in Run. So opencode's
-	// exit code is captured to a temp file inside the pipeline and re-raised
-	// afterwards with `exit` — a POSIX-sh construct that works under the
-	// sandbox image's /bin/sh (dash) without relying on the non-POSIX
-	// `pipefail`. The prelude (guard, .env) runs before the pipeline so its
-	// own exits — notably the guard's 97 — are not swallowed by the subshell.
-	// The prelude joins with && so a guard or .env failure short-circuits.
-	// The pipeline captures opencode's exit code and re-raises it. The
-	// final exit is conditional on the prelude having succeeded — when the
-	// prelude short-circuits, the shell exits with the prelude's own status
-	// rather than reading a potentially stale rc file.
+	// The stream is also tee'd to a sandbox file because ExtractTranscripts
+	// downloads it after Run. A bare pipe would report tee's exit code, so
+	// opencode's is saved to rcFile and re-raised (POSIX sh, no pipefail in
+	// dash). The pipeline only runs if the prelude succeeded, so a stale rc
+	// file cannot mask a prelude failure.
 	return strings.Join(prelude, " ") + " && " + openCodeExitPipeline(invocation, rcFile, sandboxTranscript)
 }
 
@@ -335,10 +249,9 @@ func openCodeBinaryPin() string {
 		`"; then :; else echo 'fullsend: opencode not found on PATH' >&2; exit 127; fi`
 }
 
-// openCodeCloudLocationExport sets GOOGLE_CLOUD_LOCATION from
-// CLOUD_ML_REGION only when the result is non-empty, and otherwise unsets
-// it (an exported "" would also win over the JS ?? default), so OpenCode
-// keeps its own "global" default when neither is set.
+// openCodeCloudLocationExport exports GOOGLE_CLOUD_LOCATION only when
+// non-empty, otherwise unsets it: JS ?? treats "" as set, so an empty export
+// would defeat OpenCode's "global" default.
 const openCodeCloudLocationExport = `{ _gcl="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"; [ -n "$_gcl" ] && export GOOGLE_CLOUD_LOCATION="$_gcl" || unset GOOGLE_CLOUD_LOCATION; }`
 
 func openCodeUtilityPin() string {
@@ -370,17 +283,10 @@ func openCodeTrustedEnvPin(env openCodeTrustedEnv) string {
 		openCodePathPinVar + `="$PATH"`
 }
 
-// openCodeDangerousEnvVars lists environment variables the runner does not own
-// that could widen the tool-permission policy, redirect config/auth/db paths,
-// or inject code via loader/linker vectors if left in the process environment
-// after sourcing the agent-writable .env. They are unset as part of the
-// trusted-env restore step (CWE-15, CWE-426). HOME and PATH are re-pinned
-// rather than unset (see openCodeTrustedEnvRestore). XDG vars are included
-// because they relocate auth.json and other OpenCode state. Keep in sync with
-// upstream config/config.ts (Flag.OPENCODE_PERMISSION, OPENCODE_CONFIG,
-// OPENCODE_TUI_CONFIG) and packages/opencode/src/plugin
-// (OPENCODE_DISABLE_DEFAULT_PLUGINS). Loader/linker vectors mirror the unset
-// list in codex_run.go:348 and pi_run.go:685-691.
+// openCodeDangerousEnvVars are unset after sourcing the agent-writable .env
+// because they could widen the permission policy, redirect config/auth/db
+// paths, or inject code (CWE-15, CWE-426). HOME and PATH are re-pinned
+// instead. Keep in sync with upstream config/config.ts and src/plugin.
 var openCodeDangerousEnvVars = []string{
 	"OPENCODE_PERMISSION",
 	"OPENCODE_CONFIG",
@@ -396,8 +302,7 @@ var openCodeDangerousEnvVars = []string{
 	"XDG_DATA_HOME",
 	"XDG_STATE_HOME",
 	"XDG_CACHE_HOME",
-	// Loader/linker injection vectors (CWE-426). Codex (codex_run.go:348)
-	// and pi (pi_run.go:685-691) unset these after .env.
+	// Loader/linker injection vectors, as codex and pi unset.
 	"LD_PRELOAD",
 	"LD_LIBRARY_PATH",
 	"LD_AUDIT",
@@ -414,17 +319,11 @@ func openCodeTrustedEnvRestore() string {
 		`" PATH="$` + openCodePathPinVar + `"`
 }
 
-// openCodeValidatedArg constrains model/effort/agent-name values to a safe
-// charset before they are shell-quoted, rejecting control characters. The
-// shell-quoting (shellQuote) is the primary defense at the sh -c boundary;
-// this is defense in depth against values that a downstream sink (a path or
-// agent-name consumer) might mishandle even when correctly quoted. Values
-// with disallowed characters have them stripped rather than failing the run,
-// since the model/agent resolution already validated the harness inputs
-// upstream (config.validModelRef). An emptied --model value falls back to
-// OpenCode's own model resolution, but an emptied --agent value causes
-// opencode to use its default agent rather than the bootstrap-generated one
-// — callers should treat an empty result for agent names as an error.
+// openCodeValidatedArg strips characters outside a safe charset from
+// model/effort/agent-name values, as defense in depth behind shellQuote.
+// Inputs are already validated upstream, so it strips rather than fails.
+// Callers must treat a changed or empty agent name as an error: OpenCode
+// would fall back to its default agent.
 func openCodeValidatedArg(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -440,15 +339,10 @@ func openCodeValidatedArg(s string) string {
 	return b.String()
 }
 
-// openCodeHooksGuard is the POSIX sh fragment run before opencode when #515's
-// hook plugin is expected: the adapter must exist and be byte-identical to the
-// runner-vetted copy. It exits openCodeHooksMissingExit otherwise, before
-// .env is sourced. #510 reserves the shape and the exit code; the embedded
-// adapter bytes (and therefore the real hash) are #515's — until then the
-// hash is of an empty adapter, which #515 replaces with the embedded copy.
-//
-// Absolute utility paths are resolved and made readonly before .env is sourced,
-// so neither PATH nor shell functions can stand in for these commands.
+// openCodeHooksGuard is the POSIX sh fragment that exits
+// openCodeHooksMissingExit unless the hook adapter exists and matches the
+// runner-vetted copy. It calls utilities through readonly absolute paths
+// pinned before .env, so PATH or shell functions cannot stand in for them.
 func openCodeHooksGuard(hooksExt string) string {
 	sum := sha256.Sum256(openCodeHooksExtensionBytes())
 	return fmt.Sprintf(`{ "$%s" -f %s && "$%s" "$("$%s" %s | "$%s" -d' ' -f1)" = %s || { "$%s" '%%s\n' 'fullsend: opencode hook adapter missing or modified; refusing to run unhooked' >&2; exit %d; }; }`,
@@ -457,25 +351,19 @@ func openCodeHooksGuard(hooksExt string) string {
 		shellQuote(hex.EncodeToString(sum[:])), openCodePrintfVar, openCodeHooksMissingExit)
 }
 
-// openCodeHooksExtensionBytes returns the runner-vetted hook plugin adapter
-// bytes the integrity guard compares against. #510 reserves the hook path and
-// integrity gate; the adapter itself is #515, so this returns an empty slice
-// for now. When #515 lands it embeds fullsend-hooks.ts here (go:embed), and
-// the guard's hash follows automatically.
+// openCodeHooksExtensionBytes returns the runner-vetted hook adapter bytes the
+// guard hashes. Empty until #515 embeds fullsend-hooks.ts.
 func openCodeHooksExtensionBytes() []byte { return nil }
 
 // Run executes one agent iteration and normalizes OpenCode's --format json
-// stream into AgentEvents. OpenCode's ndjson has no terminal sentinel and the
-// parser synthesizes a ResultEvent at EOF, so a stream that reports an error
-// (or ends with zero turns) overrides a 0 exit code, mirroring pi.
+// stream into AgentEvents. A stream that reports an error overrides a 0 exit
+// code, as in pi.
 func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Printer, start time.Time, metrics *RunMetrics) (int, error) {
 	agentName := params.AgentBaseName
 	if agentName == "" {
 		return -1, fmt.Errorf("opencode run: agent base name is required")
 	}
 	if len(params.FallbackModels) > 0 {
-		// OpenCode has no built-in fallback chain; say so rather than silently
-		// dropping the list.
 		printer.StepWarn(fmt.Sprintf("fallback models %s are not supported on opencode yet and are ignored", sanitizeOutput(strings.Join(params.FallbackModels, ","))))
 	}
 	if params.HooksSettingsPath != "" && len(openCodeHooksExtensionBytes()) == 0 {
@@ -517,13 +405,9 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	}
 
 	modelSpec := translateOpenCodeModel(EffectiveModel(params.Model, trustedEnv.AgentModel), params.ModelAliases)
-	// Telemetry and the renderer get the bare model id, as they do for Claude
-	// Code and pi, so runs group by model across runtimes; the provider is
-	// gen_ai.system's job and stays visible on the command line.
+	// Bare model id, as for Claude Code and pi, so runs group by model.
 	metrics.Model = openCodeBareModelID(modelSpec)
-	// OpenCode's wire format carries no model/version metadata, so the parser
-	// deliberately does not emit an InitEvent (opencode_progress.go); emit it
-	// here from the resolved model.
+	// The stream carries no model metadata, so InitEvent comes from here.
 	handler(InitEvent{Model: metrics.Model})
 
 	var lastResult *ResultEvent
@@ -531,10 +415,7 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	handler = func(evt AgentEvent) {
 		switch e := evt.(type) {
 		case InitEvent:
-			// Forward-compatibility guard: parseOpenCodeStream does not emit
-			// InitEvent today (opencode_progress.go:111), but if a future
-			// wire-format revision adds one it must not duplicate the
-			// InitEvent already emitted above from RunParams.Model.
+			// Drop any future parser InitEvent; one was already emitted above.
 			return
 		case ResultEvent:
 			lastResult = &e
@@ -571,8 +452,7 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 		return exitCode, fmt.Errorf("openshell exec failed: %w", waitErr)
 	}
 	if !fallback.fellBack && params.Debug != "" {
-		// In debug mode opencode's stderr goes to the debug log, not to the
-		// watcher.
+		// In debug mode stderr goes to the debug log, not the watcher.
 		fallback.fellBack = openCodeDebugLogHasFallback(params.SandboxName, r.WorkspaceDir()+"/"+openCodeDebugLogFile)
 	}
 	if fallback.fellBack {
@@ -582,9 +462,7 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 		return exitCode, fmt.Errorf("opencode hook adapter missing or modified in %s; refusing to run unhooked (was Bootstrap run, or did the agent change it?)", r.ConfigDir())
 	}
 
-	// A stream parse error or silently skipped malformed lines means the
-	// NDJSON output was corrupt or truncated; treat as a failed run so a
-	// broken stream cannot pass as successful.
+	// A corrupt or truncated stream must not pass as a successful run.
 	if exitCode == 0 && streamParseErr != nil {
 		printer.StepWarn("opencode exited 0 but the output stream failed to parse: " + sanitizeOutput(streamParseErr.Error()))
 		return 1, nil
@@ -604,13 +482,10 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	return exitCode, nil
 }
 
-// restoreOpenCodeAgent undoes overrides an earlier iteration could have
-// left: it removes the other places OpenCode loads agents, tools, commands or
-// config from (agent/, agents/, mode/, modes/, tool/, tools/, command/,
-// commands/ and opencode.jsonc under the config dir, the user-level config
-// dirs, a cached models.json, which OpenCode prefers over its built-in
-// catalog, and auth.json), re-uploads the agent file Bootstrap wrote, and
-// checks that OpenCode loads it as the primary agent. plugins/ and skills/
+// restoreOpenCodeAgent undoes overrides an earlier iteration could have left:
+// it removes other places OpenCode loads agents, tools, commands, config,
+// cached models.json (preferred over the built-in catalog) or auth.json from,
+// re-uploads the Bootstrap agent file, and verifies it. plugins/ and skills/
 // stay writable until #7824.
 func (r OpenCodeRuntime) restoreOpenCodeAgent(sandboxName, agentName string, env openCodeTrustedEnv) error {
 	cfg := r.ConfigDir()

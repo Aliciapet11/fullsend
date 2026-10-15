@@ -1,142 +1,49 @@
 # OpenCode
 
-[OpenCode](https://github.com/anomalyco/opencode) is fullsend's fourth agent runtime, opt-in per repo. Like pi, it runs through the same sandbox, credentials and egress policy, and reads
-`AGENTS.md` natively.
+[OpenCode](https://github.com/anomalyco/opencode) is fullsend's fourth agent runtime, opt-in per repo
+or per agent. It runs in the same sandbox, with the same credentials and egress policy as Claude
+Code and pi. Choosing between runtimes is in [Agent runtimes](../runtimes.md).
+
+> **Planned:** sandbox tool hooks and write-capable agents
+> ([#7824](https://github.com/fullsend-ai/fullsend/issues/7824)). Until they land, OpenCode is
+> experimental:
+>
+> - Use it only for read-only agents (`triage`, `prioritize`) on a disposable repo. fullsend does
+>   not enforce this, so do not select it for `code` or `fix`.
+> - The harness must set `security.enabled: false`. That also turns off the content scans of the
+>   agent, skills and repo context, and the secret redaction of outputs and transcripts.
+
+## Run it locally
+
+Complete [Running agents locally](../guides/user/running-agents-locally.md) first. The CLI,
+OpenShell, credentials and the agents clone are the same. The fleet sandbox image includes the
+pinned OpenCode (1.19.1).
+
+**1. Write the tool policy.** OpenCode reads its global config, including the tool-permission
+policy, from `OPENCODE_CONFIG_CONTENT`. A run fails before it starts when the variable is empty or
+has no `permission` block. Put it in an env file:
 
 ```bash
-fullsend run triage --runtime opencode --model google-vertex-anthropic/claude-opus-5-5@default
+# fullsend-opencode.env
+OPENCODE_CONFIG_CONTENT='{"provider":{"google-vertex-anthropic":{"id":"google-vertex-anthropic"}},"permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","skill":"allow","bash":{"*":"allow","rm *":"deny"},"write":"deny","edit":"deny","webfetch":"deny","task":"deny"}}'
 ```
 
-Selecting it, and how it compares to Claude Code and pi, is in [Agent runtimes](../runtimes.md). This
-page is what changes once you are on it.
+Allow every tool the agent needs. OpenCode runs without a TTY here, so it rejects any tool call
+the policy does not allow. The agent's own `tools:` list can narrow this policy but never widen it.
 
-> **Planned:** write-path support. OpenCode is enabled for read-only agents (`triage`,
-> `prioritize`). Write-capable agents (`code`, `fix`) are gated on the security-hook adapter, tracked
-> in [unbound-force#515](https://github.com/unbound-force/unbound-force/issues/515): OpenCode has no
-> native PreToolUse/PostToolUse hooks, so until the runner-owned, sha256-gated plugin adapter lands,
-> no sandbox tool hooks are installed. Harnesses using the default `security.enabled: true` will
-> fail with a Go-level error (`hooks adapter not yet available`) before the sandbox command is
-> built; set `security.enabled: false` on the harness entry until #515 lands. The exit-97 guard
-> shape is reserved for #515's in-sandbox integrity check and cannot run today. This is not a
-> role-aware gate: disabling security also removes the hook guard, including for write-capable
-> agents. Select OpenCode only for read-only agents and pilot on a disposable repo.
->
-> **What `security.enabled: false` turns off.** The flag gates more than the exit-97 hook guard.
-> Setting it to `false` also suppresses:
->
-> 1. the pre-upload runtime content scan (agent def, skills, plugins),
-> 2. the host-side context file scan (unicode, SSRF patterns on repo context files),
-> 3. the pre-agent sandbox `scan context` pass,
-> 4. the post-agent output scan and secret redaction (`scanOutputFiles`).
->
-> OpenCode transcripts tee raw JSON to the host and download a second copy; with this workaround,
-> neither copy receives secret redaction and untrusted repo context files are not scanned.
-> Use only on disposable repos with no real credentials until #515 lands.
+**2. Set up the harness.** Pass the variable into the sandbox and turn security off:
 
-## Models and providers
+```yaml
+security:
+  enabled: false
+env:
+  sandbox:
+    OPENCODE_CONFIG_CONTENT: ${OPENCODE_CONFIG_CONTENT}
+```
 
-A model on OpenCode is `provider/model`. Aliases and bare ids also work — `opus`/`sonnet`/`haiku`
-resolve through fullsend's table, and a bare id gets the provider from `FULLSEND_OPENCODE_PROVIDER`
-(default `google-vertex-anthropic`). A `provider/model` spec passes through unchanged.
+`fullsend agent new --runtime opencode` adds the `env.sandbox` entry for you.
 
-| Model | Spec |
-|---|---|
-| Claude | `google-vertex-anthropic/claude-opus-5-5@default` |
-| Alias | `opus`, `sonnet`, `haiku` (resolve to the catalog ids) |
-
-Harness `model:` and `agents:` entry `model:` values accept the `provider/model` form directly. The
-same Vertex WIF credentials cover the Anthropic-on-Vertex provider the injected config registers.
-
-## Config discovery
-
-OpenCode's config directory is off the agent-writable workspace and pointed at OpenCode with
-`OPENCODE_CONFIG_DIR` (`/sandbox/opencode-config`). The target repo cannot pre-seed it and a
-workspace reset does not clear it.
-
-> **Current limitation (#7824).** The directory is group-writable (mode 0775, group sandbox), so
-> the sandbox user can replace `agent/<name>.md` or add files under `plugins/` and `skills/`.
-> Changes written within a run carry over to later iterations. Full lockdown (mode 0750, all writes
-> via openshell as root) is deferred to #7824 alongside the hook adapter. Until it lands, use
-> OpenCode only with read-only agents on disposable repos.
-
-The injected `OPENCODE_CONFIG_CONTENT` (Vertex provider +
-tool-permission policy) provides the global defaults in OpenCode's config stack.
-
-Agent-level permission records (emitted in the agent frontmatter by Bootstrap) are evaluated after
-the global policy and would otherwise override it via findLast semantics. Bootstrap therefore
-intersects the agent record with the trusted policy so the agent frontmatter can only narrow, never
-widen, the global gate. Additionally, the run prelude unsets `OPENCODE_PERMISSION` and other
-dangerous env vars after sourcing the agent-writable `.env` to prevent agent-written overrides from
-widening the policy at the env-var layer.
-
-During Bootstrap, before an agent iteration can modify `.env`, the runner records the effective
-`OPENCODE_CONFIG_CONTENT` and `GOOGLE_APPLICATION_CREDENTIALS` values outside the sandbox. Run fails
-closed if that state is missing, then restores both values after sourcing `.env`. Bootstrap and Run
-must therefore execute in the same fullsend process, as they do in the normal CLI lifecycle.
-
-> A non-interactive `opencode run` has no TTY, so OpenCode auto-rejects every permission request that
-> config does not pre-resolve. The injected policy therefore **allows** the read-only tools an agent
-> needs (read, grep, glob, list, read-only bash). Write-path denial and the compensating hook adapter
-> are [unbound-force#515](https://github.com/unbound-force/unbound-force/issues/515).
-
-## At a glance
-
-| | |
-|---|---|
-| Credentials | Same WIF `external_account` + refreshed OIDC token as Claude Code and pi |
-| Unattended | No approval prompts, stdin closed; a non-config-allowed tool request is auto-rejected |
-| Artifacts | `output.jsonl`, `transcripts/<agent>-output.jsonl`, `metrics.json` with `runtime: opencode`, plus `opencode-debug.log` (stderr with `--print-logs` structured logs) when `--debug` is set |
-| Extra knobs | `FULLSEND_OPENCODE_PROVIDER` (prefix for bare ids) |
-| Not supported | Fallback chains, `plugins:` (Claude marketplace layout), sandbox tool hooks (until #515) |
-
-## Running it locally
-
-Complete [Running agents locally](../guides/user/running-agents-locally.md) first — the CLI,
-OpenShell, credentials and the fleet clone are the same. An OpenCode run additionally needs the
-`OPENCODE_CONFIG_CONTENT` env var (see below) and `security.enabled: false` on the harness until
-#515 lands.
-
-The plan block confirms the selection, and `metrics.json` records `runtime`, `runtime_source`,
-`requested_model` and `override_source`.
-
-To keep an agent on OpenCode (or off it) without passing flags every time, set `runtime:`/`model:` on
-its `agents:` entry in `config.yaml` — see [per-agent settings](../runtimes.md#per-agent-runtime-model-and-effort).
-
-What a local OpenCode run needs, beyond the guide:
-
-- **A sandbox image that includes `opencode`** — Bootstrap preflights `opencode --version` and fails
-  fast if the pinned binary is missing or broken, rather than producing an empty transcript.
-- **Read-only agents** — pilot `triage`/`prioritize`; `code`/`fix` are gated on #515.
-- **`OPENCODE_CONFIG_CONTENT`** — Bootstrap validates this env var and fails closed when it is
-  missing or has no `permission` policy. `agent new --runtime opencode` adds the
-  `env.sandbox` mapping automatically:
-
-  ```yaml
-  env:
-    sandbox:
-      OPENCODE_CONFIG_CONTENT: ${OPENCODE_CONFIG_CONTENT}
-  ```
-
-  Supply the value on the host via `--env-file`:
-
-  ```bash
-  # fullsend-opencode.env
-  OPENCODE_CONFIG_CONTENT='{"provider":{"google-vertex-anthropic":{"id":"google-vertex-anthropic"}},"permission":{"read":"allow","glob":"allow","grep":"allow","list":"allow","bash":"allow","write":"deny","edit":"deny","skill":"deny","agent":"deny","sourcegraph":"deny","mcp":"deny","task":"deny"}}'
-  ```
-
-  Adjust the `permission` record to match the agent's `tools:` frontmatter. The `env.sandbox`
-  mapping expands `${OPENCODE_CONFIG_CONTENT}` from the host env (populated by `--env-file`)
-  into the sandbox `.env`, where Bootstrap reads it.
-- **`security.enabled: false`** — required on the harness entry until #515 lands. Without it the
-  run fails with a Go-level error before the sandbox command is built (the exit-97 guard shape is
-  reserved for #515). See the warning at the top of this page for the full implications — it also
-  suppresses all scan pipelines and secret redaction.
-- **Knobs** — `FULLSEND_OPENCODE_PROVIDER` sets the provider for bare model ids (default
-  `google-vertex-anthropic`).
-- **Debugging** — `--debug='*'` (the `=` is required); sandbox-side failures land in
-  `opencode-debug.log` inside the run directory, next to the transcripts.
-
-The local-run command therefore becomes:
+**3. Run the agent:**
 
 ```bash
 fullsend run triage \
@@ -145,55 +52,86 @@ fullsend run triage \
   --env-file fullsend-gcp.env \
   --env-file fullsend-triage.env \
   --env-file fullsend-opencode.env \
-  --runtime opencode
+  --runtime opencode \
+  --model google-vertex-anthropic/claude-sonnet-4-6@default
 ```
+
+Output from a triage run (trimmed):
+
+```text
+    Model: google-vertex-anthropic/claude-sonnet-4-6@default (from --model flag)
+    Runtime: opencode (from --runtime flag)
+runtime: selected "opencode" from --runtime flag
+  • Bootstrapping sandbox
+Skill "github": uploaded to sandbox
+Skill "issue-labels": uploaded to sandbox
+Agent Bash allowlist (gh, curl, jq) is recorded but not enforced on opencode — ...
+→ Iteration 1 of 2
+→ Agent: claude-sonnet-4-6@default
+  ⚙ bash: gh issue view 1 --repo <owner>/<repo> --json number,title,body,...
+  ⚙ bash: gh label list --repo <owner>/<repo> --json name,description --limit 100
+  ✓ Validation passed: Validating: output/agent-result.json against .../triage-result.schema.json
+    Agent exit code: 0
+    Validation: passed
+```
+
+`metrics.json` records `runtime: opencode`. To keep an agent on OpenCode without the flag, set
+`runtime:` on its `agents:` entry in `config.yaml` (see
+[per-agent settings](../runtimes.md#per-agent-runtime-model-and-effort)).
+
+## Models
+
+A model is `provider/model`. The aliases resolve to ids in OpenCode's built-in model catalog:
+
+| You give | OpenCode gets |
+|---|---|
+| `opus` (default) | `google-vertex-anthropic/claude-opus-5-5@default` |
+| `sonnet` | `google-vertex-anthropic/claude-sonnet-5-5@default` |
+| `haiku` | `google-vertex-anthropic/claude-haiku-5-5@default` |
+| A bare id | the id, prefixed with `FULLSEND_OPENCODE_PROVIDER` (default `google-vertex-anthropic`) |
+| `provider/model` | unchanged |
+
+The harness or `--model` wins over the agent's `model:` frontmatter. `models.aliases` in
+`.fullsend/config.yaml` can retarget an alias.
+
+**There is no fallback chain.** Vertex enables models per project. On a project that does not serve
+5.5, Claude Code falls back to 4.6, but OpenCode fails. Name a model your project serves, as in the
+example above.
+
+## At a glance
+
+| | |
+|---|---|
+| Roles | Read-only agents (`triage`, `prioritize`) |
+| Credentials | Same Vertex WIF credentials as Claude Code and pi |
+| Instructions | Reads `AGENTS.md`; no `CLAUDE.md` bridge |
+| Effort | `--effort` maps to OpenCode's `--variant` |
+| Artifacts | `output.jsonl`, `transcripts/<agent>-output.jsonl`, `metrics.json`, and `opencode-debug.log` with `--debug='*'` |
+| Not supported | Fallback chains, `plugins:`, sandbox tool hooks (#7824) |
 
 ## Behaviour differences worth knowing
 
-- **Reads `AGENTS.md` only** — unlike Claude Code, which supports multiple instruction files
-  (`CLAUDE.md`, per-directory overrides), OpenCode currently reads only `AGENTS.md`. No
-  `CLAUDE.md` bridge is injected (like pi). `OPENCODE_DISABLE_PROJECT_CONFIG=true` suppresses
-  OpenCode's own project-level config walk; the runner re-injects `AGENTS.md` through
-  `config.instructions` in the runner-owned `opencode.json`.
-  `OPENCODE_DISABLE_EXTERNAL_SKILLS=true` suppresses skill discovery from the workspace
-  directory and `$HOME`, preventing a hostile repo from injecting custom skills.
-  Runner-owned skills placed under `OPENCODE_CONFIG_DIR/skills/` by Bootstrap are still
-  loaded because `OPENCODE_CONFIG_DIR` is on OpenCode's explicit config search path.
-- **The Claude-style agent definition is translated** into OpenCode's `agent/<name>.md` layout with
-  JSON frontmatter (`mode: primary`, `permission:` as a `{toolID: "allow"|"deny"}` record). Claude
-  tool names are mapped to OpenCode tool ids; names without an OpenCode equivalent are dropped with
-  a warning. Per-argument Bash restrictions currently collapse to a bare `bash: "allow"`; bootstrap
-  warns when this occurs, and enforcement is grouped with the hook adapter in unbound-force#515.
-  When the trusted `OPENCODE_CONFIG_CONTENT` policy gives a tool a pattern map
-  (`bash: {"gh *": "allow", "*": "deny"}`), an agent that declares the tool gets that same pattern
-  map in its record, so the agent can never widen it.
-- **The agent is restored before every iteration.** `Run` removes the other places OpenCode
-  loads agents, tools, commands or config from (`agent/`, `agents/`, `mode/`, `modes/`, `tool/`,
-  `tools/`, `command/`, `commands/` and `opencode.jsonc` in the config directory, `~/.opencode`,
-  `~/.config/opencode`, a cached `~/.cache/opencode/models.json`, which OpenCode would prefer over
-  its built-in model catalog, and `~/.local/share/opencode/auth.json`), re-uploads the translated
-  `agent/<name>.md`, and checks with `opencode debug agent` that it loads as the primary agent.
-  An iteration also fails when OpenCode prints `Falling back to default agent`. Other files in
-  the config directory, such as `plugins/` and `skills/`, stay agent-writable until #7824.
-- **`plugins:` are unsupported** — the Claude marketplace layout is warned and skipped.
-- **Effort maps to `--variant`** — the harness `effort` value selects OpenCode's model reasoning
-  variant.
-- **No sandbox tool hooks yet** — the plugin-adapter path is reserved at
-  `OPENCODE_CONFIG_DIR/plugins/fullsend-hooks.ts` with a fail-closed SHA-256 integrity guard. The
-  guard exits 97 when the adapter file is missing or modified; until #515 lands, `Run` returns a
-  Go-level error before the guard can execute, and the exit-97 code is reserved but not observable.
+- **Bash allowlists are not enforced.** `Bash(gh:*)` in the agent's `tools:` becomes plain `bash`,
+  with a warning. To restrict commands, give `bash` a pattern map in the policy
+  (`"bash": {"*": "deny", "gh *": "allow"}`). An agent that declares Bash gets that same map.
+- **The agent is reset before every iteration.** The runner removes agent, tool and config overrides
+  the previous iteration could have written, re-uploads the agent, and checks that OpenCode loads it.
+  `plugins/` and `skills/` in the config directory stay agent-writable until #7824.
+- **Repo config is ignored.** OpenCode does not load the target repo's `.opencode/` config or skills.
 
-## Transcripts
+## Troubleshooting
 
-OpenCode's `--format json` stream is the transcript. During a run it is streamed to the host and
-tee'd into a sandbox file, which `ExtractTranscripts` downloads to
-`transcripts/<agent>-output.jsonl`. A stream that reports an error (or ends zero-turn) overrides a
-`0` exit code, the same false-success guard pi uses. The full-fidelity transcript redesign is
-deferred to [unbound-force#513](https://github.com/unbound-force/unbound-force/issues/513); this is
-the interim tee approach.
+| You see | Cause and fix |
+|---|---|
+| `OPENCODE_CONFIG_CONTENT is empty` or `has no permission policy` | The env file or the harness `env.sandbox` entry is missing (steps 1 and 2) |
+| `hooks adapter not yet available` | The harness still has `security.enabled: true` (step 2) |
+| `ProviderModelNotFoundError` | The id is not in OpenCode's built-in catalog. Use an id from the table above |
+| Vertex `404 NOT_FOUND` for the model | Your project does not serve it. Name one it serves |
+| `Falling back to default agent` | OpenCode could not load the agent, and the iteration fails. Rerun with `--debug='*'` and read `opencode-debug.log` |
+| Tool calls fail with a permission error | The policy does not allow that tool (step 1) |
 
 ## See also
 
-- [Agent runtimes](../runtimes.md) — choosing and selecting a runtime
-- [Running agents locally](../guides/user/running-agents-locally.md) — the local-run flow that [Running it locally](#running-it-locally) builds on
-- [Runtime implementation](../contributing/runtime-implementation.md) — the runtime contract and security matrix
+- [Agent runtimes](../runtimes.md): choosing and selecting a runtime
+- [Running agents locally](../guides/user/running-agents-locally.md): the local-run setup this page builds on
+- [Runtime implementation](../contributing/runtime-implementation.md): how the runtime is secured, per feature

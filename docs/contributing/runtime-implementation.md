@@ -162,6 +162,14 @@ How the shared PostToolUse chain reaches each runtime — the three sanitizer ro
   stores them on the runner keyed by sandbox name, and Run restores them after sourcing the
   agent-writable `.env`. A missing entry fails closed. This requires Bootstrap and Run to share the
   same one-shot CLI process; a future long-lived runner must evict state when each sandbox finishes.
+- **OpenCode agent permissions and reset:** OpenCode evaluates agent-level permission rules after
+  the global policy (`findLast`), so Bootstrap intersects the translated agent record with the
+  trusted `OPENCODE_CONFIG_CONTENT` policy, copying a trusted pattern map (`bash: {...}`) for a
+  declared tool. Before every iteration Run removes `agent/`, `agents/`, `mode/`, `modes/`,
+  `tool/`, `tools/`, `command/`, `commands/` and `opencode.jsonc` from the config dir, the
+  user-level config dirs, a cached `models.json` and `auth.json`, then re-uploads the agent and
+  re-runs `opencode debug agent`. A `Falling back to default agent` warning (stderr, or the debug
+  log under `--debug`) fails the iteration. `plugins/` and `skills/` stay writable until #7824.
 - **Pi:** `fullsend-hooks.js` `tool_result` → the same `posttool_chain.py` (sent `tool_response` + `tool_result`; `updatedToolOutput` applied to the result the model sees). pi's `tool_result` fires for failed calls too, so those are sanitized as well.
 - **Codex:** `fullsend-codex-hook.py` (a `PostToolUse` handler in `hooks.json`) → the same `posttool_chain.py`. codex's `PostToolUse` fires for a command that exited non-zero as well, so failed calls are covered without a second phase — but **the rewrite cannot be applied**: codex accepts only `additionalContext` and `updatedMCPToolOutput` there. The adapter uses the chain metadata to block and withhold results containing secrets, unsafe Unicode or an unclassified rewrite. It passes only context suppression and ANSI cleanup with known-safe metadata. Before suppressed output can pass, the original runs through the complete chain again with suppression disabled, preserving Unicode and NFKC-aware secret detection. The chain imports its stages itself, so before every chain spawn the adapter checks the whole hooks directory the way Run's guard does: every entry a regular file with its runner-held digest, and nothing else present, so neither a rewritten stage, a stage file for a disabled sanitizer, nor a `hook_io/` package shadowing `hook_io.py` can change what the chain runs. codex kills a hook at the 30 s handler timeout and a killed hook does not block, so each spawn's timeout is what remains of that budget and a spawn with under a second left is withheld instead. A canary block also withholds the output entirely, because a codex `PostToolUse` block replaces the tool result with the reason.
 

@@ -252,7 +252,7 @@ flowchart TB
     CC["Claude Code\nclaude -p --agent\nhooks via --settings"]
     PI["pi\npi --print --mode json\nhooks via fullsend-hooks.js"]
     CX["codex\ncodex exec --json\nhooks via hooks.json + adapter"]
-    OC["opencode\nopencode run --format json\nhooks via plugin adapter (#515)"]
+    OC["opencode\nopencode run --format json\nno hooks yet (#7824)"]
     DM["dummy\nscripted ops\n(behaviour tests)"]
     DP["dummy-playback\nplaylist replay\n(behaviour tests)"]
   end
