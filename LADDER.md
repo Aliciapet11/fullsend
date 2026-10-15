@@ -50,7 +50,7 @@ repository.
   agent when applied by a user with `write` access or by an agent bot.
   The same applies to `ok-to-test`: CI removes it when a triage user
   applies it, and it does not authorize e2e or functional runs. Ask
-  someone with Write access to apply it.
+  someone with the Write role to apply it.
 - Automatic e2e CI triggering on your PRs (no maintainer label needed)
 
 **Criteria:**
