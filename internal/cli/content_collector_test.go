@@ -267,6 +267,11 @@ func TestContentCollector_AURLsUserinfoQueryAndFragmentAreMasked(t *testing.T) {
 		"a fullwidth at sign":                  {"Bash", `{"command":"git clone https://x-access-token` + fw(0xff1a) + pw + fw(0xff20) + `github.com/o/r"}`, `{"command":"git clone https://***@github.com/o/r"}`},
 		"a zero-width split scheme":            {"Bash", `{"command":"curl https:` + fw(0x200b) + `//h.example.com/p?access_token=` + pw + `"}`, `{"command":"curl https://h.example.com/p?***"}`},
 		"a fullwidth token in the path":        {"Bash", `{"command":"curl https://h.example.com/ghp_` + ghpFull.String() + `?x=1"}`, `{"command":"curl https://h.example.com/ghp_...?***"}`},
+		"the colon escaped for the shell too":  {"Bash", `{"command":"git clone https\\\\:\\\\/\\\\/deploy:` + pw + `@git.example.com/o/r"}`, `{"command":"git clone https\\\\:\\\\/\\\\/***@git.example.com/o/r"}`},
+		"a URL percent-encoded whole":          {"Bash", `{"command":"curl https%3A%2F%2Fdeploy%3A` + pw + `%40git.example.com%2Fo%2Fr"}`, `{"command":"curl https%3A%2F%2F***"}`},
+		"a URL percent-encoded in a query":     {"Bash", `{"command":"curl https://h.example.com/x?next=https%3A%2F%2Fdeploy%3A` + pw + `%40git.example.com"}`, `{"command":"curl https://h.example.com/x?***"}`},
+		"a URL percent-encoded in a path":      {"Bash", `{"command":"curl https://proxy.example.com/fetch/https%3A%2F%2Fdeploy%3A` + pw + `%40git.example.com"}`, `{"command":"curl https://proxy.example.com/fetch/https%3A%2F%2F***"}`},
+		"a URL percent-encoded twice":          {"Bash", `{"command":"curl https%253A%252F%252Fdeploy%253A` + pw + `%2540git.example.com"}`, `{"command":"curl https%253A%252F%252F***"}`},
 		"separators escaped for the shell":     {"Bash", `{"command":"curl https:\\\\/\\\\/h.example.com/p?access_token=` + pw + `"}`, `{"command":"curl https:\\\\/\\\\/h.example.com/p?***"}`},
 		"a password behind escaped separators": {"Bash", `{"command":"git clone https:\\\\/\\\\/deploy:` + pw + `@git.example.com/o/r"}`, `{"command":"git clone https:\\\\/\\\\/***@git.example.com/o/r"}`},
 	} {

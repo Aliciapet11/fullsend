@@ -816,11 +816,16 @@ func redactText(pipeline *security.Pipeline, runnerEnv map[string]string, text s
 // fields after it are not masked with it. Any other quote (a password or
 // a query quoted half-way for the shell) and a backslash-escaped
 // character do not end it.
-var urlRun = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*:(?:\\*/){2}(?:[^\s"\\]|\\.|"[^\s"\\,:}\]])+`)
+var urlRun = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*(?:\\*:(?:\\*/){2}|%(?:25)*3[Aa]%(?:25)*2[Ff]%(?:25)*2[Ff])(?:[^\s"\\]|\\.|"[^\s"\\,:}\]])+`)
 
-// urlSep matches a URL's "://", or the same with its slashes escaped, as
-// a shell command or a JSON encoder writes them, once or more.
-var urlSep = regexp.MustCompile(`:(?:\\*/){2}`)
+// urlSep matches a URL's "://", the same with its colon or slashes
+// escaped as a shell command or a JSON encoder writes them, once or
+// more, or percent-encoded (urlSepEncoded).
+var urlSep = regexp.MustCompile(`\\*:(?:\\*/){2}|%(?:25)*3[Aa]%(?:25)*2[Ff]%(?:25)*2[Ff]`)
+
+// urlSepEncoded matches a percent-encoded "://" (%3A%2F%2F), as a URL
+// carried in another's query is written, encoded once or more.
+var urlSepEncoded = regexp.MustCompile(`%(?:25)*3[Aa]%(?:25)*2[Ff]%(?:25)*2[Ff]`)
 
 // maskURLs masks what a URL carries that no pattern is written for:
 // everything from its separator to its last '@' (userinfo — a password
@@ -830,14 +835,15 @@ var urlSep = regexp.MustCompile(`:(?:\\*/){2}`)
 // fragment), as ***, with one finding for a string that had any. When
 // the first '?' or '#' comes before the last '@' — a password holding
 // one, or an '@' in the query — the two cannot be told apart and
-// everything after the separator is masked. It runs last
+// everything after the separator is masked; so it is after a
+// percent-encoded separator anywhere in the run, whose '@', '?' and '#'
+// are encoded too and nothing here decodes. It runs last
 // in redactText, on text the normalizer has folded and the patterns have
 // masked, so a compatibility '？' or '＠' is a plain one here, and nothing
 // is re-encoded: the mask only replaces bytes. Kept: a token carried in
 // the path itself, as a webhook URL's is; in a URL holding a quote that
 // ends it (see urlRun), what follows the quote and userinfo whose '@'
-// follows it; a URL written percent-encoded or with an escaped colon,
-// which is not read as one.
+// follows it.
 func maskURLs(text string, findings *[]security.Finding) string {
 	masked := false
 	text = urlRun.ReplaceAllStringFunc(text, func(run string) string {
@@ -848,6 +854,9 @@ func maskURLs(text string, findings *[]security.Finding) string {
 			out = run[:s] + "***"
 		case a > s:
 			out = run[:s] + "***" + run[a:]
+		}
+		if e := urlSepEncoded.FindStringIndex(out); e != nil {
+			out = out[:e[1]] + "***"
 		}
 		if i := strings.IndexAny(out, "?#"); i >= 0 {
 			out = out[:i+1] + "***"

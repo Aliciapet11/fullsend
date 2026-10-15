@@ -30,8 +30,7 @@ import (
 // secret split across two parts or events; a secret matching no pattern
 // and in no env — a token in a URL's path, in a URL holding a double
 // quote that ends it (urlRun), what follows the quote and userinfo whose
-// '@' follows it, a URL written percent-encoded or with an escaped colon
-// among them; a summary a pi or codex parser cut before the collector
+// '@' follows it among them; a summary a pi or codex parser cut before the collector
 // saw it, since that cut can split a value the parser's own scan did not
 // see joined (a Claude summary is cut from a member the collector scans
 // whole). Nothing else is excluded.
@@ -116,6 +115,14 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 				out[i] = secret{name, "https://deploy:" + b[:16] + "?rest@git.example.com/o/r", b[:16], false}
 			case "url_userinfo_hash": // a password holding a '#'
 				out[i] = secret{name, "https://deploy:" + b[:16] + "#rest@git.example.com/o/r", b[:16], false}
+			case "url_userinfo_escaped_colon": // the colon escaped for the shell too
+				out[i] = secret{name, `https\:\/\/deploy:` + b[:16] + `@git.example.com/o/r`, b[:16], false}
+			case "url_percent_encoded": // the whole URL percent-encoded, as a query value is
+				out[i] = secret{name, "https%3A%2F%2Fdeploy%3A" + b[:16] + "%40git.example.com%2Fo%2Fr", b[:16], false}
+			case "url_percent_encoded_nested": // percent-encoded, in a plain URL's path
+				out[i] = secret{name, "https://proxy.example.com/fetch/https%3A%2F%2Fdeploy%3A" + b[:16] + "%40git.example.com", b[:16], false}
+			case "url_percent_encoded_twice": // encoded in a query that was itself encoded
+				out[i] = secret{name, "https%253A%252F%252Fdeploy%253A" + b[:16] + "%2540git.example.com", b[:16], false}
 			case "url_nested": // a URL in another's path
 				out[i] = secret{name, "https://proxy.example.com/https://u:" + b[:16] + "@h.example.com/x", b[:16], false}
 			}
@@ -129,7 +136,7 @@ func TestRedaction_NoSecretSurvivesAnyWrapping(t *testing.T) {
 		mk("url_userinfo", 1000), mk("url_userinfo_quoted", 1100), mk("url_userinfo_fullwidth", 1200),
 		mk("url_query", 1300), mk("url_query_fullwidth", 1400), mk("url_fragment", 1500), mk("url_nested", 1600),
 		mk("url_userinfo_escaped", 1700), mk("url_query_escaped", 1800),
-		mk("url_userinfo_slash", 1900), mk("url_userinfo_double_quote", 2000), mk("url_userinfo_question", 2100), mk("url_userinfo_hash", 2200),
+		mk("url_userinfo_slash", 1900), mk("url_userinfo_double_quote", 2000), mk("url_userinfo_question", 2100), mk("url_userinfo_hash", 2200), mk("url_userinfo_escaped_colon", 2300), mk("url_percent_encoded", 2400), mk("url_percent_encoded_nested", 2500), mk("url_percent_encoded_twice", 2600),
 	}
 
 	// Wrappings over the secret text; the ones that insert a character
