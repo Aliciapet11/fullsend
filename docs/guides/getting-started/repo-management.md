@@ -106,7 +106,7 @@ For GitLab repos, set the `GITLAB_TOKEN` environment variable or pass
 repos are present, including gitlab.com; there is no manifest default. Pass
 `--gitlab-url` to `fullsend repos install` to set it (this also implies
 `--forge=gitlab` when no forge is specified), or set it later with
-`fullsend repos set-default gitlab.url <url>`. The env-var fallback chain
+`fullsend repos set gitlab.url <url>`. The env-var fallback chain
 (`FULLSEND_GITLAB_URL` → `GITLAB_API_URL` → `CI_SERVER_URL`, defaulting to
 gitlab.com) applies only to call paths without a manifest URL; it does
 not override manifest validation. Self-hosted
@@ -190,7 +190,7 @@ selection as `inference.auth` on each selected manifest entry, for repos
 added by the command and for existing entries alike. It never changes
 `defaults`, forge sections, or unselected repos, so later `status` and
 `install` runs resolve the same value without the flag. To set the
-forge-wide or global selection, use `repos set-default`
+forge-wide or global selection, use `repos set`
 (`defaults.inference.auth`, `github.inference.auth`,
 `gitlab.inference.auth`). See
 [fullsend repos § Inference authentication selection](../../cli/repos.md#inference-authentication-selection)
@@ -202,7 +202,7 @@ upgrading. For example, to keep the previous Vertex WIF behaviour
 everywhere:
 
 ```bash
-fullsend repos set-default defaults.inference.auth vertex-wif
+fullsend repos set defaults.inference.auth vertex-wif
 ```
 
 **Shared manifests:** older CLI versions reject unknown manifest fields, so
@@ -435,6 +435,34 @@ fullsend repos status -f repos.yaml --json   # whole-file managed drift
 fullsend repos install -f repos.yaml --dry-run
 fullsend repos install -f repos.yaml         # rewrite the managed file
 ```
+
+### Editing the manifest from the command line
+
+`fullsend repos set <path> <value>` edits any field in `repos.yaml`
+without opening an editor. The path names the field with dot-separated
+keys, and a quoted selector picks a repository entry by its exact name.
+Every edit is checked against the manifest schema and validated as a
+whole before it is written, so a rejected edit leaves the file
+unchanged. Comments and unrelated content are kept.
+
+```bash
+# Set a value at defaults, forge, or repository scope
+fullsend repos set defaults.config.runtime pi
+fullsend repos set gitlab.agent_runner_tags '[fullsend-agent]'
+fullsend repos set 'github.repos["acme/api"].config.runtime' claude
+
+# Add a repository entry (or replace an existing one)
+fullsend repos set 'github.repos["acme/new-service"]' '{"inference": {"auth": "vertex-wif"}}'
+
+# Delete a key
+fullsend repos set --unset 'github.repos["acme/api"].config.runtime'
+```
+
+Setting a field under a repository entry that does not exist fails, so a
+typo cannot enroll a new repository; set the whole entry to add one. An
+empty value never deletes a key: use `--unset`. See
+[`repos set`](../../cli/repos.md#repos-set) for the path syntax, value
+types, and migration from the removed `repos set-default`.
 
 ### Manifest paths and URLs
 
@@ -739,12 +767,14 @@ Push the upgrade directly to the default branch instead of creating a PR:
 fullsend repos install -f repos.yaml --direct
 ```
 
-Repos that are already SHA-pinned (`@<sha> # <ref>`) preserve their
+Repos that are already SHA-pinned (`@<sha>  # <ref>`) preserve their
 pinning style during upgrades when the target ref is a semver tag — the
-tag is resolved to a commit SHA and written as `@<sha> # <ref>`. When
+tag is resolved to a commit SHA and written as `@<sha>  # <ref>`. When
 the target ref is a branch name (e.g., `main`), the branch name is
 written directly (`@main`) to ensure idempotent convergence. Non-SHA-pinned
 repos keep their string ref format (e.g., `@v2.3.0`).
+Repos installed with one space before `#` are not rewritten when the
+ref and tag are unchanged; they pick up two spaces on the next ref change.
 
 Downgrades are blocked unless `--force` is set. When both the current
 and target refs are semver tags, the guard uses version comparison. When
@@ -808,7 +838,7 @@ The repo resolves no `inference.auth` from its entry, its forge section,
 or `defaults`. This is expected after upgrading from a release without
 the setting. Add the selection at the appropriate level (see
 [Inference authentication](#inference-authentication)) and re-run.
-`fullsend repos set-default defaults.inference.auth vertex-wif` restores
+`fullsend repos set defaults.inference.auth vertex-wif` restores
 the previous Vertex WIF behaviour for every repo. An unrecognised value
 (for example `vertex`) fails manifest validation and names the offending
 key.

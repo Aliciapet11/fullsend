@@ -9,7 +9,16 @@
 # removal is removed on the retry; a write actor who is a maintainer is set
 # back to member; any other member or pending invitee (including an email
 # invitation with a null login) on the team fails; no
-# PAT value is printed.
+# PAT value is printed. Also checks that the script no longer references
+# the legacy hosted-GCP-mint settings and keeps the
+# FULLSEND_FOREIGN_E2E_REPOS step.
+#
+# Also covers the organization-role steps (assign_all_repo_role and
+# check_no_all_repo_role): a role is verified by listing the role's users,
+# never through the unsupported per-user route; an already-assigned role
+# is not re-assigned; a role still missing after the PUT fails; an outsider
+# holding the write or triage role fails; and a role-user listing error
+# fails closed (#8448).
 #
 # Run from the repo root:
 #   bash hack/setup-new-e2e-org_test.sh
@@ -47,6 +56,11 @@ trap 'rm -rf "${SHIM_DIR}" "${STATE}"' EXIT
 #                           (null login)
 # ${S}/put_state            "STATE ROLE" a PUT produces (default: active, role
 #                           from the request)
+# ${S}/roles/<id>/<login>   login holds organization role <id> (8 is
+#                           all_repo_write, 9 is all_repo_triage)
+# ${S}/role_users_error     listing the users of any org role fails with
+#                           HTTP 500
+# ${S}/role_put_noop        an org role PUT succeeds but assigns nothing
 # Pending memberships show up in the invitations list, not the members list.
 cat > "${SHIM_DIR}/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -81,7 +95,28 @@ list_logins() {
   done | jq -R -s 'split("\n") | map(select(length > 0)) | map({login: .})'
 }
 team_path="/orgs/${STUB_ORG}/teams/${STUB_TEAM}"
+roles_path="/orgs/${STUB_ORG}/organization-roles"
 case "${method} ${path}" in
+  "GET ${roles_path}")
+    out '{"total_count":3,"roles":[{"id":7,"name":"all_repo_read"},{"id":8,"name":"all_repo_write"},{"id":9,"name":"all_repo_triage"}]}' ;;
+  "GET ${roles_path}/users/"*)
+    # Unsupported per-user route: GitHub answers 404.
+    notfound ;;
+  "GET ${roles_path}/"*/users)
+    [[ -f "${S}/role_users_error" ]] && servererr
+    rid="${path#"${roles_path}"/}"; rid="${rid%/users}"
+    users="[]"
+    for f in "${S}"/roles/"${rid}"/*; do
+      [[ -f "${f}" ]] || continue
+      users=$(jq --arg l "$(basename "${f}")" '. + [{login: $l}]' <<< "${users}")
+    done
+    out "${users}" ;;
+  "PUT ${roles_path}/users/"*/*)
+    rid="${path##*/}"; login="${path%/*}"; login="${login##*/}"
+    if [[ ! -f "${S}/role_put_noop" ]]; then
+      mkdir -p "${S}/roles/${rid}"
+      touch "${S}/roles/${rid}/${login}"
+    fi ;;
   "GET /user")
     out "{\"login\":\"${STUB_OPERATOR}\"}" ;;
   "GET ${team_path}")
@@ -325,6 +360,116 @@ if [[ "${RC}" -ne 0 ]] && grep -q "could not list members" <<< "${OUT}"; then
   pass "member list error: fails"
 else
   fail "member list error: rc=${RC}: ${OUT}"
+fi
+
+# --- 13. no legacy hosted-GCP-mint check (#8416) ---------------------------
+if grep -nE 'MINT_PROJECT|MINT_FUNCTION|MINT_REGION|gcloud|ROLE_APP_IDS' "${SETUP}"; then
+  fail "legacy mint check: script still references hosted-GCP-mint settings"
+else
+  pass "legacy mint check: no hosted-GCP-mint settings referenced"
+fi
+if grep -q 'FULLSEND_FOREIGN_E2E_REPOS' "${SETUP}"; then
+  pass "legacy mint check: FULLSEND_FOREIGN_E2E_REPOS step kept"
+else
+  fail "legacy mint check: FULLSEND_FOREIGN_E2E_REPOS step missing"
+fi
+
+# --- 14. organization roles (#8448) ---------------------------------------
+# run_fn runs a sourced function with the stub; sets OUT and RC.
+run_fn() {
+  RC=0
+  OUT=$(PATH="${SHIM_DIR}:${PATH}" STUB_STATE="${STATE}" STUB_ORG="${ORG}" \
+    STUB_TEAM="${TEAM}" STUB_OPERATOR="${OPERATOR}" \
+    bash -c 'source "$1"; shift; "$@"' _ "${SETUP}" "$@" 2>&1) || RC=$?
+}
+
+# legacy_role_get reports calls to the unsupported per-user role route.
+legacy_role_get() {
+  grep -E "^gh api /orgs/${ORG}/organization-roles/users/" "${STATE}/gh.log" || true
+}
+
+# 14a. role missing: assigned and verified via the role's user list.
+new_state
+run_fn assign_all_repo_role "${ORG}" "${WRITE}" write
+if [[ "${RC}" -eq 0 && -e "${STATE}/roles/8/${WRITE}" ]] \
+    && grep -q -- "-X PUT /orgs/${ORG}/organization-roles/users/${WRITE}/8" "${STATE}/gh.log" \
+    && grep -q "^gh api --paginate /orgs/${ORG}/organization-roles/8/users" "${STATE}/gh.log" \
+    && [[ -z "$(legacy_role_get)" ]]; then
+  pass "org role missing: assigned and verified"
+else
+  fail "org role missing: rc=${RC}, legacy: $(legacy_role_get): ${OUT}"
+fi
+
+# 14b. role already held (login case differs): no PUT.
+new_state
+mkdir -p "${STATE}/roles/9"
+touch "${STATE}/roles/9/FSTest-Triage"
+run_fn assign_all_repo_role "${ORG}" "${TRIAGE}" triage
+if [[ "${RC}" -eq 0 && -z "$(mutations)" ]] && grep -q "already has all-repository triage" <<< "${OUT}"; then
+  pass "org role already held: PUT skipped"
+else
+  fail "org role already held: rc=${RC}, changes: $(mutations): ${OUT}"
+fi
+
+# 14c. role still missing after the PUT: fail.
+new_state
+touch "${STATE}/role_put_noop"
+run_fn assign_all_repo_role "${ORG}" "${WRITE}" write
+if [[ "${RC}" -ne 0 ]] && grep -q "still lacks all-repository write" <<< "${OUT}"; then
+  pass "org role missing after PUT: fails"
+else
+  fail "org role missing after PUT: rc=${RC}: ${OUT}"
+fi
+
+# 14d. role-user listing error during assignment: fail closed, no PUT.
+new_state
+touch "${STATE}/role_users_error"
+run_fn assign_all_repo_role "${ORG}" "${WRITE}" write
+if [[ "${RC}" -ne 0 && -z "$(mutations)" ]] && grep -q "could not list users of organization role" <<< "${OUT}"; then
+  pass "org role listing error on assign: fails closed"
+else
+  fail "org role listing error on assign: rc=${RC}, changes: $(mutations): ${OUT}"
+fi
+
+# 14e. outsider holds neither role: passes.
+new_state
+mkdir -p "${STATE}/roles/8" "${STATE}/roles/9"
+touch "${STATE}/roles/8/${WRITE}" "${STATE}/roles/9/${TRIAGE}"
+run_fn check_no_all_repo_role "${ORG}" "${OUTSIDER}"
+if [[ "${RC}" -eq 0 && -z "$(legacy_role_get)" ]]; then
+  pass "outsider without roles: passes"
+else
+  fail "outsider without roles: rc=${RC}, legacy: $(legacy_role_get): ${OUT}"
+fi
+
+# 14f. outsider holds the write or the triage role: fails.
+for rid in 8 9; do
+  new_state
+  mkdir -p "${STATE}/roles/${rid}"
+  touch "${STATE}/roles/${rid}/${OUTSIDER}"
+  run_fn check_no_all_repo_role "${ORG}" "${OUTSIDER}"
+  if [[ "${RC}" -ne 0 ]] && grep -q "${OUTSIDER} has all-repository role" <<< "${OUT}"; then
+    pass "outsider with role ${rid}: fails"
+  else
+    fail "outsider with role ${rid}: rc=${RC}: ${OUT}"
+  fi
+done
+
+# 14g. role-user listing error on the outsider check: fail closed.
+new_state
+touch "${STATE}/role_users_error"
+run_fn check_no_all_repo_role "${ORG}" "${OUTSIDER}"
+if [[ "${RC}" -ne 0 ]] && grep -q "could not list users of organization role" <<< "${OUT}"; then
+  pass "outsider check listing error: fails closed"
+else
+  fail "outsider check listing error: rc=${RC}: ${OUT}"
+fi
+
+# 14h. the unsupported per-user role route is gone from the script.
+if grep -nE 'organization-roles/users/\$\{[A-Za-z_]+\}"' "${SETUP}"; then
+  fail "per-user role route: script still GETs /organization-roles/users/{username}"
+else
+  pass "per-user role route: not used"
 fi
 
 if [[ "${FAILURES}" -gt 0 ]]; then

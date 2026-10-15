@@ -1344,8 +1344,11 @@ func (v PipelineInputValue) MarshalJSON() ([]byte, error) {
 }
 
 // ProtectedBranchAccess is one grant on a protected branch.
-// A role-based grant has AccessLevel set and UserID/GroupID zero.
-// A user or group grant has the corresponding ID set. ID is the forge's
+// A role-based grant has AccessLevel set and UserID/GroupID/DeployKeyID zero.
+// A user, group, or deploy-key grant has the corresponding ID set. GitLab
+// reports a deploy-key grant with a Maintainer AccessLevel, but it admits
+// only the key, not every Maintainer, so callers must not read it as a role
+// grant. ID is the forge's
 // identifier of this individual entry (zero when the forge does not report
 // one); it lets a caller remove exactly this entry later.
 // GitLab access levels: 0 (No one), 30 (Developer), 40 (Maintainer),
@@ -1355,6 +1358,7 @@ type ProtectedBranchAccess struct {
 	AccessLevel int
 	UserID      int
 	GroupID     int
+	DeployKeyID int
 }
 
 // ProtectedBranchRule is the protection configuration for a branch.

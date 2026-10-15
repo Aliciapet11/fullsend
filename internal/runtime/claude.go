@@ -7,7 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fullsend-ai/fullsend/internal/pluginformat"
@@ -106,7 +109,11 @@ func (r ClaudeRuntime) Bootstrap(input BootstrapInput) error {
 
 	// On the gateway route a gateway/ model in the frontmatter must reach
 	// Claude Code as an explicit --model without the prefix.
-	setClaudeGatewayAgentModel(sandboxName, AgentDefinitionModel(agentPath))
+	agentModel := AgentDefinitionModel(agentPath)
+	setClaudeGatewayAgentModel(sandboxName, agentModel)
+	// Run resolves a frontmatter alias the way it resolves the harness's
+	// (built-in default and fallback chain) when the run names no model.
+	claudeAgentModels.Store(sandboxName, agentModel)
 	// The api-key mode pins its placeholder in the --settings document,
 	// which the hooks install below builds.
 	if err := claudeGatewayAPIKeyPlaceholder(sandboxName); err != nil {
@@ -169,25 +176,207 @@ func (r ClaudeRuntime) Bootstrap(input BootstrapInput) error {
 	return installClaudeHooks(sandboxName, hooksInput.SandboxHookConfig(), r.claudeGatewaySettings(sandboxName))
 }
 
-func (ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Printer, start time.Time, metrics *RunMetrics) (int, error) {
-	gw := claudeGatewayRunFor(params.SandboxName)
-	cmd := buildRunCommand(params)
-	stdout, execCmd, cancel, err := sandbox.ExecStreamReader(ctx, params.SandboxName, cmd, params.Timeout, os.Stderr)
-	if err != nil {
-		return -1, err
-	}
-	defer cancel()
+// claudeAgentModels records, per sandbox, the agent definition's frontmatter
+// model that Bootstrap read, so Run can resolve it when the run names none.
+var claudeAgentModels sync.Map
 
-	var r io.Reader = stdout
-	if params.OutputPath != "" {
-		f, ferr := os.Create(params.OutputPath)
-		if ferr != nil {
-			printer.StepWarn(fmt.Sprintf("Failed to create %s: ", params.OutputPath) + ferr.Error())
-		} else {
-			defer f.Close()
-			r = io.TeeReader(stdout, f)
+// claudeAgentModelFor returns the frontmatter model Bootstrap recorded for
+// sandboxName, or "".
+func claudeAgentModelFor(sandboxName string) string {
+	if v, ok := claudeAgentModels.Load(sandboxName); ok {
+		s, _ := v.(string)
+		return s
+	}
+	return ""
+}
+
+// claudeModelChain is the ordered list of models Run tries. When the run's
+// model (else the agent definition's) is an alias, it is the alias's id
+// followed by its fallback chain — FallbackModels when set, else the
+// built-in chain (ImplicitFallbackModels) — each resolved by claudeModelID
+// and deduplicated. A pinned id, a provider/id spec, an alias with no
+// chain (fable without an explicit list), and any gateway run yield a single entry: the model as the run
+// gave it, which buildRunCommand resolves as before (#7026). The one
+// exception is an alias that only the agent definition names (the run
+// names none): its single entry is the alias's resolved id, so a
+// models.aliases retarget or the built-in default reaches --model instead
+// of Claude Code resolving the frontmatter alias with its own table.
+func claudeModelChain(params RunParams, gateway bool) []string {
+	model := strings.TrimSpace(EffectiveModel(params.Model, claudeAgentModelFor(params.SandboxName)))
+	single := []string{params.Model}
+	if gateway || model == "" || strings.Contains(model, "/") {
+		return single
+	}
+	primary := claudeModelID(model, params.ModelAliases)
+	if _, ok := params.ModelAliases[model]; !ok {
+		if _, ok := claudeAliasDefaults[model]; !ok {
+			// An alias with no built-in chain (fable) still takes an
+			// explicit FULLSEND_FALLBACK_MODELS list.
+			id, explicit := claudeExplicitChainAliases[model]
+			if !explicit || len(params.FallbackModels) == 0 {
+				return single
+			}
+			primary = id
 		}
 	}
+	if params.Model == "" {
+		single = []string{primary}
+	}
+	fallbacks := effectiveFallbackModels(model, params.FallbackModels, params.ModelAliases)
+	if len(fallbacks) == 0 {
+		return single
+	}
+	chain := []string{primary}
+	for _, fb := range fallbacks {
+		id := claudeModelID(strings.TrimSpace(fb), params.ModelAliases)
+		if id != "" && !strings.Contains(id, "/") && !slices.Contains(chain, id) {
+			chain = append(chain, id)
+		}
+	}
+	return chain
+}
+
+// claudeAttemptResult is the outcome of one Claude Code invocation in Run's
+// fallback loop.
+type claudeAttemptResult struct {
+	// model is the id the attempt passed as --model.
+	model    string
+	exitCode int
+	execErr  error
+	// lastResult is the attempt's final ResultEvent, nil when none arrived.
+	lastResult *ResultEvent
+	// sessionID is the session the init event reported, used to remove an
+	// abandoned attempt's transcript.
+	sessionID string
+	// held and answered: see attemptGate.
+	held     []AgentEvent
+	answered bool
+}
+
+// claudeSyntheticModel is the model Claude Code puts on an assistant
+// message it wrote itself rather than one the API returned (an API error
+// reported in the conversation).
+const claudeSyntheticModel = "<synthetic>"
+
+// claudeSelectedModelIssue is the part of Claude Code's own "model not
+// available" message (see claudeShouldFallBack) that precedes the model id.
+// The leading "There's an" is left out so a typographic apostrophe cannot
+// break the match.
+const claudeSelectedModelIssue = "issue with the selected model ("
+
+// claudeModelNotAvailablePrefix and claudeModelNotAvailableSuffix wrap the
+// model id in Claude Code's other "model not available" message, the one it
+// writes for an id in its own model list (see claudeShouldFallBack).
+const (
+	claudeModelNotAvailablePrefix = "the model "
+	claudeModelNotAvailableSuffix = " is not available on your "
+)
+
+// claudeAttemptOutput reports whether evt shows that the model was served.
+// A failed API call reaches the stream as a synthetic assistant message —
+// text starting with "API Error", Claude Code's "There's an issue with the
+// selected model (...)", or its "The model ... is not available on your
+// ... deployment" — which is not output. runAttempt also refuses
+// any text on a message whose model is claudeSyntheticModel.
+func claudeAttemptOutput(evt AgentEvent) bool {
+	if t, ok := evt.(TextEvent); ok {
+		text := strings.TrimSpace(t.Text)
+		if strings.HasPrefix(text, "API Error") {
+			return false
+		}
+		lower := strings.ToLower(text)
+		if strings.HasPrefix(lower, claudeModelNotAvailablePrefix) && strings.Contains(lower, claudeModelNotAvailableSuffix) {
+			return false
+		}
+		return !strings.HasPrefix(lower, "there") || !strings.Contains(lower, claudeSelectedModelIssue)
+	}
+	return attemptOutput(evt)
+}
+
+// claudeSelectedModelUnavailable reports whether errMsg is one of Claude
+// Code's own "model not available" messages for model: the attempt's
+// --model id must be the one the message names, compared
+// case-insensitively, so the message about some other model does not count.
+func claudeSelectedModelUnavailable(errMsg, model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return false
+	}
+	lower := strings.ToLower(errMsg)
+	return strings.Contains(lower, claudeSelectedModelIssue+model+")") ||
+		strings.Contains(lower, claudeModelNotAvailablePrefix+model+claudeModelNotAvailableSuffix)
+}
+
+// claudeShouldFallBack reports whether an attempt failed only because the
+// run's Vertex project does not serve its model: the result is an error
+// with no output tokens, the model produced nothing, and the message is
+// either one of the two Vertex "not served" shapes
+// (isVertexModelUnavailable) or one of Claude Code's own messages naming
+// the attempt's model (claudeSelectedModelUnavailable). Any other failure —
+// auth, quota, a PERMISSION_DENIED that is not the data-sharing one, a
+// model that already answered — is final.
+//
+// The pinned Claude Code (2.1.296) on Vertex (CLAUDE_CODE_USE_VERTEX=1)
+// does not surface Vertex's 404 text for a model the project does not
+// serve. It writes an assistant message with "model":"<synthetic>",
+// "error":"model_not_found" and zero output tokens, then a result event
+// with "is_error":true, "api_error_status":404 and
+// "terminal_reason":"api_error", whose text depends on the id:
+//
+//   - an id in Claude Code's own model list (every default and fallback id
+//     except claude-haiku-4-5): "The model <id> is not available on your
+//     vertex deployment. Try --model to switch to ..., or ask your admin
+//     to enable this model."
+//   - any other id: "There's an issue with the selected model (<id>). It
+//     may not exist or you may not have access to it. Run --model to pick a
+//     different model."
+//
+// Both were reproduced against a stub Vertex endpoint returning the 404,
+// and the second also live. Auth, permission and quota failures produce
+// other text. The 403 data-sharing error does reach the result text, so
+// isVertexModelUnavailable still matters here.
+//
+// The runner does this itself because the built-in chain is never passed
+// as --fallback-model. An explicit FULLSEND_FALLBACK_MODELS list is: on a
+// Vertex 404, Claude Code 2.1.296 then switches to the next entry inside
+// the same session (a "model_fallback" system event, "trigger":
+// "last_resort", observed live), which recordClaudeMetrics records as a
+// fallback; this check only runs when Claude Code gave up instead.
+func claudeShouldFallBack(res claudeAttemptResult) bool {
+	if res.execErr != nil || res.answered || res.lastResult == nil {
+		return false
+	}
+	r := res.lastResult
+	if !r.IsError || r.OutputTokens != 0 {
+		return false
+	}
+	return isVertexModelUnavailable(r.ErrorMessage) || claudeSelectedModelUnavailable(r.ErrorMessage, res.model)
+}
+
+// claudeRemoveTranscript removes the transcript of an attempt the run
+// abandoned for a fallback, within timeout. The transcript would otherwise
+// be extracted and reported as an error on a run that went on to succeed;
+// a failure to remove it is only reported.
+func (r ClaudeRuntime) claudeRemoveTranscript(sandboxName, sessionID string, timeout time.Duration, printer *ui.Printer) {
+	if !claudeSessionIDPattern.MatchString(sessionID) {
+		return
+	}
+	cmd := fmt.Sprintf("find %s -name %s -delete", shellQuote(r.ConfigDir()), shellQuote(sessionID+".jsonl"))
+	if _, stderr, code, cerr := sandbox.Exec(sandboxName, cmd, timeout); cerr != nil || code != 0 {
+		msg := strings.TrimSpace(stderr)
+		if cerr != nil {
+			msg = cerr.Error()
+		}
+		printer.StepWarn("Could not remove the abandoned attempt's transcript: " + sanitizeOutput(msg))
+	}
+}
+
+// claudeSessionIDPattern is what a Claude Code session id looks like (a
+// UUID); anything else is not used in a sandbox command.
+var claudeSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
+
+func (r ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Printer, start time.Time, metrics *RunMetrics) (int, error) {
+	gw := claudeGatewayRunFor(params.SandboxName)
 
 	handler := params.OnEvent
 	if handler == nil {
@@ -201,10 +390,114 @@ func (ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Prin
 		innerHandler(evt)
 	}
 
-	if parseErr := parseClaudeStream(r, handler); parseErr != nil {
+	chain := claudeModelChain(params, gw != nil)
+	// lastSession is the session of the attempt that just ended. It is
+	// removed only in onFallback, once the loop has decided a fallback
+	// starts, so the final attempt's transcript always survives.
+	lastSession := ""
+	attempt := func(model string, timeout time.Duration, mayFallBack bool) claudeAttemptResult {
+		attemptParams := params
+		attemptParams.Model = model
+		attemptParams.Timeout = timeout
+		res := r.runAttempt(ctx, attemptParams, mayFallBack, handler, printer)
+		lastSession = res.sessionID
+		return res
+	}
+	onFallback := func(prev, next string, budget time.Duration) bool {
+		printer.StepWarn(modelFallbackWarning(prev, next, fallbackReasonNotServed))
+		r.claudeRemoveTranscript(params.SandboxName, lastSession, min(10*time.Second, budget), printer)
+		return true
+	}
+	var result claudeAttemptResult
+	served := 0
+	if len(chain) == 1 {
+		result = attempt(chain[0], params.Timeout, false)
+	} else {
+		result, served = modelFallbackLoop(chain, params.Timeout, minFallbackAttemptTimeout, time.Now, attempt, claudeShouldFallBack, onFallback)
+		if served > 0 {
+			// The served attempt's own in-session fallback (a
+			// ModelFallbackEvent, already recorded) comes after the
+			// models the runner abandoned.
+			inSessionFrom, inSessionReasons := metrics.FallbackFrom, metrics.FallbackReasons
+			metrics.FallbackFrom, metrics.FallbackReasons = nil, nil
+			for _, m := range chain[:served] {
+				metrics.recordFallback(m, fallbackReasonNotServed)
+			}
+			for i, m := range inSessionFrom {
+				metrics.recordFallback(m, inSessionReasons[i])
+			}
+		}
+	}
+	// Replay the final attempt's withheld events so metrics are captured
+	// and the renderer sees them once.
+	for _, evt := range result.held {
+		handler(evt)
+	}
+	if result.execErr != nil {
+		return result.exitCode, result.execErr
+	}
+	if gw != nil && result.exitCode == piCredentialSeedFailedExit {
+		return result.exitCode, fmt.Errorf("the inference gateway credential seed failed (the sandbox's gateway provider placeholder is missing or malformed, or the token file in %s could not be written); this is a runner setup failure, not an agent failure", sandbox.SandboxClaudeConfig)
+	}
+	return result.exitCode, nil
+}
+
+// runAttempt runs one Claude Code invocation with params.Model and
+// params.Timeout. When mayFallBack is set, its events are withheld until
+// the model produces output (see attemptGate), so an attempt abandoned
+// for a fallback leaves nothing behind in the run's output.
+func (r ClaudeRuntime) runAttempt(ctx context.Context, params RunParams, mayFallBack bool, handler func(AgentEvent), printer *ui.Printer) (res claudeAttemptResult) {
+	// synthetic is set while the assistant message being read is one
+	// Claude Code wrote itself: the parser emits an InitEvent with the
+	// message's model ahead of its content, and text under
+	// claudeSyntheticModel is an error report, never model output.
+	synthetic := false
+	output := func(evt AgentEvent) bool {
+		if _, ok := evt.(TextEvent); ok && synthetic {
+			return false
+		}
+		return claudeAttemptOutput(evt)
+	}
+	gate := &attemptGate{next: handler, hold: mayFallBack, output: output}
+	defer func() { res.model, res.held, res.answered = params.Model, gate.held, gate.answered }()
+
+	cmd := buildRunCommand(params)
+	stdout, execCmd, cancel, err := sandbox.ExecStreamReader(ctx, params.SandboxName, cmd, params.Timeout, os.Stderr)
+	if err != nil {
+		return claudeAttemptResult{exitCode: -1, execErr: err}
+	}
+	defer cancel()
+
+	var reader io.Reader = stdout
+	if params.OutputPath != "" {
+		f, ferr := os.Create(params.OutputPath)
+		if ferr != nil {
+			printer.StepWarn(fmt.Sprintf("Failed to create %s: ", params.OutputPath) + ferr.Error())
+		} else {
+			defer f.Close()
+			reader = io.TeeReader(stdout, f)
+		}
+	}
+
+	var lastResult *ResultEvent
+	sessionID := ""
+	onEvent := func(evt AgentEvent) {
+		switch e := evt.(type) {
+		case ResultEvent:
+			lastResult = &e
+		case InitEvent:
+			if sessionID == "" {
+				sessionID = e.SessionID
+			}
+			synthetic = e.Model == claudeSyntheticModel
+		}
+		gate.handle(evt)
+	}
+
+	if parseErr := parseClaudeStream(reader, onEvent); parseErr != nil {
 		fmt.Fprintf(os.Stderr, "  progress parser: %v\n", sanitizeOutput(parseErr.Error()))
 		cancel()
-		io.Copy(io.Discard, r)
+		io.Copy(io.Discard, reader)
 	}
 
 	waitErr := execCmd.Wait()
@@ -214,13 +507,9 @@ func (ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Prin
 	}
 
 	if waitErr != nil && execCmd.ProcessState == nil {
-		return exitCode, fmt.Errorf("openshell exec failed: %w", waitErr)
+		return claudeAttemptResult{exitCode: exitCode, execErr: fmt.Errorf("openshell exec failed: %w", waitErr)}
 	}
-	if gw != nil && exitCode == piCredentialSeedFailedExit {
-		return exitCode, fmt.Errorf("the inference gateway credential seed failed (the sandbox's gateway provider placeholder is missing or malformed, or the token file in %s could not be written); this is a runner setup failure, not an agent failure", sandbox.SandboxClaudeConfig)
-	}
-
-	return exitCode, nil
+	return claudeAttemptResult{exitCode: exitCode, lastResult: lastResult, sessionID: sessionID}
 }
 
 // ClearIterationArtifacts terminates processes the previous iteration left
@@ -372,6 +661,21 @@ func remapModel(name string, aliases map[string]string) string {
 	return name
 }
 
+// claudeModelID is the model Claude Code is given for name: the
+// models.aliases target when the repo configured one (remapModel), else
+// the built-in default id for opus, sonnet and haiku (claudeAliasDefaults,
+// #8426), else name as written. Passing the id rather than the bare alias
+// keeps the default independent of the pinned CLI's own alias table.
+func claudeModelID(name string, aliases map[string]string) string {
+	if _, ok := aliases[name]; ok {
+		return remapModel(name, aliases)
+	}
+	if id, ok := claudeAliasDefaults[name]; ok {
+		return id
+	}
+	return name
+}
+
 func buildRunCommand(params RunParams) string {
 	envFile := sandbox.SandboxWorkspace + "/.env"
 	safe := strings.ReplaceAll(params.AgentBaseName, "'", "'\\''")
@@ -419,8 +723,14 @@ func buildRunCommand(params RunParams) string {
 	if params.Model != "" {
 		// When the repo configures models.aliases and the model is an
 		// alias key with an entry, pass the id to --model so the run uses
-		// the repo's chosen generation (#6882).
-		model = remapModel(params.Model, params.ModelAliases)
+		// the repo's chosen generation (#6882); otherwise opus, sonnet and
+		// haiku get their built-in default id (#8426). The gateway route
+		// keeps today's resolution: the gateway decides what it serves.
+		if gw != nil {
+			model = remapModel(params.Model, params.ModelAliases)
+		} else {
+			model = claudeModelID(params.Model, params.ModelAliases)
+		}
 	}
 	if gw != nil {
 		// The gateway serves <model>; gateway/ only selects the route. A
@@ -439,20 +749,23 @@ func buildRunCommand(params RunParams) string {
 	}
 
 	if len(params.FallbackModels) > 0 {
-		// Same remap as --model, so an *aliased* fallback entry follows the
-		// repo's retarget. A literal id in the chain is passed as written.
-		if len(params.ModelAliases) > 0 || gw != nil {
-			remapped := make([]string, len(params.FallbackModels))
-			for i, fb := range params.FallbackModels {
+		// Same resolution as --model, so an *aliased* fallback entry
+		// follows the repo's retarget or the built-in default. A literal
+		// id in the chain is passed as written.
+		remapped := make([]string, len(params.FallbackModels))
+		for i, fb := range params.FallbackModels {
+			if gw != nil {
 				remapped[i] = remapModel(fb, params.ModelAliases)
 				// On the gateway route every fallback goes to the gateway
 				// too, so a gateway/ entry loses its prefix as --model does.
-				if id, ok := cutGatewayModel(remapped[i]); gw != nil && ok {
+				if id, ok := cutGatewayModel(remapped[i]); ok {
 					remapped[i] = id
 				}
+				continue
 			}
-			params.FallbackModels = remapped
+			remapped[i] = claudeModelID(fb, params.ModelAliases)
 		}
+		params.FallbackModels = remapped
 		// Claude Code accepts a comma-separated chain tried in order when the
 		// primary model is overloaded or retired.
 		parts = append(parts, fmt.Sprintf("--fallback-model '%s'", strings.ReplaceAll(strings.Join(params.FallbackModels, ","), "'", "'\\''")))

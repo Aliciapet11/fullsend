@@ -91,6 +91,9 @@ fullsend
 │   │   ├── --json                           #   Emit JSON output instead of table
 │   │   ├── --repo <owner/repo>              #   Filter to specific repos (repeatable)
 │   │   └── --concurrency <int>              #   Max parallel API calls (default: 8)
+│   ├── set          <path> <value>          # Set any writable repos.yaml field, validated against the manifest schema (comments and ordering preserved)
+│   │   ├── -f, --manifest <path>            #   Path to repos.yaml (default: repos.yaml; created if missing)
+│   │   └── --unset                          #   Remove the key at <path> instead of setting it (omit <value>)
 ├── agent                                    # Generate and manage agents in config (--fullsend-dir default: .fullsend)
 │   ├── new          <name>                   # Generate a complete custom agent and register it
 │   │   ├── --role <name>                    #   Mint role: triage|review|coder|retro|prioritize

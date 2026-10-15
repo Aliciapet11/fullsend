@@ -127,7 +127,7 @@ and typed pins predating the secured contract are unsupported.
 > schedules were never created, expect any such re-run to fail even when
 > it's otherwise applying an unrelated change. Set manifest options like
 > `gitlab.agent_runner_tags` (see [Runner Configuration](#runner-configuration)
-> below) with `repos set-default` *before* your first install so they're
+> below) with `repos set` *before* your first install so they're
 > captured by that first, non-converge run instead of requiring a
 > converge-path re-run later. Rely on [Off-system
 > polling](#off-system-polling) for pickup on repos where schedule
@@ -175,7 +175,7 @@ whenever it's omitted, and nothing auto-populates it. Pass
 `https://gitlab.com` for gitlab.com, or your instance URL for a self-hosted
 install (`--gitlab-url https://gitlab.example.com`); either form also
 implies `--forge=gitlab` when no forge is specified. You can set it after
-the fact instead with `fullsend repos set-default gitlab.url <url>`.
+the fact instead with `fullsend repos set gitlab.url <url>`.
 
 The command bootstraps a `repos.yaml` manifest if one does not exist,
 then converges the project:
@@ -1003,7 +1003,7 @@ tag-restricted with no untagged pool, set `gitlab.control_runner_tags`
 explicitly or the poll job will sit pending indefinitely:
 
 ```bash
-fullsend repos set-default gitlab.agent_runner_tags fullsend-gitlab-runner
+fullsend repos set gitlab.agent_runner_tags '[fullsend-gitlab-runner]'
 fullsend repos install <group/project> \
   --forge gitlab \
   --gitlab-url https://gitlab.com \
@@ -1015,7 +1015,7 @@ example, a cheaper high-concurrency runner without sandbox capacity),
 set `gitlab.control_runner_tags` explicitly:
 
 ```bash
-fullsend repos set-default gitlab.control_runner_tags fullsend-api
+fullsend repos set gitlab.control_runner_tags '[fullsend-api]'
 ```
 
 > **Migration note.** Upgrading an existing install that only had the
@@ -1038,14 +1038,15 @@ fullsend repos set-default gitlab.control_runner_tags fullsend-api
 > no drift is detected and no repair commit runs there — that install
 > keeps its old rendered tag until it moves past the pre-split pin. The
 > on-disk `gitlab.runner_tags` key is separately rewritten to
-> `gitlab.agent_runner_tags` the next time a manifest-writing command
-> runs (see [`repos
-> set-default`](../../cli/repos.md#repos-set-default) for exactly which
-> commands persist the rewrite); that key rewrite is unrelated to the
-> poll job's tag default described above.
+> `gitlab.agent_runner_tags` the next time `repos install` appends
+> manifest entries or `repos uninstall` removes them. [`repos
+> set`](../../cli/repos.md#repos-set) edits the file in place and leaves
+> the old key alone; remove it with `fullsend repos set --unset
+> gitlab.runner_tags`. That key rewrite is unrelated to the poll job's
+> tag default described above.
 
 If the repo is already installed, setting the tag with `repos
-set-default` and re-running `fullsend repos install -f repos.yaml`
+set` and re-running `fullsend repos install -f repos.yaml`
 takes the converge path instead of a fresh install: it retries any
 not-yet-created pipeline schedules, and on any instance where schedule
 creation previously failed that retry fails
@@ -1269,7 +1270,7 @@ GitLab repos are present` otherwise. Set it via `--gitlab-url` at
 install time, or later with:
 
 ```bash
-fullsend repos set-default gitlab.url https://gitlab.example.com
+fullsend repos set gitlab.url https://gitlab.example.com
 ```
 
 Self-hosted instances sign OIDC tokens with their own issuer. The GCP

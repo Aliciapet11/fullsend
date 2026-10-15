@@ -422,7 +422,13 @@ For setup instructions, see
 
 Model configuration, currently containing only `aliases`.
 
-- **`aliases`** — Per-key overrides of fullsend's pinned model alias table.
+- **`aliases`** — Per-key overrides of fullsend's pinned model alias table
+  (defaults: `opus` → `claude-opus-5-5`, `sonnet` → `claude-sonnet-5-5`,
+  `haiku` → `claude-haiku-5-5`, each with a built-in fallback chain to the
+  previous default when the Vertex project does not serve it; `fable` →
+  `claude-fable-5-1` on pi). An overridden alias has no built-in fallback
+  chain. See [Claude Code](../runtimes/claude.md#models) and
+  [pi](../runtimes/pi.md#per-repo-alias-overrides).
   Keys are alias names (`opus`, `sonnet`, `haiku`, `fable`); values are model
   ids or `provider/id` specs (e.g., `claude-opus-4-6`,
   `google-vertex/gemini-3.8-flash`). An unknown key is a validation error. A

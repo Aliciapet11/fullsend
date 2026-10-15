@@ -730,6 +730,33 @@ func TestAggregateRunMetrics(t *testing.T) {
 // where only one iteration dispatched sub-agents is the case that breaks
 // if an iteration reports totals without also reporting its own entry, so
 // the pi runtime folds the parent entry on every iteration.
+// A fallback through the alias's chain (#8426) reaches metrics.json, and an
+// iteration that did not fall back does not erase an earlier one's record.
+func TestAggregateRunMetrics_FallbackFrom(t *testing.T) {
+	var agg aggregateMetrics
+	m1 := agentruntime.RunMetrics{Model: "claude-opus-4-6", FallbackFrom: []string{"claude-opus-5-5"}, FallbackReasons: []string{"not_served"}}
+	aggregateRunMetrics(&agg, &m1, 1)
+	m1.FallbackFrom[0] = "mutated"
+	m1.FallbackReasons[0] = "mutated"
+	assert.Equal(t, []string{"claude-opus-5-5"}, agg.FallbackFrom, "the aggregate keeps its own copy")
+	assert.Equal(t, []string{"not_served"}, agg.FallbackReasons, "the aggregate keeps its own copy")
+
+	m2 := agentruntime.RunMetrics{Model: "claude-opus-4-6"}
+	aggregateRunMetrics(&agg, &m2, 2)
+	assert.Equal(t, []string{"claude-opus-5-5"}, agg.FallbackFrom)
+	assert.Equal(t, []string{"not_served"}, agg.FallbackReasons)
+
+	data, err := json.Marshal(agg)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"fallback_from":["claude-opus-5-5"]`)
+	assert.Contains(t, string(data), `"fallback_reasons":["not_served"]`)
+
+	empty, err := json.Marshal(aggregateMetrics{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(empty), "fallback_from", "absent when no iteration fell back")
+	assert.NotContains(t, string(empty), "fallback_reasons", "absent when no iteration fell back")
+}
+
 func TestAggregateRunMetrics_MixedIterations(t *testing.T) {
 	var agg aggregateMetrics
 

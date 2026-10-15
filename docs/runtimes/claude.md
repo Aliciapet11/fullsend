@@ -12,29 +12,71 @@ config keys live there too.
 
 ## Models
 
-Pass an alias or a model id; Claude Code resolves aliases natively.
+Pass an alias or a model id. fullsend resolves `opus`, `sonnet` and `haiku` itself and passes the
+id to `--model`, so the default does not depend on the pinned Claude Code version:
 
-| Alias | Resolves to |
-|---|---|
-| `opus`, `sonnet`, `haiku`, `fable` | the current Anthropic model of that tier, as the pinned Claude Code version defines it |
+| Alias | Resolves to | Built-in fallback chain |
+|---|---|---|
+| `opus` | `claude-opus-5-5` | `claude-opus-4-6` |
+| `sonnet` | `claude-sonnet-5-5` | `claude-sonnet-4-6` |
+| `haiku` | `claude-haiku-5-5` | `claude-haiku-4-5` |
+| `fable` | the current model of that tier, as the pinned Claude Code version defines it | none |
 
-By default all inference goes to Anthropic models on Vertex AI, on the fleet's WIF credentials.
-Vertex enables models **per project**, so the tier's current model is not always one your project
-can serve; a run that asks for a model the project cannot serve fails at the first model call. When
-a specific generation matters, name the id. The one other supported route is the
+The same alias applies when the harness names no model and the agent definition's `model:`
+frontmatter does. By default all inference goes to Anthropic models on Vertex AI, on the fleet's
+WIF credentials. Vertex enables models **per project**, so the default is not always a model your
+project can serve. When it is not, the run falls back along the alias's chain (see **Fallback
+chains** below), so a project that has not enabled the 5.5 models keeps running on the previous
+default with no config change. A pinned id that the project does not serve fails at the first model
+call. The one other supported route is the
 [inference gateway route](#inference-gateway-route), selected by a `gateway/<model>` model.
 
 **Per-repo alias overrides.** Point an alias at a different model for this repo with
 `models.aliases` in `.fullsend/config.yaml` (`sonnet: claude-sonnet-5`); the run then passes that id
-to `--model` and `--fallback-model`. Syntax, rules and what the plan block shows are on the
-[pi page](pi.md#per-repo-alias-overrides) — it is the same block. It covers the run's own model only:
-sub-agent `model:` frontmatter is resolved by Claude Code itself, so a sub-agent that needs a
-specific generation names the id.
+to `--model` and `--fallback-model`, and the alias has no built-in fallback chain. A repo that
+pinned the 5.5 ids here before they became the default can drop the pin to get the fallback. Syntax, rules
+and what the plan block shows are on the [pi page](pi.md#per-repo-alias-overrides) — it is the
+same block. It covers the run's own model only.
 
-**Fallback chains.** `FULLSEND_FALLBACK_MODELS=a,b` becomes `--fallback-model a,b`, tried in order
-when the primary model is overloaded or retired. pi uses the same list differently: the runner
-retries an alias request on the next model when Vertex answers that it does not serve the first, for
-the top-level run only; see [pi](pi.md#at-a-glance).
+**Sub-agents.** Sub-agent `model:` frontmatter is resolved by Claude Code itself, with its own
+alias table for the pinned version. fullsend's defaults and fallback chain do not apply there, and
+fullsend does not set `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`: a pinned 5.5 id there would
+fail every sub-agent on a project that does not serve it. A sub-agent that needs a specific
+generation names the id.
+
+### When your project does not serve the model
+
+A run on `opus`, `sonnet` or `haiku` retries on the next model when Vertex says the project does
+not serve the one it asked for. Nothing to configure:
+
+| Situation | What happens |
+|---|---|
+| Alias on its default, project serves 5.5 | Runs on 5.5 |
+| Alias on its default, project does not serve 5.5 | Falls back along the built-in chain (table above) |
+| `FULLSEND_FALLBACK_MODELS=a,b` set | That list replaces the built-in chain |
+| Alias retargeted in `models.aliases` | No fallback, unless `FULLSEND_FALLBACK_MODELS` is set |
+| Pinned id (`claude-opus-5-5`) or `provider/id` | No fallback: the run fails at the first model call |
+| Any other error (auth, quota, `PERMISSION_DENIED`) | No fallback: the run fails |
+| Inference gateway route | No runner fallback |
+
+What you see:
+
+```text
+Model: opus → claude-opus-5-5 (built-in default)                          # plan block
+Fallback models: claude-opus-4-6 (built-in for opus, when not served)    # plan block
+! model claude-opus-5-5 is not available (not served in this project); falling back to claude-opus-4-6
+```
+
+`metrics.json` then records the model that answered as `model`, the one it left in
+`fallback_from`, and why in `fallback_reasons` (`not_served`). A retry happens only when the model
+produced nothing, and every attempt shares the run's timeout.
+
+An explicit `FULLSEND_FALLBACK_MODELS` list is also passed to Claude Code as `--fallback-model`, on
+every route. Claude Code may then switch models itself within the session (overload, server errors,
+or a Vertex 404). That prints the same warning with Claude Code's trigger as the reason,
+`! model <id> is not available (Claude Code: <trigger>); falling back to <next>`, and is recorded the
+same way, with `claude_code:<trigger>` in `fallback_reasons`. How the runner detects "not served" is in
+[Runtime implementation](../contributing/runtime-implementation.md).
 
 ## At a glance
 

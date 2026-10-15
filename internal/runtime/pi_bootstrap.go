@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +102,11 @@ type piAgentManifest struct {
 	// pi model specs; the extension translates a child's `model` through
 	// it and rejects anything else it cannot serve.
 	Models map[string]string `json:"models"`
+	// ModelFallbacks maps an alias in Models to the specs a child that
+	// asked for it by name falls back to, in order, when the run's Vertex
+	// project does not serve the alias's spec (#8426). Only an alias on
+	// its built-in default has an entry (piAgentModelFallbacks).
+	ModelFallbacks map[string][]string `json:"modelFallbacks,omitempty"`
 	// ProviderModels lists the model ids of the providers pi serves without
 	// an extension and without a Models entry (google-vertex). The
 	// extension accepts a `provider/id` spec only when the id is in this
@@ -125,6 +131,9 @@ type piAgentManifest struct {
 	// is the whole point — a repo sets it so children stop inheriting an
 	// expensive parent — but an explicit argument still wins (#7031).
 	SubagentDefault string `json:"subagentDefault,omitempty"`
+	// SubagentDefaultFallbacks are SubagentDefault's fallback specs when
+	// subagents.default names an alias with a ModelFallbacks entry.
+	SubagentDefaultFallbacks []string `json:"subagentDefaultFallbacks,omitempty"`
 	// SkippedPersonas maps a persona file that did not register to the
 	// reason, so a dispatch naming it is rejected with that reason.
 	SkippedPersonas map[string]string `json:"skippedPersonas,omitempty"`
@@ -519,6 +528,7 @@ func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools
 		Extensions:       exts,
 		ExtensionDigests: piAgentExtensionDigests(hooksExt, hooksEnabled, editRepairExt, editRepair),
 		Models:           piAgentModels(def.Model, configAliases),
+		ModelFallbacks:   piAgentModelFallbacks(configAliases),
 		ProviderModels:   piAgentProviderModels(gatewayIDs),
 		Thinking:         piAgentThinking(),
 		Tools:            childTools,
@@ -574,9 +584,9 @@ func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools
 	// resolved persona specs are checked against this set and only then
 	// written into the manifest, so a persona can never widen the set that
 	// admits it.
-	trustedSpecs := piTrustedSpecs(manifest.Models, manifest.ProviderModels, parentModel, configAliases)
+	trustedSpecs := piTrustedSpecs(manifest.Models, manifest.ModelFallbacks, manifest.ProviderModels, parentModel, configAliases)
 
-	resolved, defaultSpec, skippedOut, err := resolvePersonaModels(personas, skipped, subagentsCfg, manifest.Models, trustedSpecs)
+	resolved, defaultSpec, skippedOut, err := resolvePersonaModels(personas, skipped, subagentsCfg, manifest.Models, manifest.ModelFallbacks, trustedSpecs)
 	if err != nil {
 		return nil, fmt.Errorf("resolving persona models: %w", err)
 	}
@@ -587,8 +597,67 @@ func (r PiRuntime) piAgentManifestFor(sandboxName string, def *piAgentDef, tools
 		manifest.SkippedPersonas = skippedOut
 	}
 	manifest.SubagentDefault = defaultSpec
+	piApplyChildFallbacks(manifest, personas, subagentsCfg)
 
 	return manifest, nil
+}
+
+// piAgentModelFallbacks is the manifest's per-alias child fallback table:
+// for each alias on its built-in default (ImplicitFallbackModels), the
+// chain's ids on the Anthropic Vertex provider, the provider piAgentModels
+// resolves the aliases on. An alias the repo retargets has no entry.
+func piAgentModelFallbacks(configAliases map[string]string) map[string][]string {
+	out := map[string][]string{}
+	for alias := range claudeAliasFallbacks {
+		chain := ImplicitFallbackModels(alias, configAliases)
+		if len(chain) == 0 {
+			continue
+		}
+		specs := make([]string, len(chain))
+		for i, id := range chain {
+			specs[i] = piDefaultProvider + "/" + id
+		}
+		out[alias] = specs
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// piChildAliasFallbacks returns the fallback specs for a child whose model
+// was configured as model: the alias's ModelFallbacks entry when model is
+// a bare alias name (an "@default"-style suffix dropped), else nil — a
+// pinned id or provider/id spec never falls back (#7026).
+func piChildAliasFallbacks(m *piAgentManifest, model string) []string {
+	base, _, _ := strings.Cut(strings.TrimSpace(model), "@")
+	return slices.Clone(m.ModelFallbacks[strings.ToLower(strings.TrimSpace(base))])
+}
+
+// piApplyChildFallbacks gives subagents.default and every persona whose
+// model was configured as an alias the alias's child fallback chain, so a
+// persona asking for sonnet runs on sonnet's fallback when the project
+// does not serve sonnet's default (#8426). The specs come from the
+// manifest's own ModelFallbacks table.
+func piApplyChildFallbacks(m *piAgentManifest, personas []piPersona, subagentsCfg map[string]*string) {
+	defaultModel := ""
+	if v := subagentsCfg["default"]; v != nil {
+		defaultModel = *v
+	}
+	if m.SubagentDefault != "" {
+		m.SubagentDefaultFallbacks = piChildAliasFallbacks(m, defaultModel)
+	}
+	for _, p := range personas {
+		entry, ok := m.Personas[p.Name]
+		if !ok || entry.Model == "" {
+			continue
+		}
+		model, _ := piPersonaModelSource(p, subagentsCfg, defaultModel)
+		if fb := piChildAliasFallbacks(m, model); len(fb) > 0 {
+			entry.Fallbacks = fb
+			m.Personas[p.Name] = entry
+		}
+	}
 }
 
 // piAgentExtensionDigests records the sha256 of every child -e entry that

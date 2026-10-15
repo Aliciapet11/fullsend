@@ -99,10 +99,11 @@ func hasPositiveID(userIDs []int) bool {
 }
 
 // roleAllowsPoller reports whether a role-based grant at Developer level or
-// below covers every Developer-level identity.
+// below covers every Developer-level identity. User, group, and deploy-key
+// grants are not role grants.
 func roleAllowsPoller(levels []forge.ProtectedBranchAccess) bool {
 	for _, l := range levels {
-		if l.UserID > 0 || l.GroupID > 0 {
+		if l.UserID > 0 || l.GroupID > 0 || l.DeployKeyID > 0 {
 			continue
 		}
 		if l.AccessLevel > 0 && l.AccessLevel <= gitlabroles.DeveloperAccessLevel {
@@ -163,6 +164,8 @@ func summarizeAccess(kind string, levels []forge.ProtectedBranchAccess) string {
 			bits = append(bits, fmt.Sprintf("user:%d", l.UserID))
 		case l.GroupID > 0:
 			bits = append(bits, fmt.Sprintf("group:%d", l.GroupID))
+		case l.DeployKeyID > 0:
+			bits = append(bits, fmt.Sprintf("deploy-key:%d", l.DeployKeyID))
 		case l.AccessLevel == 0:
 			bits = append(bits, "no one")
 		case l.AccessLevel <= gitlabroles.DeveloperAccessLevel:

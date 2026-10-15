@@ -59,26 +59,28 @@ const (
 
 // piModelAliases maps the Claude aliases to the catalog ids this runtime
 // defaults to. A default must be an id the running pi's catalog carries
-// (see above) and one that is conservative enough to work out of the box:
-// which models a Vertex project serves is that project's own Model Garden
-// choice, so a deployment whose project enables a newer generation points
-// the alias at it with models.aliases in .fullsend/config.yaml (#6882)
-// rather than editing this table.
+// (see above). opus, sonnet and haiku carry the same ids as
+// claudeAliasDefaults, so both Claude-family runtimes default alike
+// (#8426); which models a Vertex project serves is that project's own
+// Model Garden choice, so each of the three has a built-in fallback chain
+// (claudeAliasFallbacks) back to the previous default, and a deployment
+// that wants another generation points the alias at it with models.aliases
+// in .fullsend/config.yaml (#6882) rather than editing this table.
 //
-// Preference order for the defaults, most preferred first:
+// The defaults and their fallback chains, most preferred first:
 //
-//	sonnet: claude-sonnet-5 → claude-sonnet-4-6
-//	opus:   claude-opus-5   → claude-opus-4-8 → claude-opus-4-6
-//	fable:  claude-fable-5-1 → claude-fable-5
-//	haiku:  claude-haiku-4-5
+//	opus:   claude-opus-5-5   → claude-opus-4-6
+//	sonnet: claude-sonnet-5-5 → claude-sonnet-4-6
+//	haiku:  claude-haiku-5-5  → claude-haiku-4-5
+//	fable:  claude-fable-5-1  (no chain)
 //
-// The arrows are what to raise a default to, not a history. An id the
-// project does not serve fails the run unless the alias request carries
-// FULLSEND_FALLBACK_MODELS, which Run then tries in order (#7026).
+// An id the project does not serve falls back along the chain; an explicit
+// FULLSEND_FALLBACK_MODELS replaces the built-in chain, and an alias the
+// repo retargets has none (#7026).
 var piModelAliases = map[string]string{
-	"opus":   "claude-opus-4-6",
-	"sonnet": "claude-sonnet-4-6",
-	"haiku":  "claude-haiku-4-5",
+	"opus":   "claude-opus-5-5",
+	"sonnet": "claude-sonnet-5-5",
+	"haiku":  "claude-haiku-5-5",
 	"fable":  "claude-fable-5-1",
 }
 
@@ -927,46 +929,15 @@ type piRunResult struct {
 	answered bool
 }
 
-// piAttemptGate forwards an attempt's events to next, except that while
-// hold is set it withholds them until the model produces output. A Vertex
-// "model not served" answer carries no output, so an attempt abandoned for
-// a fallback leaves no ErrorEvent, token line or retry line behind on a run
-// that then succeeds; the first output event flushes what was held, in
-// order, and passes everything after it straight through.
-type piAttemptGate struct {
-	next     func(AgentEvent)
-	hold     bool
-	held     []AgentEvent
-	answered bool
-}
-
-func (g *piAttemptGate) handle(evt AgentEvent) {
-	switch evt.(type) {
-	case TextEvent, ThinkingEvent, ToolUseEvent, ToolResultEvent:
-		if !g.answered {
-			g.answered = true
-			for _, h := range g.held {
-				g.next(h)
-			}
-			g.held = nil
-		}
-	}
-	if g.hold && !g.answered {
-		g.held = append(g.held, evt)
-		return
-	}
-	g.next(evt)
-}
-
 // piExecModel runs a single pi invocation with the given model spec and
 // returns the result. It handles stream parsing, output tee, and exit code
 // handling but does NOT fold sub-agent usage or apply the stream-error
 // override — those are the caller's responsibility after the fallback loop
 // selects the successful attempt. timeout is what is left of the run's
-// budget, and mayFallBack holds the attempt's events back (piAttemptGate)
+// budget, and mayFallBack holds the attempt's events back (attemptGate)
 // when a later model could still replace it.
 func (r PiRuntime) piExecModel(ctx context.Context, params RunParams, m *piManifest, exts []piManifestExtension, manifestSum, modelSpec string, timeout time.Duration, mayFallBack bool, handler func(AgentEvent), printer *ui.Printer) (res piRunResult) {
-	gate := &piAttemptGate{next: handler, hold: mayFallBack}
+	gate := &attemptGate{next: handler, hold: mayFallBack}
 	defer func() { res.held, res.answered = gate.held, gate.answered }()
 
 	// Override the model in params for this attempt.
@@ -1057,10 +1028,6 @@ func (r PiRuntime) piExecModel(ctx context.Context, params RunParams, m *piManif
 // run's timeout; mayFallBack is true when a later model could replace it.
 type piAttemptFunc func(modelSpec string, timeout time.Duration, mayFallBack bool) piRunResult
 
-// piMinAttemptTimeout is the least budget a fallback attempt is started
-// with; openshell takes --timeout in whole seconds.
-const piMinAttemptTimeout = time.Second
-
 // piShouldFallBack reports whether an attempt failed only because Vertex
 // does not serve its model in this project. Infrastructure and guard
 // failures, non-zero exits, other stream errors and attempts where the
@@ -1073,30 +1040,11 @@ func piShouldFallBack(res piRunResult) bool {
 }
 
 // piFallbackLoop runs chain in order until an attempt is final and returns
-// that attempt. All attempts share one deadline of timeout from the start,
-// so a chain never runs longer than a single-model run could; a fallback
-// is not started with less than piMinAttemptTimeout left. onFallback runs
-// between an abandoned attempt and the next, with a budget of at least a
-// second that leaves the next attempt at least piMinAttemptTimeout; when
-// it reports false the abandoned attempt is final instead.
+// that attempt; see modelFallbackLoop for the shared deadline and the
+// onFallback contract. An attempt is abandoned when piShouldFallBack says
+// so.
 func piFallbackLoop(chain []string, timeout time.Duration, now func() time.Time, attempt piAttemptFunc, onFallback func(prev, next string, budget time.Duration) bool) piRunResult {
-	deadline := now().Add(timeout)
-	var result piRunResult
-	for i, spec := range chain {
-		remaining := timeout
-		if i > 0 {
-			remaining = deadline.Sub(now())
-		}
-		last := i == len(chain)-1
-		result = attempt(spec, remaining, !last)
-		if last || !piShouldFallBack(result) {
-			break
-		}
-		budget := deadline.Sub(now()) - piMinAttemptTimeout
-		if budget < time.Second || !onFallback(spec, chain[i+1], budget) || deadline.Sub(now()) < piMinAttemptTimeout {
-			break
-		}
-	}
+	result, _ := modelFallbackLoop(chain, timeout, minFallbackAttemptTimeout, now, attempt, piShouldFallBack, onFallback)
 	return result
 }
 
@@ -1104,8 +1052,9 @@ func piFallbackLoop(chain []string, timeout time.Duration, now func() time.Time,
 // into AgentEvents. pi exits 0 on model error in json mode, so the stream's
 // verdict overrides the exit code (#2786/#5361).
 //
-// When the requested model is an alias and FallbackModels are set, Run
-// attempts each model in the chain until one succeeds or returns a
+// When the requested model is an alias, Run attempts each model in its
+// fallback chain — FallbackModels when set, else the alias's built-in
+// chain (ImplicitFallbackModels, #8426) — until one succeeds or returns a
 // non-model error. A Vertex 404 ("Publisher model not found") or 403
 // ("data sharing not enabled") on an aliased model triggers the next
 // fallback; all other errors are terminal, as is an attempt where the
@@ -1129,10 +1078,15 @@ func (r PiRuntime) Run(ctx context.Context, params RunParams, printer *ui.Printe
 
 	effectiveModel := EffectiveModel(params.Model, m.Model)
 
-	// Build the fallback chain. For alias requests with FallbackModels, the
-	// chain is primary + fallbacks; for pinned ids or no fallbacks, it is a
-	// single entry.
-	chain, skipped := piFallbackChain(effectiveModel, params.FallbackModels, params.ModelAliases)
+	// Build the fallback chain. For alias requests, the chain is primary +
+	// the explicit FallbackModels, else + the alias's built-in chain; for
+	// pinned ids or an alias with neither, it is a single entry.
+	chainModel := strings.TrimSpace(effectiveModel)
+	if chainModel == "" {
+		chainModel = piDefaultModel
+	}
+	fallbacks := effectiveFallbackModels(chainModel, params.FallbackModels, params.ModelAliases)
+	chain, skipped := piFallbackChain(effectiveModel, fallbacks, params.ModelAliases)
 	if len(skipped) > 0 {
 		printer.StepWarn(fmt.Sprintf("fallback models %s have no pi mapping or resolve to a different pi provider than %s and are ignored", sanitizeOutput(strings.Join(skipped, ",")), sanitizeOutput(piBareModelID(chain[0]))))
 	}
@@ -1207,13 +1161,20 @@ func (r PiRuntime) Run(ctx context.Context, params RunParams, printer *ui.Printe
 			cerr = fmt.Errorf("exit %d: %s", code, strings.TrimSpace(stderr))
 		}
 		if cerr != nil {
-			printer.StepWarn(fmt.Sprintf("model %s is not available in this project; not falling back to %s because the abandoned attempt's session files could not be cleared: %s", sanitizeOutput(piBareModelID(prev)), sanitizeOutput(piBareModelID(next)), sanitizeOutput(cerr.Error())))
+			printer.StepWarn(fmt.Sprintf("model %s is not available (%s); not falling back to %s because the abandoned attempt's session files could not be cleared: %s", sanitizeOutput(piBareModelID(prev)), fallbackReasonText(fallbackReasonNotServed), sanitizeOutput(piBareModelID(next)), sanitizeOutput(cerr.Error())))
 			return false
 		}
-		printer.StepWarn(fmt.Sprintf("model %s is not available in this project; falling back to %s", sanitizeOutput(piBareModelID(prev)), sanitizeOutput(piBareModelID(next))))
+		printer.StepWarn(modelFallbackWarning(piBareModelID(prev), piBareModelID(next), fallbackReasonNotServed))
 		return true
 	}
 	result := piFallbackLoop(chain, params.Timeout, time.Now, attempt, onFallback)
+	// Record the models abandoned for the one that ran, so a silent
+	// downgrade shows up in metrics.json and not only in the run log.
+	if served := slices.Index(chain, result.modelSpec); served > 0 {
+		for _, spec := range chain[:served] {
+			metrics.recordFallback(piBareModelID(spec), fallbackReasonNotServed)
+		}
+	}
 
 	// Replay the final attempt's withheld events, then its ResultEvent, so
 	// metrics are captured and the renderer sees exactly one result block.

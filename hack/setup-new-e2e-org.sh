@@ -18,7 +18,6 @@ set -euo pipefail
 TEST_APP_SET="fullsend-test"
 TEST_ROLES=(fullsend triage coder review retro prioritize)
 E2E_APP_SET="fullsend-ai"
-MINT_ROLES=(fullsend triage coder review retro prioritize e2e)
 BOT_USER="botsend"
 TEST_WRITE_USER="fstest-write"
 TEST_TRIAGE_USER="fstest-triage"
@@ -91,6 +90,27 @@ resolve_all_repo_role_id() {
   return 1
 }
 
+# role_has_user checks whether username holds org role role_id, directly or
+# through a team, by listing the role's users
+# (GET /orgs/{org}/organization-roles/{role_id}/users). GitHub has no
+# per-user route for org role assignments. Prints "yes" or "no"; any API
+# error goes to stderr and returns 1, so callers fail closed.
+role_has_user() {
+  local org="$1" role_id="$2" username="$3" logins login
+  if ! logins=$(gh api --paginate "/orgs/${org}/organization-roles/${role_id}/users?per_page=100" \
+      --jq '.[].login' 2>&1); then
+    echo "    ERROR: could not list users of organization role ${role_id} in ${org}: ${logins}" >&2
+    return 1
+  fi
+  while IFS= read -r login; do
+    if [[ -n "${login}" && "$(lower "${login}")" == "$(lower "${username}")" ]]; then
+      echo "yes"
+      return 0
+    fi
+  done <<< "${logins}"
+  echo "no"
+}
+
 # assign_all_repo_role grants username the all-repository <perm> org role.
 # Idempotent: already-assigned roles are left in place and re-verified.
 assign_all_repo_role() {
@@ -98,10 +118,8 @@ assign_all_repo_role() {
   local role_id assigned
   role_id=$(resolve_all_repo_role_id "${org}" "${perm}") || return 1
 
-  assigned=$(gh api "/orgs/${org}/organization-roles/users/${username}" \
-    | jq -r --arg id "${role_id}" '.roles[]? | select(.id == ($id | tonumber)) | .id' \
-    2>/dev/null || true)
-  if [[ -n "${assigned}" ]]; then
+  assigned=$(role_has_user "${org}" "${role_id}" "${username}") || return 1
+  if [[ "${assigned}" == "yes" ]]; then
     echo "    OK: ${username} already has all-repository ${perm} (role ${role_id})"
     return 0
   fi
@@ -112,14 +130,34 @@ assign_all_repo_role() {
     return 1
   fi
 
-  assigned=$(gh api "/orgs/${org}/organization-roles/users/${username}" \
-    | jq -r --arg id "${role_id}" '.roles[]? | select(.id == ($id | tonumber)) | .id' \
-    2>/dev/null || true)
-  if [[ -z "${assigned}" ]]; then
+  assigned=$(role_has_user "${org}" "${role_id}" "${username}") || return 1
+  if [[ "${assigned}" != "yes" ]]; then
     echo "    ERROR: ${username} still lacks all-repository ${perm} after assignment."
     return 1
   fi
   echo "    OK: ${username} has all-repository ${perm}"
+}
+
+# check_no_all_repo_role verifies username holds neither the all-repository
+# write nor the all-repository triage org role. Fails closed: this is a
+# security invariant (#7777), so an API error returns 1 rather than being
+# read as "no role".
+check_no_all_repo_role() {
+  local org="$1" username="$2"
+  local perm role_id assigned held=""
+  for perm in write triage; do
+    role_id=$(resolve_all_repo_role_id "${org}" "${perm}") || return 1
+    assigned=$(role_has_user "${org}" "${role_id}" "${username}") || return 1
+    if [[ "${assigned}" == "yes" ]]; then
+      held+=" ${perm}"
+    fi
+  done
+  if [[ -n "${held}" ]]; then
+    echo "    ERROR: ${username} has all-repository role(s):${held}" >&2
+    echo "    Remove to preserve the outsider test model." >&2
+    return 1
+  fi
+  echo "    OK: ${username} has no all-repository write/triage role"
 }
 
 # team_membership prints "STATE ROLE" for username's membership in org/slug
@@ -440,35 +478,8 @@ fi
 # Confirm outsider was not granted an all-repository role. Fail closed,
 # same rationale as the membership check above: an API error must abort
 # rather than silently reporting an empty (and therefore "OK") role list.
-if outsider_roles_body=$(gh api "/orgs/${ORG}/organization-roles/users/${TEST_OUTSIDER_USER}" 2>&1); then
-  outsider_role_names=$(echo "${outsider_roles_body}" | jq -r '.roles[]?.name')
-elif echo "${outsider_roles_body}" | grep -q "HTTP 404"; then
-  outsider_role_names=""
-else
-  echo "    ERROR: could not check ${TEST_OUTSIDER_USER} organization roles: ${outsider_roles_body}" >&2
+if ! check_no_all_repo_role "${ORG}" "${TEST_OUTSIDER_USER}"; then
   exit 1
-fi
-
-# Route names through normalize_role_name so a display-name variant (e.g.
-# "All-repository write") is caught the same way resolve_all_repo_role_id
-# already recognizes it for the assignment path above.
-outsider_has_all_repo_role=false
-while IFS= read -r role_name; do
-  [[ -z "${role_name}" ]] && continue
-  case "$(normalize_role_name "${role_name}")" in
-    all_repo_write | all_repo_triage | all_repository_write | all_repository_triage)
-      outsider_has_all_repo_role=true
-      ;;
-  esac
-done <<< "${outsider_role_names}"
-
-if "${outsider_has_all_repo_role}"; then
-  echo "    ERROR: ${TEST_OUTSIDER_USER} has an all-repository role:" >&2
-  echo "${outsider_role_names}" | sed 's/^/      /' >&2
-  echo "    Remove to preserve the outsider test model." >&2
-  exit 1
-else
-  echo "    OK: ${TEST_OUTSIDER_USER} has no all-repository write/triage role"
 fi
 echo
 
@@ -555,62 +566,9 @@ else
 fi
 echo "    Verify with: fullsend admin foreign list --org ${ORG}"
 
-# --- 5. check mint enrollment ---
-MINT_PROJECT="${MINT_PROJECT:?MINT_PROJECT must be set}"
-MINT_REGION="${MINT_REGION:-us-central1}"
-MINT_FUNCTION="${MINT_FUNCTION:?MINT_FUNCTION must be set}"
-
 echo
-echo "==> Checking mint enrollment (project: ${MINT_PROJECT}, region: ${MINT_REGION})..."
-mint_ok=true
-
-if ! command -v gcloud &>/dev/null; then
-  echo "    SKIP: gcloud CLI not found, cannot check mint config."
-  mint_ok=false
-else
-  mint_env=$(gcloud functions describe "${MINT_FUNCTION}" \
-    --region "${MINT_REGION}" \
-    --project "${MINT_PROJECT}" \
-    --format json 2>/dev/null \
-    | jq -r '.serviceConfig.environmentVariables' 2>/dev/null) || mint_env=""
-
-  if [[ -z "${mint_env}" || "${mint_env}" == "null" ]]; then
-    echo "    SKIP: could not read mint function env vars."
-    echo "    You may need to run: gcloud auth login"
-    mint_ok=false
-  else
-    # Check ROLE_APP_IDS
-    role_app_ids=$(echo "${mint_env}" | jq -r '.ROLE_APP_IDS // ""')
-    missing_roles=()
-    for role in "${MINT_ROLES[@]}"; do
-      # ROLE_APP_IDS uses role-only keys; org/role keys are legacy and ignored
-      # by the mint during the migration window.
-      key="${role}"
-      if echo "${role_app_ids}" | jq -e --arg k "${key}" '.[$k]' &>/dev/null; then
-        echo "    OK: ${key} is in ROLE_APP_IDS"
-      else
-        echo "    MISSING: ${key} is NOT in ROLE_APP_IDS"
-        missing_roles+=("${key}")
-        mint_ok=false
-      fi
-    done
-  fi
-fi
-
-echo
-if [[ "${mint_ok}" == "true" ]]; then
-  echo "==> ${ORG} is fully ready for e2e testing."
-else
-  echo "==> ${ORG} GitHub setup is complete, but mint enrollment needs attention."
-  echo "    Fix the issues above, then:"
-fi
+echo "==> ${ORG} is ready for e2e testing."
 echo
 echo "    Next steps:"
-if [[ "${mint_ok}" != "true" ]]; then
-  echo "    1. Enroll ${ORG} in the mint: run /mint-enroll in Claude Code"
-  echo "    2. Uncomment \"${ORG}\" in internal/e2etest/testutil.go orgPool"
-  echo "    3. Run: make behaviour-test"
-else
-  echo "    1. Uncomment \"${ORG}\" in internal/e2etest/testutil.go orgPool"
-  echo "    2. Run: make behaviour-test"
-fi
+echo "    1. Uncomment \"${ORG}\" in internal/e2etest/testutil.go orgPool"
+echo "    2. Run: make behaviour-test"

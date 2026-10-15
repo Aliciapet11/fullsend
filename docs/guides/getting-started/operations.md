@@ -88,7 +88,7 @@ region there remains an alternative.
 
 ### Per-repo configuration in `repos.yaml`
 
-For repositories managed through `repos.yaml` (every GitLab install, and GitHub fleets), `.fullsend/config.yaml` is managed: change per-repo config values — including `runtime` and `allowed_remote_resources` — in `defaults.config`, `github.config`, `gitlab.config`, or the repository entry's `config`, then run `fullsend repos install`. `repos install` has no `--runtime` or `--allowed-remote-resources` flag, and `repos set-default` does not write config fields. The former sibling keys (`defaults.runtime`, `defaults.allowed_remote_resources`, and their repository-entry equivalents) are rejected with the replacement path. See [Repo Management — Managed configuration](repo-management.md#managed-configuration).
+For repositories managed through `repos.yaml` (every GitLab install, and GitHub fleets), `.fullsend/config.yaml` is managed: change per-repo config values — including `runtime` and `allowed_remote_resources` — in `defaults.config`, `github.config`, `gitlab.config`, or the repository entry's `config`, then run `fullsend repos install`. `repos install` has no `--runtime` or `--allowed-remote-resources` flag; edit the manifest by hand or with `fullsend repos set` (for example `fullsend repos set defaults.config.runtime claude`). The former sibling keys (`defaults.runtime`, `defaults.allowed_remote_resources`, and their repository-entry equivalents) are rejected with the replacement path. See [Repo Management — Managed configuration](repo-management.md#managed-configuration).
 
 ## Syncing workflow templates
 
@@ -163,7 +163,7 @@ For organizations that separate GCP and GitHub responsibilities across teams, fu
 | Platform Admin | `fullsend repos install [repos...]` | Converge repos to desired state: provision new, repair component drift (workflow, thin callers, variables, secrets, pipeline schedules, GitLab poller protected-ref pipeline access, GitLab pipeline-variable override-role inspection — typed jobs require verified `no_one_allowed` before template delivery; legacy upgrades need maintenance-window preparation; legacy variable-based wrappers are exempt), repair scaffold content drift, refresh a declared configuration preset, rewrite a drifted managed `.fullsend/config.yaml`, upgrade refs |
 | Platform Admin | `fullsend repos uninstall <repos...>` | Tear down fullsend from repos and remove from manifest |
 | Fleet Admin | `fullsend repos status` | Compare manifest against actual per-repo state: detect missing or drifted components, ref drift, scaffold content drift, declared configuration-preset drift, an existing `.fullsend/config.base.yaml` with no resolved preset, managed `.fullsend/config.yaml` drift and markerless-overlay adoption (both layers are checked before first install too), and GitLab `protected-ref-pipeline` drift |
-| Fleet Admin | `fullsend repos set-default <key> <value>` | Set or remove a platform-level default in the manifest |
+| Fleet Admin | `fullsend repos set <path> <value>` | Set or remove (`--unset <path>`) any field in the manifest: defaults, forge sections, repository entries, and nested `config` fields. Replaces the removed `repos set-default` |
 
 | Developer | `fullsend agent new <name>` | Generate a complete custom agent and register it |
 | Developer | `fullsend agent add <url-or-path>` | Register an agent in config (URL auto-pinned to commit SHA) |
