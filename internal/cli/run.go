@@ -685,8 +685,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// Declare result outside the URL references block so it's accessible
 	// later for profile import and provider resolution.
 	var result resolve.ResolveResult
-	// lockedWorkflowHash is the workflow definition's tree hash from a
-	// current lock entry; it binds the definition resolved below.
+	// lockedWorkflowHash is the runtime workflow's tree hash from a
+	// current lock entry; it binds the runtime workflow resolved below.
 	var lockedWorkflowHash string
 
 	if h.HasURLReferences() {
@@ -723,10 +723,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 				if entry.IsStale(harnessHash) {
 					printer.StepWarn(fmt.Sprintf("Harness has changed since lock file was generated. Run 'fullsend lock %s%s' to update.", agentName, fullsendDirArg(fullsendDir)))
 				} else {
-					// Read the workflow definition's locked hash before the
-					// replay: it binds the definition whether the replay
+					// Read the runtime workflow's locked hash before the
+					// replay: it binds the runtime workflow whether the replay
 					// succeeds or falls back to normal resolution, so the
-					// URL index never picks the tree of a locked definition.
+					// URL index never picks the tree of a locked runtime workflow.
 					var wfErr error
 					lockedWorkflowHash, wfErr = lockedWorkflowSHA256(entry, agentName, fullsendDir)
 					if wfErr != nil {
@@ -1117,10 +1117,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		h.ValidationLoop.PreflightCheck = os.Expand(h.ValidationLoop.PreflightCheck, expander)
 	}
 
-	// Check the runtime before resolving the workflow: definition (ADR
-	// 0130), so a codex agent fails before the definition is fetched; the
+	// Check the runtime before resolving the runtime workflow (ADR
+	// 0130), so a codex agent fails before the runtime workflow is fetched; the
 	// harness's own other remote resources (base, skills, plugins,
-	// providers) were resolved above. The definition joins h.Plugins, so
+	// providers) were resolved above. The runtime workflow joins h.Plugins, so
 	// ValidateFilesExist below checks it and bootstrap uploads it like any
 	// plugin of its kind.
 	if err := checkWorkflowRuntime(h, agentName, runtimeBackend.Runtime.Name()); err != nil {
@@ -1138,8 +1138,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		LockedWorkflowSHA256: lockedWorkflowHash,
 	})
 	if err != nil {
-		printer.StepFail("Workflow definition resolution failed")
-		return fmt.Errorf("resolving workflow definition: %w", err)
+		printer.StepFail("Runtime workflow resolution failed")
+		return fmt.Errorf("resolving runtime workflow: %w", err)
 	}
 	if workflowDep != nil {
 		if workflowDep.CacheHit {
@@ -1257,7 +1257,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		printer.KeyValue("Plugins", strings.Join(describePlugins(h.Plugins), ", "))
 	}
 	if resolvedWorkflow != nil {
-		printer.KeyValue("Workflow", describeWorkflow(resolvedWorkflow))
+		printer.KeyValue("Runtime workflow", describeWorkflow(resolvedWorkflow))
 	}
 	if h.AgentInput != "" {
 		printer.KeyValue("Agent input", h.AgentInput)
