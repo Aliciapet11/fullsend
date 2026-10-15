@@ -231,10 +231,10 @@ type aggregateMetrics struct {
 	// iteration's result modelUsage. A run on a runtime without sub-agents
 	// keeps metrics.json as it was.
 	PerModelUsage map[string]agentruntime.ModelUsage `json:"per_model_usage,omitempty"`
-	// Workflow records the workflow definition the run delivered and, for
+	// Workflow records the runtime workflow the run delivered and, for
 	// a Claude plugin, the command it started (ADR 0130), on every
-	// runtime; absent without a harness workflow: field.
-	Workflow *workflowLaunch `json:"workflow,omitempty"`
+	// runtime; absent without a harness runtime_workflow: field.
+	RuntimeWorkflow *workflowLaunch `json:"runtime_workflow,omitempty"`
 }
 
 func writeMetricsJSON(dir string, m aggregateMetrics) error {
@@ -1124,17 +1124,17 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	if h.ValidationLoop != nil && strings.Contains(h.ValidationLoop.PreflightCheck, "${") {
 		h.ValidationLoop.PreflightCheck = os.Expand(h.ValidationLoop.PreflightCheck, expander)
 	}
-	// Expand ${VAR} references in workflow.args (ADR 0130), so a harness
+	// Expand ${VAR} references in runtime_workflow.args (ADR 0130), so a harness
 	// can hand the work item to the workflow; the result must stay one
 	// line, because it is the tail of the slash command the runner starts,
 	// and is scanned for credentials whether or not it names a variable.
-	if h.Workflow != nil {
-		args, err := expandWorkflowArgs(h.Workflow.Args, lookup)
+	if h.RuntimeWorkflow != nil {
+		args, err := expandWorkflowArgs(h.RuntimeWorkflow.Args, lookup)
 		if err != nil {
 			printer.StepFail("Environment validation failed")
 			return err
 		}
-		h.Workflow.Args = args
+		h.RuntimeWorkflow.Args = args
 	}
 
 	// Check the runtime before resolving the runtime workflow (ADR
@@ -2067,7 +2067,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	aggMetrics.RuntimeSource = configSource
 	aggMetrics.RequestedModel = h.Model
 	aggMetrics.OverrideSource = aliasOverrideSource(modelOverrideSource(overrides, h.Model), modelRemapped, runCfg.source)
-	aggMetrics.Workflow = newWorkflowLaunch(resolvedWorkflow)
+	aggMetrics.RuntimeWorkflow = newWorkflowLaunch(resolvedWorkflow)
 	tx := backend.Transcripts
 
 	// The dummy-playback runtime (e2e behaviour tests) reads and updates a
