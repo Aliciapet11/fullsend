@@ -95,6 +95,7 @@ const (
 	openCodePrintfVar             = "FULLSEND_OPENCODE_PRINTF_BIN"
 	openCodeTeeVar                = "FULLSEND_OPENCODE_TEE_BIN"
 	openCodeCatVar                = "FULLSEND_OPENCODE_CAT_BIN"
+	openCodeRmVar                 = "FULLSEND_OPENCODE_RM_BIN"
 	openCodeConfigContentPinVar   = "FULLSEND_OPENCODE_CONFIG_CONTENT"
 	openCodeCredentialsPathPinVar = "FULLSEND_OPENCODE_GOOGLE_APPLICATION_CREDENTIALS"
 	openCodeHomePinVar            = "FULLSEND_OPENCODE_HOME"
@@ -160,7 +161,7 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 	configPath := r.ConfigDir() + "/" + openCodeConfigFile
 	prelude := []string{
 		"cd " + shellQuote(params.RepoDir),
-		"&& mkdir -p " + shellQuote(sandboxTranscriptDir),
+		"&& mkdir -p " + shellQuote(sandboxTranscriptDir) + " " + shellQuote(sandbox.SandboxWorkspace+"/output"),
 		"&& " + openCodeBinaryPin(),
 		"&& " + openCodeUtilityPin(),
 		"&& " + openCodeTrustedEnvPin(trustedEnv),
@@ -176,6 +177,18 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 		// overrides, and restore the pinned trusted values.
 		"&& "+strings.Join(r.EnvExports(), " && "),
 		"&& "+openCodeTrustedEnvRestore(),
+	)
+	if trustedEnv.AgentDefinition != "" {
+		// .env can run arbitrary commands, so redo the override reset after
+		// it and check the agent file restoreOpenCodeAgent verified is
+		// unchanged. (Rewriting the file here would exceed openshell's 32 KiB
+		// argument limit for a long agent.)
+		prelude = append(prelude,
+			`&& "$`+openCodeRmVar+`" -rf -- `+r.openCodeOverridePaths(false),
+			"&& "+openCodeAgentGuard(trustedEnv.AgentPath, trustedEnv.AgentDefinition),
+		)
+	}
+	prelude = append(prelude,
 		// Map fleet env vars to the names the google-vertex-anthropic provider
 		// reads; it does not read ANTHROPIC_VERTEX_PROJECT_ID.
 		`&& export GOOGLE_CLOUD_PROJECT="${ANTHROPIC_VERTEX_PROJECT_ID:-$GOOGLE_CLOUD_PROJECT}"`,
@@ -265,6 +278,7 @@ func openCodeUtilityPin() string {
 		{openCodePrintfVar, "printf"},
 		{openCodeTeeVar, "tee"},
 		{openCodeCatVar, "cat"},
+		{openCodeRmVar, "rm"},
 	}
 	assignments := make([]string, 0, len(utilities))
 	individualChecks := make([]string, 0, len(utilities))
@@ -349,6 +363,19 @@ func openCodeHooksGuard(hooksExt string) string {
 		openCodeTestVar, shellQuote(hooksExt), openCodeTestVar,
 		openCodeSHA256Var, shellQuote(hooksExt), openCodeCutVar,
 		shellQuote(hex.EncodeToString(sum[:])), openCodePrintfVar, openCodeHooksMissingExit)
+}
+
+// openCodeAgentModifiedExit is the exit code of the run command when the
+// agent file changed after restoreOpenCodeAgent verified it.
+const openCodeAgentModifiedExit = 98
+
+// openCodeAgentGuard fails the run command with openCodeAgentModifiedExit
+// unless the agent file still has the runner's content.
+func openCodeAgentGuard(agentPath, definition string) string {
+	sum := sha256.Sum256([]byte(definition))
+	return fmt.Sprintf(`{ "$%s" "$("$%s" %s | "$%s" -d' ' -f1)" = %s || { "$%s" '%%s\n' 'fullsend: opencode agent file changed after .env; refusing to run' >&2; exit %d; }; }`,
+		openCodeTestVar, openCodeSHA256Var, shellQuote(agentPath), openCodeCutVar,
+		shellQuote(hex.EncodeToString(sum[:])), openCodePrintfVar, openCodeAgentModifiedExit)
 }
 
 // openCodeHooksExtensionBytes returns the runner-vetted hook adapter bytes the
@@ -458,6 +485,9 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	if fallback.fellBack {
 		return 1, fmt.Errorf("opencode ran its default agent instead of %q; refusing the result", agentName)
 	}
+	if exitCode == openCodeAgentModifiedExit {
+		return exitCode, fmt.Errorf("opencode agent file %s changed after .env was sourced; refusing to run", trustedEnv.AgentPath)
+	}
 	if exitCode == openCodeHooksMissingExit && params.HooksSettingsPath != "" {
 		return exitCode, fmt.Errorf("opencode hook adapter missing or modified in %s; refusing to run unhooked (was Bootstrap run, or did the agent change it?)", r.ConfigDir())
 	}
@@ -482,18 +512,30 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 	return exitCode, nil
 }
 
-// restoreOpenCodeAgent undoes overrides an earlier iteration could have left:
-// it removes other places OpenCode loads agents, tools, commands, config,
-// cached models.json (preferred over the built-in catalog) or auth.json from,
-// re-uploads the Bootstrap agent file, and verifies it. plugins/ and skills/
-// stay writable until #7824.
-func (r OpenCodeRuntime) restoreOpenCodeAgent(sandboxName, agentName string, env openCodeTrustedEnv) error {
-	cfg := r.ConfigDir()
-	clearCmd := "rm -rf --"
-	for _, p := range []string{"agent", "agents", "mode", "modes", "tool", "tools", "command", "commands", "opencode.jsonc"} {
-		clearCmd += " " + shellQuote(cfg+"/"+p)
+// openCodeOverridePaths lists, shell-quoted, the places other than the
+// runner's own files that OpenCode loads agents, tools, commands, config, a
+// cached models.json (preferred over the built-in catalog) or auth.json from;
+// withAgentDir adds agent/, which holds the runner's agent file.
+// plugin/, plugins/, skill/ and skills/ stay writable until #7824.
+func (r OpenCodeRuntime) openCodeOverridePaths(withAgentDir bool) string {
+	dirs := []string{"agents", "mode", "modes", "tool", "tools", "command", "commands", "opencode.jsonc"}
+	if withAgentDir {
+		dirs = append([]string{openCodeAgentDir}, dirs...)
 	}
-	clearCmd += ` "$HOME/.opencode" "$HOME/.config/opencode" "$HOME/.cache/opencode/models.json" "$HOME/.local/share/opencode/auth.json"`
+	paths := make([]string, 0, len(dirs)+4)
+	for _, p := range dirs {
+		paths = append(paths, shellQuote(r.ConfigDir()+"/"+p))
+	}
+	paths = append(paths, `"$HOME/.opencode"`, `"$HOME/.config/opencode"`,
+		`"$HOME/.cache/opencode/models.json"`, `"$HOME/.local/share/opencode/auth.json"`)
+	return strings.Join(paths, " ")
+}
+
+// restoreOpenCodeAgent undoes overrides an earlier iteration could have left:
+// it removes openCodeOverridePaths, re-uploads the Bootstrap agent file, and
+// verifies it. The run prelude repeats the reset after sourcing .env.
+func (r OpenCodeRuntime) restoreOpenCodeAgent(sandboxName, agentName string, env openCodeTrustedEnv) error {
+	clearCmd := "rm -rf -- " + r.openCodeOverridePaths(true)
 	_, stderr, exitCode, err := sandbox.Exec(sandboxName, clearCmd, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("clearing opencode agent overrides: %w", err)

@@ -124,12 +124,11 @@ func parseOpenCodeTranscriptFile(path string) (TranscriptError, bool) {
 	// Run fails a stream with malformed lines or a read error even when a
 	// turn completed, so the artifact verdict must not read as clean either.
 	if parseErr != nil || malformed > 0 {
-		return TranscriptError{
-			Source:       source,
-			IsError:      true,
-			ErrorMessage: fmt.Sprintf("corrupt opencode stream: %d malformed line(s), read error: %v", malformed, parseErr),
-			Subtype:      result.Subtype,
-		}, true
+		msg := fmt.Sprintf("corrupt opencode stream: %d malformed line(s)", malformed)
+		if parseErr != nil {
+			msg += ", read error: " + parseErr.Error()
+		}
+		return TranscriptError{Source: source, IsError: true, ErrorMessage: truncateError(msg), Subtype: "error"}, true
 	}
 	return TranscriptError{
 		Source:       source,

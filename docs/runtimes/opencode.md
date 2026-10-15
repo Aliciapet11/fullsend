@@ -31,13 +31,15 @@ OPENCODE_CONFIG_CONTENT='{"provider":{"google-vertex-anthropic":{"id":"google-ve
 Allow every tool the agent needs. OpenCode runs without a TTY here, so it rejects any tool call
 the policy does not allow. The agent's own `tools:` list can narrow this policy but never widen it.
 
-**2. Set up the harness.** Pass the variable into the sandbox and turn security off:
+**2. Set up the harness.** In the agent's harness (`harness/triage.yaml`), turn security off and
+add the variable to the existing `env.sandbox` block:
 
 ```yaml
 security:
   enabled: false
 env:
   sandbox:
+    # ...existing entries...
     OPENCODE_CONFIG_CONTENT: ${OPENCODE_CONFIG_CONTENT}
 ```
 
@@ -88,6 +90,7 @@ A model is `provider/model`. The aliases resolve to ids in OpenCode's built-in m
 | `opus` (default) | `google-vertex-anthropic/claude-opus-5-5@default` |
 | `sonnet` | `google-vertex-anthropic/claude-sonnet-5-5@default` |
 | `haiku` | `google-vertex-anthropic/claude-haiku-5-5@default` |
+| `fable` | `google-vertex-anthropic/claude-fable-5-1@default` |
 | A bare id | the id, prefixed with `FULLSEND_OPENCODE_PROVIDER` (default `google-vertex-anthropic`) |
 | `provider/model` | unchanged |
 
@@ -116,14 +119,16 @@ example above.
   (`"bash": {"*": "deny", "gh *": "allow"}`). An agent that declares Bash gets that same map.
 - **The agent is reset before every iteration.** The runner removes agent, tool and config overrides
   the previous iteration could have written, re-uploads the agent, and checks that OpenCode loads it.
-  `plugins/` and `skills/` in the config directory stay agent-writable until #7824.
+  `plugin/`, `plugins/`, `skill/` and `skills/` in the config directory stay agent-writable until
+  #7824.
 - **Repo config is ignored.** OpenCode does not load the target repo's `.opencode/` config or skills.
 
 ## Troubleshooting
 
 | You see | Cause and fix |
 |---|---|
-| `OPENCODE_CONFIG_CONTENT is empty` or `has no permission policy` | The env file or the harness `env.sandbox` entry is missing (steps 1 and 2) |
+| `OPENCODE_CONFIG_CONTENT is empty` | The env file or the harness `env.sandbox` entry is missing (steps 1 and 2) |
+| `OPENCODE_CONFIG_CONTENT ... invalid JSON` or `... permission policy` | The JSON is invalid, or its `permission` block is missing or invalid (step 1) |
 | `hooks adapter not yet available` | The harness still has `security.enabled: true` (step 2) |
 | `ProviderModelNotFoundError` | The id is not in OpenCode's built-in catalog. Use an id from the table above |
 | Vertex `404 NOT_FOUND` for the model | Your project does not serve it. Name one it serves |

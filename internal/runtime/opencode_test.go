@@ -621,6 +621,38 @@ func TestBuildOpenCodeRunCommand_HooksGuard(t *testing.T) {
 	assert.Contains(t, cmd, "exit 97")
 }
 
+func TestBuildOpenCodeRunCommand_ResetsOverridesAfterEnv(t *testing.T) {
+	t.Setenv(openCodeProviderEnv, "")
+
+	env := openCodeTrustedEnv{AgentPath: "/sandbox/opencode-config/agent/triage.md", AgentDefinition: "---\n{}\n---\nbody\n"}
+	cmd := buildOpenCodeRunCommand(RunParams{AgentBaseName: "triage", RepoDir: "/repo"}, "triage", env)
+	envIdx := strings.Index(cmd, "&& . "+shellQuote(sandbox.SandboxWorkspace+"/.env"))
+	resetIdx := strings.Index(cmd, `"$`+openCodeRmVar+`" -rf -- `+OpenCodeRuntime{}.openCodeOverridePaths(false))
+	guardIdx := strings.Index(cmd, openCodeAgentGuard(env.AgentPath, env.AgentDefinition))
+	require.NotEqual(t, -1, resetIdx)
+	require.NotEqual(t, -1, guardIdx)
+	assert.Greater(t, resetIdx, envIdx, "reset must run after .env")
+	assert.Less(t, guardIdx, strings.Index(cmd, " run --format json"), "agent is checked before opencode starts")
+	assert.NotContains(t, cmd, shellQuote(env.AgentDefinition), "the agent body is not inlined (openshell argument limit)")
+}
+
+func TestOpenCodeAgentGuard(t *testing.T) {
+	requirePinnedSha256sum(t)
+	agent := filepath.Join(t.TempDir(), "triage.md")
+	require.NoError(t, os.WriteFile(agent, []byte("trusted"), 0o644))
+	for content, want := range map[string]int{"trusted": 0, "tampered": openCodeAgentModifiedExit} {
+		require.NoError(t, os.WriteFile(agent, []byte(content), 0o644))
+		cmd := exec.Command("sh", "-c", openCodeUtilityPin()+" && "+openCodeAgentGuard(agent, "trusted"))
+		cmd.Env = []string{"PATH=/usr/bin:/bin"}
+		err := cmd.Run()
+		got := 0
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			got = exitErr.ExitCode()
+		}
+		assert.Equal(t, want, got, content)
+	}
+}
+
 func TestBuildOpenCodeRunCommand_AgentModelPrecedence(t *testing.T) {
 	t.Setenv(openCodeProviderEnv, "")
 
