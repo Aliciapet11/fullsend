@@ -76,9 +76,13 @@ and the ADR 0138 statement that the `api-key` mode sends its key the same way.
   (`ANTHROPIC_API_KEY`) in place of `ANTHROPIC_AUTH_TOKEN`. The runner still
   pins it in the inline `--settings` document and still clears every other
   credential variable after `.env`.
-- **One credential header per request.** When the setting is on, a
-  Messages-dialect request carries the credential in `x-api-key` and the runner
-  sets no credential in `Authorization`. Otherwise it is the reverse.
+- **One credential header per request, when the setting is on.** A
+  Messages-dialect request then carries the credential in `x-api-key` and the
+  runner sets no credential in `Authorization`. When the setting is off, behavior
+  is unchanged: the credential goes in `Authorization: Bearer`, and Claude Code
+  in `oidc` mode keeps sending its `apiKeyHelper` value as both
+  `Authorization: Bearer` and `x-api-key`, as it does today. This ADR does not
+  change that default launch.
 - **The block is still read from the base branch** on pull-request events
   ([ADR 0033](0033-per-repo-installation-mode.md)), so a pull request cannot
   change the header for its own run.
