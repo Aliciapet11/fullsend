@@ -34,10 +34,6 @@ type ManagedConfigWritebackConfig struct {
 	// persisted rather than as a preview. Ignored without DryRun.
 	Deferred   bool
 	RepoFilter []string
-	// Roles and RolesExplicit carry an explicit --roles value, which a
-	// first install persists in config.roles.
-	Roles         []string
-	RolesExplicit bool
 }
 
 // selectManifestRepos returns the manifest repositories selected by filter:
@@ -49,8 +45,8 @@ func selectManifestRepos(ctx context.Context, m *Manifest, clients ForgeClientFa
 	if err != nil {
 		return nil, fmt.Errorf("expanding globs: %w", err)
 	}
+	expanded = withGlobCoveredSelections(m, expanded, filter)
 	var selected []ResolvedRepo
-	seen := make(map[string]bool)
 	for _, rr := range expanded {
 		name := rr.Owner + "/" + rr.Repo
 		keep := len(filter) == 0
@@ -66,59 +62,9 @@ func selectManifestRepos(ctx context.Context, m *Manifest, clients ForgeClientFa
 		}
 		if keep {
 			selected = append(selected, rr)
-			seen[strings.ToLower(name)] = true
-		}
-	}
-	for _, name := range filter {
-		if isGlob(name) || seen[strings.ToLower(name)] {
-			continue
-		}
-		owner, repo, ok := strings.Cut(name, "/")
-		if !ok {
-			continue
-		}
-		if rr, found := lookupManifestEntry(m, owner, repo); found {
-			selected = append(selected, rr)
-			seen[strings.ToLower(name)] = true
 		}
 	}
 	return selected, nil
-}
-
-// lookupManifestEntry finds the entry that resolves owner/repo: an
-// explicit entry, else the first covering glob entry (GitHub before
-// GitLab, matching ResolveConfigWithGlobs).
-func lookupManifestEntry(m *Manifest, owner, repo string) (ResolvedRepo, bool) {
-	fullName := owner + "/" + repo
-	for _, p := range []struct {
-		name string
-		cfg  *PlatformConfig
-	}{{ForgeGitHub, m.GitHub}, {ForgeGitLab, m.GitLab}} {
-		if p.cfg == nil {
-			continue
-		}
-		for _, e := range p.cfg.Repos {
-			if strings.EqualFold(e.Name, fullName) {
-				return ResolvedRepo{Owner: owner, Repo: repo, Forge: p.name, Entry: e}, true
-			}
-		}
-	}
-	for _, p := range []struct {
-		name string
-		cfg  *PlatformConfig
-	}{{ForgeGitHub, m.GitHub}, {ForgeGitLab, m.GitLab}} {
-		if p.cfg == nil {
-			continue
-		}
-		for _, e := range p.cfg.Repos {
-			if ok, _ := matchesPattern(e.Name, fullName); ok {
-				entry := e
-				entry.Name = fullName
-				return ResolvedRepo{Owner: owner, Repo: repo, Forge: p.name, Entry: entry}, true
-			}
-		}
-	}
-	return ResolvedRepo{}, false
 }
 
 // PreflightManagedConfig reads the existing configuration layers of every
@@ -212,21 +158,6 @@ func PreflightProposedManagedSafety(ctx context.Context, m *Manifest, clients Fo
 	return errors.Join(errs...)
 }
 
-// PreflightManagedConfigNew is PreflightManagedConfig for repositories
-// that are not in the manifest yet and are about to be added to the
-// forgeName section. They resolve through the manifest defaults only.
-func PreflightManagedConfigNew(ctx context.Context, m *Manifest, clients ForgeClientFactory, forgeName string, names []string) error {
-	var selected []ResolvedRepo
-	for _, name := range names {
-		owner, repo, ok := strings.Cut(name, "/")
-		if !ok {
-			continue
-		}
-		selected = append(selected, ResolvedRepo{Owner: owner, Repo: repo, Forge: forgeName, Entry: RepoEntry{Name: name}})
-	}
-	return preflightManagedConfigRepos(ctx, m, clients, selected)
-}
-
 func preflightManagedConfigRepos(ctx context.Context, m *Manifest, clients ForgeClientFactory, selected []ResolvedRepo) error {
 	var errs []error
 	store := newPresetCache()
@@ -310,14 +241,10 @@ type pendingWriteback struct {
 
 // EnsureManagedConfigDefaults persists install-time choices that the
 // generated managed overlay must reproduce into the manifest entry of each
-// selected repository on a first install (#8218):
-//
-//   - a no-preset first install with no explicit create_issues declaration
-//     and no .fullsend/config.yaml records
-//     config.create_issues.allow_targets.repos: [fullsend-ai/fullsend];
-//   - an explicit --roles value is recorded in config.roles, including
-//     when a valid marked overlay already exists but the installation is
-//     still pending (no shim workflow).
+// selected repository on a first install (#8218): a no-preset first
+// install with no explicit create_issues declaration and no
+// .fullsend/config.yaml records
+// config.create_issues.allow_targets.repos: [fullsend-ai/fullsend].
 //
 // A declared preset keeps inheriting its own create_issues, and an
 // explicit manifest value is never overridden. A repository covered only
@@ -360,17 +287,16 @@ func EnsureManagedConfigDefaults(ctx context.Context, cfg ManagedConfigWriteback
 		if err != nil {
 			return nil, fmt.Errorf("%s/%s: reading %s: %w", rr.Owner, rr.Repo, preset.OverlayPath, err)
 		}
-		if found && !cfg.RolesExplicit {
+		if found {
 			// An existing overlay needs no automatic create_issues
-			// injection; only an explicit --roles can still need
-			// recording.
+			// injection.
 			continue
 		}
-		pristine, recordRoles, err := installEligibility(ctx, fc, resolved, found)
+		pristine, err := pristineRepository(ctx, fc, resolved)
 		if err != nil {
 			return nil, fmt.Errorf("%s/%s: %w", rr.Owner, rr.Repo, err)
 		}
-		if next, what := installDefaultsFor(m, rr, resolved, cfg.Roles, cfg.RolesExplicit && recordRoles, pristine); len(what) > 0 {
+		if next, what := installDefaultsFor(rr, resolved, pristine); len(what) > 0 {
 			pending = append(pending, pendingWriteback{rr: rr, cfg: next, what: what})
 		}
 	}
@@ -395,7 +321,7 @@ func EnsureManagedConfigDefaults(ctx context.Context, cfg ManagedConfigWriteback
 		entry := findExplicitEntry(m, name)
 		if entry == nil {
 			needsNewEntry[name] = true
-			carved, _, err := carveOutForForge(m, name, p.rr.Forge, nil)
+			carved, _, err := carveOutForForge(m, name, p.rr.Forge)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", name, err)
 			}
@@ -428,13 +354,11 @@ func EnsureManagedConfigDefaults(ctx context.Context, cfg ManagedConfigWriteback
 // pristineRepository reports whether the repository has no established
 // Fullsend installation (see pristineInstallation), no overlay and no base:
 // the same predicate convergence uses (FreshInstall plus no layer files) to
-// treat an install as a first one. An
-// existing or partially installed repository is not pristine, so install
-// defaults that widen permissions are not granted to it implicitly.
-func pristineRepository(ctx context.Context, fc ForgeConfig, resolved ResolvedConfig, overlayFound bool) (bool, error) {
-	if overlayFound {
-		return false, nil
-	}
+// treat an install as a first one. The caller has already established that
+// no overlay exists. An existing or partially installed repository is not
+// pristine, so install defaults that widen permissions are not granted to
+// it implicitly.
+func pristineRepository(ctx context.Context, fc ForgeConfig, resolved ResolvedConfig) (bool, error) {
 	resolved.ForgeConfig = fc
 	_, baseFound, err := readManagedConfigBaseFile(ctx, resolved)
 	if err != nil {
@@ -450,105 +374,18 @@ func pristineRepository(ctx context.Context, fc ForgeConfig, resolved ResolvedCo
 	return pristineInstallation(components), nil
 }
 
-// installEligibility reports which install-time values a first install may
-// record for a repository. pristine is the create_issues injection
-// eligibility (see pristineRepository). recordRoles reports whether an
-// explicit --roles value is persisted: always when no overlay exists, and
-// also when an existing overlay is found on a repository whose
-// installation is still pending (see pristineInstallation), because the
-// flag would otherwise be silently ignored when convergence renders from
-// the manifest.
-func installEligibility(ctx context.Context, fc ForgeConfig, resolved ResolvedConfig, overlayFound bool) (pristine, recordRoles bool, err error) {
-	if !overlayFound {
-		pristine, err = pristineRepository(ctx, fc, resolved, false)
-		return pristine, true, err
-	}
-	components, err := ProbeComponentsForAuth(ctx, fc.Client, resolved.Owner, resolved.Repo, resolved.Forge, resolved.InferenceAuth, fc, nil)
-	if err != nil {
-		return false, false, fmt.Errorf("probing components: %w", err)
-	}
-	return false, pristineInstallation(components), nil
-}
-
 // installDefaultsFor returns the entry config rr's manifest entry needs
 // for a first install, and a description of each value added. what is
 // empty when the entry needs no change. The upstream issue-target default
 // is granted only to a pristine repository (see pristineRepository); any
 // other repository needs an operator declaration.
-func installDefaultsFor(m *Manifest, rr ResolvedRepo, resolved ResolvedConfig, roles []string, rolesExplicit, pristine bool) (next config.ManagedConfig, what []string) {
+func installDefaultsFor(rr ResolvedRepo, resolved ResolvedConfig, pristine bool) (next config.ManagedConfig, what []string) {
 	next = rr.Entry.Config
 	if pristine && resolved.Config == "" && resolved.Managed.IssueCreationConfig() == nil {
 		next = next.WithCreateIssuesRepos([]string{UpstreamIssueTarget})
 		what = append(what, "create_issues.allow_targets.repos: ["+UpstreamIssueTarget+"]")
 	}
-	// An explicit --roles value is recorded even when it equals the
-	// inherited or default roles, so the manifest reproduces the choice.
-	// Only an entry that already declares the same roles itself needs no
-	// edit.
-	if rolesExplicit && !entryDeclaresRoles(m, rr, roles) {
-		next = next.WithRoles(roles)
-		what = append(what, "roles: ["+strings.Join(roles, ", ")+"]")
-	}
 	return next, what
-}
-
-// RequireWritableManifestForNewRepos fails when the manifest cannot be
-// written (an HTTP(S) source) and entries must be added to it. It runs
-// before AddToManifest so no manifest write is attempted, and the error
-// carries the exact entries to add to the manifest source, including the
-// install-time config values a first install records (#8218).
-func RequireWritableManifestForNewRepos(ctx context.Context, m *Manifest, manifestPath, forgeName string, entries []RepoEntry, clients ForgeClientFactory, roles []string, rolesExplicit bool) error {
-	if !ManifestReadOnly(m, manifestPath) || len(entries) == 0 {
-		return nil
-	}
-	fc, err := clients.ConfigFor(forgeName)
-	if err != nil {
-		return fmt.Errorf("creating %q client: %w", forgeName, err)
-	}
-	proposed := make([]RepoEntry, 0, len(entries))
-	for _, entry := range entries {
-		owner, repo, ok := strings.Cut(entry.Name, "/")
-		if !ok {
-			proposed = append(proposed, entry)
-			continue
-		}
-		rr := ResolvedRepo{Owner: owner, Repo: repo, Forge: forgeName, Entry: entry}
-		resolved := m.ResolveConfigForEntry(owner, repo, forgeName, entry)
-		_, found, readErr := readExistingFile(ctx, fc.Client, owner, repo, preset.OverlayPath)
-		if readErr != nil {
-			return fmt.Errorf("%s: reading %s: %w", entry.Name, preset.OverlayPath, readErr)
-		}
-		if !isGlob(entry.Name) && (!found || rolesExplicit) {
-			pristine, recordRoles, pErr := installEligibility(ctx, fc, resolved, found)
-			if pErr != nil {
-				return fmt.Errorf("%s: %w", entry.Name, pErr)
-			}
-			entry.Config, _ = installDefaultsFor(m, rr, resolved, roles, rolesExplicit && recordRoles, pristine)
-		}
-		proposed = append(proposed, entry)
-	}
-	body, err := yaml.Marshal(proposed)
-	if err != nil {
-		return fmt.Errorf("manifest %s is read-only; add the repositories to its %s.repos list, then re-run (rendering the entries failed: %w)", manifestPath, forgeName, err)
-	}
-	var b strings.Builder
-	for _, line := range strings.Split(strings.TrimRight(string(body), "\n"), "\n") {
-		b.WriteString("  " + line + "\n")
-	}
-	return fmt.Errorf("manifest %s is read-only and the repositories are not in it; no changes were made. "+
-		"Add the following to its %s.repos list, then re-run:\n%s", manifestPath, forgeName, strings.TrimRight(b.String(), "\n"))
-}
-
-// entryDeclaresRoles reports whether the repository's own explicit
-// manifest entry (not a covering glob, defaults.config, or the code
-// defaults) already declares exactly roles in config.roles.
-func entryDeclaresRoles(m *Manifest, rr ResolvedRepo, roles []string) bool {
-	entry := findExplicitEntry(m, rr.Owner+"/"+rr.Repo)
-	if entry == nil {
-		return false
-	}
-	declared, ok := entry.Config.ExplicitRoles()
-	return ok && slices.Equal(declared, roles)
 }
 
 // ManifestReadOnly reports whether the manifest at path cannot be written:
@@ -576,60 +413,6 @@ func ManifestReadOnly(m *Manifest, path string) bool {
 	}
 	_ = f.Close()
 	return false
-}
-
-// RequireWritableManifestForCarved fails when the manifest cannot be
-// written and glob-covered repositories were given explicit entries in
-// memory (names, already carved with any per-entry flags applied). The
-// error carries the exact entries to add to the manifest source, including
-// the install-time config values a first install records, and is returned
-// before any manifest write is attempted (#8218).
-func RequireWritableManifestForCarved(ctx context.Context, m *Manifest, manifestPath string, names []string, clients ForgeClientFactory, roles []string, rolesExplicit bool) error {
-	if !ManifestReadOnly(m, manifestPath) || len(names) == 0 {
-		return nil
-	}
-	var b strings.Builder
-	for _, forgeName := range []string{ForgeGitHub, ForgeGitLab} {
-		var proposed []RepoEntry
-		for _, name := range names {
-			entry := findExplicitEntryIn(m.PlatformFor(forgeName), name)
-			if entry == nil {
-				continue
-			}
-			owner, repo, _ := strings.Cut(name, "/")
-			resolved := m.ResolveConfigForEntry(owner, repo, forgeName, *entry)
-			fc, err := clients.ConfigFor(forgeName)
-			if err != nil {
-				return fmt.Errorf("creating %q client for %s: %w", forgeName, name, err)
-			}
-			_, found, readErr := readExistingFile(ctx, fc.Client, owner, repo, preset.OverlayPath)
-			if readErr != nil {
-				return fmt.Errorf("%s: reading %s: %w", name, preset.OverlayPath, readErr)
-			}
-			next := *entry
-			if !found || rolesExplicit {
-				pristine, recordRoles, pErr := installEligibility(ctx, fc, resolved, found)
-				if pErr != nil {
-					return fmt.Errorf("%s: %w", name, pErr)
-				}
-				next.Config, _ = installDefaultsFor(m, ResolvedRepo{Owner: owner, Repo: repo, Forge: forgeName, Entry: *entry}, resolved, roles, rolesExplicit && recordRoles, pristine)
-			}
-			proposed = append(proposed, next)
-		}
-		if len(proposed) == 0 {
-			continue
-		}
-		body, err := yaml.Marshal(proposed)
-		if err != nil {
-			return fmt.Errorf("manifest %s is read-only; add explicit entries for %s to its %s.repos list, then re-run (rendering them failed: %w)", manifestPath, strings.Join(names, ", "), forgeName, err)
-		}
-		fmt.Fprintf(&b, "Add to its %s.repos list (keep the covering glob entry):\n", forgeName)
-		for _, line := range strings.Split(strings.TrimRight(string(body), "\n"), "\n") {
-			b.WriteString("  " + line + "\n")
-		}
-	}
-	return fmt.Errorf("manifest %s is read-only and glob-covered repositories need explicit entries; no changes were made.\n%s",
-		manifestPath, strings.TrimRight(b.String(), "\n"))
 }
 
 func findExplicitEntryIn(platform *PlatformConfig, name string) *RepoEntry {
@@ -665,7 +448,7 @@ func newEntrySuggestion(m *Manifest, p pendingWriteback) RepoEntry {
 		entry = *existing
 	} else if platform := m.PlatformFor(p.rr.Forge); platform != nil {
 		scratch := &PlatformConfig{Repos: slices.Clone(platform.Repos)}
-		if carved, _ := carveOutGlobEntry([]*PlatformConfig{scratch}, name, nil); carved != nil {
+		if carved, _ := carveOutGlobEntry([]*PlatformConfig{scratch}, name); carved != nil {
 			entry = *carved
 		}
 	}

@@ -278,17 +278,30 @@ func validateManagedBlock(field string, o config.ManagedConfig) error {
 // mint_url is allowed to carry a path — e.g. a Cloud Functions mint
 // endpoint — matching every other mint_url gate in this codebase.
 func validateManagedMintAndWIF(r config.PerRepoConfigReader) error {
-	if mintURL := r.ConfigMintURL(); mintURL != "" {
-		mu, err := url.Parse(mintURL)
-		if err != nil || mu.Scheme != "https" || mu.Host == "" {
-			return fmt.Errorf("mint_url must be a valid HTTPS URL, got %q", mintURL)
-		}
-		if mu.User != nil {
-			return fmt.Errorf("mint_url must not contain userinfo, got %q", mintURL)
-		}
+	if err := validateDeclaredMintURL(r.ConfigMintURL()); err != nil {
+		return err
 	}
 	if wif := r.ConfigInferenceWIFProvider(); wif != "" && !WIFProviderPattern.MatchString(wif) {
 		return fmt.Errorf("inference.wif_provider %q does not match the required resource name pattern", wif)
+	}
+	return nil
+}
+
+// validateDeclaredMintURL applies the mint_url HTTPS/userinfo gate to a
+// declared value; an empty value is accepted (nothing is declared). It is
+// shared by managed-configuration validation and by the effective
+// infrastructure resolution, which also receives mint_url from a
+// config_base preset.
+func validateDeclaredMintURL(mintURL string) error {
+	if mintURL == "" {
+		return nil
+	}
+	mu, err := url.Parse(mintURL)
+	if err != nil || mu.Scheme != "https" || mu.Host == "" {
+		return fmt.Errorf("mint_url must be a valid HTTPS URL, got %q", mintURL)
+	}
+	if mu.User != nil {
+		return fmt.Errorf("mint_url must not contain userinfo, got %q", mintURL)
 	}
 	return nil
 }

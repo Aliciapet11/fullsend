@@ -38,8 +38,9 @@ Next:
    [`fullsend github setup`](../getting-started/configuring-github.md) — see
    [Before you begin](#before-you-begin) for the full prerequisite list.
    The generated agent works on GitHub: its harness, prompt and post-script
-   all use GitHub. On GitLab, scaffold with
-   `fullsend repos install --forge gitlab` and adapt those three files; for the
+   all use GitHub. On GitLab, scaffold with `fullsend repos install` (see
+   [Configuring GitLab](../getting-started/configuring-gitlab.md#installing-fullsend))
+   and adapt those three files; for the
    harness `role:` and its credentials, see
    [Custom roles](../getting-started/configuring-gitlab.md#custom-roles) and
    the [role-credential contract](../../contributing/gitlab-role-credentials.md).
@@ -335,7 +336,7 @@ scratch.
 ### Before you begin
 
 - **fullsend CLI** installed and available on your PATH.
-- **Repository scaffolded.** Run [`fullsend github setup`](../getting-started/configuring-github.md) first — it creates `.fullsend/config.yaml` and the dispatch workflow. It does **not** create `policies/`; [`fullsend agent new`](#quick-start) writes that one, and you commit it with the agent. Writing the harness by hand instead? [Minimum viable agent](#minimum-viable-agent) lists what to supply. GitLab repositories are scaffolded instead with `fullsend repos install --forge gitlab` and use role-specific credentials (project service accounts, or fallback project access tokens) rather than GitHub Apps — see [Configuring GitLab](../getting-started/configuring-gitlab.md).
+- **Repository scaffolded.** Run [`fullsend github setup`](../getting-started/configuring-github.md) first — it creates `.fullsend/config.yaml` and the dispatch workflow. It does **not** create `policies/`; [`fullsend agent new`](#quick-start) writes that one, and you commit it with the agent. Writing the harness by hand instead? [Minimum viable agent](#minimum-viable-agent) lists what to supply. GitLab repositories are scaffolded instead by declaring the project in `repos.yaml` and running `fullsend repos install`, and use role-specific credentials (project service accounts, or fallback project access tokens) rather than GitHub Apps — see [Configuring GitLab](../getting-started/configuring-gitlab.md).
 - **Inference set up for CI (CI only).** For agents running in GitHub Actions, on the Vertex route run [`fullsend inference provision`](../../cli/inference.md) to set up Workload Identity Federation, then give the provider it prints to [`fullsend github setup`](../getting-started/configuring-github.md), which stores it with the project and region. On the OpenAI route run [`fullsend inference openai request` and `import`](../../cli/inference.md), or set a `FULLSEND_OPENAI_API_KEY` secret.
 - **GitHub Apps installed (CI only).** Your org needs the fullsend GitHub Apps — see [Configuring GitHub](../getting-started/configuring-github.md).
 

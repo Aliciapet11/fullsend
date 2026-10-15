@@ -55,24 +55,18 @@ fullsend
 │   └── set          <owner/repo> <key> <value> # Update a config value
 ├── repos                                    # Manage per-repo installations via manifest
 │   ├── --gitlab-token <token>               #   GitLab access token (overrides GITLAB_TOKEN)
-│   ├── install      [repos...]              # Converge repos to desired state (provision, repair drift, upgrade)
-│   │   ├── -f, --manifest <path>            #   Path or URL to repos.yaml (default: repos.yaml)
+│   ├── install      [repos...]              # Converge declared repos to repos.yaml (provision, repair drift, upgrade); positional args only filter declared entries
+│   │   ├── -f, --manifest <path>            #   Path or URL to repos.yaml (default: repos.yaml; must exist)
 │   │   ├── --dry-run                        #   Preview without making changes
 │   │   ├── --concurrency <int>              #   Max parallel operations (1-32, default: 4)
-│   │   ├── --roles <list>                   #   Agent roles (default: triage,coder,review,fix,retro,prioritize)
 │   │   ├── --direct                         #   Push scaffold to default branch (skip PR)
-│   │   ├── --vertex-project <id>            #   GCP project ID for Vertex inference (install-time only)
-│   │   ├── --vertex-wif-provider <path>     #   Full WIF provider resource name (uses verbatim; skips per-repo derivation)
+│   │   ├── --force                          #   Allow scaffold ref downgrades
+│   │   ├── --reactivate-schedules           #   Re-enable disabled GitLab pipeline schedules
+│   │   ├── --vertex-project <id>            #   GCP project ID for Vertex inference (else declared inference.project; never in repos.yaml)
+│   │   ├── --vertex-wif-provider <path>     #   Full WIF provider resource name (else declared inference.wif_provider; skips per-repo derivation)
 │   │   ├── --openai-api-key <key>           #   FULLSEND_OPENAI_API_KEY for openai-api-key repos (CLI-only; never in repos.yaml)
-│   │   ├── --forge <type>                   #   Forge type for new repos (github or gitlab)
-│   │   ├── --vertex-region <region>         #   Per-repo GCP inference region override
-│   │   ├── --fullsend-ref <ref>             #   Per-repo fullsend workflow ref override
-│   │   ├── --mint-url <url>                 #   Per-repo mint URL override
-│   │   ├── --app-set <prefix>               #   GitHub App set prefix override ($FULLSEND_APP_SET); GitHub-only
-│   │   ├── --inference-auth <method>        #   vertex-wif, openai-api-key or openai-wif (GitHub only); persisted as inference.auth on each selected manifest entry (a repo covered only by a glob gets its own copied entry); never changes defaults or forge sections
-│   │   ├── --vendor                         #   Vendor binary and content into each repo for offline CI
-│   │   ├── --signoff                        #   Signed-off-by trailer on scaffold commits; overrides manifest signoff for this run
-│   │   ├── --gitlab-url <url>               #   GitLab instance URL; sets gitlab.url in the manifest
+│   │   ├── --fullsend-binary <path>         #   Pre-built binary to vendor (requires a selected repo with vendor: true)
+│   │   ├── --fullsend-source <path>         #   Source checkout to vendor from (requires a selected repo with vendor: true)
 │   │   ├── --gitlab-role-registry <path>    #   Administrator GitLab role registry JSON
 │   │   ├── --gitlab-role-token role=token   #   Administrator-provided GitLab role PAT (repeatable)
 │   │   ├── --rotate-gitlab-roles            #   Force-rotate GitLab role credentials

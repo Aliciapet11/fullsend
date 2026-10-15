@@ -77,11 +77,9 @@ func githubManagedInstallOpts(manifestPath string, fc *forge.FakeClient) *reposI
 	return &reposInstallConfig{
 		manifest:               manifestPath,
 		concurrency:            4,
-		roles:                  []string{"triage"},
 		direct:                 true,
 		inferenceProject:       "inf-proj",
 		inferenceProjectNumber: "123456789",
-		inferenceRegion:        "us-central1",
 		testClient:             fc,
 	}
 }
@@ -104,7 +102,6 @@ func useOpenAIInputs(opts *reposInstallConfig) *reposInstallConfig {
 	}
 	opts.inferenceProject = ""
 	opts.inferenceProjectNumber = ""
-	opts.inferenceRegion = ""
 	opts.openAIAPIKey = "test-openai-key"
 	return opts
 }
@@ -279,13 +276,13 @@ func TestRunReposInstall_NoConfigKeyDryRunWritesNothing(t *testing.T) {
 	assert.Equal(t, githubUnmanagedManifestYAML, string(data), "dry-run must not rewrite the manifest")
 }
 
-func TestRunReposInstall_ExplicitRolesPersistedInManifest(t *testing.T) {
-	manifestPath := writeTestManifest(t, githubUnmanagedManifestYAML)
+func TestRunReposInstall_DeclaredRolesRenderedFromManifest(t *testing.T) {
+	manifest := strings.Replace(githubUnmanagedManifestYAML, "    - name: acme/api\n",
+		"    - name: acme/api\n      config:\n        roles: [triage, review]\n", 1)
+	manifestPath := writeTestManifest(t, manifest)
 	fc := newInstallFakeClient("acme/api")
 
 	opts := githubManagedInstallOpts(manifestPath, fc)
-	opts.roles = []string{"triage", "review"}
-	opts.rolesChanged = true
 	require.NoError(t, runReposInstall(context.Background(), opts))
 
 	reloaded, err := repos.LoadManifest(context.Background(), manifestPath)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/fullsend-ai/fullsend/internal/preset"
@@ -174,40 +173,18 @@ func TestEnsureManagedConfigDefaults_DoesNotOverrideDeclaredValues(t *testing.T)
 	})
 }
 
-func TestEnsureManagedConfigDefaults_RolesWithPreset(t *testing.T) {
-	presetPath := writePresetFile(t, testPresetYAML)
-	m := newConvergeManifest("acme/api")
-	m.Defaults.ConfigBase.Source = presetPath
-
-	names, err := EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
-		Manifest: m, Roles: []string{"fix"}, RolesExplicit: true,
-	}, newTestClientFactory(newFakeClientForBatch("acme/api")), nil)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"acme/api"}, names)
-	resolved, _ := m.ResolveConfig("acme", "api")
-	assert.Equal(t, []string{"fix"}, resolved.Managed.ConfigRoles())
-	assert.Nil(t, resolved.Managed.IssueCreationConfig(), "a declared preset keeps inheriting its create_issues")
-
-	// Roles equal to the effective value are not rewritten.
-	names, err = EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
-		Manifest: m, Roles: []string{"fix"}, RolesExplicit: true,
-	}, newTestClientFactory(newFakeClientForBatch("acme/api")), nil)
-	require.NoError(t, err)
-	assert.Empty(t, names)
-}
-
 func TestEnsureManagedConfigDefaults_ReadOnlyManifestSuggestsExactEdit(t *testing.T) {
 	m := newConvergeManifest("acme/api")
 	fc := newFakeClientForBatch("acme/api")
 
 	_, err := EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
-		Manifest: m, ManifestPath: "https://example.com/repos.yaml", Roles: []string{"triage", "fix"}, RolesExplicit: true,
+		Manifest: m, ManifestPath: "https://example.com/repos.yaml",
 	}, newTestClientFactory(fc), nil)
 	require.Error(t, err)
 	msg := err.Error()
 	assert.Contains(t, msg, "read-only")
 	assert.Contains(t, msg, `github.repos entry "acme/api"`)
-	for _, want := range []string{"config:", "create_issues:", "allow_targets:", "- fullsend-ai/fullsend", "roles:", "- fix"} {
+	for _, want := range []string{"config:", "create_issues:", "allow_targets:", "- fullsend-ai/fullsend"} {
 		assert.Contains(t, msg, want)
 	}
 	assert.False(t, m.GitHub.Repos[0].Config.IsSet(), "a read-only manifest is not edited in memory either")
@@ -261,11 +238,6 @@ func TestEnsureManagedConfigDefaults_Errors(t *testing.T) {
 		Manifest: m, RepoFilter: []string{"[bad"},
 	}, newTestClientFactory(newFakeClientForBatch("acme/api")), nil)
 	require.Error(t, err)
-
-	_, err = EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
-		Manifest: m, Roles: []string{"not-a-role"}, RolesExplicit: true,
-	}, newTestClientFactory(newFakeClientForBatch("acme/api")), nil)
-	require.Error(t, err, "an invalid persisted value is rejected before the manifest is written")
 }
 
 func TestPreflightManagedConfig(t *testing.T) {
@@ -332,18 +304,6 @@ func TestPreflightManagedConfig(t *testing.T) {
 	})
 }
 
-func TestPreflightManagedConfigNew(t *testing.T) {
-	ctx := context.Background()
-	m := &Manifest{Version: 1, Defaults: testInferenceDefaults(), GitHub: &PlatformConfig{}}
-	fc := newFakeClientForBatch("acme/new")
-	require.NoError(t, PreflightManagedConfigNew(ctx, m, newTestClientFactory(fc), ForgeGitHub, []string{"acme/new", "malformed"}))
-
-	fc.FileContents["acme/new/"+preset.OverlayPath] = []byte("keep_history: true\n")
-	err := PreflightManagedConfigNew(ctx, m, newTestClientFactory(fc), ForgeGitHub, []string{"acme/new"})
-	require.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(), "acme/new") && strings.Contains(err.Error(), "adoption required"))
-}
-
 type failingFactory struct{}
 
 func (failingFactory) ConfigFor(string) (ForgeConfig, error) {
@@ -358,52 +318,48 @@ func TestWritebackClientFactoryErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestEnsureManagedConfigDefaults_ExplicitRolesWithExistingOverlayOnFirstInstall(t *testing.T) {
-	roles := []string{"fix"}
+// The create_issues default is a first-install grant: an existing overlay
+// or a repository that is not pristine never receives it, so nothing is
+// written to the manifest and a read-only manifest is not an error.
+func TestEnsureManagedConfigDefaults_NoWritebackUnlessPristineFirstInstall(t *testing.T) {
 	markedOverlay := []byte(managedConfigMarker + "{}\n")
+	const readOnlyURL = "https://example.com/repos.yaml"
 
-	t.Run("pending installation records roles only", func(t *testing.T) {
-		m := newConvergeManifest("acme/api")
-		path := writebackManifestFile(t, m)
-		fc := newFakeClientForBatch("acme/api")
-		fc.FileContents["acme/api/"+preset.OverlayPath] = markedOverlay
+	cases := []struct {
+		name  string
+		files map[string][]byte
+	}{
+		{"existing overlay", map[string][]byte{"acme/api/" + preset.OverlayPath: markedOverlay}},
+		{"existing overlay on an installed repository", map[string][]byte{
+			"acme/api/" + preset.OverlayPath:           markedOverlay,
+			"acme/api/.github/workflows/fullsend.yaml": []byte("shim"),
+		}},
+		{"installed repository without overlay", map[string][]byte{
+			"acme/api/.github/workflows/fullsend.yaml": []byte("shim"),
+		}},
+		{"existing base without overlay", map[string][]byte{
+			"acme/api/" + preset.BasePath: []byte("version: \"1\"\n"),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newConvergeManifest("acme/api")
+			fc := newFakeClientForBatch("acme/api")
+			for k, v := range tc.files {
+				fc.FileContents[k] = v
+			}
 
-		names, err := EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
-			Manifest: m, ManifestPath: path, Roles: roles, RolesExplicit: true,
-		}, newTestClientFactory(fc), nil)
-		require.NoError(t, err)
-		assert.Equal(t, []string{"acme/api"}, names)
+			names, err := EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
+				Manifest: m, ManifestPath: writebackManifestFile(t, m),
+			}, newTestClientFactory(fc), nil)
+			require.NoError(t, err)
+			assert.Empty(t, names)
+			assert.False(t, m.GitHub.Repos[0].Config.IsSet(), "the manifest entry is not edited")
 
-		declared, ok := m.GitHub.Repos[0].Config.ExplicitRoles()
-		require.True(t, ok, "the explicit --roles must reach the manifest so convergence renders it")
-		assert.Equal(t, roles, declared)
-		resolved, _ := m.ResolveConfig("acme", "api")
-		assert.Nil(t, resolved.Managed.IssueCreationConfig(),
-			"an existing overlay never gets the automatic create_issues injection")
-	})
-	t.Run("installed repository is left alone", func(t *testing.T) {
-		m := newConvergeManifest("acme/api")
-		fc := newFakeClientForBatch("acme/api")
-		fc.FileContents["acme/api/"+preset.OverlayPath] = markedOverlay
-		fc.FileContents["acme/api/.github/workflows/fullsend.yaml"] = []byte("shim")
-
-		names, err := EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
-			Manifest: m, Roles: roles, RolesExplicit: true,
-		}, newTestClientFactory(fc), nil)
-		require.NoError(t, err)
-		assert.Empty(t, names, "an established installation does not take --roles through the first-install path")
-		assert.False(t, m.GitHub.Repos[0].Config.IsSet())
-	})
-	t.Run("read-only manifest suggests the roles edit", func(t *testing.T) {
-		m := newConvergeManifest("acme/api")
-		fc := newFakeClientForBatch("acme/api")
-		fc.FileContents["acme/api/"+preset.OverlayPath] = markedOverlay
-
-		_, err := EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
-			Manifest: m, ManifestPath: "https://example.com/repos.yaml", Roles: roles, RolesExplicit: true,
-		}, newTestClientFactory(fc), nil)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "roles")
-		assert.Contains(t, err.Error(), "read-only")
-	})
+			_, err = EnsureManagedConfigDefaults(context.Background(), ManagedConfigWritebackConfig{
+				Manifest: m, ManifestPath: readOnlyURL,
+			}, newTestClientFactory(fc), nil)
+			require.NoError(t, err, "nothing to persist, so a read-only manifest is not an error")
+		})
+	}
 }

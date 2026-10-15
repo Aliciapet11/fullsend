@@ -478,10 +478,6 @@ type DriftConfig struct {
 	UpstreamRef string
 	UpstreamTag string
 
-	// InferenceRegion is the GCP region for inference. Only available
-	// from CLI flags on repos install; empty on the status path.
-	InferenceRegion string
-
 	// ReviewAppClientID is the OAuth client ID of the review agent's
 	// GitHub App. Only available from CLI flags on repos install.
 	ReviewAppClientID string
@@ -508,14 +504,14 @@ func driftInstallConfig(resolved ResolvedConfig, dcfg DriftConfig) InstallConfig
 		Owner:             resolved.Owner,
 		Repo:              resolved.Repo,
 		Forge:             resolved.Forge,
-		Roles:             defaultRoles(nil),
+		Roles:             config.PerRepoDefaultRoles(),
 		MintURL:           resolved.MintURL,
 		UpstreamRef:       ref,
 		UpstreamTag:       ref,
 		Runtime:           resolved.Runtime,
 		VendorBinary:      resolved.Vendor,
 		InferenceAuth:     resolved.InferenceAuth,
-		InferenceRegion:   dcfg.InferenceRegion,
+		InferenceRegion:   resolved.InferenceRegion,
 		ReviewAppClientID: dcfg.ReviewAppClientID,
 		AgentRunnerTags:   dcfg.AgentRunnerTags,
 		ControlRunnerTags: dcfg.ControlRunnerTags,
@@ -618,8 +614,7 @@ func BuildScaffoldFiles(cfg InstallConfig) ([]forge.TreeFile, error) {
 				// base, so materializing default roles/allowed_remote_resources/
 				// create_issues here would silently shadow the preset's values.
 				// cfg.Roles is only non-empty when the caller explicitly
-				// requested roles (see defaultRoles in converge.go); an unset
-				// Roles here lets the preset (or its own fallback defaults)
+				// requested roles; an unset Roles here lets the preset (or its own fallback defaults)
 				// take effect through the overlay -> base -> code-default chain.
 				overlay := config.NewEmptyPerRepoOverlay()
 				if len(cfg.Roles) > 0 {
@@ -786,8 +781,9 @@ func installSecretsForForge(cfg InstallConfig, wifProvider string) map[string]st
 
 // requiredVariables lists the per-repo variables that must exist for a
 // complete installation. FULLSEND_GCP_REGION is excluded because it is
-// conditionally set (only when --vertex-region is provided) and may
-// not be present when secrets are reused. FULLSEND_APP_SET is required:
+// conditionally set (with the Vertex credentials, or when the effective
+// configuration declares inference.region) and may not be present when
+// secrets are reused. FULLSEND_APP_SET is required:
 // every GitHub install writes it (defaulting to the built-in app set), so
 // its absence on an existing repo is drift that convergence repairs.
 // Shared by install, checkInstallComponents, and uninstall.

@@ -17,10 +17,12 @@ GitHub repositories use a different command (`fullsend github setup`). See
   [Getting Inference](getting-inference.md). OpenAI-only installation does not
   need a GCP project. GitLab does **not** use
   `fullsend inference provision` — inference credentials are written by
-  `repos install --vertex-project` (see [Inference Setup](#inference-setup)
-  below). Unless you also pass `--vertex-wif-provider` (see
-  [Inference Setup](#inference-setup)), `repos install` derives the
-  project number from `--vertex-project` via the GCP Resource
+  `repos install` from `--vertex-project` or a declared `inference.project`
+  (see [Inference Setup](#inference-setup) below). Unless you also supply a
+  WIF provider (`--vertex-wif-provider` or a declared
+  `inference.wif_provider`; a declared provider also requires a declared
+  `inference.project`), `repos install` derives the
+  project number from the project via the GCP Resource
   Manager API, so the machine running `repos install` needs
   Application Default Credentials with `cloudresourcemanager.googleapis.com`
   `projects.get` access on that project.
@@ -136,30 +138,53 @@ and typed pins predating the secured contract are unsupported.
 
 ## Installing Fullsend
 
-Run the command:
+`repos install` reads every persistent setting, and the list of projects
+it manages, from a `repos.yaml` manifest. Declare the project first, then
+install it:
 
-```bash
-fullsend repos install <group/project> \
-  --forge gitlab \
-  --gitlab-url https://gitlab.com \
-  --inference-auth vertex-wif \
-  --vertex-project "<gcp-project>"
-```
+1. Declare the GitLab instance, the inference method, and the project:
+
+   ```bash
+   fullsend repos set gitlab.url https://gitlab.com
+   fullsend repos set gitlab.inference.auth vertex-wif
+   fullsend repos set 'gitlab.repos["<group/project>"]' '{}'
+   ```
+
+   The first command creates `repos.yaml` if it does not exist.
+
+2. Preview, then install:
+
+   ```bash
+   fullsend repos install <group/project> --dry-run --vertex-project "<gcp-project>"
+   fullsend repos install <group/project> --vertex-project "<gcp-project>"
+   ```
 
 Where `<group/project>` is the GitLab project path (nested groups are
 supported, for example `group/subgroup/project`), and `<gcp-project>` is
-the GCP project from [Getting Inference](getting-inference.md).
+the GCP project from [Getting Inference](getting-inference.md). Instead of
+passing `--vertex-project` on every run, you can declare it once with
+`fullsend repos set gitlab.config.inference.project <gcp-project>`; the
+value is then committed to `repos.yaml` and the project's
+`.fullsend/config.yaml`.
 
-`--inference-auth` selects the inference authentication method
+The positional argument only selects a project already declared in
+`repos.yaml`; install fails before any write when it matches no entry.
+`repos install` has no `--forge`, `--gitlab-url`, or `--inference-auth`
+flag. See
+[Migrating to manifest-driven `repos install`](migrating-from-github-setup.md)
+if your scripts used them.
+
+`inference.auth` selects the inference authentication method
 (`vertex-wif` or `openai-api-key`; `openai-wif` is GitHub only and is
-rejected for GitLab projects) and is persisted as `inference.auth` on
-the project's manifest entry. There is no default: when the manifest does
-not already provide a selection, `repos install` fails before changing the
-project. See
+rejected for GitLab projects). It can be set under `defaults`, in the
+`gitlab` section, or on the project's entry. There is no default: when the
+manifest does not provide a selection, `repos install` fails before
+changing the project. See
 [Repository management § Inference authentication](repo-management.md#inference-authentication).
 
-For an installation without Vertex credentials, pass
-`--inference-auth openai-api-key --openai-api-key <key>` and omit
+For an installation without Vertex credentials, run
+`fullsend repos set gitlab.inference.auth openai-api-key`, then pass
+`--openai-api-key <key>` to `repos install` and omit
 `--vertex-project`. The key is written as the masked
 `FULLSEND_OPENAI_API_KEY` CI/CD variable, and no GCP inference secrets are
 written or looked up. An unprefixed `OPENAI_API_KEY` CI/CD variable is no
@@ -169,16 +194,15 @@ Configure each enabled agent's runtime and model for OpenAI before it runs.
 GitLab OpenAI runs use an API key, not GitHub Actions WIF; see
 [OpenAI Workload Identity](../infrastructure/openai-workload-identity.md).
 
-`--gitlab-url` is required in every case, including gitlab.com: `repos.yaml`
+`gitlab.url` is required in every case, including gitlab.com: `repos.yaml`
 fails validation (`gitlab.url is required when GitLab repos are present`)
-whenever it's omitted, and nothing auto-populates it. Pass
+whenever it's omitted, and nothing auto-populates it. Use
 `https://gitlab.com` for gitlab.com, or your instance URL for a self-hosted
-install (`--gitlab-url https://gitlab.example.com`); either form also
-implies `--forge=gitlab` when no forge is specified. You can set it after
-the fact instead with `fullsend repos set gitlab.url <url>`.
+install (`fullsend repos set gitlab.url https://gitlab.example.com`). Set it
+before declaring the first GitLab project; `repos set` rejects a GitLab
+entry without it.
 
-The command bootstraps a `repos.yaml` manifest if one does not exist,
-then converges the project:
+Install then converges the project:
 
 * Scaffolds `.gitlab/ci/fullsend-*.yml` and merges an include, stages, and
   workflow rules into `.gitlab-ci.yml` without overwriting unrelated CI.
@@ -246,7 +270,9 @@ then converges the project:
   trigger is owned by a fresh Poller service account that is verified at
   Developer before its credential is published; see
   [Project service accounts](#project-service-accounts).
-* Writes inference CI/CD variables when `--vertex-project` is set.
+* Writes inference CI/CD variables when a GCP project is supplied, by
+  `--vertex-project` or a declared `inference.project` (see
+  [Inference Setup](#inference-setup)).
 
 By default the scaffold lands as a merge request. Pass `--direct` to push
 to the default branch instead. Preview with `--dry-run`.
@@ -298,14 +324,12 @@ credentials at the wildcard scope.
 
 By default, install configures
 `triage,coder,review,fix,retro,prioritize`. To enable only specific
-agents, pass `--roles`:
+agents, declare `config.roles` for the project (or in `gitlab.config` for
+every GitLab project), then install:
 
 ```bash
-fullsend repos install <group/project> \
-  --forge gitlab \
-  --gitlab-url https://gitlab.com \
-  --vertex-project "<gcp-project>" \
-  --roles triage,review
+fullsend repos set 'gitlab.repos["<group/project>"].config.roles' '[triage, review]'
+fullsend repos install <group/project> --vertex-project "<gcp-project>"
 ```
 
 ### Choosing a runtime
@@ -335,8 +359,6 @@ role with a personal access token:
 
 ```bash
 fullsend repos install <group/project> \
-  --forge gitlab \
-  --gitlab-url https://gitlab.com \
   --vertex-project "<gcp-project>" \
   --gitlab-role-token "poller=<poller-pat>" \
   --gitlab-role-token "analyst=<analyst-pat>" \
@@ -360,8 +382,6 @@ role credentials manually with personal access tokens:
 
 ```bash
 fullsend repos install <group/project> \
-  --forge gitlab \
-  --gitlab-url https://gitlab.com \
   --gitlab-role-token "poller=$POLLER_PAT" \
   --gitlab-role-token "analyst=$ANALYST_PAT" \
   --gitlab-role-token "coder=$CODER_PAT"
@@ -424,8 +444,6 @@ they cannot create or elevate a role.
 
 ```bash
 fullsend repos install <group/project> \
-  --forge gitlab \
-  --gitlab-url https://gitlab.com \
   --gitlab-role-registry ./gitlab-roles.json
 ```
 
@@ -713,8 +731,13 @@ the pipeline-ref falls back to `CI_COMMIT_REF_NAME` then
 
 ## Inference Setup
 
-Pass `--vertex-project` so install writes `FULLSEND_GCP_PROJECT_ID`
-and `FULLSEND_GCP_WIF_PROVIDER`. **This only writes CI/CD variables
+Pass `--vertex-project`, or declare `inference.project` in the managed
+configuration (for example
+`fullsend repos set gitlab.config.inference.project <gcp-project>`), so
+install writes `FULLSEND_GCP_PROJECT_ID` and `FULLSEND_GCP_WIF_PROVIDER`.
+A declared project is a supplied credential: every install rewrites both
+CI/CD variables from it, and a `--vertex-project` value that disagrees with
+it fails before any write. **This only writes CI/CD variables
 that reference the shared `gitlab-oidc` provider's resource name — it
 does not create the Workload Identity Pool, the `gitlab-oidc`
 provider, or its IAM bindings.** GitLab has no equivalent of
@@ -972,19 +995,29 @@ AI access to every identity in the pool, not just the GitLab
 namespaces you intend to cover.
 
 If a platform operator already provisioned a WIF provider, pass the full
-resource name instead of relying on the default `gitlab-oidc` path:
+resource name instead of relying on the default `gitlab-oidc` path (or
+declare it as `inference.wif_provider`). Supplying the provider also skips
+the project-number lookup through the GCP Resource Manager API. A declared
+`inference.wif_provider` also requires a declared `config.inference.project`
+(for example `fullsend repos set gitlab.config.inference.project <gcp-project>`);
+`--vertex-project` alone does not satisfy it, so `repos status` and install
+agree. Passing `--vertex-wif-provider` alongside `--vertex-project` needs no
+declaration:
 
 ```bash
 fullsend repos install <group/project> \
-  --forge gitlab \
-  --gitlab-url https://gitlab.com \
   --vertex-project "<gcp-project>" \
   --vertex-wif-provider "projects/<number>/locations/global/workloadIdentityPools/fullsend-inference/providers/gitlab-oidc"
 ```
 
 The GCP project still needs the Vertex AI APIs enabled as described in
-[Getting Inference](getting-inference.md). `--vertex-region` defaults
-to `global` when `--vertex-project` is set.
+[Getting Inference](getting-inference.md). Install writes the
+`FULLSEND_GCP_REGION` variable as `global` when it is missing. To use
+another region, declare it, for example
+`fullsend repos set gitlab.config.inference.region us-east5`; a declared
+region is managed, so install repairs a variable that differs. Without a
+declared region, install keeps an existing variable as it is. See
+[Effective infrastructure values](../../cli/repos.md#effective-infrastructure-values).
 
 ### Private OIDC issuers (uploaded JWKS)
 
@@ -1083,8 +1116,6 @@ explicitly or the poll job will sit pending indefinitely:
 ```bash
 fullsend repos set gitlab.agent_runner_tags '[fullsend-gitlab-runner]'
 fullsend repos install <group/project> \
-  --forge gitlab \
-  --gitlab-url https://gitlab.com \
   --vertex-project "<gcp-project>"
 ```
 
@@ -1116,8 +1147,9 @@ fullsend repos set gitlab.control_runner_tags '[fullsend-api]'
 > no drift is detected and no repair commit runs there — that install
 > keeps its old rendered tag until it moves past the pre-split pin. The
 > on-disk `gitlab.runner_tags` key is separately rewritten to
-> `gitlab.agent_runner_tags` the next time `repos install` appends
-> manifest entries or `repos uninstall` removes them. [`repos
+> `gitlab.agent_runner_tags` the next time a command rewrites
+> `repos.yaml`, such as `repos install` persisting install defaults or
+> `repos uninstall` removing entries. [`repos
 > set`](../../cli/repos.md#repos-set) edits the file in place and leaves
 > the old key alone; remove it with `fullsend repos set --unset
 > gitlab.runner_tags`. That key rewrite is unrelated to the poll job's
@@ -1152,8 +1184,8 @@ chooses which tags the scaffold embeds.
 GitLab still has to **assign** a runner that carries that tag to the
 target project or a parent group, or the job never gets a runner.
 
-Use the Fullsend runner hub on the **same GitLab instance** you pass to
-`--gitlab-url`. A hub on a different instance cannot pick up the job.
+Use the Fullsend runner hub on the **same GitLab instance** you set as
+`gitlab.url`. A hub on a different instance cannot pick up the job.
 
 * **GitLab.com** (`https://gitlab.com`) — use the
   [GitLab.com Fullsend runner hub](https://gitlab.com/fullsend/runner-hub).
@@ -1266,11 +1298,11 @@ external scheduler instead — see [Off-system polling](#off-system-polling)
 
 | Topic | GitHub | GitLab |
 |---|---|---|
-| Install command | `fullsend github setup` | `fullsend repos install --forge gitlab` |
+| Install command | `fullsend github setup` | `fullsend repos install`, after declaring the project in `repos.yaml` |
 | Bot identity | Per-role GitHub Apps | Role-specific project service accounts (`fullsend-poller`, `fullsend-analyst`, `fullsend-coder`), with project access tokens as the fallback; Free tier must enroll these via `--gitlab-role-token` since runtime authentication never falls back to the shared PAT or `fullsend-bot` |
 | Token mint | Required for App installation tokens | Not used — GitLab uses the stored PAT |
 | Event dispatch | Native Actions webhooks | Cron polling (`fullsend slash poll` / `fullsend event poll`) |
-| Inference WIF | Per-repo provider from `inference provision` | Operator-created shared `gitlab-oidc` provider, referenced via `--vertex-project` |
+| Inference WIF | Per-repo provider from `inference provision` | Operator-created shared `gitlab-oidc` provider, referenced via `--vertex-project` or a declared `inference.project` |
 | CI entrypoint | `.github/workflows/fullsend.yaml` | `.gitlab/ci/fullsend-*.yml` included from `.gitlab-ci.yml` |
 
 ### `workflow:` block and `auto_cancel`
@@ -1329,13 +1361,13 @@ unexpectedly, set that value in the root `workflow:` block.
 
 ## Self-Hosted GitLab Instances
 
-Pass `--gitlab-url` at install time to record the instance URL in
-`repos.yaml` (`gitlab.url`):
+Record the instance URL in `repos.yaml` (`gitlab.url`) before declaring
+the project:
 
 ```bash
-fullsend repos install <group/project> \
-  --gitlab-url https://gitlab.example.com \
-  --vertex-project "<gcp-project>"
+fullsend repos set gitlab.url https://gitlab.example.com
+fullsend repos set 'gitlab.repos["<group/project>"]' '{}'
+fullsend repos install <group/project> --vertex-project "<gcp-project>"
 ```
 
 That env-var fallback (`FULLSEND_GITLAB_URL` → `GITLAB_API_URL` →
@@ -1344,8 +1376,8 @@ forge-client construction inside CI jobs — it does **not** apply to
 `repos.yaml` manifest validation. `gitlab.url` must be set in the
 manifest whenever GitLab repos are present; there is no default, and
 `repos install`/`repos status` fail with `gitlab.url is required when
-GitLab repos are present` otherwise. Set it via `--gitlab-url` at
-install time, or later with:
+GitLab repos are present` otherwise. `repos install` has no
+`--gitlab-url` flag; change the URL with:
 
 ```bash
 fullsend repos set gitlab.url https://gitlab.example.com
