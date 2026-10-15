@@ -23,4 +23,5 @@ func Register(sc *godog.ScenarioContext) {
 	registerPlaybackSteps(sc)
 	registerGatewaySteps(sc)
 	registerMintProbeSteps(sc)
+	registerMintStatusSteps(sc)
 }

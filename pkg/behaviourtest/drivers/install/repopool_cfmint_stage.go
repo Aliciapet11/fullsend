@@ -49,6 +49,9 @@ type stageMintConfig struct {
 	perRepoWIFRepos   string
 	workflowHostRepos string
 	appSet            string
+	// statusGitHubGroup enables GitHub user-token status auth for an
+	// ORG/TEAM; see cfmintConfig.statusGitHubGroup.
+	statusGitHubGroup string
 }
 
 // NewRepoPoolCFMintStage is a Factory that deploys a durable CF Worker
@@ -88,6 +91,7 @@ func NewRepoPoolCFMintStage(
 		perRepoWIFRepos:   buildRepoList(StageOrg, poolSize),
 		workflowHostRepos: buildWorkflowHostRepoList(StageOrg, poolSize),
 		appSet:            envAppSet(),
+		statusGitHubGroup: mintStatusGitHubGroup(StageOrg),
 	}
 
 	md, err := newStageMintDriver(client, token, binary, gcpProjectID, logf, cfg)
@@ -142,7 +146,7 @@ func buildStageMintDriver(
 	if err != nil {
 		return nil, err
 	}
-	return withRateLimitReporter(d, client), nil
+	return withRateLimitReporter(withMintURL(d, mintURL), client), nil
 }
 
 // stageMintMintDriver deploys a durable CF Worker mint with a custom
@@ -216,6 +220,7 @@ func StageMintDeployArgs(cfg stageMintConfig) []string {
 	if cfg.appSet != "" {
 		args = append(args, "--app-set", cfg.appSet)
 	}
+	args = appendStatusAuthArgs(args, cfg.statusGitHubGroup)
 	return args
 }
 

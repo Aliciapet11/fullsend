@@ -30,6 +30,11 @@ type cfmintConfig struct {
 	perRepoWIFRepos   string
 	workflowHostRepos string
 	appSet            string
+	// statusGitHubGroup is the ORG/TEAM passed as --status-github-group
+	// (with --status-auth=oidc,github), so members of the pool org's
+	// mint-status team can query /v1/status with a GitHub user token.
+	// Empty leaves status auth at the CLI default (OIDC only).
+	statusGitHubGroup string
 }
 
 // NewRepoPoolCFMintPreviews is a Factory that deploys a CF preview
@@ -67,6 +72,7 @@ func NewRepoPoolCFMintPreviews(
 		perRepoWIFRepos:   buildRepoList(org, poolSize),
 		workflowHostRepos: buildWorkflowHostRepoList(org, poolSize),
 		appSet:            envAppSet(),
+		statusGitHubGroup: mintStatusGitHubGroup(org),
 	}
 
 	md, err := newCFMintDriver(client, token, binary, gcpProjectID, logf, cfg)
@@ -135,7 +141,7 @@ func buildCFMintDriverWithOpts(
 	if err != nil {
 		return nil, err
 	}
-	return withRateLimitReporter(d, client), nil
+	return withRateLimitReporter(withMintURL(d, mintURL), client), nil
 }
 
 // cfmintMintDriver deploys a CF Worker preview mint and uses the derived
@@ -257,7 +263,18 @@ func CFMintDeployArgs(alias, workerName string, cfg cfmintConfig) []string {
 	if cfg.appSet != "" {
 		args = append(args, "--app-set", cfg.appSet)
 	}
+	args = appendStatusAuthArgs(args, cfg.statusGitHubGroup)
 	return args
+}
+
+// appendStatusAuthArgs appends the flags that enable GitHub user-token
+// auth on the mint's /v1/status for members of group (ORG/TEAM). OIDC
+// status auth stays enabled. An empty group appends nothing.
+func appendStatusAuthArgs(args []string, group string) []string {
+	if group == "" {
+		return args
+	}
+	return append(args, "--status-auth", "oidc,github", "--status-github-group", group)
 }
 
 // CFMintTeardownArgs builds the CLI arguments for `fullsend mint delete --platform=cloudflare`.

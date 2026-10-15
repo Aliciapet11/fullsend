@@ -279,7 +279,12 @@ a closed team.
 | `halfsend-12` | `halfsend-12/mint-status` |
 
 The STAGE and numbered test mints take these values as
-`--status-github-group=ORG/mint-status`.
+`--status-github-group=ORG/mint-status`. The behaviour suite's CF mint
+drivers pass it, with `--status-auth=oidc,github`, on every mint
+deploy. The
+[CLI mint status scenarios](behaviour-testing.md#cli-mint-status-scenarios)
+run `fullsend mint status --mint-url` with the writer PAT against that
+mint.
 
 The setup script (`hack/setup-new-e2e-org.sh`) creates or verifies the
 team after it confirms test actor org membership:

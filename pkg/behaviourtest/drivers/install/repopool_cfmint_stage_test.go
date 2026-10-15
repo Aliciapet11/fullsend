@@ -75,6 +75,21 @@ func TestStageMintDeployArgs_WithoutAppSet(t *testing.T) {
 	assert.NotContains(t, args, "--app-set")
 	assert.Contains(t, args, "--custom-domain")
 	assert.NotContains(t, args, "--preview")
+	assert.NotContains(t, args, "--status-auth", "no status group, no GitHub status auth")
+}
+
+func TestStageMintDeployArgs_StatusGitHubGroup(t *testing.T) {
+	cfg := stageMintConfig{
+		pemDir:            "/tmp/pems",
+		perRepoWIFRepos:   "halfsend/test-repo-01",
+		workflowHostRepos: "halfsend/test-repo-01",
+		statusGitHubGroup: mintStatusGitHubGroup(StageOrg),
+	}
+
+	args := StageMintDeployArgs(cfg)
+
+	assert.Equal(t, []string{"--status-auth", "oidc,github", "--status-github-group", "halfsend/mint-status"},
+		args[len(args)-4:])
 }
 
 func TestNewStageMintDriver_FailsEarly_NoPEMDir(t *testing.T) {
@@ -185,6 +200,9 @@ func TestBuildStageMintDriver_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, d)
 	assert.Equal(t, 3, d.Capacity())
+	reporter, ok := d.(MintURLReporter)
+	require.True(t, ok, "driver reports its mint URL")
+	assert.Equal(t, StageMintURL, reporter.MintURL())
 }
 
 func TestBuildStageMintDriver_InstallFails(t *testing.T) {

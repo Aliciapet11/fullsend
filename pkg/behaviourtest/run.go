@@ -104,6 +104,7 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 		Logf:         t.Logf,
 		FixturesRoot: opts.FixturesRoot,
 		RepoOwner:    org,
+		CLIBinary:    binary,
 	}
 
 	if outsiderPAT := os.Getenv("TEST_ACTOR_OUTSIDER_PAT"); outsiderPAT != "" {
@@ -127,6 +128,7 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 			t.Fatal(err)
 		}
 		template.WriteSCM = writeSCM
+		template.WriteToken = writePAT
 		login, err := writeClient.GetAuthenticatedUser(ctx)
 		if err != nil {
 			t.Fatalf("resolving write actor login: %v", err)

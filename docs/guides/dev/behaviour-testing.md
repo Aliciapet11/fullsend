@@ -570,6 +570,33 @@ A minted token's granted permissions are compared with the role's canonical set 
 
 Each row is a scenario that leases a pool repository, so the 18 rows add 18 leases (about 3–5 minutes of provisioning each) to the [CI timeout budget](#ci-timeout-budgeting-for-lazy-provisioning). Each probe run is short: two parallel jobs that each make one HTTP request. If the suite outgrows the budget, grow the pool through `DefaultPoolSize` (`pkg/behaviourtest/drivers/install/driver.go`). Update the pool-sized infrastructure in the same change, for example `POOL_REPOS` in the inference gateway setup script (see [e2e-testing.md](e2e-testing.md#who-runs-it-and-when)). Then rerun that infrastructure before the larger pool is used.
 
+## CLI mint status scenarios
+
+`e2e/behaviour/features/platform/mint-status.feature` checks that an operator who knows only the mint address and has an authorized GitHub account gets the mint's status through the CLI: `fullsend mint status --mint-url <mint address>`. The target is the suite's own mint: the preview mint of the numbered halfsend org on `dev`, the STAGE mint on `stage`. Both CF mint drivers deploy it with `--status-auth oidc,github --status-github-group <org>/mint-status`, and the write actor is the only member of that team (see [Mint status team](e2e-testing.md#mint-status-team)). The steps get the address from the install driver through the optional `install.MintURLReporter` interface, so the scenarios lease no pool repository.
+
+The steps run the suite's CLI binary (`World.CLIBinary`) with only `--mint-url`, never `--project`. The CLI gets a clean environment. It inherits only `PATH`, `TMPDIR`, the proxy variables and `SSL_CERT_FILE`/`SSL_CERT_DIR`. It gets a fresh `HOME` and gh config directory, and `GH_TOKEN` set to the credential under test. The GitHub Actions OIDC variables, which the behaviour job has because it declares `id-token: write`, are withheld, so the CLI cannot authenticate with OIDC before it falls back to the user token. GCP project and credential variables, `GITHUB_TOKEN` and `FULLSEND_MINT_URL` are withheld too. The status facts are read from the CLI's output, and nothing calls `/v1/status` directly:
+
+- authenticated via `GitHub`, in the step line and the summary;
+- the URL the CLI reports is the address it was given;
+- no caller organization, which only OIDC status auth reports;
+- every `fullsend-test` role is listed, and the summary's role count matches the list;
+- every workflow host repository is in the suite's org, and `<org>/test-repo-01` is one of them.
+
+A failure has one of four classes, and the step error starts with the class:
+
+| Class | Meaning |
+|-------|---------|
+| `authentication` | The mint rejected the credential (the CLI's `authentication failed for /v1/status`) |
+| `transport` | The CLI could not reach the mint, or did not finish within 3 minutes |
+| `deployment` | The install driver reported no mint URL, or the address answered but not as a mint's status API (an unexpected HTTP status or an unparsable response) |
+| `assertion` | The CLI succeeded but reported the wrong facts, printed the credential, or a failure was expected and did not happen |
+
+The mint answers a GitHub token it does not accept with the same 401 in three cases: the token is invalid, its user is not an active member of the status group, or the mint was deployed without GitHub status auth. A rejected write actor credential is therefore an authentication failure whose message names all three causes. A missing or misconfigured status group can never pass.
+
+The Scenario Outline holds a negative control for each failure class, and none of them may pass as a success. An `invalid credential` must fail as `authentication`. The `unreachable mint address` (`https://127.0.0.1:1`) must fail as `transport`. The `suite mint address with a non-mint path` (the suite mint address plus `/not-a-mint`, which the mint answers with 404) must fail as `deployment`. The deployment control sends the write actor credential only to the suite's own mint.
+
+The steps register the credential with the secret redactor. They store only redacted CLI output and save it as `mint-status-<scenario>-*/cli-output.txt` under `BEHAVIOUR_ARTIFACT_DIR`. The last step of each scenario fails if the raw CLI output held the credential, or if any file under `BEHAVIOUR_ARTIFACT_DIR` holds the write actor's PAT. In CI the PAT is a repository secret, so GitHub Actions also masks it in the job log.
+
 ## Version pinning for `fullsend-ai/agents`
 
 External behaviour runners import the shared libraries from this module:
@@ -689,6 +716,10 @@ suiteRunner := godog.TestSuite{
 **`world.World.MintProbe` addition:** The new `MintProbe *world.MintProbe` field (with the `world.MintProbe` and `world.MintProbeResult` types) holds the state of the [GitHub mint scope scenarios](#github-mint-scope-scenarios). It is a non-breaking addition. The mint probe steps need a CI driver that implements the optional `ci.RunLister` interface, as the GitHub Actions driver does.
 
 **`install.MintProbeHostRepoSuffix` addition:** The suffix (`-mint-host`) of each pool slot's mint-probe host repository. The CF mint drivers add those names to the mint's `--workflow-host-repos`.
+
+**`install.MintURLReporter` optional interface and `install.MintStatusTeamSlug`:** `MintURL() string` reports the suite's mint URL. The [CLI mint status scenarios](#cli-mint-status-scenarios) use it to get the mint address. It is a separate interface, not an `install.Driver` method, so external `install.Driver` implementations keep compiling. The mint status steps fail with a `deployment` error on a driver without it. `MintStatusTeamSlug` (`mint-status`) names the team the CF mint drivers pass as `--status-github-group <org>/mint-status`.
+
+**`world.World.CLIBinary`, `world.World.WriteToken` and `world.World.MintStatus` additions:** `RunSuite` sets `CLIBinary` to the CLI it builds and `WriteToken` to `TEST_ACTOR_WRITE_PAT`. `MintStatus` (type `world.MintStatus`) holds the CLI mint status scenario state. All three are non-breaking additions. A custom bootstrap must set `CLIBinary` and `WriteToken` to run the mint status scenarios.
 
 **`ci.EmptyMatrixWaiter` optional interface:** `WaitForHarnessEmptyMatrix(ctx, owner, repo string, after time.Time) (*forge.WorkflowRun, error)` backs the `the harness dispatch completes with an empty matrix` step. It is a separate interface, not a `ci.Driver` method, so external `ci.Driver` implementations keep compiling; the step fails with an explanatory error on a driver without it. Only the GitHub Actions reference driver implements it.
 

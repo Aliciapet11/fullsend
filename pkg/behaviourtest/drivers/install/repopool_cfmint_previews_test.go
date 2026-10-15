@@ -172,6 +172,23 @@ func TestCFMintDeployArgs_WithoutAppSet(t *testing.T) {
 	assert.Contains(t, args, "--pem-dir")
 	assert.NotContains(t, args, "--allowed-orgs")
 	assert.Contains(t, args, "--workflow-host-repos")
+	assert.NotContains(t, args, "--status-auth", "no status group, no GitHub status auth")
+	assert.NotContains(t, args, "--status-github-group")
+}
+
+func TestCFMintDeployArgs_StatusGitHubGroup(t *testing.T) {
+	cfg := cfmintConfig{
+		pemDir:            "/tmp/pems",
+		suiteName:         "bt",
+		perRepoWIFRepos:   "halfsend-03/test-repo-01",
+		workflowHostRepos: "halfsend-03/test-repo-01",
+		statusGitHubGroup: mintStatusGitHubGroup("halfsend-03"),
+	}
+
+	args := CFMintDeployArgs("bt-abc12345", "bt-mint", cfg)
+
+	assert.Equal(t, []string{"--status-auth", "oidc,github", "--status-github-group", "halfsend-03/mint-status"},
+		args[len(args)-4:])
 }
 
 func TestCFMintTeardownArgs(t *testing.T) {
@@ -316,6 +333,9 @@ func TestBuildCFMintDriver_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, d)
 	assert.Equal(t, 3, d.Capacity())
+	reporter, ok := d.(MintURLReporter)
+	require.True(t, ok, "driver reports its mint URL")
+	assert.Equal(t, "https://mint.test", reporter.MintURL())
 }
 
 func TestBuildCFMintDriver_InstallFails(t *testing.T) {
