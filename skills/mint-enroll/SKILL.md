@@ -97,8 +97,8 @@ PEM keys and app IDs are tied to the role, not the org. Secrets use role-only na
 (`fullsend-{role}-app-pem`) — one secret per role, shared across orgs on the
 mint. `ROLE_APP_IDS` uses the same model: one GitHub App ID per role (e.g.,
 `coder` → `123456`), shared by all enrolled repos. PEMs and app IDs must already
-exist (from `mint deploy --pem-dir` or `go run ./cmd/fullsend admin install <owner/repo>`, which is
-deprecated but still required to create GitHub Apps); enrollment
+exist (from `mint deploy --pem-dir`, `go run ./cmd/fullsend mint add-role <role> --project <gcp-project> --org <org>`, or the
+deprecated `go run ./cmd/fullsend admin install <owner/repo>`); enrollment
 does not create, copy, or modify PEM secrets or app ID mappings.
 
 Apps must be installed on the target org before the mint can produce tokens.
@@ -223,7 +223,7 @@ Common causes of verification failure:
 - **Template/traffic divergence** — traffic routing step didn't complete.
   Re-run enrollment to trigger a new revision cycle.
 - **Missing shared app IDs** — the mint has no role-keyed `ROLE_APP_IDS` entries.
-  Run `mint deploy --pem-dir` or `go run ./cmd/fullsend admin install <owner/repo>` on the mint project first.
+  Run `mint deploy --pem-dir`, `go run ./cmd/fullsend mint add-role <role> --project <gcp-project> --org <org>`, or `go run ./cmd/fullsend admin install <owner/repo>` on the mint project first.
 
 ### 5. Handoff to repo admin
 
