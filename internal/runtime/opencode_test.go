@@ -219,6 +219,20 @@ func TestIntersectPermissionRecord(t *testing.T) {
 	assert.Equal(t, "deny", noBash["bash"])
 }
 
+func TestValidateOpenCodePermissionPolicy_DuplicateKeys(t *testing.T) {
+	t.Parallel()
+
+	for _, policy := range []string{
+		`{"*":"deny","bash":{"curl *":"allow"},"bash":{"ls *":"allow"}}`,
+		`{"bash":{"*":"allow","rm *":"deny","*":"allow"}}`,
+	} {
+		err := validateOpenCodePermissionPolicy(json.RawMessage(policy))
+		require.Error(t, err, policy)
+		assert.Contains(t, err.Error(), "duplicate permission key")
+	}
+	require.NoError(t, validateOpenCodePermissionPolicy(json.RawMessage(`{"*":"deny","bash":{"*":"allow","rm *":"deny"}}`)))
+}
+
 func TestParseTrustedPermissionPolicy(t *testing.T) {
 	t.Parallel()
 

@@ -119,8 +119,7 @@ example above.
   (`"bash": {"*": "deny", "gh *": "allow"}`). An agent that declares Bash gets that same map.
 - **The agent is reset before every iteration.** The runner removes agent, tool and config overrides
   the previous iteration could have written, re-uploads the agent, and checks that OpenCode loads it.
-  `plugin/`, `plugins/`, `skill/` and `skills/` in the config directory stay agent-writable until
-  #7824.
+  `skills/` in the config directory stays agent-writable until #7824.
 - **Repo config is ignored.** OpenCode does not load the target repo's `.opencode/` config or skills.
 
 ## Troubleshooting

@@ -515,10 +515,12 @@ func (r OpenCodeRuntime) Run(ctx context.Context, params RunParams, printer *ui.
 // openCodeOverridePaths lists, shell-quoted, the places other than the
 // runner's own files that OpenCode loads agents, tools, commands, config, a
 // cached models.json (preferred over the built-in catalog) or auth.json from;
-// withAgentDir adds agent/, which holds the runner's agent file.
-// plugin/, plugins/, skill/ and skills/ stay writable until #7824.
+// withAgentDir adds agent/, which holds the runner's agent file. The runner
+// installs no plugins yet, so plugin/ and plugins/ are cleared too (#7824
+// must keep its adapter); skills/ holds the runner's skills and stays
+// writable until #7824.
 func (r OpenCodeRuntime) openCodeOverridePaths(withAgentDir bool) string {
-	dirs := []string{"agents", "mode", "modes", "tool", "tools", "command", "commands", "opencode.jsonc"}
+	dirs := []string{"agents", "mode", "modes", "tool", "tools", "command", "commands", "plugin", "plugins", "skill", "opencode.jsonc"}
 	if withAgentDir {
 		dirs = append([]string{openCodeAgentDir}, dirs...)
 	}

@@ -107,6 +107,12 @@ func validateOpenCodePermissionPolicy(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &policy); err != nil || len(policy) == 0 {
 		return fmt.Errorf("permission policy must be a non-empty object")
 	}
+	// Go keeps a duplicate key's last value and position, JSON.parse its
+	// last value at the first position, so the runner's reading of a policy
+	// with duplicates could differ from OpenCode's.
+	if key, ok := openCodeDuplicateKey(raw); ok {
+		return fmt.Errorf("duplicate permission key %q", key)
+	}
 	for _, value := range policy {
 		var action string
 		if err := json.Unmarshal(value, &action); err == nil {
@@ -155,4 +161,40 @@ func (f *openCodeFallbackWatcher) Write(p []byte) (int, error) {
 		f.tail = append(f.tail[:0], buf...)
 	}
 	return f.w.Write(p)
+}
+
+// openCodeDuplicateKey reports the first key that repeats within the
+// permission object or within one of its pattern maps.
+func openCodeDuplicateKey(raw json.RawMessage) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var walk func() (string, bool)
+	walk = func() (string, bool) {
+		tok, err := dec.Token()
+		if err != nil || tok != json.Delim('{') {
+			return "", false
+		}
+		seen := map[string]bool{}
+		for dec.More() {
+			tok, err := dec.Token()
+			if err != nil {
+				return "", false
+			}
+			key, _ := tok.(string)
+			if seen[key] {
+				return key, true
+			}
+			seen[key] = true
+			var value json.RawMessage
+			if err := dec.Decode(&value); err != nil {
+				return "", false
+			}
+			if len(value) > 0 && value[0] == '{' {
+				if k, dup := openCodeDuplicateKey(value); dup {
+					return k, true
+				}
+			}
+		}
+		return "", false
+	}
+	return walk()
 }
