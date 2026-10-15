@@ -108,18 +108,16 @@ What a local OpenCode run needs, beyond the guide:
   fast if the pinned binary is missing or broken, rather than producing an empty transcript.
 - **Read-only agents** — pilot `triage`/`prioritize`; `code`/`fix` are gated on #515.
 - **`OPENCODE_CONFIG_CONTENT`** — Bootstrap validates this env var and fails closed when it is
-  missing or has no `permission` policy. The value must reach the sandbox `.env`; `--env-file`
-  alone only sets the host process env. To bridge the value into the sandbox, add an
-  `env.sandbox` mapping to the harness entry for the agent:
+  missing or has no `permission` policy. `agent new --runtime opencode` adds the
+  `env.sandbox` mapping automatically:
 
   ```yaml
-  # In .fullsend/config.yaml, under the agent's harness entry:
   env:
     sandbox:
       OPENCODE_CONFIG_CONTENT: ${OPENCODE_CONFIG_CONTENT}
   ```
 
-  Then supply the value on the host via `--env-file`:
+  Supply the value on the host via `--env-file`:
 
   ```bash
   # fullsend-opencode.env
