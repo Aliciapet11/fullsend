@@ -500,7 +500,7 @@ Key properties:
   Inference is not available for GitLab instances that are not
   resolvable in public DNS.
 
-  > **Update (2026-10, [#8468](https://github.com/fullsend-ai/fullsend/issues/8468)):**
+  > **Update (2026-10, #8468):**
   > The last sentence above is incorrect. Uploading the instance's public
   > JWKS to the WIF provider (`--jwk-json-path`) lets STS verify tokens
   > without contacting the issuer. This was tested on an internal instance
