@@ -48,6 +48,9 @@ repository.
 - Ability to label, close, and reopen issues. A triage user can apply
   labels such as `ready-to-code`, but that label only dispatches the code
   agent when applied by a user with `write` access or by an agent bot.
+  The same applies to `ok-to-test`: CI removes it when a triage user
+  applies it, and it does not authorize e2e or functional runs. Ask
+  someone with Write access to apply it.
 - Automatic e2e CI triggering on your PRs (no maintainer label needed)
 
 **Criteria:**
@@ -77,6 +80,8 @@ repository.
 - `/fs-retro` and `/fs-prioritize` slash commands (analysis agents
   that require write-level trust)
 - Push access to non-protected branches
+- Authorizing e2e and functional CI on external PRs by applying the
+  `ok-to-test` label after reviewing the latest push
 
 **Criteria:**
 
@@ -107,7 +112,6 @@ project and to help review contributions you are not driving.
 **What it unlocks:**
 
 - CODEOWNERS approval required to merge PRs
-- Authorizing CI runs on PRs from non-maintainers
 - Issue triage and backlog management
 - All capabilities from previous roles
 
