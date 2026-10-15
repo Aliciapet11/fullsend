@@ -1,0 +1,81 @@
+name: Gemara pilot writer (restricted spike)
+on:
+  workflow_call:
+    inputs:
+      pr:
+        type: string
+        required: true
+      head:
+        type: string
+        required: true
+      maintenance:
+        type: boolean
+        default: false
+      probe:
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  writer:
+    if: >-
+      github.repository == 'fullsend-ai/auto-merge'
+      && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run')
+      && (inputs.probe || github.ref == 'refs/heads/main')
+      && startsWith(github.workflow_ref, 'fullsend-ai/auto-merge/.github/workflows/autonomy-pilot.yml@')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+      checks: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - if: ${{ !inputs.probe }}
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.6'
+          cache: false
+      - name: Prepare native evaluator without forge credentials
+        if: ${{ !inputs.probe }}
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          python3 experiments/autonomy-platform/bootstrap_tools.py
+          python3 experiments/autonomy-platform/build_sdk.py
+      - name: Mint repository-scoped Fullsend App token
+        id: app-token
+        uses: fullsend-ai/fullsend/.github/actions/mint-token@02438e1c117d31bf50f9fb9fafabe40856dbfdda # main
+        with:
+          role: coder
+          level: ${{ inputs.probe && 'read' || 'write' }}
+          repos: auto-merge
+          mint_url: ${{ vars.FULLSEND_MINT_URL }}
+      - name: Re-evaluate immediately and request GitHub protected queue
+        if: ${{ !inputs.probe }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PILOT_SOURCE_SHA: ${{ github.sha }}
+          PILOT_EVENT_NAME: ${{ github.event_name }}
+          PILOT_REF: ${{ github.ref }}
+          PILOT_CAN_ENQUEUE: 'true'
+          PILOT_ENQUEUE_TOKEN: ${{ steps.app-token.outputs.token }}
+          PILOT_PR: ${{ inputs.pr }}
+          PILOT_HEAD: ${{ inputs.head }}
+          PILOT_MAINTENANCE: ${{ inputs.maintenance }}
+        run: python3 experiments/autonomy-platform/live_pilot.py --phase enroll --pr "$PILOT_PR" --head "$PILOT_HEAD" --execute
+      - name: Verify read-only probe scope
+        if: inputs.probe
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 experiments/autonomy-platform/app_token.py verify
+      - name: Revoke the short-lived installation token
+        if: always() && steps.app-token.outputs.token != ''
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 experiments/autonomy-platform/app_token.py revoke
