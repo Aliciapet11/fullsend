@@ -149,6 +149,21 @@ const (
 	// account IDs and the pending generation's handoff phase). It never
 	// stores token values. Not yet written by any command. See #8210.
 	VarGitLabPollerGenerations = "FULLSEND_GITLAB_POLLER_GENERATIONS"
+
+	// VarGitLabTriggerAccount is the protected, unmasked ledger for the
+	// trigger-only GitLab service account (account, bootstrap PAT,
+	// deploy-key and branch-grant, and pipeline trigger token IDs, plus
+	// the lifecycle phase). It never stores token values or private keys.
+	// Written by repos install and removed by repos uninstall only after
+	// every resource it records is gone; see #8437 and #8438.
+	VarGitLabTriggerAccount = "FULLSEND_GITLAB_TRIGGER_ACCOUNT"
+
+	// SecretGitLabTriggerAccountToken is the pipeline trigger token owned by
+	// the trigger-only service account. It is stored as a masked, protected
+	// CI/CD variable that no pipeline reads until the dispatch route of #8438
+	// is activated; the existing polling path and FULLSEND_TRIGGER_TOKEN are
+	// unaffected. Never logged and never written to the ledger.
+	SecretGitLabTriggerAccountToken = "FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN"
 )
 
 // GitLab CI pipeline-variable minimum-override roles.

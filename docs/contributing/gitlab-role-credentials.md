@@ -159,13 +159,16 @@ references, never secret values.
 | `FULLSEND_GITLAB_ROLE_<NAME>_TOKEN` | masked secret | Custom role PAT when `credential` is `own`. Provisioned when the role is registered. |
 | `FULLSEND_GITLAB_ROLE_REGISTRY` | unmasked variable | Administrator registry JSON. Absent or empty = built-ins only. |
 | `FULLSEND_GITLAB_ROLE_ROTATION` | unmasked variable | Per-role rotation state (lock, token IDs, expiry dates, phase). Never stores token values. |
+| `FULLSEND_GITLAB_TRIGGER_ACCOUNT` | unmasked variable | Version 1 ledger for the trigger-only service account (phase, nonce, branch, and the account, bootstrap PAT, deploy key, branch-grant entry, and trigger token IDs). Never stores token values or private keys. Written by `repos install` and removed by `repos uninstall` only after every resource it records is gone, so it is the durable cleanup obligation until then. See [Trigger-only service account](#trigger-only-service-account). |
+| `FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN` | masked, protected variable | The pipeline trigger token owned by the trigger-only service account. Written only after GitLab reports the variable masked, protected, and not file-typed; deleted before its token is revoked. No pipeline reads it until the dispatch route of [#8438](https://github.com/fullsend-ai/fullsend/issues/8438) is activated. See [Trigger-only service account](#trigger-only-service-account). |
 | `FULLSEND_GITLAB_POLLER_GENERATIONS` | unmasked variable | Version 1 Poller identity-generation state (current, pending, and retiring Poller account IDs and the pending generation's handoff phase). Never stores token values. Written by `repos install` when it creates or rotates the webhook trigger. Absent = empty state; present but blank fails closed. See [Poller identity generations](#poller-identity-generations). |
 
 Canonical constants live in [`internal/forge/forge.go`](../../internal/forge/forge.go)
 (`SecretForgeToken`, `SecretGitLabPollerToken`,
 `SecretGitLabAnalystToken`, `SecretGitLabCoderToken`,
 `VarGitLabRoleRegistry`,
-`VarGitLabRoleRotation`, `VarGitLabPollerGenerations`). Custom secret names
+`VarGitLabRoleRotation`, `VarGitLabPollerGenerations`,
+`VarGitLabTriggerAccount`, `SecretGitLabTriggerAccountToken`). Custom secret names
 are derived by `gitlabroles.CustomSecretName`.
 
 Role readiness is checked through the registry/status paths rather than the
@@ -771,7 +774,194 @@ before manually removing a stranded lease.
   above.
 
 `ci_pipeline_variables_minimum_override_role` stays `no_one_allowed`.
-There is no fourth identity and no custom webhook receiver.
+The webhook fast path uses no fourth identity and no custom webhook
+receiver; the trigger-only service account described below is separate
+from that path and is not used by it.
+
+### Trigger-only service account
+
+> **Status:** `repos install`, `--rotate-gitlab-trigger-account`, `repos
+> status`, and `repos uninstall` run the lifecycle implemented in
+> [`internal/repos/gitlab_trigger_account.go`](../../internal/repos/gitlab_trigger_account.go).
+> The dispatch route that would use its trigger token stays inactive until
+> [#8438](https://github.com/fullsend-ai/fullsend/issues/8438). Polling is
+> unchanged. Tracked by
+> [#8437](https://github.com/fullsend-ai/fullsend/issues/8437). It is
+> not yet validated against a real GitLab instance
+> ([#8245](https://github.com/fullsend-ai/fullsend/issues/8245)); the
+> fake does not show whether a project Maintainer can delete a deploy key
+> or trigger token owned by the service account.
+
+**Command wiring.** Install, rotation, and uninstall each take the GitLab
+project lease (`LockGitLabProjectLease`) and pass the capability to the
+lifecycle. Every public entry point (`ConvergeGitLabTriggerAccount`,
+`RotateGitLabTriggerAccount`, `RemoveGitLabTriggerAccount`) refuses to run
+unless `lease.holds(owner, repo)`, so overlapping runs cannot write the
+shared ledger from stale snapshots or elevate the same account at once.
+Install runs after the Poller and its generations are settled. It passes a
+verified Poller identity inventory: every managed Poller account, including
+the current, retiring, and abandoned generations recorded in
+`FULLSEND_GITLAB_POLLER_GENERATIONS`, plus every owner of an
+administrator-supplied role credential. A project with no Poller account is a
+verified empty inventory; any other failure to read it stops the run.
+Uninstall removes the trigger account under the lease it already holds,
+after the webhook fast path is removed and before role-identity cleanup
+retires the Poller generation state. It is skipped when the Poller could not be
+reconciled, so the ledger remains the cleanup obligation. A removal failure
+stops uninstall and keeps the manifest entry.
+
+**Trigger token sink.** The token value goes to the masked, protected CI/CD
+variable `FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN`, which no pipeline reads until
+#8438. The value is accepted only after GitLab reports the variable masked,
+protected, and not file-typed; otherwise it is deleted and publication fails,
+so the ledger keeps the obligation and a re-run revokes the token and
+publishes a replacement. Deletion and revocation are attempted independently
+(re-elevation, rotation, uninstall, containment): the deletion is tried first,
+and a failed deletion does not prevent the revocation. Errors are joined and
+unresolved obligations stay in the ledger. The value is never logged or
+written to the ledger. `FULLSEND_TRIGGER_TOKEN` is unrelated and unchanged.
+
+Install and status verify the sink on every run: the variable exists, is
+masked, is protected, is not file-typed, and is not environment-scoped. Status
+reports drift; install repairs it by revoking the trigger and publishing a
+replacement from a fresh account generation (see below). Generic role-variable
+cleanup excludes both the ledger and the token sink, so neither is deleted
+except by the trigger-account lifecycle.
+
+**No schedule in #8437.** A pipeline schedule runs as its owner, and its cron,
+ref, and variables are defined by the dispatch admission rules of #8438.
+Creating one now would activate the dispatch route this change keeps inactive.
+So no schedule belongs to the trigger account in #8437, and any schedule it owns
+is foreign: install fails closed. #8438 adds the schedule lifecycle (creation,
+adoption, drift, rotation, interrupted cleanup, uninstall) when it activates
+scheduled dispatch. The installer's own polling schedules are not owned by the
+trigger account and are untouched.
+
+**Fresh generations; no re-elevation.** A trigger credential that was already
+published is never re-elevated. A trigger request accepted before revocation
+can still materialize as a job while the account holds Maintainer, and GitLab
+has no server-side drain barrier to wait on. Repair and rotation therefore
+create a fresh trigger-account generation (new nonce, account, deploy key, and
+trigger token), publish it, and only then retire the previous generation:
+revoke its trigger, revoke its branch push entry, delete its deploy key, and
+delete its account, each with the ownership checks above. The previous
+generation stays at Developer until retirement. Retirement is recorded in the
+ledger (the `retired` list) and retried by install and uninstall; status
+reports an unfinished retirement as drift.
+
+**Foreign resources.** Each account must own no SSH authentication key, no pipeline schedule, and
+no pipeline trigger token other than the recorded one: any of those fails
+closed, because each would let a holder act as the account, and fullsend
+removes only what it can prove it owns.
+
+**Protected-branch change.** The ledger records the branch every grant was made
+on. When the default branch differs, install and rotation defer with a reason
+instead of moving grants: nothing is granted on the new branch, and `repos
+uninstall` removes the recorded resources from the recorded branch. Run
+uninstall, then install again.
+
+**Status.** `repos status` reports one of `not-installed`, `ready`, `drifted`,
+`deferred`, `in-progress`, `cleanup-pending`, or `unreadable`, with exact
+reasons: a deferral reason (wildcard-only branch, service accounts
+unavailable, pipeline-variable override role not `no_one_allowed`, branch
+change), the live override role of an installed account (the exact role, or
+that it could not be verified), the resources a pending cleanup still holds by
+ID, and drift such as a missing key, push entry, trigger, or sink, a sink that
+is not masked, protected, non-file, and unscoped, an unfinished retirement of a
+previous generation, an account that is not Developer, or an account that no
+longer exists. Anything other than
+`not-installed`, `deferred`, and `ready` is reported as drift.
+
+GitLab.com Free rejects per-user protected-branch merge grants, but it
+accepts a deploy key in a protected branch's `allowed_to_push` list and lets
+the user who added the key start pipelines on that branch. The trigger-only
+service account uses that path. It is a separate project service account,
+never the Poller identity: a PAT on an identity that holds a deploy-key grant
+could write the protected branch, so the Poller role PAT stays on a
+different account. Converge and uninstall both refuse an account ID listed as
+a Poller identity.
+
+**Resources.** All names carry a random 16-hex-character nonce
+(`fullsend-trigger-<nonce>`) that is recorded in
+`FULLSEND_GITLAB_TRIGGER_ACCOUNT` before anything is created:
+
+| Resource | Created with | Ownership proof |
+| --- | --- | --- |
+| Project service account `fullsend-trigger-<nonce>` | installer | Recorded ID, or the single account with the recorded nonce name |
+| Bootstrap PAT `fullsend-trigger-bootstrap-<nonce>` (`api`, one-day expiry) | installer | Recorded ID and nonce name on the owned account (a recorded ID with another name fails closed); always revoked before readiness |
+| Push-capable deploy key `fullsend-trigger-<nonce>` | bootstrap PAT, so the trigger account owns it | Title and the SHA-256 fingerprint recorded before creation |
+| Deploy-key push entry on the branch's exact-name protected-branch rule | installer | Entry read back by deploy key ID; removed only after the key's title and fingerprint are verified and while it still names that key |
+| Pipeline trigger token `fullsend-trigger-<nonce>` | bootstrap PAT, so the trigger account owns it | Recorded ID, description, and owner ID, all checked before any revocation; unrecorded leftovers need the nonce description and the account as owner |
+
+The deploy key pair is generated in memory and the private key is discarded
+immediately; only the public key reaches GitLab. Trigger token values go to
+the caller's publisher and never into the ledger.
+
+**Install** (`ConvergeGitLabTriggerAccount`):
+
+1. Contain any bootstrap left by an interrupted run (revoke the recorded PAT
+   and return an elevated account to Developer) and finish any unfinished
+   rotation before anything else. Then, before any deferral, inventory read or
+   replacement, contain the published sink: remove an unsafe published token
+   variable, and revoke the owned triggers across every publication-owning
+   generation, current and retired, including a retired generation an
+   interrupted rotation left in the sink. The same containment removes the
+   variable and revokes the triggers whatever the variable's attributes when
+   the live override role is weakened or cannot be read.
+   `ContainGitLabTriggerAccount`, the containment-only entry point that
+   `repos install` runs first, performs the same bootstrap and published-sink
+   containment. Variable deletion and each generation's revocation are
+   attempted independently and the errors are joined, so one failure does not
+   suppress the others; unresolved obligations stay in the ledger. If
+   containment cannot complete, fail with an explicit error instead of
+   deferring. Then defer, creating nothing, when
+   the branch has no exact-name protected-branch
+   rule (fullsend never edits wildcard rules, which cover other branches),
+   the live `ci_pipeline_variables_minimum_override_role` is not
+   `no_one_allowed` (the lifecycle checks it itself, so a legacy repository
+   that allows pipeline variable overrides never gets a live trigger
+   credential, whichever install path called it; rotation defers before the
+   ledger moves to a replacement generation), or
+   project service accounts are unavailable (404, 403, or not supported).
+2. Create or adopt the account. Fail closed if it holds an active PAT that
+   fullsend did not create.
+3. If the deploy key or the published trigger token is missing, record
+   `elevated`, raise the account to Maintainer, mint the bootstrap PAT,
+   create the missing resources with it, then revoke every bootstrap PAT and
+   return the account to Developer. The revoke and demotion also run when a
+   create step fails, each independently of the other and on a bounded context
+   that survives cancellation of the caller's.
+4. Grant the key push on the exact-name rule and record the entry ID.
+5. Record phase `ready`. A re-run repairs drift: a missing grant is recreated
+   and an elevated membership is restored to Developer. A missing key or
+   trigger token, or sink drift, is repaired through a fresh generation rather
+   than by re-elevating the published account.
+
+**Rotation** (`RotateGitLabTriggerAccount`) records phase `rotating`, creates a
+fresh generation, publishes its trigger token, and then retires the previous
+generation with the uninstall ownership checks (see above). A re-run of rotate
+or install while the phase is `rotating` or while a retirement is recorded
+finishes it.
+
+**Uninstall** (`RemoveGitLabTriggerAccount`) records phase `removing`, then
+deletes the published token variable and revokes the trigger token, the grant
+entry, the deploy key, any bootstrap PAT, and the account, clearing each from
+the ledger only after it is gone (including any unfinished retirement of a
+previous generation), and finally deletes the ledger. Generic variable cleanup
+never deletes the ledger or the token sink. Install refuses to run while phase is `removing`.
+
+**Recovery.** Every mutating call is preceded by a ledger write, so an
+interrupted install, rotation, or uninstall leaves a retriable obligation:
+re-run the same command. A bootstrap PAT or unpublished trigger token left by
+an interruption cannot be recovered (its value is gone), so the next run
+revokes it and creates a new one. A recorded resource whose name,
+fingerprint, description, or owner no longer matches fails closed and is left
+in place with the ledger kept; an administrator must inspect it. A recorded
+account that no longer exists blocks install; run uninstall to clear the
+remaining resources, then install again. Unrelated administrator accounts,
+keys, push entries, PATs, and trigger tokens are never touched. Do not edit
+or blank `FULLSEND_GITLAB_TRIGGER_ACCOUNT` by hand: a blank or malformed
+ledger fails closed.
 
 ## Job → role mapping
 
