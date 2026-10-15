@@ -409,7 +409,7 @@ The `fork-dispatch.feature` file defines the canonical fork-PR behaviour contrac
 | CEL `is_fork` exclusion (`!event.state.change_proposal.is_fork`) | Empty matrix, exit 0 | Harness with `is_fork` guard in positive scenario; assert agent did not run |
 | Fork PR matches CEL `trigger` on `pull_request_target`; unauthorized actor ([ADR 0054](../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)) | Empty matrix, exit 0 — no agent run | `platform/trigger-auth.feature`. The outsider opens a PR from its own fork; assert the harness dispatch completed with an empty matrix, the agent did not run, and it was dispatched exactly 0 times, then a label as the positive control |
 
-**Kill switch vs disabled harness:** These are distinct mechanisms. The **kill switch** (`kill_switch: true` in `config.yaml`) is a global emergency stop that blocks *all* harness dispatch for the repo — tested in its own scenario because no positive harness can run alongside it. A **disabled harness** (`enabled: false` per agent entry) only prevents that single agent from running — tested as a piggyback negative assertion in the positive-path scenario.
+**Kill switch vs disabled harness:** These are distinct mechanisms. The **kill switch** (`kill_switch: true`, settable in either `config.yaml` or `config.base.yaml`) is a global emergency stop that blocks *all* harness dispatch for the repo — tested in its own scenario because no positive harness can run alongside it. A **disabled harness** (`enabled: false` per agent entry) only prevents that single agent from running — tested as a piggyback negative assertion in the positive-path scenario.
 
 **Consolidation pattern:** To conserve parallel execution slots, add negative-path harnesses (disabled agent, CEL exclusion) alongside the positive-path harness in a single scenario rather than creating separate scenarios. The positive harness wait acts as the settle window for negative assertions (piggyback pattern — see `negativeSettleDuration` in `dispatch.go`). The kill switch scenario cannot be consolidated because it blocks all harnesses.
 
@@ -424,7 +424,9 @@ The `fork-dispatch.feature` file defines the canonical fork-PR behaviour contrac
 
 **`the harness dispatch completes with an empty matrix`** — Waits for the harness workflow run(s) created since the last trigger step, then requires every run that was not cancelled to have completed with its `Harness dispatch` job succeeded and no `Harness run (<agent>)` job scheduled. It fails if the dispatch job failed or an agent was scheduled, and keeps waiting while no run exists yet or a run is still in progress, so a denial is never inferred from a missing or failed run. Pair it with `agent did not run` and `dispatched exactly 0 times` for denial scenarios. It needs a CI driver that implements the optional `ci.EmptyMatrixWaiter`; the GitHub Actions driver does.
 
-**`the kill switch is active`** — Sets `kill_switch: true` in the repo's `config.yaml`, causing `Dispatch` to return an empty matrix for *all* agents. Use this step in a dedicated scenario where no harness should run. Because the kill switch blocks everything, it cannot share a scenario with a positive-path harness.
+**`the kill switch is active`** — Sets `kill_switch: true` in the repo's `config.yaml` (the overlay), causing `Dispatch` to return an empty matrix for *all* agents. Use this step in a dedicated scenario where no harness should run. Because the kill switch blocks everything, it cannot share a scenario with a positive-path harness.
+
+**`the kill switch is active in config.base.yaml`** — Sets `kill_switch: true` in `config.base.yaml` (the central/base layer) instead, leaving `config.yaml` unset. Use this step to verify that a base-file kill switch halts dispatch the same way an overlay one does, since the two files are read independently.
 
 ## Forge operational constraints
 
