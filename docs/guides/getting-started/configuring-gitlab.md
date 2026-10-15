@@ -810,7 +810,9 @@ The provider's `--issuer-uri` is a trust-boundary setting: it must exactly
 match the GitLab instance that signs the `id_tokens` used by this repository.
 Do not leave the `https://gitlab.com` value when installing against a
 self-hosted instance, and do not point a self-hosted provider at a different
-instance.
+instance. If GCP cannot reach that instance over the public internet, also
+upload its signing keys to the provider; see
+[Private OIDC issuers (uploaded JWKS)](#private-oidc-issuers-uploaded-jwks).
 
 The combined project-id and project-path condition scopes trust to this
 project, but any job in that project that can request an OIDC token with
@@ -983,6 +985,82 @@ fullsend repos install <group/project> \
 The GCP project still needs the Vertex AI APIs enabled as described in
 [Getting Inference](getting-inference.md). `--vertex-region` defaults
 to `global` when `--vertex-project` is set.
+
+### Private OIDC issuers (uploaded JWKS)
+
+By default, GCP's Security Token Service (STS) checks each GitLab
+`id_tokens` token by fetching the issuer's OIDC discovery document and
+public signing keys (its JSON Web Key Set, or JWKS) from the provider's
+`--issuer-uri`. If the GitLab instance is reachable only on a private
+network, over VPN, or through corporate DNS, STS cannot fetch them and
+agent jobs fail the token exchange with:
+
+```text
+Error code invalid_grant: Error connecting to the given credential's issuer
+```
+
+Upload the instance's public JWKS to the `gitlab-oidc` provider instead.
+STS then verifies token signatures against the uploaded keys and does not
+contact the instance. This changes only where STS gets the signing keys.
+A platform operator still creates and manages the pool, the provider, and
+its IAM bindings as described above, and `repos install --vertex-project`
+still only writes the CI/CD variables that reference the provider.
+
+1. From a machine that can reach the GitLab instance, download its public
+   signing keys:
+
+   ```bash
+   curl -fsS "$GITLAB_URL/oauth/discovery/keys" > gitlab-jwks.json
+   ```
+
+   This is the `jwks_uri` listed in
+   `$GITLAB_URL/.well-known/openid-configuration`. The file holds only
+   public keys.
+
+2. Upload the keys to the provider:
+
+   ```bash
+   gcloud iam workload-identity-pools providers update-oidc gitlab-oidc \
+     --location=global \
+     --workload-identity-pool=fullsend-inference \
+     --jwk-json-path=gitlab-jwks.json \
+     --project="$GCP_PROJECT"
+   ```
+
+   When creating the provider, you can pass the same `--jwk-json-path`
+   flag to the `create-oidc` command above instead. In both cases, keep
+   `--issuer-uri` set to the instance URL: the token's `iss` claim must
+   still match it, even though STS no longer connects to it.
+
+3. Run an agent job and confirm it gets Vertex AI credentials.
+   `repos install` writes CI/CD variables but never performs the STS token
+   exchange. Install success therefore does not prove the provider accepts
+   the instance's tokens. The first proof is an agent job that completes
+   the exchange.
+
+**Key refresh is your responsibility.** The uploaded JWKS is a static
+copy. When the GitLab instance rotates its OIDC signing key, tokens
+signed with the new key fail the exchange until you upload a fresh JWKS.
+Repeat steps 1 and 2 after every signing-key rotation. Ask the instance
+administrators to tell you about planned rotations, or run a scheduled
+job inside the network that fetches the JWKS and re-uploads it when it
+changes.
+
+Treat key removal as a security event, not only an availability one.
+Because the uploaded JWKS is static, STS keeps trusting every key in it
+after GitLab retires or revokes that key. Removing or revoking a signing
+key in GitLab does not revoke the uploaded copy in GCP. Anyone who holds a
+compromised key can keep minting tokens that satisfy the provider's issuer,
+audience, project-id, and project-path conditions until you replace the
+uploaded JWKS. Issuer-URI discovery drops such keys automatically; an
+uploaded JWKS does not.
+
+- Include emergency revocations, not only planned rotations, in the
+  notification and refresh procedure with the instance administrators.
+- After any retirement or revocation, promptly re-upload a JWKS that
+  omits the retired or compromised keys (repeat steps 1 and 2).
+- If you cannot obtain a trustworthy replacement JWKS during an incident,
+  disable the provider until you can.
 
 ## Runner Configuration
 
@@ -1192,7 +1270,7 @@ external scheduler instead — see [Off-system polling](#off-system-polling)
 | Bot identity | Per-role GitHub Apps | Role-specific project service accounts (`fullsend-poller`, `fullsend-analyst`, `fullsend-coder`), with project access tokens as the fallback; Free tier must enroll these via `--gitlab-role-token` since runtime authentication never falls back to the shared PAT or `fullsend-bot` |
 | Token mint | Required for App installation tokens | Not used — GitLab uses the stored PAT |
 | Event dispatch | Native Actions webhooks | Cron polling (`fullsend slash poll` / `fullsend event poll`) |
-| Inference WIF | Per-repo provider from `inference provision` | Shared `gitlab-oidc` provider via `--vertex-project` |
+| Inference WIF | Per-repo provider from `inference provision` | Operator-created shared `gitlab-oidc` provider, referenced via `--vertex-project` |
 | CI entrypoint | `.github/workflows/fullsend.yaml` | `.gitlab/ci/fullsend-*.yml` included from `.gitlab-ci.yml` |
 
 ### `workflow:` block and `auto_cancel`
@@ -1276,7 +1354,10 @@ fullsend repos set gitlab.url https://gitlab.example.com
 Self-hosted instances sign OIDC tokens with their own issuer. The GCP
 WIF provider's issuer must match that instance; API URL flags do not
 configure WIF. If agent jobs fail token exchange, confirm the
-`gitlab-oidc` provider issuer matches the GitLab instance URL.
+`gitlab-oidc` provider issuer matches the GitLab instance URL. If the
+instance is not reachable from the public internet, upload its JWKS to
+the provider and refresh it after key rotations; see
+[Private OIDC issuers (uploaded JWKS)](#private-oidc-issuers-uploaded-jwks).
 
 ## Next steps
 
