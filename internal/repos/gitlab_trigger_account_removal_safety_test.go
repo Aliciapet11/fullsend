@@ -178,3 +178,56 @@ func TestRemoveGitLabTriggerAccount_NonceRecoveredAccountDoesNotRevokePATByName(
 	_, ok = e.ledger(t)
 	assert.True(t, ok, "obligation kept")
 }
+
+// Repeating the removal of a nonce-recovered account keeps the PAT that merely
+// carries the bootstrap name: the first attempt recorded the account ID, but
+// the ledger still holds no bootstrap obligation.
+func TestRemoveGitLabTriggerAccount_RepeatedRemovalDoesNotRevokePATByName(t *testing.T) {
+	e := newTrigEnv()
+	acct := loseAccountCreate(t, e)
+	st, ok := e.ledger(t)
+	require.True(t, ok)
+	e.f.pats[9] = &ProjectAccessToken{ID: 9, Name: st.patName(), Active: true, UserID: acct}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		err := RemoveGitLabTriggerAccount(context.Background(), e.opts())
+		require.ErrorContains(t, err, "did not create", "attempt %d", attempt)
+		assert.Contains(t, e.f.accounts, acct, "attempt %d keeps the account", attempt)
+		assert.True(t, e.f.pats[9].Active, "attempt %d does not revoke the PAT by name", attempt)
+	}
+}
+
+// A ready account has no bootstrap obligation, so an administrator-created PAT
+// that carries the bootstrap name is not revoked by uninstall.
+func TestRemoveGitLabTriggerAccount_ReadyAccountKeepsPATWithBootstrapName(t *testing.T) {
+	e := newTrigEnv()
+	res, err := ConvergeGitLabTriggerAccount(context.Background(), e.opts())
+	require.NoError(t, err)
+	st, ok := e.ledger(t)
+	require.True(t, ok)
+	require.Zero(t, st.PATID)
+	require.False(t, st.PATPending)
+	e.f.pats[9] = &ProjectAccessToken{ID: 9, Name: st.patName(), Active: true, UserID: res.AccountID}
+
+	err = RemoveGitLabTriggerAccount(context.Background(), e.opts())
+	require.ErrorContains(t, err, "did not create")
+	assert.Contains(t, e.f.accounts, res.AccountID)
+	assert.True(t, e.f.pats[9].Active, "the PAT is not revoked by name alone")
+}
+
+// Retiring a previous generation applies the same rule.
+func TestGitLabTriggerAccount_RetirementKeepsPATWithBootstrapName(t *testing.T) {
+	e := newTrigEnv()
+	e.useRecreatingSink()
+	res, err := ConvergeGitLabTriggerAccount(context.Background(), e.unpublishClearsAttributes(e.opts()))
+	require.NoError(t, err)
+	st, ok := e.ledger(t)
+	require.True(t, ok)
+	e.f.pats[9] = &ProjectAccessToken{ID: 9, Name: st.patName(), Active: true, UserID: res.AccountID}
+
+	_, err = RotateGitLabTriggerAccount(context.Background(), e.unpublishClearsAttributes(e.opts()))
+	require.ErrorContains(t, err, "retiring a previous GitLab trigger account generation")
+	require.ErrorContains(t, err, "did not create")
+	assert.Contains(t, e.f.accounts, res.AccountID)
+	assert.True(t, e.f.pats[9].Active, "the PAT is not revoked by name alone")
+}

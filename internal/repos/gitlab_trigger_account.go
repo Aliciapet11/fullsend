@@ -1599,19 +1599,19 @@ func (op *gitLabTriggerAccountOp) removeAccount(ctx context.Context) error {
 		// An account recovered by its nonce name (the create response or the
 		// ledger write was lost) is recorded first, so the account-scoped calls
 		// below address it and the ledger keeps the obligation.
-		recovered := op.st.AccountID == 0
-		if recovered {
+		if op.st.AccountID == 0 {
 			op.st.AccountID = acct.ID
 			if err := op.save(ctx); err != nil {
 				return err
 			}
 		}
-		// Bootstrap needs a recorded account ID, so a nonce-recovered account
-		// can hold no bootstrap PAT from this lifecycle unless the ledger
-		// records one. Without that proof, name-based revocation is skipped and
-		// any PAT found reaches the foreign-PAT check below, which refuses the
-		// deletion.
-		if !recovered || op.st.PATID != 0 || op.st.PATPending {
+		// Name-based bootstrap PAT revocation needs a persisted bootstrap
+		// obligation, whether or not the account ID was just recovered: a ready
+		// account, or one recovered by nonce on an earlier attempt, holds no
+		// bootstrap PAT from this lifecycle unless the ledger records one.
+		// Without that proof the PAT is left intact and reaches the
+		// foreign-PAT check below, which refuses the deletion.
+		if op.st.PATID != 0 || op.st.PATPending {
 			if err := op.revokeBootstrapPATs(ctx); err != nil {
 				return err
 			}
