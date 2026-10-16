@@ -98,6 +98,8 @@ Credentials are required only for the forges of the selected repos: a GitLab-onl
 
 Install writes to `repos.yaml` itself in only two cases: the first-install `create_issues` writeback described above, and, after a first install, the CLI's release written to `github.fullsend_ref` or `gitlab.fullsend_ref` when that key is unset. `--dry-run` writes neither.
 
+On GitHub, a `fullsend_ref` pinned to an older release needs the CLI from that release: this CLI's shim passes `FULLSEND_GITHUB_RUNNER_SECRETS` ([ADR 0136](../ADRs/0136-runner-secrets-through-one-stored-secret.md)), and GitHub rejects the call when the older reusable workflow does not declare it.
+
 ### Removed configuration flags (breaking)
 
 `repos install` no longer accepts flags that set persistent repository state. Passing one fails immediately with an error that names the `repos.yaml` key and shows a `fullsend repos set` example; nothing is read or written. Declare the value in the manifest instead:

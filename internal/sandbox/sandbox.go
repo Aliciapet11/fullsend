@@ -1608,6 +1608,8 @@ func Upload(sandboxName, localPath, remotePath string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "openshell", "sandbox", "upload",
+		// fullsend always uploads one file it already chose (UploadDir applies its own excludes); OpenShell's Git filtering must not drop it (NVIDIA/OpenShell#3957).
+		"--no-git-ignore",
 		sandboxName,
 		uploadPath,
 		remotePath,
