@@ -369,6 +369,11 @@ func checkRepoStatus(ctx context.Context, cfg ResolvedConfig, dcfg DriftConfig, 
 			return status
 		}
 		checkManagedConfigDrift(ctx, cfg, &status)
+		if status.Error != "" {
+			return status
+		}
+		// A partial earlier installation can leave vendored assets behind.
+		checkStaleVendoredAssets(ctx, cfg, dcfg, resolver, true, &status)
 		return status
 	}
 	status.Installed = true
@@ -464,6 +469,11 @@ func checkRepoStatus(ctx context.Context, cfg ResolvedConfig, dcfg DriftConfig, 
 	}
 
 	checkManagedConfigDrift(ctx, cfg, &status)
+	if status.Error != "" {
+		return status
+	}
+
+	checkStaleVendoredAssets(ctx, cfg, dcfg, resolver, !workflowPresent, &status)
 	if status.Error != "" {
 		return status
 	}

@@ -532,7 +532,11 @@ Install runs in two phases:
    delivery, even when enforcement is requested; legacy variable-based
    wrappers are exempt), scaffold content drift, managed `.fullsend/config.yaml`
    drift, scaffold ref drift, and declared configuration-preset drift against
-   `.fullsend/config.base.yaml`. Missing or drifted components are repaired
+   `.fullsend/config.base.yaml`. When a GitHub repo resolves `vendor: false`,
+   stale assets from an earlier vendored install are reported as
+   `vendored-assets` drift and removed (see
+   [Turning vendoring off](../../cli/repos.md#turning-vendoring-off)). Missing
+   or drifted components are repaired
    automatically; ref updates are committed as PRs (or direct pushes with
    `--direct`).
 
@@ -672,8 +676,11 @@ inspection — typed dispatch activation fails closed without
 `no_one_allowed` before runnable template delivery, even when enforcement
 is requested; legacy upgrades need maintenance-window preparation and legacy variable-based wrappers are
 exempt), scaffold ref drift,
-scaffold content drift, declared configuration-preset drift, and managed
-`.fullsend/config.yaml` drift across all manifest repos:
+scaffold content drift, declared configuration-preset drift, managed
+`.fullsend/config.yaml` drift, and stale vendored assets left by an earlier
+vendored install (`vendored-assets`, removed when a GitHub repo resolves
+`vendor: false`; see [Turning vendoring off](../../cli/repos.md#turning-vendoring-off))
+across all manifest repos:
 
 ```bash
 fullsend repos install -f repos.yaml
@@ -703,6 +710,8 @@ even when enforcement is requested; legacy variable-based wrappers are exempt), 
 removal of a leftover `.gitlab/ci/fullsend-dispatch.yml` from installs
 predating #7707),
 declared configuration-preset drift, managed `.fullsend/config.yaml` drift,
+stale vendored assets (`vendored-assets` drift when a GitHub repo resolves
+`vendor: false`; see [Turning vendoring off](../../cli/repos.md#turning-vendoring-off)),
 and scaffold workflow refs against the manifest. Missing or drifted
 components are repaired automatically (disabled pipeline schedules are the
 exception — see above); a changed preset replaces only

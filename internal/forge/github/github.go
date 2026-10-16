@@ -1827,7 +1827,7 @@ func decodeBlobSHA(resp *http.Response) (string, error) {
 
 // GetFileContent retrieves the content of a file from a repository.
 func (c *LiveClient) GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error) {
-	resp, err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path))
+	resp, err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, escapePathSegments(path)))
 	if err != nil {
 		return nil, fmt.Errorf("get file content: %w", err)
 	}

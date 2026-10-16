@@ -381,7 +381,7 @@ Linux binary resolution for `fullsend run` and vendoring lives in `internal/bina
 | `ResolveForVendor` | Cross-compile → matching release (released CLI only) → fail (no latest) |
 | `ResolveExplicit` | Validate linux/{arch} ELF for `--fullsend-binary` |
 
-Vendoring commit messages use title + body (upload and stale delete). `admin install` and `github setup` remove stale vendored assets at `.fullsend/bin/fullsend` when `--vendor` is not set.
+Vendoring commit messages use title + body (upload and stale delete). `admin install` and `github setup` remove stale vendored assets at `.fullsend/bin/fullsend` when `--vendor` is not set. `repos install` removes them for GitHub repositories whose `repos.yaml` settings resolve `vendor: false`. The read-only plan comes from `scaffold.FindStaleVendoredAssets` and `internal/repos/stale_vendored.go`, and install, dry run and `repos status` all use it. The deletions and any caller rewrites go into the scaffold commit. Ownership comes from the embedded `.defaults/` layout plus the explicit historical lists in `internal/scaffold/vendorhistory.go`, never from the manifest alone. On an established install with stale assets, `convergeEstablishedPhases` completes this planning before any variable or secret write and reuses the plan for the scaffold commit.
 
 ---
 
