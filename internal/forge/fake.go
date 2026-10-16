@@ -42,6 +42,8 @@ func NewFakeClient() *FakeClient {
 		ProjectHooks:             make(map[string][]ProjectHook),
 		PipelineVarOverrideRoles: make(map[string]string),
 		ProjectLeases:            make(map[string]string),
+
+		JobTokenRepositoryPushAllowed: make(map[string]bool),
 		// New trigger tokens are owned by a Developer-level user unless a
 		// test says otherwise.
 		TriggerTokenOwnerID: 1001,
@@ -296,6 +298,11 @@ type FakeClient struct {
 	// ci_pipeline_variables_minimum_override_role setting per project.
 	// Key: "owner/repo". Missing keys round-trip as empty string.
 	PipelineVarOverrideRoles map[string]string
+
+	// JobTokenRepositoryPushAllowed stores the GitLab
+	// ci_push_repository_for_job_token_allowed setting per project.
+	// Key: "owner/repo". Missing keys read as false (push disabled).
+	JobTokenRepositoryPushAllowed map[string]bool
 
 	// Directory listings for ListDirectoryContents.
 	DirContents map[string][]DirectoryEntry // key: "owner/repo/path@ref"
@@ -2882,6 +2889,16 @@ func (f *FakeClient) SetPipelineVariablesMinimumOverrideRole(_ context.Context, 
 	}
 	f.PipelineVarOverrideRoles[owner+"/"+repo] = role
 	return nil
+}
+
+func (f *FakeClient) GetJobTokenRepositoryPushAllowed(_ context.Context, owner, repo string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if e := f.err("GetJobTokenRepositoryPushAllowed"); e != nil {
+		return false, e
+	}
+	return f.JobTokenRepositoryPushAllowed[owner+"/"+repo], nil
 }
 
 func (f *FakeClient) CompareCommits(_ context.Context, owner, repo, base, head string) (string, error) {

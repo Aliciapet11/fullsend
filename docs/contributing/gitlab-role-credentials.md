@@ -837,8 +837,13 @@ uses pipeline variables (the canonical schedule specs and every live managed
 schedule; a failed schedule read defers), the live
 `ci_pipeline_variables_minimum_override_role` is exactly `no_one_allowed`
 (weaker, unreadable, and unsupported all defer; a published token or
-deploy-key grant is not taken as proof), and `DiagnoseGitLabTriggerAccount`
-reports `ready` for the default branch. `repos install` rechecks it whenever
+deploy-key grant is not taken as proof), the live
+`ci_push_repository_for_job_token_allowed` is `false` (the deploy key can push
+to the protected default branch, so a job token that could push the repository
+would let a dispatched job rewrite the code later protected pipelines run;
+enabled, unreadable, and unreported all defer, read through
+`forge.Client.GetJobTokenRepositoryPushAllowed`), and
+`DiagnoseGitLabTriggerAccount` reports `ready` for the default branch. `repos install` rechecks it whenever
 the trigger account converges to ready. That includes the legacy (non-typed)
 path, where the schedules still set `FULLSEND_POLL_MODE` and the gate defers,
 and the path that prepares the trigger account after the Poller protected-ref

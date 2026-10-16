@@ -161,6 +161,37 @@ func TestCheckGitLabTriggerDispatchGate_OverrideRoleMustBeNoOneAllowed(t *testin
 	}
 }
 
+func TestCheckGitLabTriggerDispatchGate_JobTokenPushMustBeDisabled(t *testing.T) {
+	// The trigger account's deploy key may push to the protected default
+	// branch, so CI job-token repository push must stay disabled. An enabled,
+	// unreadable, or unreported setting defers without changing anything.
+	cases := map[string]struct {
+		allowed bool
+		err     error
+		want    string
+	}{
+		"enabled":    {allowed: true, want: "ci_push_repository_for_job_token_allowed is enabled"},
+		"unreadable": {err: forge.ErrForbidden, want: "could not read ci_push_repository_for_job_token_allowed"},
+		"unreported": {err: fmt.Errorf("wrapped: %w", forge.ErrNotSupported), want: "is not reported by this GitLab instance"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := readyTriggerDispatchEnv(t)
+			e.state.JobTokenRepositoryPushAllowed[trigOwner+"/"+trigRepo] = tc.allowed
+			if tc.err != nil {
+				e.state.Errors["GetJobTokenRepositoryPushAllowed"] = tc.err
+			}
+
+			gate := e.dispatchGate()
+			assert.False(t, gate.Ready)
+			require.Len(t, gate.Deferred, 1)
+			assert.Contains(t, gate.Deferred[0], tc.want)
+			assert.Equal(t, tc.allowed, e.state.JobTokenRepositoryPushAllowed[trigOwner+"/"+trigRepo], "the gate must not change the setting")
+			assert.True(t, e.sinkPresent(), "the gate only reads; polling and the published token are untouched")
+		})
+	}
+}
+
 func TestCheckGitLabTriggerDispatchGate_TriggerAccountMustBeReady(t *testing.T) {
 	t.Run("not installed", func(t *testing.T) {
 		e := newTrigEnv()
@@ -192,13 +223,15 @@ func TestCheckGitLabTriggerDispatchGate_ReportsEveryReason(t *testing.T) {
 		{ID: 21, Description: "fullsend event poll", Variables: map[string]string{forge.VarPollMode: "events"}},
 	}
 	e.state.PipelineVarOverrideRoles[trigOwner+"/"+trigRepo] = forge.PipelineVarOverrideDeveloper
+	e.state.JobTokenRepositoryPushAllowed = map[string]bool{trigOwner + "/" + trigRepo: true}
 
 	gate := e.dispatchGate()
 	assert.False(t, gate.Ready)
-	require.Len(t, gate.Deferred, 3)
+	require.Len(t, gate.Deferred, 4)
 	assert.Contains(t, gate.Deferred[0], "managed schedule 21")
 	assert.Contains(t, gate.Deferred[1], "ci_pipeline_variables_minimum_override_role")
-	assert.Contains(t, gate.Deferred[2], "the trigger account is")
+	assert.Contains(t, gate.Deferred[2], "ci_push_repository_for_job_token_allowed")
+	assert.Contains(t, gate.Deferred[3], "the trigger account is")
 }
 
 // swappedScheduleClient answers GetPipelineSchedule with a different

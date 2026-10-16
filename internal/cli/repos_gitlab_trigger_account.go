@@ -88,7 +88,7 @@ func printGitLabTriggerDispatchGate(printer *ui.Printer, repoFullName string, ga
 		printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch activation deferred: %s. Polling stays the dispatch path", repoFullName, strings.Join(gate.Deferred, "; ")))
 		return
 	}
-	printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch prerequisites verified (schedules migrated off pipeline variables, override role no_one_allowed, trigger account ready); the dispatch route is not yet activated", repoFullName))
+	printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch prerequisites verified (schedules migrated off pipeline variables, override role no_one_allowed, job-token repository push disabled, trigger account ready); the dispatch route is not yet activated", repoFullName))
 }
 
 // containFailedKeys returns the owner/repo names of repos whose trigger-account

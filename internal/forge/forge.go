@@ -1276,6 +1276,14 @@ type Client interface {
 	// Returns ErrNotFound if the project does not exist. GitHub returns
 	// ErrNotSupported.
 	SetPipelineVariablesMinimumOverrideRole(ctx context.Context, owner, repo, role string) error
+	// GetJobTokenRepositoryPushAllowed returns the GitLab project setting
+	// ci_push_repository_for_job_token_allowed, which lets a job's
+	// CI_JOB_TOKEN push to the project repository. Returns ErrNotSupported
+	// if the field is absent from GitLab's response (an instance or edition
+	// that does not report the setting), so callers can fail closed rather
+	// than treat an unreported setting as disabled. Returns ErrNotFound if
+	// the project does not exist. GitHub returns ErrNotSupported.
+	GetJobTokenRepositoryPushAllowed(ctx context.Context, owner, repo string) (bool, error)
 
 	// Commit comparison
 	// CompareCommits compares two commits and returns their relationship

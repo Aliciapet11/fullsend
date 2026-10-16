@@ -862,6 +862,10 @@ func TestFakeClient_ErrorInjection(t *testing.T) {
 		{"SetPipelineVariablesMinimumOverrideRole", func(fc *FakeClient) error {
 			return fc.SetPipelineVariablesMinimumOverrideRole(ctx, "o", "r", PipelineVarOverrideOwner)
 		}},
+		{"GetJobTokenRepositoryPushAllowed", func(fc *FakeClient) error {
+			_, err := fc.GetJobTokenRepositoryPushAllowed(ctx, "o", "r")
+			return err
+		}},
 		{"CreateOrUpdateOrgVariableAll", func(fc *FakeClient) error {
 			return fc.CreateOrUpdateOrgVariableAll(ctx, "o", "n", "v")
 		}},
@@ -1185,6 +1189,9 @@ func threadSafetyCalls(ctx context.Context) map[string]func(fc *FakeClient) []an
 		},
 		"SetPipelineVariablesMinimumOverrideRole": func(fc *FakeClient) []any {
 			return pack(fc.SetPipelineVariablesMinimumOverrideRole(ctx, "o", "r", PipelineVarOverrideOwner))
+		},
+		"GetJobTokenRepositoryPushAllowed": func(fc *FakeClient) []any {
+			return pack(fc.GetJobTokenRepositoryPushAllowed(ctx, "o", "r"))
 		},
 		"CompareCommits": func(fc *FakeClient) []any { return pack(fc.CompareCommits(ctx, "o", "r", "a", "b")) },
 

@@ -4772,6 +4772,11 @@ func (c *LiveClient) SetPipelineVariablesMinimumOverrideRole(_ context.Context, 
 	return forge.ErrNotSupported
 }
 
+// GetJobTokenRepositoryPushAllowed is not supported on GitHub.
+func (c *LiveClient) GetJobTokenRepositoryPushAllowed(_ context.Context, _, _ string) (bool, error) {
+	return false, forge.ErrNotSupported
+}
+
 // ForceCommitFileToBranch is not supported on GitHub.
 func (c *LiveClient) ForceCommitFileToBranch(_ context.Context, _, _, _, _, _ string, _ []byte) error {
 	return forge.ErrNotSupported
