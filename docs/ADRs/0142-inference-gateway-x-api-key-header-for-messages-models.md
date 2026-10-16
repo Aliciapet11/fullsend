@@ -62,10 +62,18 @@ credential as `x-api-key` for Messages-dialect requests.** This amends the
 ADR 0137 rule that the `anthropic-messages` header is always `authorization`,
 and the ADR 0138 statement that the `api-key` mode sends its key the same way.
 
-- **The default stays `authorization`.** Existing gateways, including the
-  agentgateway setup in the
+- **The setting is `messages_auth_header`,** a scalar in `inference.gateway`
+  with the values `authorization` and `x-api-key`. Its name says it does not
+  affect the other dialects or codex. It merges field by field like the rest of
+  the block, has no runner-variable override, and
+  `fullsend inference gateway status` reports it.
+- **The default stays `authorization`,** and it is used when the field is
+  absent. Existing gateways, including the agentgateway setup in the
   [operator guide](../guides/infrastructure/inference-gateway-operator.md),
   are unaffected.
+- **It applies to `api-key` mode only.** An `oidc` block that sets
+  `messages_auth_header: x-api-key` is a config error. See
+  [Why `api-key` mode only](#why-api-key-mode-only).
 - **Only the Messages dialect moves.** `openai-responses` and
   `openai-completions` models, and codex, keep `Authorization: Bearer`.
 - **It applies to every runtime that speaks the Messages dialect on the
@@ -147,46 +155,37 @@ prevent. It would also double the requests on every auth failure, and it
 would hide a misconfigured gateway behind a retry. The header is configured,
 never guessed.
 
-### Open questions
+### Why `api-key` mode only
 
-These are left to the implementation in #8370. Whichever option it takes is
-recorded in `docs/architecture.md` and the config reference.
+`x-api-key` is the documented place for an API key on the Messages API, and an
+OIDC JWT is a bearer token, whose documented place is `Authorization`. The
+gateway in #8370 issues keys. Limiting the setting to `api-key` mode is also
+the smallest surface to build, test and explain. Alternatives considered:
 
-**1. Which auth modes the setting applies to.**
+- **Both modes.** A gateway that validates forge OIDC tokens but reads them
+  from `x-api-key` on its Messages route could use the route too. Claude
+  Code's `oidc` mode already copies its `apiKeyHelper` value into `x-api-key`
+  as well as `Authorization`, so "one credential header per request" would
+  need a different launch for that combination. It also carries a short-lived
+  token in the slot documented for a static key.
+- **Both modes, with `oidc` behind a warning,** as `api-key` mode itself is in
+  ADR 0138. This is more flexible, but it keeps the testing cost of the
+  both-modes option.
 
-- **(a) `api-key` only.** An `oidc` block with the setting is a config
-  error. This fits the reasoning above: `x-api-key` is the documented place
-  for an API key, and an OIDC JWT is a bearer token, whose documented place is
-  `Authorization`. The gateway in #8370 issues keys. This is the smallest
-  surface to test and to explain.
-- **(b) Both modes.** A gateway that validates forge OIDC tokens but reads
-  them from `x-api-key` on its Messages route could use the route too.
-  Claude Code's `oidc` mode already copies its `apiKeyHelper` value into
-  `x-api-key` as well as `Authorization`, so "one credential header per
-  request" would need a different launch for that combination. It also
-  carries a short-lived token in the slot documented for a static key.
-- **(c) Both modes, with `oidc` behind a warning,** as `api-key` mode itself
-  is in ADR 0138. This is more flexible than (a), but it keeps the testing
-  cost of (b).
+### Why a Messages-scoped scalar
 
-**2. The setting's name and shape in `inference.gateway`.**
+The name `messages_auth_header` says the setting does not affect the other
+dialects or codex. Alternatives considered:
 
-- **(a) A Messages-scoped scalar,** for example
-  `messages_auth_header: authorization | x-api-key`. Its name says it does
-  not affect the other dialects.
-- **(b) A general scalar,** for example `auth_header: x-api-key`. It is
-  shorter, but a reader may expect it to move every dialect, including codex.
-- **(c) A map keyed by dialect,** for example
+- **A general scalar,** for example `auth_header: x-api-key`. It is shorter,
+  but a reader may expect it to move every dialect, including codex.
+- **A map keyed by dialect,** for example
   `auth_headers: { anthropic-messages: x-api-key }`. It extends to other
   dialects without a rename, but today only one key and one non-default value
   are valid.
-- **(d) A per-model `authHeader` in `models`.** It is the finest grain, but
-  Claude Code reads no model list, and ADR 0137 has the runner own
-  `authHeader`, so it would fit only pi.
-
-Whatever the shape, it merges field by field like the rest of the block, has
-no runner-variable override, and `fullsend inference gateway status` reports
-it.
+- **A per-model `authHeader` in `models`.** It is the finest grain, but Claude
+  Code reads no model list, and ADR 0137 has the runner own `authHeader`, so
+  it would fit only pi.
 
 ## Consequences
 
