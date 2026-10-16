@@ -177,9 +177,6 @@ func TestCheckGitLabTriggerDispatchGate_JobTokenPushMustBeDisabled(t *testing.T)
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := readyTriggerDispatchEnv(t)
-			if e.state.JobTokenRepositoryPushAllowed == nil {
-				e.state.JobTokenRepositoryPushAllowed = map[string]bool{}
-			}
 			e.state.JobTokenRepositoryPushAllowed[trigOwner+"/"+trigRepo] = tc.allowed
 			if tc.err != nil {
 				e.state.Errors["GetJobTokenRepositoryPushAllowed"] = tc.err

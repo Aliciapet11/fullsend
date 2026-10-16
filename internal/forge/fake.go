@@ -42,6 +42,8 @@ func NewFakeClient() *FakeClient {
 		ProjectHooks:             make(map[string][]ProjectHook),
 		PipelineVarOverrideRoles: make(map[string]string),
 		ProjectLeases:            make(map[string]string),
+
+		JobTokenRepositoryPushAllowed: make(map[string]bool),
 		// New trigger tokens are owned by a Developer-level user unless a
 		// test says otherwise.
 		TriggerTokenOwnerID: 1001,
