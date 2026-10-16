@@ -230,7 +230,7 @@ credentials, comes from the sandbox.
 
 | Run | Cleared after `.env` | Sources it covers |
 |---|---|---|
-| Every run | `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `NODE_OPTIONS`, `NODE_PATH`, `BUN_OPTIONS`: code-loading variables, not routing ones | all |
+| Every run | `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE`, `NODE_OPTIONS`, `NODE_PATH`, `BUN_OPTIONS`: code-loading variables, not routing ones | all |
 | Gateway runs | `ANTHROPIC_BASE_URL`, `ANTHROPIC_UNIX_SOCKET`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_IDENTITY_TOKEN`, `ANTHROPIC_IDENTITY_TOKEN_FILE`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`, `ANTHROPIC_PROFILE`, `ANTHROPIC_FEDERATION_RULE_ID`, `CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, `CLAUDE_CODE_HOST_AUTH_ENV_VAR`, `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER`, `AGENT_PROXY_AUTH_TOKEN`, and the provider selectors `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`, `CLAUDE_CODE_USE_GATEWAY`; then the runner exports its own values | all: `env.sandbox`, host-file env files, the agent's `.env` writes, and providers |
 
 On non-gateway runs no `ANTHROPIC_*` variable is cleared. A value the harness sets is honoured.
@@ -273,6 +273,14 @@ override is visible after the fact.
 **A tool call was blocked.** The security hooks log to `/sandbox/workspace/.security/findings.jsonl`
 inside the sandbox. A blocked tool reports its reason in the transcript; an allowlist mismatch names
 the offending tool and the expected vocabulary.
+
+**The run refused to start with exit 97.** Before every launch the runtime checks that
+`/sandbox/claude-config/hooks.json` and the hook scripts under `/sandbox/claude-config/hooks/` are
+exactly what `Bootstrap` installed. A file that was changed, deleted or added, usually by an earlier
+iteration, fails the run instead of loading altered hooks. On the inference gateway route the settings
+document is passed inline, so only the hook scripts are checked. The launch also starts the `claude`
+binary it found before sourcing `.env`, so a `claude` function or a `PATH` entry from `.env` cannot
+stand in for it.
 
 **A harness plugin did not load.** When Claude Code reports a plugin in the `plugin_errors` of its
 startup `system`/`init` event, the run output prints one `Plugin <name> failed to load …` warning per
