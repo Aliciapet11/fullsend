@@ -132,8 +132,17 @@ var fullsendWorkflowRules = []workflowRule{
 	{If: debugTraceDenyRuleIf, When: "never"},
 	{If: `$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_REF_PROTECTED == "true"`},
 	{If: `$CI_PIPELINE_SOURCE == "api" && $CI_COMMIT_REF_PROTECTED == "true" && $STAGE`},
+	{If: childPipelineAgentRuleIf},
 	{If: triggerDispatcherRuleIf},
 }
+
+// childPipelineAgentRuleIf admits agent pipelines a poll or dispatcher job
+// of the trigger-only account starts with its CI_JOB_TOKEN through the
+// pipeline trigger API (source=pipeline, #8438) on the protected default
+// branch. run-agent-job.sh still requires the recorded trigger account as
+// the pipeline creator and a valid dispatch HMAC before any role
+// credential is selected.
+const childPipelineAgentRuleIf = `$CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH && $STAGE`
 
 // triggerDispatcherRuleIf admits webhook-triggered (source=trigger)
 // pipelines on the protected default branch (ADR 0125, #7771). The
@@ -156,6 +165,7 @@ var unmergeWorkflowRules = []workflowRule{
 	{If: debugTraceDenyRuleIf, When: "never"},
 	{If: `$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_REF_PROTECTED == "true"`},
 	{If: `$CI_PIPELINE_SOURCE == "api" && $CI_COMMIT_REF_PROTECTED == "true" && $STAGE`},
+	{If: childPipelineAgentRuleIf},
 	{If: triggerDispatcherRuleIf},
 }
 

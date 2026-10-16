@@ -674,8 +674,8 @@ Whenever install leaves the trigger account ready, including after GitLab
 refuses the Poller protected-ref grant, it also rechecks the dispatch
 activation gate (`CheckGitLabTriggerDispatchGate`) and reports either
 `GitLab trigger dispatch activation deferred: <reasons>` or
-`GitLab trigger dispatch prerequisites verified`. The recheck only reads and
-lists every unmet prerequisite: managed scheduled polling no longer uses
+`GitLab trigger dispatch prerequisites verified`. The recheck lists every
+unmet prerequisite: managed scheduled polling no longer uses
 pipeline variables (the canonical schedule specs and every live managed
 schedule; a failed schedule read defers), the live
 `ci_pipeline_variables_minimum_override_role` is exactly `no_one_allowed`
@@ -684,9 +684,18 @@ already published), CI job-token repository push
 (`ci_push_repository_for_job_token_allowed`) is disabled (enabled, unreadable,
 and unreported all defer), and the trigger account is ready on the default branch,
 verified against live GitLab state. A legacy install, whose schedules still set
-`FULLSEND_POLL_MODE`, defers. A deferral is informational, changes nothing, and
-polling stays the dispatch path. Even when the prerequisites are verified, no
-dispatch path uses the trigger token yet.
+`FULLSEND_POLL_MODE`, defers, and so does a committed CI job that a trigger or
+agent child (`source=pipeline`) pipeline would run besides Fullsend's own.
+Every converge, rotate, containment or uninstall run first deletes the
+`FULLSEND_GITLAB_DISPATCH_ACTIVATION` variable, before it rechecks the gate.
+When the gate passes, `repos install` records that variable, bound to the exact
+`FULLSEND_GITLAB_TRIGGER_ACCOUNT` ledger generation, which activates the
+CI_JOB_TOKEN child-pipeline (`source=pipeline`) dispatch route; install fails
+if recording the activation fails. A deferral leaves the activation cleared,
+and polling stays the dispatch path through the Poller credential. The ledger
+carries no activation field, so an older CLI still reads it; see the
+[older-CLI behavior and rollback](../contributing/gitlab-role-credentials.md#trigger-only-service-account)
+note.
 
 As soon as the manifest and forge clients are available, before the
 configuration preflights or any convergence, `repos install` runs a

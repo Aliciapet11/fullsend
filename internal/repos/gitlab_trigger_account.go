@@ -441,6 +441,11 @@ func convergeGitLabTriggerAccountLocked(ctx context.Context, opts GitLabTriggerA
 			return GitLabTriggerAccountResult{}, errors.New("GitLab trigger account: an uninstall is still in progress; re-run uninstall to finish it before installing again")
 		}
 	}
+	// Any lifecycle run withdraws the dispatch activation first; the caller
+	// records it again only after the activation gate passes on the result.
+	if err := op.clearDispatchActive(ctx); err != nil {
+		return GitLabTriggerAccountResult{}, err
+	}
 	// Contain an unfinished bootstrap before any deferral or inventory read
 	// can return early and leave the account elevated.
 	if err := op.containBootstrap(ctx); err != nil {
@@ -486,6 +491,99 @@ func convergeGitLabTriggerAccountLocked(ctx context.Context, opts GitLabTriggerA
 		return op.result(false), err
 	}
 	return op.result(true), nil
+}
+
+// gitLabDispatchActivation is the activation record stored in
+// forge.VarGitLabDispatchActivation. It binds to the ledger generation it was
+// written for: the scaffold honors it only while the ledger is ready and every
+// field below still equals the ledger's, so an older CLI that rotates,
+// repairs or removes the account (and does not know this variable) leaves it
+// stale, never active. The activation is not part of the ledger because older
+// decoders reject unknown ledger fields before they read the version.
+type gitLabDispatchActivation struct {
+	Version        int    `json:"version"`
+	Nonce          string `json:"nonce"`
+	AccountID      int    `json:"account_id"`
+	DeployKeyID    int    `json:"deploy_key_id"`
+	GrantEntryID   int    `json:"grant_entry_id"`
+	TriggerTokenID int64  `json:"trigger_token_id"`
+}
+
+const gitLabDispatchActivationVersion = 1
+
+// activationFor derives the activation record that matches the working copy of
+// the ledger.
+func (op *gitLabTriggerAccountOp) activationFor() gitLabDispatchActivation {
+	return gitLabDispatchActivation{
+		Version:        gitLabDispatchActivationVersion,
+		Nonce:          op.st.Nonce,
+		AccountID:      op.st.AccountID,
+		DeployKeyID:    op.st.DeployKeyID,
+		GrantEntryID:   op.st.GrantEntryID,
+		TriggerTokenID: op.st.TriggerTokenID,
+	}
+}
+
+// clearDispatchActive withdraws the recorded dispatch activation, if any. It
+// deletes the activation variable even when no ledger exists, so an orphaned
+// record never outlives the ledger it was bound to. The ledger itself is not
+// rewritten: older decoders keep reading it unchanged.
+func (op *gitLabTriggerAccountOp) clearDispatchActive(ctx context.Context) error {
+	if op.opts.State == nil {
+		return nil
+	}
+	return withdrawGitLabDispatchActivation(ctx, op.opts.State, op.opts.Owner, op.opts.Repo)
+}
+
+// withdrawGitLabDispatchActivation deletes the activation variable. A missing
+// variable is success.
+func withdrawGitLabDispatchActivation(ctx context.Context, client forge.Client, owner, repo string) error {
+	if err := client.DeleteRepoVariable(ctx, owner, repo, forge.VarGitLabDispatchActivation); err != nil && !forge.IsNotFound(err) {
+		return safeAPIError("withdrawing "+forge.VarGitLabDispatchActivation, err)
+	}
+	return nil
+}
+
+// SetGitLabTriggerDispatchActive records (or withdraws) the dispatch
+// activation. Callers pass active=true only when
+// CheckGitLabTriggerDispatchGate returned Ready for the same project state.
+// Activation requires a ready ledger and is written as a record bound to that
+// ledger generation; withdrawing deletes the record and is a no-op when none
+// exists.
+func SetGitLabTriggerDispatchActive(ctx context.Context, opts GitLabTriggerAccountOptions, active bool) error {
+	if err := requireGitLabTriggerLease(opts); err != nil {
+		return err
+	}
+	if opts.State == nil {
+		return errors.New("GitLab trigger account: a state store is required")
+	}
+	if !active {
+		return withdrawGitLabDispatchActivation(ctx, opts.State, opts.Owner, opts.Repo)
+	}
+	op, err := loadGitLabTriggerAccountOp(ctx, opts)
+	if err != nil {
+		return err
+	}
+	if !op.exists {
+		return errors.New("GitLab trigger account: dispatch cannot be activated without a ledger")
+	}
+	if op.st.Phase != gitLabTriggerPhaseReady {
+		return fmt.Errorf("GitLab trigger account: dispatch cannot be activated while the ledger phase is %q", op.st.Phase)
+	}
+	if op.st.AccountID <= 0 || op.st.TriggerTokenID <= 0 || !op.st.TriggerPublished {
+		return errors.New("GitLab trigger account: dispatch cannot be activated before the account and its published trigger token are recorded")
+	}
+	raw, err := json.Marshal(op.activationFor())
+	if err != nil {
+		return err
+	}
+	// Written unmasked and protected: pipelines on the protected default branch
+	// read it, and it holds no secret. If the write fails the activation is
+	// withdrawn as far as possible so a half-applied update never stays active.
+	if err := opts.State.UpdateCIVariable(ctx, opts.Owner, opts.Repo, forge.VarGitLabDispatchActivation, string(raw), true); err != nil {
+		return errors.Join(safeAPIError("recording "+forge.VarGitLabDispatchActivation, err), withdrawGitLabDispatchActivation(ctx, opts.State, opts.Owner, opts.Repo))
+	}
+	return nil
 }
 
 // containBootstrap revokes a recorded bootstrap PAT and returns an elevated
@@ -1563,6 +1661,12 @@ func RemoveGitLabTriggerAccount(ctx context.Context, opts GitLabTriggerAccountOp
 	if err != nil {
 		return err
 	}
+	// Withdraw the dispatch activation before any resource it relies on is
+	// removed, whether or not a ledger remains, so no pipeline selects the
+	// child-pipeline route while the account is being torn down.
+	if err := op.clearDispatchActive(ctx); err != nil {
+		return err
+	}
 	if !op.exists {
 		return nil
 	}
@@ -1713,7 +1817,8 @@ func (op *gitLabTriggerAccountOp) removeAccount(ctx context.Context) error {
 // every retired one, and it creates nothing: no account, key, grant, trigger
 // or variable. It does not need the Poller inventory, so a malformed or
 // unreadable inventory, or a failure in any other install stage, cannot keep
-// it from running. It is a no-op when no ledger exists. A failure is returned
+// it from running. It also withdraws a recorded dispatch activation. It is a
+// no-op when no ledger exists. A failure is returned
 // and the ledger keeps every obligation that was not completed.
 func ContainGitLabTriggerAccount(ctx context.Context, opts GitLabTriggerAccountOptions) error {
 	if err := requireGitLabTriggerLease(opts); err != nil {
@@ -1726,10 +1831,17 @@ func ContainGitLabTriggerAccount(ctx context.Context, opts GitLabTriggerAccountO
 	if err != nil {
 		return err
 	}
+	// The dispatch activation is withdrawn first: containment runs before every
+	// install stage, so a later stage that fails before the lifecycle can
+	// withdraw it never leaves a recorded activation behind (#8438). The
+	// install re-records it only after the activation gate passes again. A
+	// failed withdrawal stops containment's other work from being skipped but
+	// is still reported.
+	clearErr := op.clearDispatchActive(ctx)
 	if !op.exists {
-		return nil
+		return clearErr
 	}
-	errs := []error{op.containBootstrap(ctx)}
+	errs := []error{clearErr, op.containBootstrap(ctx)}
 	for i := range op.st.Retired {
 		sub := &gitLabTriggerAccountOp{opts: op.opts, st: op.st.Retired[i], exists: true, retired: true}
 		sub.persist = func(ctx context.Context) error {
@@ -1812,6 +1924,9 @@ func RotateGitLabTriggerAccount(ctx context.Context, opts GitLabTriggerAccountOp
 	}
 	if !op.exists || (op.st.Phase != gitLabTriggerPhaseReady && op.st.Phase != gitLabTriggerPhaseRotating) {
 		return GitLabTriggerAccountResult{}, errors.New("GitLab trigger account: rotation needs a ready trigger account; run install first")
+	}
+	if err := op.clearDispatchActive(ctx); err != nil {
+		return GitLabTriggerAccountResult{}, err
 	}
 	if op.st.Branch != opts.Branch {
 		if err := op.containUnsafePublishedSink(ctx); err != nil {

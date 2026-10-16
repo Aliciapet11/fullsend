@@ -322,6 +322,7 @@ func IsGitLabRoleManagedVar(name string) bool {
 	case forge.SecretForgeToken, forge.VarGitLabRoleRegistry,
 		forge.VarGitLabRoleRotation, forge.VarGitLabPollerGenerations,
 		forge.VarGitLabTriggerAccount, forge.SecretGitLabTriggerAccountToken,
+		forge.VarGitLabDispatchActivation,
 		forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken,
 		forge.SecretGitLabCoderToken:
 		return true

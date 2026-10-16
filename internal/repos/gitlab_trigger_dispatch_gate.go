@@ -41,7 +41,9 @@ type GitLabTriggerDispatchGate struct {
 //     so a CI_JOB_TOKEN that could push the repository would let a job in a
 //     dispatched pipeline rewrite the code later protected pipelines run.
 //     An enabled, unreadable, or unreported setting defers.
-//  4. The trigger account (DiagnoseGitLabTriggerAccount) is ready on branch,
+//  4. The committed CI files run no unrelated job in a trigger or agent
+//     child (source=pipeline) pipeline (gitlabTriggerExtraWorkProblem).
+//  5. The trigger account (DiagnoseGitLabTriggerAccount) is ready on branch,
 //     verified against live project state.
 //
 // A nil api or an empty branch makes the live account checks and the
@@ -61,6 +63,16 @@ func CheckGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, ap
 	}
 	if reason := gitlabTriggerDispatchJobTokenPushProblem(ctx, client, owner, repo); reason != "" {
 		deferred = append(deferred, reason)
+	}
+	if branch != "" {
+		// Unrelated user jobs must not run in the trigger or agent child
+		// (source=pipeline) pipelines: they would receive the protected
+		// credentials those pipelines carry.
+		if problem, err := gitlabDispatchExtraWorkProblem(ctx, client, owner, repo, branch); err != nil {
+			deferred = append(deferred, "could not verify that unrelated jobs are excluded from trigger and agent child pipelines: "+err.Error())
+		} else if problem != "" {
+			deferred = append(deferred, problem)
+		}
 	}
 	if status := DiagnoseGitLabTriggerAccount(ctx, client, api, owner, repo, branch); status.State != GitLabTriggerStateReady {
 		reason := "the trigger account is " + status.State

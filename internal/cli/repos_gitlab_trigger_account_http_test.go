@@ -302,6 +302,13 @@ func (s *tahServer) setLevel(uid, level int) {
 func (s *tahServer) project(w http.ResponseWriter, r *http.Request, uid int, seg []string) {
 	key := tahRouteKey(r.Method, seg)
 	s.hits[key]++
+	// The activation gate reads the committed CI files (#8438) to check that
+	// no unrelated job runs in trigger or agent child pipelines. This
+	// emulation commits none, so every file is absent.
+	if len(seg) >= 3 && seg[0] == "repository" && seg[1] == "files" && r.Method == http.MethodGet {
+		tahJSON(w, http.StatusNotFound, map[string]any{"message": "404 File Not Found"})
+		return
+	}
 	switch key {
 	// ---- CI/CD variables (ledger, sink, lease, Poller state) ----
 	case "POST /variables":
