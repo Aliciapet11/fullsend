@@ -7,6 +7,11 @@
 FROM docker.io/library/ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 LABEL fullsend-ci-local=1
 
+# TARGETARCH is set automatically by BuildKit and Buildah, but not by Docker's
+# legacy builder: fail first, with a clear message, rather than mid-download.
+ARG TARGETARCH
+RUN [ -n "${TARGETARCH}" ] || { echo "TARGETARCH is empty: Docker's legacy builder is not supported; use BuildKit (the default since Docker 23) or Podman" >&2; exit 1; }
+
 # build-essential: -race needs cgo. util-linux: flock. bc/gzip: wasm-build.
 # jq: scaffold script tests. xz-utils: node tarball. python3 + python3-yaml:
 # the runner's system /usr/bin/python3, which some scripts hardcode
@@ -17,7 +22,6 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       bc build-essential ca-certificates curl file git gzip jq procps python3 python3-yaml unzip util-linux xz-utils zip \
     && rm -rf /var/lib/apt/lists/*
 
-ARG TARGETARCH
 # Set by ci-local from the checkout; no defaults, so a direct build fails loudly.
 ARG GO_VERSION
 ARG PYTHON_VERSION
@@ -32,26 +36,12 @@ RUN for v in GO_VERSION PYTHON_VERSION NODE_VERSION PIP_PACKAGES LYCHEE_VERSION 
       eval "x=\${$v}"; [ -n "$x" ] || { echo "build arg $v is not set; build with hack/ci-local/ci-local build-image" >&2; exit 1; }; \
     done
 
-# fetch URL SHA256: download to /tmp/dl and verify, or fail the build.
-# sumof URL NAME: NAME's SHA256 from a publisher's checksum file ("<sum>  <name>"
-# lines, or a lone "<sum>"), or fail the build.
-RUN <<'EOF'
-set -e
-cat > /usr/local/bin/fetch <<'SH'
-#!/bin/sh
-set -e
-curl -sSfL "$1" -o /tmp/dl
-echo "$2  /tmp/dl" | sha256sum -c - >/dev/null
-SH
-cat > /usr/local/bin/sumof <<'SH'
-#!/bin/sh
-set -e
-s=$(curl -sSfL "$1" | awk -v n="$2" '{f = $2; sub(/^\*/, "", f)} f == n || NF == 1 {print $1; exit}')
-[ -n "$s" ] || { echo "no checksum for $2 in $1" >&2; exit 1; }
-echo "$s"
-SH
-chmod +x /usr/local/bin/fetch /usr/local/bin/sumof
-EOF
+# fetch (download + verify SHA256) and sumof (a name's SHA256 from a checksum
+# file): see the scripts next to this file. COPY instead of a RUN heredoc, which
+# needs Buildah >= 1.33 / BuildKit; explicit chmod instead of COPY --chmod
+# (BuildKit-only) and in case the checkout dropped the executable bit.
+COPY fetch sumof /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/fetch /usr/local/bin/sumof
 
 # Go (actions/setup-go, go-version-file: go.mod): the newest stable release
 # matching go.mod's `go` line ("1.26.5" exactly, or "1.26" -> newest 1.26.x).

@@ -187,6 +187,51 @@ else
   fail "native arches share an image tag: ${ARM_TAG} vs ${X86_TAG}"
 fi
 
+# The fetch/sumof helpers are copied into the image, so changing one must
+# change the tag. Run a copy of hack/ci-local so the real files stay untouched.
+COPY_DIR="${WORK}/ci-local-copy"
+mkdir -p "${COPY_DIR}"
+cp "${SCRIPT_DIR}/ci-local" "${SCRIPT_DIR}/Containerfile" "${SCRIPT_DIR}/fetch" "${SCRIPT_DIR}/sumof" "${COPY_DIR}/"
+copy_tag() {
+  : > "${ENGINE_LOG}"
+  CI_LOCAL_ENGINE="${PODMAN}" STUB_IMAGE_RC=1 "${COPY_DIR}/ci-local" -C "${REPO}" go-vet >/dev/null 2>&1 || true
+  grep -A1 -x -- '-t' <<< "$(last_build_args)" | tail -1
+}
+T_BEFORE=$(copy_tag)
+echo "# changed" >> "${COPY_DIR}/sumof"
+T_SUMOF=$(copy_tag)
+echo "# changed" >> "${COPY_DIR}/fetch"
+T_FETCH=$(copy_tag)
+if [ -n "${T_BEFORE}" ] && [ "${T_BEFORE}" != "${T_SUMOF}" ] && [ "${T_SUMOF}" != "${T_FETCH}" ]; then
+  pass "changing fetch or sumof changes the image tag, forcing a rebuild"
+else
+  fail "helper change did not change the tag: ${T_BEFORE} / ${T_SUMOF} / ${T_FETCH}"
+fi
+
+# --- sumof: checksum-file formats (local file:// URLs, no network) ---
+SUMS="${WORK}/sums"
+mkdir -p "${SUMS}"
+printf '%s  other.tar.gz\n%s  tool-linux.tar.gz\n' "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})" > "${SUMS}/two-space.txt"
+printf '%s *tool-linux.tar.gz\n' "$(printf 'c%.0s' {1..64})" > "${SUMS}/binary-mode.txt"
+printf '%s\n' "$(printf 'd%.0s' {1..64})" > "${SUMS}/lone.sha256"
+sumof_out() { "${SCRIPT_DIR}/sumof" "file://${SUMS}/$1" "$2" 2> /dev/null; }
+if [ "$(sumof_out two-space.txt tool-linux.tar.gz)" = "$(printf 'b%.0s' {1..64})" ] &&
+  [ "$(sumof_out binary-mode.txt tool-linux.tar.gz)" = "$(printf 'c%.0s' {1..64})" ] &&
+  [ "$(sumof_out lone.sha256 tool-linux.tar.gz)" = "$(printf 'd%.0s' {1..64})" ]; then
+  pass "sumof reads '<sum>  <name>', '<sum> *<name>' and lone-'<sum>' checksum files"
+else
+  fail "sumof formats: two-space=$(sumof_out two-space.txt tool-linux.tar.gz) binary=$(sumof_out binary-mode.txt tool-linux.tar.gz) lone=$(sumof_out lone.sha256 tool-linux.tar.gz)"
+fi
+set +e
+"${SCRIPT_DIR}/sumof" "file://${SUMS}/two-space.txt" missing.tar.gz > /dev/null 2>&1; rc_missing=$?
+"${SCRIPT_DIR}/sumof" "file://${SUMS}/two-space.txt" > /dev/null 2>&1; rc_usage=$?
+set -e
+if [ "${rc_missing}" -ne 0 ] && [ "${rc_usage}" -eq 2 ]; then
+  pass "sumof fails for an unlisted name and on wrong usage"
+else
+  fail "sumof must fail: missing-name rc=${rc_missing}, usage rc=${rc_usage}"
+fi
+
 # --- fail-closed targets (command executed on the host via the stub) ---
 cat > "${SHIMS}/git" <<'SHIM'
 #!/usr/bin/env bash

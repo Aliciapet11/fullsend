@@ -23,6 +23,13 @@ cache volumes, until the checkout's tool versions change (see below).
 | macOS + Docker Desktop | Docker Desktop running; set `CI_LOCAL_ENGINE=docker` if Podman is also installed |
 | Fedora / RHEL / other Linux | install `podman` or `docker`; SELinux `:z` labelling is automatic |
 
+The `Containerfile` uses only classic instructions (no `RUN` heredocs, no
+`COPY --chmod`), so it builds with older Buildah/Podman too. Tested with
+Podman 6.1, Buildah 1.28 (the version behind Debian 12's Podman 4.3) and
+Docker 29 with BuildKit. Docker's **legacy builder** (`DOCKER_BUILDKIT=0`) is
+not supported: it leaves `TARGETARCH` unset, and the build stops at its first
+step with a message saying so.
+
 Apple silicon runs arm64 Linux. Use `--amd64` to match GitHub's x86_64
 runners exactly (emulated, slow). It needs Rosetta emulation, which Docker
 Desktop uses (`CI_LOCAL_ENGINE=docker`); under QEMU emulation, the default
