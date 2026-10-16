@@ -51,7 +51,6 @@ func TestCheckGitLabTriggerDispatchGate_ReadyWhenAllPrerequisitesHold(t *testing
 	gate := e.dispatchGate()
 	assert.True(t, gate.Ready)
 	assert.Empty(t, gate.Deferred)
-
 }
 
 func TestCheckGitLabTriggerDispatchGate_RequiresLiveVerification(t *testing.T) {
