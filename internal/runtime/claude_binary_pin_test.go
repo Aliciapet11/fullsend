@@ -27,7 +27,7 @@ func TestBuildRunCommand_PinsClaudeBinary(t *testing.T) {
 	pinAt := strings.Index(cmd, pin)
 	envAt := strings.Index(cmd, ". /sandbox/workspace/.env")
 	unsetAt := strings.Index(cmd, "unset -f claude")
-	loaderAt := strings.Index(cmd, "unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP NODE_OPTIONS NODE_PATH BUN_OPTIONS")
+	loaderAt := strings.Index(cmd, "unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE NODE_OPTIONS NODE_PATH BUN_OPTIONS")
 	launchAt := strings.Index(cmd, `"$FULLSEND_CLAUDE_BIN" --print`)
 	require.NotEqual(t, -1, pinAt, cmd)
 	require.NotEqual(t, -1, envAt, cmd)
