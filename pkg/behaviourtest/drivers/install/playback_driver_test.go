@@ -113,29 +113,29 @@ func TestPlaybackInstallHooks_AfterInstall_CreateIssueError(t *testing.T) {
 
 func TestPlaybackSetupOpts_DefaultsToVendoredDummy(t *testing.T) {
 	t.Setenv("PLAYBACK_RUNTIME", "")
-	opts := playbackSetupOpts()
+	opts := playbackInstallOpts()
 	assert.True(t, opts.Vendor)
 	assert.Empty(t, opts.Runtime)
 }
 
 func TestPlaybackSetupOpts_HonoursEnvOverride(t *testing.T) {
 	t.Setenv("PLAYBACK_RUNTIME", "dummy-playback")
-	opts := playbackSetupOpts()
+	opts := playbackInstallOpts()
 	assert.Equal(t, "dummy-playback", opts.Runtime)
 }
 
 // TestPlaybackSetupOpts_PropagatesConfigPreset is a regression test for a
 // factory-path bug: NewRepoPoolCFMintPreviews builds its InstallOpts via
-// playbackSetupOpts instead of common.DefaultInstallOpts, and the
+// playbackInstallOpts instead of common.DefaultInstallOpts, and the
 // replacement silently dropped BEHAVIOUR_CONFIG_PRESET (unlike
 // newRepoEnsurer, which applies it onto the vendored-mode defaults). That
 // made ordinary DEV suites silently lose their requested preset even when
-// PLAYBACK_RUNTIME is unset. playbackSetupOpts must forward the preset so
+// PLAYBACK_RUNTIME is unset. playbackInstallOpts must forward the preset so
 // it reaches the generated repos.yaml entry as config_base.source.
 func TestPlaybackSetupOpts_PropagatesConfigPreset(t *testing.T) {
 	t.Setenv("PLAYBACK_RUNTIME", "")
 	t.Setenv("BEHAVIOUR_CONFIG_PRESET", "https://example.com/preset.yaml")
-	opts := playbackSetupOpts()
+	opts := playbackInstallOpts()
 	assert.Equal(t, "https://example.com/preset.yaml", opts.ConfigPreset)
 
 	var manifest string
@@ -156,7 +156,7 @@ func TestPlaybackSetupOpts_PropagatesConfigPreset(t *testing.T) {
 func TestPlaybackSetupOpts_ConfigPresetAndRuntime(t *testing.T) {
 	t.Setenv("PLAYBACK_RUNTIME", "dummy-playback")
 	t.Setenv("BEHAVIOUR_CONFIG_PRESET", "https://example.com/preset.yaml")
-	opts := playbackSetupOpts()
+	opts := playbackInstallOpts()
 	assert.Equal(t, "https://example.com/preset.yaml", opts.ConfigPreset)
 	assert.Equal(t, "dummy-playback", opts.Runtime)
 

@@ -108,7 +108,7 @@ func playbackInstallHooks(opts common.InstallOpts, logf func(string, ...any)) In
 	}
 }
 
-// playbackSetupOpts returns vendored-mode InstallOpts with ConfigPreset
+// playbackInstallOpts returns vendored-mode InstallOpts with ConfigPreset
 // populated from BEHAVIOUR_CONFIG_PRESET (same as newRepoEnsurer) and
 // Runtime set to the playback runtime when PLAYBACK_RUNTIME is set in the
 // environment, or left empty (normal "dummy" runtime) otherwise. Factories
@@ -117,7 +117,7 @@ func playbackInstallHooks(opts common.InstallOpts, logf func(string, ...any)) In
 // back either a normal behaviour suite or a playback suite depending on
 // how the process was launched, without losing BEHAVIOUR_CONFIG_PRESET
 // support for ordinary (non-playback) suites.
-func playbackSetupOpts() common.InstallOpts {
+func playbackInstallOpts() common.InstallOpts {
 	opts := common.DefaultInstallOpts()
 	opts.ConfigPreset = envConfigPreset()
 	if runtime := os.Getenv("PLAYBACK_RUNTIME"); runtime != "" {

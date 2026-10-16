@@ -80,11 +80,11 @@ func NewRepoPoolCFMintPreviews(
 		return nil, fmt.Errorf("cfmint factory: creating mint driver: %w", err)
 	}
 
-	// playbackSetupOpts returns normal "dummy"-runtime opts unless
+	// playbackInstallOpts returns normal "dummy"-runtime opts unless
 	// PLAYBACK_RUNTIME is set in the environment, in which case this same
 	// factory backs a playback suite (see NewPlaybackDriver) instead of
 	// the standard behaviour suite.
-	return buildCFMintDriverWithOpts(org, md, client, token, binary, gcpProjectID, poolSize, playbackSetupOpts(), logf)
+	return buildCFMintDriverWithOpts(org, md, client, token, binary, gcpProjectID, poolSize, playbackInstallOpts(), logf)
 }
 
 // Compile-time check: NewRepoPoolCFMintPreviews satisfies Factory.

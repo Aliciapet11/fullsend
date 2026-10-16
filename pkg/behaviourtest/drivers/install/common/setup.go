@@ -141,6 +141,12 @@ var moduleRoot = func() (string, error) {
 // WIF provider is resolved first (see ResolveInferenceWIFProvider) and
 // passed with the project as --vertex-project / --vertex-wif-provider.
 //
+// The fullsend binary must support `repos install --manifest` together
+// with --vertex-project and --vertex-wif-provider. A relative local
+// ConfigPreset is resolved against InstallOpts.PresetBaseDir, which
+// defaults to the module root found with `go list -m`; that default
+// needs `go` on PATH and a working directory inside a module.
+//
 // The manifest lives in a temporary directory that is removed on return,
 // so every call (including a retry) installs from a fresh manifest.
 // repos install never creates a manifest; when this one cannot be
