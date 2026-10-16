@@ -661,7 +661,9 @@ pipeline variables (the canonical schedule specs and every live managed
 schedule; a failed schedule read defers), the live
 `ci_pipeline_variables_minimum_override_role` is exactly `no_one_allowed`
 (weaker, unreadable, and unsupported all defer, even when a trigger token is
-already published), and the trigger account is ready on the default branch,
+already published), CI job-token repository push
+(`ci_push_repository_for_job_token_allowed`) is disabled (enabled, unreadable,
+and unreported all defer), and the trigger account is ready on the default branch,
 verified against live GitLab state. A legacy install, whose schedules still set
 `FULLSEND_POLL_MODE`, defers. A deferral is informational, changes nothing, and
 polling stays the dispatch path. Even when the prerequisites are verified, no

@@ -36,7 +36,12 @@ type GitLabTriggerDispatchGate struct {
 //     no_one_allowed. A weaker, unreadable, or unsupported setting defers.
 //     A published trigger token or deploy-key grant is not evidence that the
 //     setting is safe, so the setting is always read here.
-//  3. The trigger account (DiagnoseGitLabTriggerAccount) is ready on branch,
+//  3. The live ci_push_repository_for_job_token_allowed is false. The
+//     trigger account's deploy key may push to the protected default branch,
+//     so a CI_JOB_TOKEN that could push the repository would let a job in a
+//     dispatched pipeline rewrite the code later protected pipelines run.
+//     An enabled, unreadable, or unreported setting defers.
+//  4. The trigger account (DiagnoseGitLabTriggerAccount) is ready on branch,
 //     verified against live project state.
 //
 // A nil api or an empty branch makes the live account checks and the
@@ -52,6 +57,9 @@ func CheckGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, ap
 	}
 	deferred = append(deferred, gitlabScheduleMigrationProblems(ctx, client, owner, repo)...)
 	if reason := gitlabTriggerDispatchOverrideRoleProblem(ctx, client, owner, repo); reason != "" {
+		deferred = append(deferred, reason)
+	}
+	if reason := gitlabTriggerDispatchJobTokenPushProblem(ctx, client, owner, repo); reason != "" {
 		deferred = append(deferred, reason)
 	}
 	if status := DiagnoseGitLabTriggerAccount(ctx, client, api, owner, repo, branch); status.State != GitLabTriggerStateReady {
@@ -125,6 +133,21 @@ func gitlabTriggerDispatchOverrideRoleProblem(ctx context.Context, client forge.
 		return "could not read ci_pipeline_variables_minimum_override_role: " + safeAPIError("reading the pipeline-variable override role", err).Error()
 	case role != forge.PipelineVarOverrideNoOneAllowed:
 		return fmt.Sprintf("ci_pipeline_variables_minimum_override_role is %s, not no_one_allowed", displayPipelineVarRole(role))
+	}
+	return ""
+}
+
+// gitlabTriggerDispatchJobTokenPushProblem returns a deferral reason unless
+// the live ci_push_repository_for_job_token_allowed setting is false.
+func gitlabTriggerDispatchJobTokenPushProblem(ctx context.Context, client forge.Client, owner, repo string) string {
+	allowed, err := client.GetJobTokenRepositoryPushAllowed(ctx, owner, repo)
+	switch {
+	case errors.Is(err, forge.ErrNotSupported):
+		return "ci_push_repository_for_job_token_allowed is not reported by this GitLab instance, so CI job-token repository push cannot be shown to be disabled"
+	case err != nil:
+		return "could not read ci_push_repository_for_job_token_allowed: " + safeAPIError("reading the job-token repository push setting", err).Error()
+	case allowed:
+		return "ci_push_repository_for_job_token_allowed is enabled; disable CI job-token repository push before activation"
 	}
 	return ""
 }

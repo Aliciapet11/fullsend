@@ -743,8 +743,12 @@ reason and resource IDs.
   `FULLSEND_POLL_MODE`), and the live
   `ci_pipeline_variables_minimum_override_role` must be exactly
   `no_one_allowed`. A weaker, unreadable, or unsupported setting defers, even
-  when a trigger token is already published. The trigger account must also be
-  ready on the default branch, verified against live GitLab state. A deferral
+  when a trigger token is already published. CI job-token repository push
+  (**Settings > CI/CD > Job token permissions**, reported as
+  `ci_push_repository_for_job_token_allowed`) must be disabled, because the
+  trigger account's deploy key can push to the protected default branch; an
+  enabled, unreadable, or unreported setting defers. The trigger account must
+  also be ready on the default branch, verified against live GitLab state. A deferral
   changes nothing, and polling stays the dispatch path.
 - **Deferral and unsafe token variable:** a branch-change, override-role, or
   capability deferral first removes an unsafe published token variable and
