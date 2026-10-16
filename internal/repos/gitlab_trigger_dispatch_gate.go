@@ -42,7 +42,7 @@ type GitLabTriggerDispatchGate struct {
 //     dispatched pipeline rewrite the code later protected pipelines run.
 //     An enabled, unreadable, or unreported setting defers.
 //  4. The committed CI files run no unrelated job in a trigger or agent
-//     child (source=pipeline) pipeline (gitlabTriggerExtraWorkProblem).
+//     child (source=pipeline) pipeline (gitlabDispatchExtraWorkProblem).
 //  5. The trigger account (DiagnoseGitLabTriggerAccount) is ready on branch,
 //     verified against live project state.
 //

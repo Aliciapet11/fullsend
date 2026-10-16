@@ -20,7 +20,8 @@
 #   FULLSEND_PINNED_REF
 #   FULLSEND_PINNED_PIPELINE_SOURCE
 #   FULLSEND_PINNED_PIPELINE_RESPONSE
-#   FULLSEND_PINNED_PROJECT_PATH   (path_with_namespace, e.g. group/project)
+#   FULLSEND_PINNED_JOB_USER_ID
+#   FULLSEND_PINNED_PROJECT_PATH  (path_with_namespace, e.g. group/project)
 #   FULLSEND_PINNED_GITLAB_URL     (validated API root with /api/v4 stripped)
 #
 # FULLSEND_PINNED_PROJECT_PATH / FULLSEND_PINNED_GITLAB_URL exist so
@@ -445,6 +446,7 @@ fullsend_gitlab_trigger_account_id() {
     ($ledger | try fromjson catch null) as $l
     | ($activation | try fromjson catch null) as $a
     | if ($l | type) == "object" and ($a | type) == "object"
+        and $l.version == 1
         and $l.phase == "ready"
         and ($l.account_id | type) == "number" and $l.account_id > 0
         and ($l.trigger_token_id | type) == "number" and $l.trigger_token_id > 0

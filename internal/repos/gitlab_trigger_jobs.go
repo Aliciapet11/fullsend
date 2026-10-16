@@ -193,7 +193,7 @@ func triggerExtraWorkProblemForSource(content []byte, file, defaultBranch, sourc
 			if job == nil || job.Kind != yaml.MappingNode {
 				return unevaluable(fmt.Sprintf("job %q", name))
 			}
-			if findMappingValue(job, "extends") != nil || findMappingValue(job, "only") != nil || findMappingValue(job, "except") != nil {
+			if jobHasUnevaluableAdmission(job) {
 				return unevaluable(fmt.Sprintf("job %q", name))
 			}
 			isExcluded, evaluable := excluded(job)
@@ -332,7 +332,10 @@ func jobExecSurfaceProblem(content []byte, file, jobName, jobLabel, unevalCtx, r
 	if job == nil || job.Kind != yaml.MappingNode {
 		return unevaluable("a job definition")
 	}
-	if findMappingValue(job, "extends") != nil {
+	// extends is resolved merge-aware: an extends inherited through a YAML
+	// merge key (<<: *base) pulls in a hidden template's execution surfaces
+	// just like a direct one.
+	if v, ok := effectiveMappingValue(job, "extends"); !ok || v != nil {
 		return unevaluable("extends")
 	}
 	for _, key := range []string{"after_script", "services", "hooks"} {
@@ -353,6 +356,19 @@ func jobExecSurfaceProblem(content []byte, file, jobName, jobLabel, unevalCtx, r
 		return fmt.Sprintf("%s defines job-level %s on the %s, %s; remove it", file, key, jobLabel, runCtx)
 	}
 	return ""
+}
+
+// jobHasUnevaluableAdmission reports whether a job sets extends, only or
+// except, directly or through a YAML merge key, or whether a merge source
+// cannot be evaluated. Those keys change the job's effective configuration or
+// admission in ways the scan does not model, so callers fail closed.
+func jobHasUnevaluableAdmission(job *yaml.Node) bool {
+	for _, key := range []string{"extends", "only", "except"} {
+		if v, ok := effectiveMappingValue(job, key); !ok || v != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatcherDisablesDefaultInheritance reports whether the committed
@@ -500,7 +516,9 @@ func gitlabExtraWorkProblem(ctx context.Context, client forge.Client, owner, rep
 		if problem := triggerAgentExecProblem(agentContent, agentFile); problem != "" {
 			return problem, nil
 		}
-		if checkInherited {
+		// Only the agent job's own inherit setting governs the agent template's
+		// global defaults; the dispatcher is not part of the agent child pipeline.
+		if !agentJobDisablesDefaultInheritance(agentContent) {
 			if problem := agentGlobalExecProblem(agentContent, agentFile); problem != "" {
 				return problem, nil
 			}
@@ -536,7 +554,7 @@ func gitlabDispatcherTemplateProblem(template []byte, defaultBranch string) stri
 	if job == nil || job.Kind != yaml.MappingNode {
 		return fmt.Sprintf("defines the %q job as a mapping", gitlabDispatcherJobName)
 	}
-	if findMappingValue(job, "extends") != nil || findMappingValue(job, "only") != nil || findMappingValue(job, "except") != nil {
+	if jobHasUnevaluableAdmission(job) {
 		return "defines a dispatcher job whose admission can be evaluated (extends, only and except are not supported)"
 	}
 	script, ok := effectiveMappingValue(job, "script")

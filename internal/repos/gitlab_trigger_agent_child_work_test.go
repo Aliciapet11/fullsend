@@ -179,6 +179,15 @@ func TestDispatchExtraWork_UnrelatedWorkInAgentTemplateDefersActivation(t *testi
 			},
 			want: "job-level after_script on the agent job",
 		},
+		"extends inherited through a YAML merge key on the agent job": {
+			mutate: func(t *testing.T, e *trigEnv) {
+				key := trigOwner + "/" + trigRepo + "/" + fullsendAgentTemplatePath
+				e.state.FileContents[key] = []byte(strings.Replace(string(e.state.FileContents[key]),
+					agentJobPrefix,
+					".extra:\n  after_script: [./leak.sh]\n.base: &base\n  extends: .extra\n"+agentJobPrefix+"  <<: *base\n", 1))
+			},
+			want: "extends",
+		},
 		"predefined-variable override in the agent template": {
 			mutate: func(t *testing.T, e *trigEnv) {
 				e.appendAgentTemplate(t, "\n.tpl:\n  variables:\n    CI_PIPELINE_SOURCE: schedule\n")
@@ -231,4 +240,23 @@ func TestDispatchExtraWork_AgentInheritsGlobalEvenWhenDispatcherDisablesInherita
 	assert.Contains(t, problem, "agent job")
 	gate := e.dispatchGate()
 	assert.False(t, gate.Ready)
+}
+
+// The agent job's own inherit: default: false governs the agent template's
+// global defaults: a global after_script in the agent template is not
+// inherited by the agent job, so it must not defer activation even when the
+// dispatcher template does not disable inheritance.
+func TestDispatchExtraWork_AgentJobDisablingInheritanceIgnoresAgentTemplateDefaults(t *testing.T) {
+	const agentJobPrefix = "\"fullsend $[[ inputs.stage | expand_vars ]] agent\":\n  stage: agent\n"
+	e := readyTriggerDispatchEnv(t)
+	commitShippedScaffold(t, e)
+
+	key := trigOwner + "/" + trigRepo + "/" + fullsendAgentTemplatePath
+	e.state.FileContents[key] = []byte(strings.Replace(string(e.state.FileContents[key]),
+		agentJobPrefix, agentJobPrefix+"  inherit:\n    default: false\n", 1))
+	e.appendAgentTemplate(t, "\ndefault:\n  after_script: [./leak.sh]\n")
+
+	problem, err := gitlabDispatchExtraWorkProblem(context.Background(), e.state, trigOwner, trigRepo, trigBranch)
+	require.NoError(t, err)
+	assert.Empty(t, problem)
 }

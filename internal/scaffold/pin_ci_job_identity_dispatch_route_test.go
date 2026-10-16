@@ -2,6 +2,7 @@ package scaffold
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -154,6 +155,8 @@ func TestSelectGitLabDispatchRoute(t *testing.T) {
 		{"valid ledger followed by trailing garbage", sched, ptr(readyLedger + ` {broken`), ptr(triggerActivationRecord), "api"},
 		{"two concatenated ledger documents", sched, ptr(readyLedger + ` ` + readyLedger), ptr(triggerActivationRecord), "api"},
 		{"ledger not an object", sched, ptr("[77]"), ptr(triggerActivationRecord), "api"},
+		{"ledger with an unsupported version", sched, ptr(strings.Replace(readyLedger, `"version":1`, `"version":2`, 1)), ptr(triggerActivationRecord), "api"},
+		{"ledger without a version", sched, ptr(strings.Replace(readyLedger, `"version":1,`, ``, 1)), ptr(triggerActivationRecord), "api"},
 		{"rotating ledger", sched, ptr(`{"phase":"rotating","account_id":77}`), ptr(triggerActivationRecord), "api"},
 		{"bootstrapping ledger", sched, ptr(`{"phase":"bootstrapping","account_id":77}`), ptr(triggerActivationRecord), "api"},
 		{"removing ledger", sched, ptr(`{"phase":"removing","account_id":77}`), ptr(triggerActivationRecord), "api"},
