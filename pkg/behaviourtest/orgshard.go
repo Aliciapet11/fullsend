@@ -159,8 +159,10 @@ type orgPlanConfig struct {
 	// PerOrgCap is the provisioning cap per org in multi-org mode.
 	PerOrgCap int
 	Policy    quotaPolicy
-	// ReserveTimeout bounds how long acquireOrgsForDemand keeps
-	// releasing and retrying a reservation it could not complete.
+	// ReserveTimeout bounds the whole of acquireOrgsForDemand: every
+	// Acquire and quota sample runs under it, and a reservation that
+	// could not be completed is released and retried only while time
+	// remains. Zero means a single attempt with no deadline of its own.
 	ReserveTimeout time.Duration
 	// RetryBackoff is the mean pause, jittered, before such a retry.
 	RetryBackoff time.Duration
@@ -183,19 +185,29 @@ func acquireOrgsForDemand(ctx context.Context, deps orgPoolDeps, cfg orgPlanConf
 	}
 	var passedOver []string
 	lowQuota := make(map[string]bool)
+	// ReserveTimeout bounds the whole acquisition, including a blocking
+	// Acquire inside an attempt, not only the retry decision. A zero
+	// timeout means one attempt with no deadline of its own.
 	deadline := time.Now().Add(cfg.ReserveTimeout)
+	if cfg.ReserveTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
 	for {
 		leases, retryable, err := reserveOrgs(ctx, deps, cfg, demand, lowQuota, &passedOver)
 		if err == nil {
 			return leases, nil
 		}
-		if !retryable || !time.Now().Before(deadline) {
+		remaining := time.Until(deadline)
+		if !retryable || remaining <= 0 {
 			return nil, err
 		}
 		pause := cfg.RetryBackoff
 		if pause > 0 {
 			pause = pause/2 + rand.N(pause)
 		}
+		pause = min(pause, remaining)
 		deps.Logf("[org-shard] could not complete the reservation (%v); released the orgs held, retrying in %s", err, pause)
 		select {
 		case <-time.After(pause):
@@ -432,8 +444,10 @@ func (a *shardAssigner) Scenarios() map[string][]string {
 	return out
 }
 
-// shardSetup is what setting up one org produced. It may be returned
-// alongside an error so whatever was created still gets torn down.
+// shardSetup is what setting up one org produced. Run owns it and passes
+// it to Setup, which fills in each field as soon as it exists, so
+// whatever was created is torn down even when Setup fails or panics
+// part-way.
 type shardSetup struct {
 	Driver   install.Driver
 	Template *world.World
@@ -448,8 +462,9 @@ type shardedSuite struct {
 	Deps   orgPoolDeps
 	Config orgPlanConfig
 	// Setup prepares one acquired org (stale-resource cleanup, install
-	// driver, SCM/CI drivers, template World).
-	Setup func(ctx context.Context, lease orgLease) (*shardSetup, error)
+	// driver, SCM/CI drivers, template World) into st. It must set
+	// st.Driver as soon as the driver is created.
+	Setup func(ctx context.Context, lease orgLease, st *shardSetup) error
 }
 
 // Run executes body with an assigner over the acquired orgs. Every org
@@ -463,9 +478,12 @@ func (s *shardedSuite) Run(ctx context.Context, demand suiteDemand, body func(*s
 		return err
 	}
 	setups := make([]*shardSetup, len(leases))
+	for i := range setups {
+		setups[i] = &shardSetup{}
+	}
 	defer func() {
 		for i, l := range leases {
-			if st := setups[i]; st != nil && st.Driver != nil {
+			if st := setups[i]; st.Driver != nil {
 				if st.Quota != nil {
 					if rl, ok := st.Quota(); ok {
 						logf("[org-shard] %s ending quota: %s", l.Org, rl)
@@ -490,7 +508,7 @@ func (s *shardedSuite) Run(ctx context.Context, demand suiteDemand, body func(*s
 					errs[i] = fmt.Errorf("panic: %v", r)
 				}
 			}()
-			setups[i], errs[i] = s.Setup(ctx, leases[i])
+			errs[i] = s.Setup(ctx, leases[i], setups[i])
 		}(i)
 	}
 	wg.Wait()

@@ -113,7 +113,7 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 			ReserveTimeout: e2eCfg.LockTimeout,
 			RetryBackoff:   reserveRetryBackoff,
 		},
-		Setup: func(ctx context.Context, lease orgLease) (*shardSetup, error) {
+		Setup: func(ctx context.Context, lease orgLease, st *shardSetup) error {
 			org, token := lease.Org, lease.Token
 			logf := orgLogf(t.Logf, org)
 			client := e2etest.NewLiveClient(token)
@@ -122,19 +122,21 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 
 			driver, err := installFactoryFor(cfg.Environment)(org, client, token, binary, e2eCfg.GCPProjectID, logf)
 			if err != nil {
-				return nil, fmt.Errorf("creating install driver (env=%s): %w", cfg.Environment, err)
+				return fmt.Errorf("creating install driver (env=%s): %w", cfg.Environment, err)
 			}
-			// Returned with any later error so Run finalizes the driver
-			// (mint teardown) before releasing the org's lock.
-			st := &shardSetup{Driver: driver, Quota: client.RateLimit}
+			// Registered in st at once, even if a later step fails or
+			// panics, so Run finalizes the driver (mint teardown) before
+			// releasing the org's lock.
+			st.Driver = driver
+			st.Quota = client.RateLimit
 
 			scmDriver, err := newSCMDriver(cfg.SCM, client)
 			if err != nil {
-				return st, err
+				return err
 			}
 			ciDriver, err := newCIDriver(cfg.CI, client, token)
 			if err != nil {
-				return st, err
+				return err
 			}
 
 			template := base.Clone()
@@ -146,7 +148,7 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 			template.RepoOwner = org
 			template.Logf = logf
 			st.Template = template
-			return st, nil
+			return nil
 		},
 	}
 

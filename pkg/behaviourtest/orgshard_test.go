@@ -220,7 +220,7 @@ type shardHarness struct {
 	active  *activeCounter
 	mu      sync.Mutex
 	drivers map[string]*shardDriver
-	setupFn func(ctx context.Context, lease orgLease) (*shardSetup, error)
+	setupFn func(ctx context.Context, lease orgLease, st *shardSetup) error
 }
 
 func newShardHarness(_ *testing.T, orgs int) *shardHarness {
@@ -240,22 +240,28 @@ func (h *shardHarness) suite(t *testing.T, cfg orgPlanConfig) *shardedSuite {
 	return &shardedSuite{Deps: h.pool.deps(t), Config: cfg, Setup: setup}
 }
 
-func (h *shardHarness) defaultSetup(_ context.Context, lease orgLease) (*shardSetup, error) {
+// createDriver registers a driver in st, as the real Setup does as soon
+// as the install driver exists.
+func (h *shardHarness) createDriver(lease orgLease, st *shardSetup) *shardDriver {
 	d := newShardDriver(lease.Org, h.log, h.active)
 	h.mu.Lock()
 	h.drivers[lease.Org] = d
 	h.mu.Unlock()
-	return &shardSetup{
-		Driver: d,
-		Template: &world.World{
-			Config:    env.RunnerConfig{SCM: "gitlab", InstallMode: "per-repo"},
-			Driver:    d,
-			Org:       lease.Org,
-			RepoOwner: lease.Org,
-			Token:     lease.Token,
-		},
-		Quota: func() (forge.RateLimit, bool) { return fullQuota(), true },
-	}, nil
+	st.Driver = d
+	st.Quota = func() (forge.RateLimit, bool) { return fullQuota(), true }
+	return d
+}
+
+func (h *shardHarness) defaultSetup(_ context.Context, lease orgLease, st *shardSetup) error {
+	d := h.createDriver(lease, st)
+	st.Template = &world.World{
+		Config:    env.RunnerConfig{SCM: "gitlab", InstallMode: "per-repo"},
+		Driver:    d,
+		Org:       lease.Org,
+		RepoOwner: lease.Org,
+		Token:     lease.Token,
+	}
+	return nil
 }
 
 func defaultPlan(orgs int) orgPlanConfig {
@@ -632,6 +638,30 @@ func TestAcquireOrgsForDemand_GivesUpAfterReserveTimeout(t *testing.T) {
 	assert.ElementsMatch(t, h.pool.acquired, h.pool.released)
 }
 
+func TestAcquireOrgsForDemand_ReserveTimeoutBoundsBlockingAcquire(t *testing.T) {
+	h := newShardHarness(t, 2)
+	// halfsend-02 is held by another run. When the incomplete first
+	// reservation is released, halfsend-01 is taken too, so the retry's
+	// blocking Acquire would wait (the fake polls for up to 2s).
+	h.pool.unavailable["halfsend-02"] = true
+	h.pool.onRelease = func(org string) {
+		if org == "halfsend-01" {
+			h.pool.unavailable["halfsend-01"] = true
+		}
+	}
+	plan := defaultPlan(2)
+	plan.ReserveTimeout = 50 * time.Millisecond
+	plan.RetryBackoff = time.Millisecond
+
+	start := time.Now()
+	_, err := acquireOrgsForDemand(context.Background(), h.pool.deps(t), plan, suiteDemand{Eligible: 40, Provisioning: 40})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), time.Second, "the blocking Acquire must stop at ReserveTimeout")
+	assert.Empty(t, h.pool.held, "nothing is left locked")
+	assert.ElementsMatch(t, h.pool.acquired, h.pool.released)
+}
+
 func TestAcquireOrgsForDemand_CompetingPartialReservationsDoNotDeadlock(t *testing.T) {
 	h := newShardHarness(t, 2)
 	plan := defaultPlan(2)
@@ -759,21 +789,25 @@ func TestShardedSuite_TeardownOnPanic(t *testing.T) {
 
 func TestShardedSuite_TeardownOnSetupFailure(t *testing.T) {
 	h := newShardHarness(t, 12)
-	h.setupFn = func(ctx context.Context, lease orgLease) (*shardSetup, error) {
+	h.setupFn = func(ctx context.Context, lease orgLease, st *shardSetup) error {
 		switch lease.Org {
 		case "halfsend-02":
 			// Driver created, then a later setup step failed.
-			st, _ := h.defaultSetup(ctx, lease)
-			return st, errors.New("unsupported BEHAVIOUR_CI")
+			_ = h.defaultSetup(ctx, lease, st)
+			return errors.New("unsupported BEHAVIOUR_CI")
 		case "halfsend-03":
-			return nil, errors.New("deploying mint")
+			return errors.New("deploying mint")
 		case "halfsend-04":
 			panic("setup panic")
+		case "halfsend-05":
+			// Driver created, then a later constructor panicked.
+			h.createDriver(lease, st)
+			panic("constructor panic")
 		}
-		return h.defaultSetup(ctx, lease)
+		return h.defaultSetup(ctx, lease, st)
 	}
 	called := false
-	err := h.suite(t, defaultPlan(12)).Run(context.Background(), suiteDemand{Eligible: 70, Provisioning: 70}, func(*shardAssigner) error {
+	err := h.suite(t, defaultPlan(12)).Run(context.Background(), suiteDemand{Eligible: 90, Provisioning: 90}, func(*shardAssigner) error {
 		called = true
 		return nil
 	})
@@ -782,18 +816,20 @@ func TestShardedSuite_TeardownOnSetupFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), `setting up org "halfsend-02": unsupported BEHAVIOUR_CI`)
 	assert.Contains(t, err.Error(), `setting up org "halfsend-03": deploying mint`)
 	assert.Contains(t, err.Error(), `setting up org "halfsend-04": panic: setup panic`)
-	assert.Len(t, h.pool.acquired, 4)
+	assert.Contains(t, err.Error(), `setting up org "halfsend-05": panic: constructor panic`)
+	assert.Len(t, h.pool.acquired, 5)
 	assert.Contains(t, h.drivers, "halfsend-02", "the partly set up org's driver is finalized")
+	assert.Contains(t, h.drivers, "halfsend-05", "a driver created before a setup panic is finalized")
 	h.assertTornDown(t)
 }
 
 func TestShardedSuite_TeardownOnCancelledSetup(t *testing.T) {
 	h := newShardHarness(t, 12)
 	ctx, cancel := context.WithCancel(context.Background())
-	h.setupFn = func(ctx context.Context, lease orgLease) (*shardSetup, error) {
-		st, _ := h.defaultSetup(ctx, lease)
+	h.setupFn = func(ctx context.Context, lease orgLease, st *shardSetup) error {
+		_ = h.defaultSetup(ctx, lease, st)
 		cancel()
-		return st, ctx.Err()
+		return ctx.Err()
 	}
 	err := h.suite(t, defaultPlan(12)).Run(ctx, suiteDemand{Eligible: 25, Provisioning: 25}, func(*shardAssigner) error { return nil })
 	require.ErrorIs(t, err, context.Canceled)
