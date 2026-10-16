@@ -30,17 +30,24 @@ for a Podman machine, the x86_64 `uv` binary segfaults.
 
 ## Isolation
 
-- No host environment variables, SSH agent or credential files enter the
-  container. Only the checkout, its `.git` directory and cache volumes are
-  mounted. `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on CI. One engine-level
-  exception: Docker passes any `proxies` set in `~/.docker/config.json` into
-  every container as `HTTP_PROXY`-style variables.
+The container keeps **host secrets** out. It is **not a sandbox** against the
+code under test, which has the same access to the checkout as `make test` on
+the host.
+
+- No host environment variables, SSH agent or credential files from outside
+  the checkout enter the container. `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on
+  CI. Podman runs with `--http-proxy=false`, so host `HTTP(S)_PROXY` values
+  (which can carry credentials) are not copied in. Docker has no such switch:
+  it passes any `proxies` set in `~/.docker/config.json` into every container.
+- The whole checkout is mounted, **including untracked and gitignored files**
+  such as `.env.local`, so tested code can read them, as it can on the host.
+- The checkout and its `.git` directory are mounted read-write (`lint`
+  writes the git index), so tested code could change git config or hooks that
+  a later host-side git command runs. Again, the same as on the host.
 - The host checkout changes only as it would on the host: lint hooks apply
   their autofixes (gofmt, ruff, whitespace), and builds leave gitignored
   output. `CI=true` skips git hook installation, `docs` builds from a
-  throwaway clone, and Linux `node_modules` live in named volumes. The
-  checkout and its `.git` directory are mounted read-write, since `lint`
-  writes the git index.
+  throwaway clone, and Linux `node_modules` live in named volumes.
 - On SELinux hosts (Fedora, RHEL), mounts use `:z`, which relabels the
   checkout's files so the container can read them.
 

@@ -171,6 +171,22 @@ else
   fail "build-image did not pass --no-cache"
 fi
 
+# Hosts that share an image store must not reuse each other's native image.
+tag_for_arch() { # uname -m value -> image tag
+  printf '#!/bin/sh\necho %s\n' "$1" > "${SHIMS}/uname"
+  chmod +x "${SHIMS}/uname"
+  PATH="${SHIMS}:${PATH}" STUB_IMAGE_RC=1 run_ci_local "${PODMAN}" go-vet
+  rm -f "${SHIMS}/uname"
+  grep -A1 -x -- '-t' <<< "$(last_build_args)" | tail -1
+}
+ARM_TAG=$(tag_for_arch aarch64)
+X86_TAG=$(tag_for_arch x86_64)
+if [ -n "${ARM_TAG}" ] && [ "${ARM_TAG}" != "${X86_TAG}" ]; then
+  pass "native arm64 and amd64 builds get different image tags"
+else
+  fail "native arches share an image tag: ${ARM_TAG} vs ${X86_TAG}"
+fi
+
 # --- fail-closed targets (command executed on the host via the stub) ---
 cat > "${SHIMS}/git" <<'SHIM'
 #!/usr/bin/env bash
@@ -222,7 +238,33 @@ if [ "${RC}" -ne 0 ] && grep -q 'script-test: make did not run' <<< "${OUT}"; th
 else
   fail "script-test with broken make must FAIL: rc=${RC} out=${OUT}"
 fi
-rm -f "${SHIMS}/git" "${SHIMS}/make"
+
+printf '#!/usr/bin/env bash\necho "main.go:3:1: expected declaration" >&2\nexit 2\n' > "${SHIMS}/gofmt"
+chmod +x "${SHIMS}/gofmt"
+PATH="${SHIMS}:${PATH}" STUB_EXEC=1 run_ci_local "${PODMAN}" go-fmt
+if [ "${RC}" -ne 0 ] && grep -q 'gofmt: failed to run' <<< "${OUT}" && ! grep -q 'gofmt: clean' <<< "${OUT}"; then
+  pass "go-fmt fails when gofmt itself fails (no stdout), not 'clean'"
+else
+  fail "go-fmt with failing gofmt must FAIL: rc=${RC} out=${OUT}"
+fi
+
+# coverage: make go-test succeeds, but the base-branch diff fails.
+printf '#!/usr/bin/env bash\nexit 0\n' > "${SHIMS}/make"
+cat > "${SHIMS}/git" <<'SHIM'
+#!/usr/bin/env bash
+case "$1" in
+  config) exit 0 ;;
+  diff) echo "fatal: bad revision 'origin/main...HEAD'" >&2; exit 128 ;;
+esac
+exit 0
+SHIM
+PATH="${SHIMS}:${PATH}" STUB_EXEC=1 run_ci_local "${PODMAN}" coverage
+if [ "${RC}" -ne 0 ] && grep -q 'coverage *FAIL' <<< "${OUT}"; then
+  pass "coverage fails when the origin/main diff fails"
+else
+  fail "coverage without origin/main must FAIL: rc=${RC} out=${OUT}"
+fi
+rm -f "${SHIMS}/git" "${SHIMS}/make" "${SHIMS}/gofmt"
 
 # --- engine argv: isolation ---
 run_ci_local "${PODMAN}" go-vet
@@ -245,6 +287,24 @@ if [ -z "${bad}" ] && ! grep -qE '\.ssh|\.gitconfig|SSH_AUTH_SOCK|docker\.sock|\
 else
   fail "unexpected mounts: ${bad}"
 fi
+if grep -qx -- '--http-proxy=false' <<< "${ARGS}"; then
+  pass "podman runs with --http-proxy=false (host proxy vars not copied in)"
+else
+  fail "podman run is missing --http-proxy=false"
+fi
+CMD=$(tail -1 <<< "${ARGS}")
+if grep -q 'safe.directory /src;' <<< "${CMD}" && grep -q 'safe.directory /gitcommon;' <<< "${CMD}" &&
+  ! grep -q 'safe.directory "\*"' <<< "${CMD}"; then
+  pass "safe.directory trusts only /src and /gitcommon, not every repo"
+else
+  fail "safe.directory scope: ${CMD}"
+fi
+run_ci_local "${PODMAN}" docs
+if grep -q 'VPL_MVB_BRANCH="$sha"' <<< "$(last_run_args)" && grep -q 'GITHUB_ACTIONS=true' <<< "$(last_run_args)"; then
+  pass "docs passes VPL_MVB_BRANCH and GITHUB_ACTIONS like site-build.yml"
+else
+  fail "docs target is missing VPL_MVB_BRANCH/GITHUB_ACTIONS"
+fi
 
 # --- engine argv: user mapping and SELinux ---
 if grep -qx -- '--userns=keep-id' <<< "${ARGS}" && ! grep -qx -- '--user' <<< "${ARGS}"; then
@@ -255,8 +315,9 @@ fi
 
 run_ci_local "${DOCKER}" go-vet
 ARGS=$(last_run_args)
-if grep -A1 -x -- '--user' <<< "${ARGS}" | grep -qx "$(id -u):$(id -g)" && ! grep -q 'keep-id' <<< "${ARGS}"; then
-  pass "docker uses --user uid:gid and no keep-id"
+if grep -A1 -x -- '--user' <<< "${ARGS}" | grep -qx "$(id -u):$(id -g)" && ! grep -q 'keep-id' <<< "${ARGS}" &&
+  ! grep -q -- '--http-proxy' <<< "${ARGS}"; then
+  pass "docker uses --user uid:gid, no keep-id, no podman-only flags"
 else
   fail "docker user mapping: ${ARGS}"
 fi

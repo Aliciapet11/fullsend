@@ -11,8 +11,10 @@ LABEL fullsend-ci-local=1
 # jq: scaffold script tests. xz-utils: node tarball. python3 + python3-yaml:
 # the runner's system /usr/bin/python3, which some scripts hardcode
 # (scripts/redact-behaviour-artifacts.sh); the venv python stays first on PATH.
+# procps: ps for internal/runtime/kill_stray_processes_test.sh (listed
+# explicitly rather than relied on as a transitive dependency).
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      bc build-essential ca-certificates curl file git gzip jq python3 python3-yaml unzip util-linux xz-utils zip \
+      bc build-essential ca-certificates curl file git gzip jq procps python3 python3-yaml unzip util-linux xz-utils zip \
     && rm -rf /var/lib/apt/lists/*
 
 ARG TARGETARCH
