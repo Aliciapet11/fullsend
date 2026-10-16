@@ -1,6 +1,6 @@
-# Notify the .fullsend repo to run sync-scaffold, which reconciles
-# per-repo variables across all fullsend-ai per-repo installs whenever
-# fullsend main is updated. Scaffold file convergence requires
+# Notify the .fullsend repo to run sync-scaffold, which converges the
+# fullsend-ai per-repo installs (shims, managed config, variables) whenever
+# a fullsend release is published. The receiver delivers pull requests. Scaffold file convergence requires
 # fullsend_ref to be set in repos.yaml (tracked separately).
 #
 # Required setup:
@@ -14,8 +14,8 @@
 name: Notify Scaffold Sync
 
 on:
-  push:
-    branches: [main]
+  release:
+    types: [published]
   workflow_dispatch: {}
 
 concurrency:
@@ -25,7 +25,7 @@ permissions: {}
 
 jobs:
   notify:
-    if: github.repository == 'fullsend-ai/fullsend' && github.ref == 'refs/heads/main'
+    if: github.repository == 'fullsend-ai/fullsend'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
