@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/forge/gitlab"
@@ -67,8 +68,27 @@ func maybeConvergeGitLabTriggerAccount(ctx context.Context, opts *reposInstallCo
 		printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger account deferred: %s. Polling stays the dispatch path", repoFullName, result.Deferred))
 	case result.Ready:
 		printer.StepDone(fmt.Sprintf("[%s] GitLab trigger account ready (the dispatch route stays inactive until it is activated separately)", repoFullName))
+		reportGitLabTriggerDispatchGate(ctx, client, lifecycleOpts.API, printer, owner, repo, info.DefaultBranch)
 	}
 	return nil
+}
+
+// reportGitLabTriggerDispatchGate rechecks the trigger-dispatch activation
+// gate (#8438) and reports the result. Every install path that prepares the
+// trigger account reaches it, including the one taken after GitLab refuses the
+// Poller protected-ref grant. A deferral is informational: it changes nothing
+// and polling stays the dispatch path.
+func reportGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, api repos.GitLabTriggerAccountAPI, printer *ui.Printer, owner, repo, branch string) {
+	printGitLabTriggerDispatchGate(printer, owner+"/"+repo, repos.CheckGitLabTriggerDispatchGate(ctx, client, api, owner, repo, branch))
+}
+
+// printGitLabTriggerDispatchGate prints a dispatch-gate result.
+func printGitLabTriggerDispatchGate(printer *ui.Printer, repoFullName string, gate repos.GitLabTriggerDispatchGate) {
+	if !gate.Ready {
+		printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch activation deferred: %s. Polling stays the dispatch path", repoFullName, strings.Join(gate.Deferred, "; ")))
+		return
+	}
+	printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch prerequisites verified (schedules migrated off pipeline variables, override role no_one_allowed, trigger account ready); the dispatch route is not yet activated", repoFullName))
 }
 
 // containFailedKeys returns the owner/repo names of repos whose trigger-account
