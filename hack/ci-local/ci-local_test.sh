@@ -326,7 +326,7 @@ else
   fail "host environment leaked into engine argv"
 fi
 mounts=$(grep -A1 -x -- '-v' <<< "${ARGS}" | grep -vx -- '-v' | grep -vx -- '--' || true)
-bad=$(grep -vE "^(${REPO}:/src|fullsend-ci-local-[a-z-]+:/home/runner/[^ ]+|fullsend-ci-local-nm-[a-z]+:/src/.*node_modules)$" <<< "${mounts}" || true)
+bad=$(grep -vE "^(${REPO}:/src|fullsend-ci-local-[a-z-]+:/home/runner/[^ ]+|fullsend-ci-local-nm-[a-z]+-[0-9a-f]{12}:/src/.*node_modules)$" <<< "${mounts}" || true)
 if [ -z "${bad}" ] && ! grep -qE '\.ssh|\.gitconfig|SSH_AUTH_SOCK|docker\.sock|\.config/gh|\.aws|gcloud' <<< "${ARGS}"; then
   pass "mounts are only the checkout and named volumes; no credentials"
 else
@@ -345,10 +345,42 @@ else
   fail "safe.directory scope: ${CMD}"
 fi
 run_ci_local "${PODMAN}" docs
-if grep -q 'VPL_MVB_BRANCH="$sha"' <<< "$(last_run_args)" && grep -q 'GITHUB_ACTIONS=true' <<< "$(last_run_args)"; then
-  pass "docs passes VPL_MVB_BRANCH and GITHUB_ACTIONS like site-build.yml"
+DOCS_CMD=$(tail -1 <<< "$(last_run_args)")
+if grep -q 'VPL_MVB_BRANCH="$sha"' <<< "${DOCS_CMD}" && grep -q 'GITHUB_ACTIONS=true' <<< "${DOCS_CMD}" &&
+  grep -q 'git submodule update --init; GITHUB_ACTIONS=true' <<< "${DOCS_CMD}" &&
+  grep -q 'git submodule update --init' "${ROOT}/.github/workflows/site-build.yml"; then
+  pass "docs initializes submodules and passes VPL_MVB_BRANCH/GITHUB_ACTIONS like site-build.yml"
 else
-  fail "docs target is missing VPL_MVB_BRANCH/GITHUB_ACTIONS"
+  fail "docs target diverges from site-build.yml (submodules, VPL_MVB_BRANCH, GITHUB_ACTIONS)"
+fi
+
+# N2: node_modules volumes are per checkout; download caches are shared.
+nm_vols() { grep -A1 -x -- '-v' <<< "$(last_run_args)" | grep -E '^fullsend-ci-local-nm-' | sort; }
+cache_vols() { grep -A1 -x -- '-v' <<< "$(last_run_args)" | grep -E '^fullsend-ci-local-(go|gobuild|precommit|uv|npm):' | sort; }
+OTHER="${WORK}/other-checkout"
+mkdir -p "${OTHER}/.git"
+add_ci_config "${OTHER}"
+run_ci_local "${PODMAN}" go-vet; NM_A=$(nm_vols); CACHE_A=$(cache_vols)
+run_ci_local "${PODMAN}" go-vet; NM_A2=$(nm_vols)
+SAVED_REPO="${REPO}"; REPO="${OTHER}"
+run_ci_local "${PODMAN}" go-vet; NM_B=$(nm_vols); CACHE_B=$(cache_vols)
+REPO="${SAVED_REPO}"
+if [ "$(wc -l <<< "${NM_A}")" -eq 2 ] && [ "${NM_A}" = "${NM_A2}" ] && [ "${NM_A}" != "${NM_B}" ] &&
+  [ -n "${CACHE_A}" ] && [ "${CACHE_A}" = "${CACHE_B}" ]; then
+  pass "node_modules volumes are per checkout (stable per path); download caches are shared"
+else
+  fail "volume scoping: A=[${NM_A}] A2=[${NM_A2}] B=[${NM_B}] cacheA=[${CACHE_A}] cacheB=[${CACHE_B}]"
+fi
+
+# N3: podman builds also run with --http-proxy=false; docker builds don't get the podman-only flag.
+STUB_IMAGE_RC=1 run_ci_local "${PODMAN}" go-vet
+PB=$(last_build_args)
+STUB_IMAGE_RC=1 run_ci_local "${DOCKER}" go-vet
+DB=$(last_build_args)
+if grep -qx -- '--http-proxy=false' <<< "${PB}" && ! grep -q -- '--http-proxy' <<< "${DB}" && [ -n "${DB}" ]; then
+  pass "podman builds run with --http-proxy=false; docker builds get no podman-only flag"
+else
+  fail "build proxy flag: podman=[$(tr '\n' ' ' <<< "${PB}")] docker=[$(tr '\n' ' ' <<< "${DB}")]"
 fi
 
 # --- engine argv: user mapping and SELinux ---
@@ -413,7 +445,7 @@ REPO="${WORK}/wt"
 run_ci_local "${PODMAN}" go-vet
 ARGS=$(last_run_args)
 COMMON=$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir)
-PTR="${HOME}/.cache/ci-local/gitfile-wt"
+PTR="${HOME}/.cache/ci-local/gitfile-$(printf '%s' "${REPO}" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)"
 if grep -qx "${COMMON}:/gitcommon" <<< "${ARGS}" && grep -qx "${PTR}:/src/.git:ro" <<< "${ARGS}" &&
   [ "$(cat "${PTR}")" = "gitdir: /gitcommon/worktrees/wt" ]; then
   pass "worktree: git common dir at /gitcommon and .git overlaid with a pointer"

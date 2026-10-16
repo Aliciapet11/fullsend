@@ -46,7 +46,7 @@ Environment:
   CI_LOCAL_ENGINE  podman or docker (default: podman if installed)
   CI_LOCAL_DNS     resolver for the container (default 1.1.1.1; empty = engine default)
 
-Isolation: no host environment variables (podman runs with --http-proxy=false),
+Isolation: no host environment variables (podman builds and runs with --http-proxy=false),
 SSH agent or credential files from outside the checkout enter the container;
 only the checkout (including gitignored files), its .git directory and cache
 volumes are mounted, read-write. GH_TOKEN/GITHUB_TOKEN are empty, as on CI.
@@ -76,6 +76,14 @@ PLATFORM=${PLATFORM:-$NATIVE}
 
 die() { echo "ci-local: $*" >&2; exit 1; }
 
+# short_hash: first 12 hex chars of the SHA256 of stdin.
+short_hash() {
+  if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi | cut -c1-12
+}
+# Per-checkout id, so state that must not be shared between checkouts or
+# worktrees (node_modules, the worktree .git pointer) never collides.
+REPO_ID=$(printf '%s' "$REPO" | short_hash)
+
 # Tool versions come from the checkout's own CI config (go.mod, lint.yml), so
 # the image follows CI, Renovate bumps included, with nothing to keep in sync
 # by hand. A value that can't be read is an error, never a guess.
@@ -96,17 +104,20 @@ resolve_versions() {
   # Tag by platform + versions + everything the build copies in (Containerfile
   # and the fetch/sumof helpers), so any of them changing triggers a rebuild
   # (and hosts sharing an image store never mix arches).
-  local sum hash=(shasum -a 256)
-  command -v sha256sum >/dev/null && hash=(sha256sum)
+  local sum
   sum=$( { echo "$PLATFORM"; printf '%s\n' "${BUILD_ARGS[@]}"
-    cat "$SCRIPT_DIR/Containerfile" "$SCRIPT_DIR/fetch" "$SCRIPT_DIR/sumof"; } | "${hash[@]}" | cut -c1-12)
+    cat "$SCRIPT_DIR/Containerfile" "$SCRIPT_DIR/fetch" "$SCRIPT_DIR/sumof"; } | short_hash)
   IMAGE=fullsend-ci-local${ARCH_TAG}:$sum
 }
 
 # build-image passes --no-cache so floating versions (Node 22.x, Python 3.x,
 # uv) are re-resolved to their latest releases, as CI's setup actions do.
+# podman copies host HTTP(S)_PROXY into build RUN steps too, as it does for
+# runs (see run_in); CI builds without a proxy, so turn that off here as well.
 build_image() {
-  "$ENGINE" build ${PLATFORM:+--platform "$PLATFORM"} "$@" "${BUILD_ARGS[@]}" \
+  local noproxy=()
+  [ "$(basename "$ENGINE")" = podman ] && noproxy=(--http-proxy=false)
+  "$ENGINE" build ${PLATFORM:+--platform "$PLATFORM"} ${noproxy[@]+"${noproxy[@]}"} "$@" "${BUILD_ARGS[@]}" \
     -f "$SCRIPT_DIR/Containerfile" -t "$IMAGE" "$SCRIPT_DIR"
 }
 
@@ -132,16 +143,21 @@ mount_args() {
     local common wt
     common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)
     wt=$(basename "$(git -C "$REPO" rev-parse --path-format=absolute --git-dir)")
-    local ptr="$HOME/.cache/ci-local/gitfile-$wt"
+    local ptr="$HOME/.cache/ci-local/gitfile-$REPO_ID"
     mkdir -p "$(dirname "$ptr")"
     echo "gitdir: /gitcommon/worktrees/$wt" > "$ptr"
     args+=(-v "$common:/gitcommon$Z" -v "$ptr:/src/.git:ro${Z:+,z}")
   fi
   local v
+  # Download caches are shared by every checkout; node_modules is per
+  # checkout, since npm ci rewrites it from that checkout's lockfile and
+  # concurrent runs in two worktrees would otherwise race on one volume.
   for v in go:/home/runner/go gobuild:/home/runner/.cache/go-build \
-    precommit:/home/runner/.cache/pre-commit uv:/home/runner/.cache/uv npm:/home/runner/.npm \
-    nm-root:/src/node_modules nm-workersrc:/src/internal/dispatch/cf/workersrc/node_modules; do
+    precommit:/home/runner/.cache/pre-commit uv:/home/runner/.cache/uv npm:/home/runner/.npm; do
     args+=(-v "fullsend-ci-local${ARCH_TAG}-${v%%:*}:${v#*:}")
+  done
+  for v in nm-root:/src/node_modules nm-workersrc:/src/internal/dispatch/cf/workersrc/node_modules; do
+    args+=(-v "fullsend-ci-local${ARCH_TAG}-${v%%:*}-${REPO_ID}:${v#*:}")
   done
   printf '%s\n' "${args[@]}"
 }
@@ -180,9 +196,10 @@ EOF
   # mvb runs `git fetch --tags --force` in the source repo, so build from a
   # throwaway clone: the host repo is never fetched into. GITHUB_ACTIONS=true
   # makes mvb build the checked-out commit, and VPL_MVB_BRANCH names it, both
-  # as in site-build.yml. Like CI, submodules are not initialized. Committed
+  # as in site-build.yml, which also runs `git submodule update --init` right
+  # before mvb (the experiments submodule supplies docs pages). Committed
   # content only.
-  docs) echo 'set -e; rm -rf /tmp/site; git clone -q /src /tmp/site; cd /tmp/site; sha=$(git -C /src rev-parse HEAD); git checkout -q --detach "$sha"; npm ci --no-audit --no-fund; GITHUB_ACTIONS=true VPL_MVB_BRANCH="$sha" npx mvb docs' ;;
+  docs) echo 'set -e; rm -rf /tmp/site; git clone -q /src /tmp/site; cd /tmp/site; sha=$(git -C /src rev-parse HEAD); git checkout -q --detach "$sha"; npm ci --no-audit --no-fund; git submodule update --init; GITHUB_ACTIONS=true VPL_MVB_BRANCH="$sha" npx mvb docs' ;;
   commit-lint) cat <<'EOF'
 set -e
 fail=0

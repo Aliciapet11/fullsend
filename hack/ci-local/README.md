@@ -43,9 +43,12 @@ the host.
 
 - No host environment variables, SSH agent or credential files from outside
   the checkout enter the container. `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on
-  CI. Podman runs with `--http-proxy=false`, so host `HTTP(S)_PROXY` values
-  (which can carry credentials) are not copied in. Docker has no such switch:
-  it passes any `proxies` set in `~/.docker/config.json` into every container.
+  CI. Podman builds and runs with `--http-proxy=false`, so host
+  `HTTP(S)_PROXY` values (which can carry credentials) are not copied in.
+  Docker has no such switch: it passes any `proxies` set in
+  `~/.docker/config.json` into every build step and container. As on CI, there
+  is no proxy support: a network that requires one to reach the internet
+  can't build the image.
 - The whole checkout is mounted, **including untracked and gitignored files**
   such as `.env.local`, so tested code can read them, as it can on the host.
 - The checkout and its `.git` directory are mounted read-write (`lint`
@@ -87,7 +90,11 @@ file from the same release.
 
 Each version set leaves its own image behind. To reclaim space, remove them all
 with `podman image prune -a --filter label=fullsend-ci-local=1` (or `docker`);
-the next run rebuilds the current one.
+the next run rebuilds the current one. Download caches (Go, npm, uv,
+pre-commit) are volumes shared by all checkouts; `node_modules` volumes are per
+checkout (`fullsend-ci-local-nm-*-<checkout-hash>`), so concurrent runs in two
+worktrees never share one. Remove them all with
+`podman volume rm $(podman volume ls -q | grep '^fullsend-ci-local')`.
 
 Not covered: `behaviour-test` / `playback-test` (they need a real GitHub org,
 the OIDC mint and secrets) and `check-gateway-doc-configs` (it starts its own
