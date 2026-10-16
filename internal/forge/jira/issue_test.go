@@ -49,6 +49,22 @@ func TestCreateIssue(t *testing.T) {
 	assert.True(t, handlerCalled, "handler was not called — URL path mismatch")
 }
 
+func TestCreateIssue_ErrorQuotesProjectKey(t *testing.T) {
+	client, mux := setupTest(t)
+	project := "PROJ\n::warning::injected"
+	handlerCalled := false
+	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		writeJSON(t, w, http.StatusBadRequest, map[string]any{"errorMessages": []string{"invalid project"}})
+	})
+
+	_, err := client.CreateIssue(context.Background(), CreateIssueInput{ProjectKey: project, IssueType: "Task", Summary: "title"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `project "PROJ\n::warning::injected"`)
+	assert.NotContains(t, err.Error(), "\n::warning::")
+	assert.True(t, handlerCalled, "handler was not called — URL path mismatch")
+}
+
 func TestCreateIssue_TypeNameNoParentNoDescription(t *testing.T) {
 	t.Parallel()
 	client, mux := setupTest(t)

@@ -476,7 +476,7 @@ func (c *LiveClient) CreateIssue(ctx context.Context, in CreateIssueInput) (*Cre
 	}
 	var created CreatedIssue
 	if err := c.do(ctx, http.MethodPost, "/issue", bytes.NewReader(reqBody), &created); err != nil {
-		return nil, fmt.Errorf("create issue in project %s: %w", in.ProjectKey, err)
+		return nil, fmt.Errorf("create issue in project %q: %w", in.ProjectKey, err)
 	}
 	return &created, nil
 }
