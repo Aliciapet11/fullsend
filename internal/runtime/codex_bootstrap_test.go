@@ -55,8 +55,8 @@ if [ "$2" = "download" ]; then
   exit 0
 fi
 if [ "$2" = "upload" ]; then
-  case "$5" in /tmp/fs-upload-*/) cp -- "$4" "$5/"; exit $? ;; esac
-  cp "$4" '` + storeDir + `'/"$(printf '%s' "$5" | tr '/' '_')"
+  case "$6" in /tmp/fs-upload-*/) cp -- "$5" "$6/"; exit $? ;; esac
+  cp "$5" '` + storeDir + `'/"$(printf '%s' "$6" | tr '/' '_')"
   exit 0
 fi
 if [ "$2" = "exec" ]; then

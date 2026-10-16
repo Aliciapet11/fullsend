@@ -14,7 +14,8 @@ import (
 )
 
 // fakeOpenshellOpenCode installs a fake "openshell" that records every argv
-// line to logPath, stores each "sandbox upload <name> <local> <remote>"
+// line to logPath, stores each
+// "sandbox upload --no-git-ignore <name> <local> <remote>"
 // payload under storeDir keyed by the remote path, and answers
 // `opencode --version` execs. Everything else succeeds silently. Mirrors
 // fakeOpenshellPi.
@@ -25,8 +26,8 @@ func fakeOpenshellOpenCode(t *testing.T, logPath, storeDir string) {
 	script := `#!/bin/sh
 echo "$@" >> '` + logPath + `'
 if [ "$2" = "upload" ]; then
-  case "$5" in /tmp/fs-upload-*/) cp -- "$4" "$5/"; exit $? ;; esac
-  cp "$4" '` + storeDir + `'/"$(printf '%s' "$5" | tr '/' '_')"
+  case "$6" in /tmp/fs-upload-*/) cp -- "$5" "$6/"; exit $? ;; esac
+  cp "$5" '` + storeDir + `'/"$(printf '%s' "$6" | tr '/' '_')"
   exit 0
 fi
 if [ "$2" = "exec" ]; then
@@ -212,7 +213,7 @@ func TestOpenCodeRuntimeBootstrap_InvalidTrustedEnvFailsClosed(t *testing.T) {
 	script := `#!/bin/sh
 echo "$@" >> '` + logPath + `'
 if [ "$2" = "upload" ]; then
-  cp "$4" '` + storeDir + `'/"$(printf '%s' "$5" | tr '/' '_')"
+  cp "$5" '` + storeDir + `'/"$(printf '%s' "$6" | tr '/' '_')"
   exit 0
 fi
 if [ "$2" = "exec" ]; then
