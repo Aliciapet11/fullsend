@@ -130,23 +130,33 @@ file in the sandbox. It sets
 and its TTL. It also sets every other variable in the [cleared list](#environment-the-launch-clears)
 to `""`, which Claude Code treats as unset. In the `api-key` mode it sets `apiKeyHelper` to `""`,
 so a repository helper adds no `x-api-key` value. In the `api-key` mode it also pins
-`ANTHROPIC_AUTH_TOKEN` to the placeholder. The runner reads that placeholder from the sandbox before
+`ANTHROPIC_AUTH_TOKEN` to the placeholder, or `ANTHROPIC_API_KEY` when the block sets
+`messages_auth_header: x-api-key` (below). The runner reads that placeholder from the sandbox before
 the agent starts. It is only a placeholder, so the file exposes nothing, and the key does not
 rotate, so it holds for the whole run. The launch refuses to start if the sandbox hands out a
 different placeholder by then.
 
-**Credential per `auth` mode.** In both modes the credential is sent as `Authorization: Bearer`,
-the header [ADR 0137](../ADRs/0137-inference-gateway-credential-route.md) sets for the route and the
-one pi sends, so a gateway reads one header whatever the runtime or mode:
+**Credential per `auth` mode.** By default the credential is sent as `Authorization: Bearer` in
+both modes, the header [ADR 0137](../ADRs/0137-inference-gateway-credential-route.md) sets for the
+route and the one pi sends, so a gateway reads one header whatever the runtime or mode. An
+`api-key` block can set `messages_auth_header: x-api-key` instead
+([ADR 0142](../ADRs/0142-inference-gateway-x-api-key-header-for-messages-models.md)):
 
 | Mode | How Claude Code gets it | Header sent |
 |---|---|---|
 | `oidc` (default) | an `apiKeyHelper` (`command -p cat` of a runner-seeded token file) in the inline `--settings` document, with `CLAUDE_CODE_API_KEY_HELPER_TTL_MS=10000` | `Authorization: Bearer`, plus a copy in `x-api-key` (below) |
 | `api-key` | `ANTHROPIC_AUTH_TOKEN` set to the placeholder for `FULLSEND_INFERENCE_GATEWAY_API_KEY` | `Authorization: Bearer` |
+| `api-key` with `messages_auth_header: x-api-key` | `ANTHROPIC_API_KEY` set to the same placeholder | `x-api-key` only |
 
-`ANTHROPIC_API_KEY`, which Claude Code would send as `x-api-key`, is cleared and never set, so a
-`.env` value cannot add a second credential header. A gateway that accepts static keys only in
-`x-api-key` is not supported on the route.
+Outside that last row, `ANTHROPIC_API_KEY`, which Claude Code would send as `x-api-key`, is cleared
+and never set, so a `.env` value cannot add a second credential header. In that row the roles swap:
+`ANTHROPIC_AUTH_TOKEN` is cleared and pinned to `""`, and `apiKeyHelper` is `""`, so the request
+carries the credential in `x-api-key` and nothing in `Authorization`. Use it for a gateway that reads
+the caller's key from `x-api-key` on `/v1/messages`, the header Anthropic documents for API keys on
+that API. The gateway must then replace the caller's `x-api-key` with its own upstream key, never
+forward it; see
+[Header custody for an x-api-key gateway](../guides/infrastructure/inference-gateway-operator.md#header-custody-for-an-x-api-key-gateway).
+`messages_auth_header: x-api-key` with `auth: oidc` is a config error.
 
 In the `oidc` mode Claude Code also sends the helper's value as `x-api-key`: it puts an
 `apiKeyHelper` value in both headers. The gateway authenticates the `Authorization` header and must
@@ -196,8 +206,9 @@ allows `POST /v1/messages` and `POST /v1/messages/count_tokens`, from the binari
 `**/claude.exe` (the sandbox image's native binary). OpenShell also admits a process whose ancestor
 matches ([egress binary identity](../contributing/runtime-implementation.md#egress-binary-identity-per-runtime)),
 so the tools Claude Code starts share this access. Its credential metadata names
-`Authorization: Bearer`. OpenShell
-resolves the placeholder only on requests to that host and path.
+`Authorization: Bearer`, or a plain `x-api-key` header with `messages_auth_header: x-api-key`. That
+rendering has its own profile id, so the two never overwrite each other on a shared OpenShell
+gateway. OpenShell resolves the placeholder only on requests to that host and path.
 
 **Limits.**
 
