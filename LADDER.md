@@ -62,8 +62,7 @@ repository.
 
 - Already vouched
 - At least 2 [substantive reviews](#substantive-reviews) or merged PRs,
-  in any combination, demonstrating familiarity with the project's
-  conventions and review etiquette. For example, two substantive
+  in any combination, that are high quality. For example, two substantive
   reviews, one review and one merged PR, or two merged PRs all meet
   the minimum. Merged PRs include
   [agent-authored PRs you drove](#agent-authored-prs-and-assignment).
@@ -78,6 +77,11 @@ repository.
 discussion. Link to your substantive reviews or merged PRs, and briefly
 describe the work and judgment each one shows (see
 [Making your case](#making-your-case)).
+
+You do not need to be an expert in the codebase or community conventions
+to request Triage. If you think your contributions demonstrate
+readiness, open a request and describe what you did. Maintainers will
+assess the evidence and explain any additional experience needed.
 
 **Who approves:** Any single maintainer.
 
@@ -176,8 +180,8 @@ you were not assigned to, link it and describe what you did.
 Distinguish between driving a change and independently reviewing it:
 
 - **Driving a change** means you were responsible for getting it done —
-  for example, you filed or refined the issue, dispatched the agent,
-  steered the implementation, and iterated on feedback. A change you
+  for example, you filed or refined the issue, steered the
+  implementation, and iterated on feedback. A change you
   drove counts like a PR you authored, whether the commits came from
   you or from an agent.
 - **Independently reviewing a change** means you evaluated work you did
