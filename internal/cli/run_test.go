@@ -4278,6 +4278,79 @@ func TestBootstrapEnv_ValidationLoopSchemaPrecedence(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A failed output-schema upload must fail bootstrap rather than continue
+// without FULLSEND_OUTPUT_SCHEMA in the sandbox (#8484).
+func TestBootstrapEnv_SchemaUploadFailureIsError(t *testing.T) {
+	schemaFile := filepath.Join(t.TempDir(), "schema.json")
+	require.NoError(t, os.WriteFile(schemaFile, []byte(`{"type":"object"}`), 0o644))
+
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$2\" = \"upload\" ]; then echo 'Git filtering selected no files' >&2; exit 1; fi\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	h := &harness.Harness{
+		Agent:          "agents/test.md",
+		ValidationLoop: &harness.ValidationLoop{Script: "scripts/validate.sh", Schema: schemaFile},
+	}
+	err := bootstrapEnv("test-sandbox", "/workspace/repo", h, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "uploading output schema "+schemaFile)
+	assert.Contains(t, err.Error(), "Git filtering selected no files")
+}
+
+// A successful schema upload exports FULLSEND_OUTPUT_SCHEMA in the .env.
+func TestBootstrapEnv_SchemaUploadExportsEnv(t *testing.T) {
+	schemaFile := filepath.Join(t.TempDir(), "schema.json")
+	require.NoError(t, os.WriteFile(schemaFile, []byte(`{"type":"object"}`), 0o644))
+
+	store := t.TempDir()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$2\" = \"upload\" ]; then cp \"$5\" " + shellQuoteForTest(store) + "/; fi\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	h := &harness.Harness{
+		Agent:          "agents/test.md",
+		ValidationLoop: &harness.ValidationLoop{Script: "scripts/validate.sh", Schema: schemaFile},
+	}
+	require.NoError(t, bootstrapEnv("test-sandbox", "/workspace/repo", h, nil))
+
+	entries, err := os.ReadDir(store)
+	require.NoError(t, err)
+	var exported bool
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(store, e.Name()))
+		require.NoError(t, err)
+		if strings.Contains(string(data), "export FULLSEND_OUTPUT_SCHEMA=/sandbox/workspace/.fullsend/output-schema.json") {
+			exported = true
+		}
+	}
+	assert.True(t, exported, "FULLSEND_OUTPUT_SCHEMA should be exported in the uploaded .env")
+}
+
+// Failing to create the schema directory in the sandbox is also an error.
+func TestBootstrapEnv_SchemaMkdirFailureIsError(t *testing.T) {
+	schemaFile := filepath.Join(t.TempDir(), "schema.json")
+	require.NoError(t, os.WriteFile(schemaFile, []byte(`{"type":"object"}`), 0o644))
+	// No openshell on PATH: the mkdir exec cannot start.
+	t.Setenv("PATH", t.TempDir())
+
+	h := &harness.Harness{
+		Agent:          "agents/test.md",
+		ValidationLoop: &harness.ValidationLoop{Script: "scripts/validate.sh", Schema: schemaFile},
+	}
+	err := bootstrapEnv("test-sandbox", "/workspace/repo", h, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creating .fullsend dir for output schema")
+}
+
 func TestBootstrapEnv_ValidationLoopSchemaFallback(t *testing.T) {
 	h := &harness.Harness{
 		Agent: "agents/test.md",

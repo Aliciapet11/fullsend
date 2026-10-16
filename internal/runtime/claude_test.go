@@ -738,8 +738,9 @@ func TestClaudeRuntime_ExtractTranscripts_OpenshellNotInPath(t *testing.T) {
 
 // fakeOpenshellBootstrap installs a fake "openshell" on PATH (ahead of the
 // real "tar", which is left reachable via the pre-existing PATH) that logs
-// every invocation's full argv to logPath and, on "sandbox upload <name>
-// <local> <remote>" where <local> is a tarball, copies it to sentinelPath.
+// every invocation's full argv to logPath and, on "sandbox upload
+// --no-git-ignore <name> <local> <remote>" where <local> is a tarball,
+// copies it to sentinelPath.
 // Bootstrap uploads several other regular files (the agent definition,
 // plugin marketplace config) in the same run, so the copy is restricted to
 // *.tar.gz uploads — otherwise a later, unrelated file upload would
@@ -754,8 +755,8 @@ func fakeOpenshellBootstrap(t *testing.T, logPath, sentinelPath string) {
 	script := "#!/bin/sh\n" +
 		"echo \"$@\" >> '" + logPath + "'\n" +
 		"if [ \"$2\" = \"upload\" ]; then\n" +
-		"  case \"$4\" in\n" +
-		"    *.tar.gz) cp \"$4\" '" + sentinelPath + "' ;;\n" +
+		"  case \"$5\" in\n" +
+		"    *.tar.gz) cp \"$5\" '" + sentinelPath + "' ;;\n" +
 		"  esac\n" +
 		"fi\n" +
 		"exit 0\n"

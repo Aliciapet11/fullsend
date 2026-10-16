@@ -3685,13 +3685,13 @@ func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, r
 		} else {
 			mkdirCmd := fmt.Sprintf("mkdir -p %s/.fullsend", sandbox.SandboxWorkspace)
 			if _, _, _, execErr := sandbox.Exec(sandboxName, mkdirCmd, 10*time.Second); execErr != nil {
-				fmt.Fprintf(os.Stderr, "WARNING: could not create .fullsend dir for schema: %v\n", execErr)
-			} else if uploadErr := sandbox.UploadFile(sandboxName, schemaHost, remoteSchemaPath); uploadErr != nil {
-				fmt.Fprintf(os.Stderr, "WARNING: could not upload output schema: %v\n", uploadErr)
-			} else {
-				// Safe: remoteSchemaPath is built from the SandboxWorkspace constant.
-				lines = append(lines, fmt.Sprintf("export FULLSEND_OUTPUT_SCHEMA=%s", remoteSchemaPath))
+				return fmt.Errorf("creating .fullsend dir for output schema: %w", execErr)
 			}
+			if uploadErr := sandbox.UploadFile(sandboxName, schemaHost, remoteSchemaPath); uploadErr != nil {
+				return fmt.Errorf("uploading output schema %s: %w", schemaHost, uploadErr)
+			}
+			// Safe: remoteSchemaPath is built from the SandboxWorkspace constant.
+			lines = append(lines, fmt.Sprintf("export FULLSEND_OUTPUT_SCHEMA=%s", remoteSchemaPath))
 		}
 	}
 	if outputFile, ok := h.RunnerEnv["FULLSEND_OUTPUT_FILE"]; ok && outputFile != "" {
