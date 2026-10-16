@@ -84,6 +84,15 @@ see [Repo Management](repo-management.md).
 - **`--fullsend-binary` and `--fullsend-source` need `vendor: true`.** They
   are accepted only when at least one selected repository resolves
   `vendor: true`.
+- **Turning vendoring off cleans up.** If a GitHub repository was vendored
+  and now resolves `vendor: false`, from `defaults.vendor` or its entry's
+  `vendor`, install removes the stale binary, the vendor manifest, the
+  `.defaults/` content, and the local reusable workflows. Fullsend's own
+  callers are rewritten in the same scaffold commit. Install deletes only
+  files Fullsend is known to have shipped; a file you created, even one
+  the vendor manifest lists, is kept. If a workflow would still call a local reusable
+  workflow, install keeps everything and reports the pending work. See
+  [Turning vendoring off](../../cli/repos.md#turning-vendoring-off).
 
 No configuration flags were added to `github setup` or any other command to
 replace the removed ones.

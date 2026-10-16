@@ -270,6 +270,12 @@ type convergeDiscovery struct {
 	configErr error
 	err       error
 
+	// staleVendored holds the Fullsend-owned assets an earlier vendored
+	// install left in a GitHub repository whose vendor setting is false.
+	// Read before any forge write so a malformed vendor manifest or a
+	// failed read changes nothing.
+	staleVendored *scaffold.StaleVendoredAssets
+
 	// credsPresent reports that every inference secret for the repo's
 	// inference.auth existed before this run. credsSupplied reports that
 	// the run supplied inputs for that method, so its secrets are
@@ -1436,6 +1442,15 @@ func convergeRepo(ctx context.Context,
 		cr.Error = contractErr
 		return cr
 	}
+	// Read stale vendored assets (GitHub, vendor: false) before any forge
+	// write, so a malformed vendor manifest or a failed read changes
+	// nothing.
+	staleVendored, staleErr := findStaleVendored(ctx, resolved)
+	if staleErr != nil {
+		cr.Error = fmt.Errorf("checking stale vendored assets: %w", staleErr)
+		return cr
+	}
+	d.staleVendored = staleVendored
 	// Treat the repo as new until the workflow file is on the default
 	// branch. Variables and secrets are written before the scaffold
 	// commit (see Install), so anyComponentPresent is true while an
@@ -1612,6 +1627,27 @@ func convergeRepo(ctx context.Context,
 			}
 		}
 
+		// Stale vendored assets from an earlier vendored install are
+		// removed in the install commit. Plan against the files the
+		// install delivers, before any forge write.
+		var staleVendoredPlanned *staleVendoredPlan
+		var staleVendoredActions []ComponentAction
+		if d.staleVendored != nil && len(d.staleVendored.Paths) > 0 {
+			installFiles, buildErr := BuildScaffoldFiles(installCfg)
+			if buildErr != nil {
+				cr.Error = fmt.Errorf("generating scaffold files: %w", buildErr)
+				return cr
+			}
+			plan, planErr := planStaleVendoredCleanup(ctx, resolved, d.staleVendored, installFiles,
+				freshCallerContent(resolved, staleVendoredDriftConfig(d, cfg)))
+			if planErr != nil {
+				cr.Error = fmt.Errorf("checking stale vendored assets: %w", planErr)
+				return cr
+			}
+			staleVendoredPlanned = plan
+			_, staleVendoredActions = applyStaleVendoredPlan(installFiles, plan, cfg.DryRun, repoFullName, progress)
+		}
+
 		if cfg.DryRun {
 			cr.Installed = true
 			if resolved.Forge == ForgeGitLab {
@@ -1630,6 +1666,7 @@ func convergeRepo(ctx context.Context,
 				Action:    "add",
 				Detail:    "Would install (new)",
 			})
+			cr.Actions = append(cr.Actions, staleVendoredActions...)
 			cr.Actions = append(cr.Actions, plannedInferenceSecretActions(d, progress)...)
 			dryCleanup := removeObsoleteInferenceSecrets(ctx, resolved, true, true, nil, progress)
 			cr.Actions = append(cr.Actions, dryCleanup...)
@@ -1662,7 +1699,15 @@ func convergeRepo(ctx context.Context,
 			return cr
 		}
 
-		installResult, installErr := Install(ctx, installCfg, resolved.ForgeConfig.Client, commitScaffold, progress)
+		installCommit := commitScaffold
+		if staleVendoredPlanned.deletable() {
+			installCommit = func(ctx context.Context, owner, repo string, files []forge.TreeFile, direct bool, installed bool) error {
+				files, _ = applyStaleVendoredPlan(files, staleVendoredPlanned, false, repoFullName, func(string, string, string) {})
+				return commitScaffold(ctx, owner, repo, files, direct, installed)
+			}
+		}
+
+		installResult, installErr := Install(ctx, installCfg, resolved.ForgeConfig.Client, installCommit, progress)
 		if installErr != nil {
 			cr.Error = installErr
 			if installResult != nil {
@@ -1679,6 +1724,7 @@ func convergeRepo(ctx context.Context,
 			Action:    "add",
 			Detail:    "Installed",
 		})
+		cr.Actions = append(cr.Actions, staleVendoredActions...)
 		// The selected method's credentials were written before the
 		// scaffold commit; only now remove the other method's secrets.
 		// This runs on every successful install, including a retry after an
@@ -1939,7 +1985,7 @@ func scaffoldDeliveryPlanned(files []forge.TreeFile, actions []ComponentAction, 
 	}
 	for _, a := range actions {
 		switch a.Action {
-		case "none", "orphan", "error", ActionAdoptionRequired, ActionSafetyRejected:
+		case "none", "orphan", "error", ActionAdoptionRequired, ActionSafetyRejected, ActionPending:
 		default:
 			return true
 		}
@@ -3738,16 +3784,37 @@ func collectConvergeScaffoldFiles(ctx context.Context, d convergeDiscovery, cfg 
 		return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", strings.Join(configErrors, "; "))
 	}
 	allScaffoldFiles = append(allScaffoldFiles, configFiles...)
+
+	// 2d-v: Stale vendored assets — with vendoring off, delete the
+	// Fullsend-owned files an earlier vendored install committed in this
+	// same scaffold commit, after rewriting Fullsend's callers away from
+	// the local reusable workflows being deleted.
+	if d.staleVendored != nil && len(d.staleVendored.Paths) > 0 {
+		plan, planErr := planStaleVendoredCleanup(ctx, resolved, d.staleVendored, allScaffoldFiles,
+			establishedCallerContent(ctx, resolved, staleVendoredDriftConfig(d, cfg), refResolver))
+		if planErr != nil {
+			detail := fmt.Sprintf("checking stale vendored assets: %v", planErr)
+			actions = append(actions, ComponentAction{Component: staleVendoredComponent, Action: "error", Detail: detail})
+			return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", detail)
+		}
+		var staleActions []ComponentAction
+		allScaffoldFiles, staleActions = applyStaleVendoredPlan(allScaffoldFiles, plan, cfg.DryRun, resolved.Owner+"/"+resolved.Repo, progress)
+		actions = append(actions, staleActions...)
+	}
 	return allScaffoldFiles, actions, nil
 }
 
 // convergeEstablishedPhases collects scaffold changes once, preserving the
-// credential-before-planning order except where vendored WIF preflight must
-// establish usable delivery before any credential can change.
+// credential-before-planning order except where planning must finish before
+// any credential can change: vendored WIF preflight must establish usable
+// delivery, and stale vendored asset cleanup must complete its caller reads,
+// rendering and planning so a failure there leaves variables and secrets
+// untouched. The one plan is then reused for the scaffold commit.
 func convergeEstablishedPhases(ctx context.Context, d convergeDiscovery, wifProvider string, cfg ConvergeConfig, refResolver *RefResolver, progress ProgressFunc, vendoredWIFSource bool) ([]forge.TreeFile, []ComponentAction, []ComponentAction, error) {
 	var orderedActions []ComponentAction
 	resolved := d.resolved
-	if !vendoredWIFSource {
+	planFirst := vendoredWIFSource || (d.staleVendored != nil && len(d.staleVendored.Paths) > 0)
+	if !planFirst {
 		actions, err := convergeRepoCredentials(ctx, d, wifProvider, cfg, progress)
 		orderedActions = append(orderedActions, actions...)
 		if err != nil {
@@ -3773,7 +3840,7 @@ func convergeEstablishedPhases(ctx context.Context, d convergeDiscovery, wifProv
 		}
 	}
 
-	if vendoredWIFSource {
+	if planFirst {
 		actions, err := convergeRepoCredentials(ctx, d, wifProvider, cfg, progress)
 		orderedActions = append(orderedActions, actions...)
 		return files, scaffoldActions, orderedActions, err
