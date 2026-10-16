@@ -27,6 +27,13 @@ import (
 //
 // Nothing inside the sandbox contributes an expected value.
 //
+// Not covered: the guard checks the files before claude starts, not while it
+// reads them. A process still running in the sandbox at launch — one an
+// earlier iteration left behind, or one this iteration's .env starts in the
+// background — can change hooks.json or a script after the second pass and
+// before Claude Code loads it. A gateway run passes the settings document
+// inline, so there only the scripts are exposed.
+//
 // The interpreter and PATH the hooks run with are pinned by Bootstrap into
 // hooks.json (claudePreflightInterpreter), so the hooks.json digest covers
 // them.
@@ -134,9 +141,10 @@ func claudeHooksGuard(d claudeHookDigests, settingsFile bool) string {
 // bin directory that holds fullsend and fullsend-check-output for the agent.
 // The pinned claude binary and the hook commands' own PATH cover the launch.
 //
-// With hooks enabled the guard is always emitted: empty digests produce a
-// guard that can never pass, so a caller that skipped the lookup fails closed
-// rather than launching unguarded.
+// With hooks enabled the guard is always emitted. Empty digests produce a
+// hooks.json check that can never pass, so a caller that skipped the lookup
+// fails closed rather than launching unguarded; the scripts-only gateway guard
+// relies on Run's digest check instead, which refuses a run without digests.
 func claudeGuardedEnv(envFile string, hooksEnabled, settingsFile bool, d claudeHookDigests) string {
 	source := ". " + envFile
 	if !hooksEnabled {

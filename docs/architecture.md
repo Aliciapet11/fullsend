@@ -987,7 +987,7 @@ flowchart TB
       C1["/sandbox/claude-config\nagents/ · skills/ · hooks/ · hooks.json"]
       C0{"shell guard, before and after .env:\nhooks.json and hook scripts match the\nrunner-held SHA-256 digests?"}
       C2["claude -p --agent code\n--settings hooks.json\n--dangerously-skip-permissions"]
-      CX["exit 97 — never runs with edited hooks"]
+      CX["exit 97 — refuses to start on edited hooks"]
       C1 --> C0
       C0 -- yes --> C2
       C0 -- no --> CX

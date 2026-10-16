@@ -60,7 +60,9 @@ which is a stronger check than the trust hash it replaces.
 > below no longer applies to it. Bootstrap also resolves an absolute `python3` and the sandbox
 > `PATH` and renders them into `hooks.json` (covered by its digest) with `-E -s -B`, so the hook
 > interpreter and its `PATH` no longer come from the agent-writable `.env`. Claude Code does not use
-> `-I`, because its scripts import `hook_io` from their own directory.
+> `-I`, because its scripts import `hook_io` from their own directory. The check runs before launch:
+> a process still running in the sandbox, including one the iteration's `.env` starts in the
+> background, can change the files after it, as on codex.
 
 Because the hook scripts and their directory stay agent-writable between iterations — the residue
 Claude Code and pi also have — codex additionally **re-verifies every script against runner-held digests
