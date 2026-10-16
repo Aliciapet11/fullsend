@@ -114,6 +114,8 @@ runs:
         fi
 
         body+="
+        Reason: \`${REASON}\`
+
         See [E2E testing guide](${DOCS_URL}) for details."
 
         existing_id="$(gh api "repos/${owner}/${repo}/issues/${PR_NUMBER}/comments" --paginate \
