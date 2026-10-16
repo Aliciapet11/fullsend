@@ -670,10 +670,17 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 		return errors.Join(errs...)
 	}
 
+	// The configuration preflights below only read the forge, and the
+	// manifest is written only after all of them, so they share one read
+	// cache: equivalent layer, component and glob reads are made once
+	// (#8501). It is discarded before the manifest write; convergence
+	// reads current state through clients.
+	preflightClients := repos.NewPreflightReadCache(clients)
+
 	// Preflight the existing configuration layers of manifest-tracked repos
 	// before any manifest or forge write: a markerless overlay needs
 	// adoption and an undeclared base needs resolution (#8218).
-	if err := repos.PreflightManagedConfig(ctx, manifest, clients, opts.repoFilter); err != nil {
+	if err := repos.PreflightManagedConfig(ctx, manifest, preflightClients, opts.repoFilter); err != nil {
 		return fmt.Errorf("configuration preflight: %w", err)
 	}
 
@@ -698,7 +705,7 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 		DryRun:       true,
 		Deferred:     !opts.dryRun,
 		RepoFilter:   opts.repoFilter,
-	}, clients, func(repo, _, msg string) {
+	}, preflightClients, func(repo, _, msg string) {
 		deferOutput(func() { printer.StepInfo(fmt.Sprintf("[%s] %s", repo, msg)) })
 	})
 	if wbErr != nil {
@@ -711,14 +718,14 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 	// Compare the proposed layered configuration (manifest edits and declared
 	// presets) with each repository's installed layers before anything is
 	// persisted or written to the forge.
-	if err := repos.PreflightProposedManagedSafety(ctx, manifest, clients, opts.repoFilter); err != nil {
+	if err := repos.PreflightProposedManagedSafety(ctx, manifest, preflightClients, opts.repoFilter); err != nil {
 		return fmt.Errorf("configuration safety preflight: %w", err)
 	}
 	// Resolve the effective infrastructure and reconcile the Vertex inputs
 	// of every selected repository before the manifest is persisted, so a
 	// mint URL conflict or a flag that contradicts the declared
 	// configuration leaves repos.yaml byte-identical.
-	if err := repos.PreflightEffectiveInfrastructure(ctx, manifest, clients, opts.repoFilter, opts.inferenceProject, opts.inferenceWIFProvider); err != nil {
+	if err := repos.PreflightEffectiveInfrastructure(ctx, manifest, preflightClients, opts.repoFilter, opts.inferenceProject, opts.inferenceWIFProvider); err != nil {
 		return fmt.Errorf("effective infrastructure preflight: %w", err)
 	}
 	if manifestChanged && !opts.dryRun && opts.manifest != "" {

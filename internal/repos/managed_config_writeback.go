@@ -279,6 +279,12 @@ func EnsureManagedConfigDefaults(ctx context.Context, cfg ManagedConfigWriteback
 		if resolved.RequireInferenceAuth() != nil {
 			continue
 		}
+		// A declared preset or an explicit create_issues setting rules
+		// out every install default, so the repository's layers and
+		// installation state are not read for this decision (#8501).
+		if !installDefaultsPossible(resolved) {
+			continue
+		}
 		fc, err := clients.ConfigFor(rr.Forge)
 		if err != nil {
 			return nil, fmt.Errorf("creating %q client for %s/%s: %w", rr.Forge, rr.Owner, rr.Repo, err)
@@ -381,11 +387,20 @@ func pristineRepository(ctx context.Context, fc ForgeConfig, resolved ResolvedCo
 // other repository needs an operator declaration.
 func installDefaultsFor(rr ResolvedRepo, resolved ResolvedConfig, pristine bool) (next config.ManagedConfig, what []string) {
 	next = rr.Entry.Config
-	if pristine && resolved.Config == "" && resolved.Managed.IssueCreationConfig() == nil {
+	if pristine && installDefaultsPossible(resolved) {
 		next = next.WithCreateIssuesRepos([]string{UpstreamIssueTarget})
 		what = append(what, "create_issues.allow_targets.repos: ["+UpstreamIssueTarget+"]")
 	}
 	return next, what
+}
+
+// installDefaultsPossible reports whether the resolved configuration alone
+// leaves room for an install default: no declared preset (which keeps
+// inheriting its own create_issues) and no explicit create_issues setting.
+// It needs no forge read, so EnsureManagedConfigDefaults checks it before
+// reading layers or probing components.
+func installDefaultsPossible(resolved ResolvedConfig) bool {
+	return resolved.Config == "" && resolved.Managed.IssueCreationConfig() == nil
 }
 
 // ManifestReadOnly reports whether the manifest at path cannot be written:
