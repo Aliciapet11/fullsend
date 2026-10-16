@@ -52,9 +52,26 @@ func TestCheckGitLabTriggerDispatchGate_ReadyWhenAllPrerequisitesHold(t *testing
 	assert.True(t, gate.Ready)
 	assert.Empty(t, gate.Deferred)
 
-	// The ledger-only diagnosis (no live API) gives the same answer.
-	gate = CheckGitLabTriggerDispatchGate(context.Background(), e.state, nil, trigOwner, trigRepo, trigBranch)
-	assert.True(t, gate.Ready, "deferred: %v", gate.Deferred)
+}
+
+func TestCheckGitLabTriggerDispatchGate_RequiresLiveVerification(t *testing.T) {
+	// Without the live trigger-account API or the default branch, the account
+	// checks that read live state cannot run, so the gate must defer even
+	// though the ledger, sink, override role and schedules all look ready.
+	t.Run("nil API", func(t *testing.T) {
+		e := readyTriggerDispatchEnv(t)
+		gate := CheckGitLabTriggerDispatchGate(context.Background(), e.state, nil, trigOwner, trigRepo, trigBranch)
+		assert.False(t, gate.Ready)
+		require.Len(t, gate.Deferred, 1)
+		assert.Contains(t, gate.Deferred[0], "without the trigger-account API")
+	})
+	t.Run("empty branch", func(t *testing.T) {
+		e := readyTriggerDispatchEnv(t)
+		gate := CheckGitLabTriggerDispatchGate(context.Background(), e.state, e.f, trigOwner, trigRepo, "")
+		assert.False(t, gate.Ready)
+		require.Len(t, gate.Deferred, 1)
+		assert.Contains(t, gate.Deferred[0], "without the default branch")
+	})
 }
 
 func TestCheckGitLabTriggerDispatchGate_LegacyScheduleVariablesDefer(t *testing.T) {

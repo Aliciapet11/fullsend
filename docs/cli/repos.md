@@ -651,6 +651,22 @@ that cannot push is never reported ready, and the account's effective access
 (including inherited group access) must be exactly Developer even when its
 direct membership already says Developer.
 
+Whenever install leaves the trigger account ready, including after GitLab
+refuses the Poller protected-ref grant, it also rechecks the dispatch
+activation gate (`CheckGitLabTriggerDispatchGate`) and reports either
+`GitLab trigger dispatch activation deferred: <reasons>` or
+`GitLab trigger dispatch prerequisites verified`. The recheck only reads and
+lists every unmet prerequisite: managed scheduled polling no longer uses
+pipeline variables (the canonical schedule specs and every live managed
+schedule; a failed schedule read defers), the live
+`ci_pipeline_variables_minimum_override_role` is exactly `no_one_allowed`
+(weaker, unreadable, and unsupported all defer, even when a trigger token is
+already published), and the trigger account is ready on the default branch,
+verified against live GitLab state. A legacy install, whose schedules still set
+`FULLSEND_POLL_MODE`, defers. A deferral is informational, changes nothing, and
+polling stays the dispatch path. Even when the prerequisites are verified, no
+dispatch path uses the trigger token yet.
+
 As soon as the manifest and forge clients are available, before the
 configuration preflights or any convergence, `repos install` runs a
 containment-only recovery for every targeted GitLab repository that has a

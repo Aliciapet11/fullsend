@@ -79,8 +79,11 @@ func maybeConvergeGitLabTriggerAccount(ctx context.Context, opts *reposInstallCo
 // Poller protected-ref grant. A deferral is informational: it changes nothing
 // and polling stays the dispatch path.
 func reportGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, api repos.GitLabTriggerAccountAPI, printer *ui.Printer, owner, repo, branch string) {
-	repoFullName := owner + "/" + repo
-	gate := repos.CheckGitLabTriggerDispatchGate(ctx, client, api, owner, repo, branch)
+	printGitLabTriggerDispatchGate(printer, owner+"/"+repo, repos.CheckGitLabTriggerDispatchGate(ctx, client, api, owner, repo, branch))
+}
+
+// printGitLabTriggerDispatchGate prints a dispatch-gate result.
+func printGitLabTriggerDispatchGate(printer *ui.Printer, repoFullName string, gate repos.GitLabTriggerDispatchGate) {
 	if !gate.Ready {
 		printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch activation deferred: %s. Polling stays the dispatch path", repoFullName, strings.Join(gate.Deferred, "; ")))
 		return

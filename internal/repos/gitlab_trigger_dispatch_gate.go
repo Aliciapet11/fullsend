@@ -36,12 +36,20 @@ type GitLabTriggerDispatchGate struct {
 //     no_one_allowed. A weaker, unreadable, or unsupported setting defers.
 //     A published trigger token or deploy-key grant is not evidence that the
 //     setting is safe, so the setting is always read here.
-//  3. The trigger account (DiagnoseGitLabTriggerAccount) is ready on branch.
+//  3. The trigger account (DiagnoseGitLabTriggerAccount) is ready on branch,
+//     verified against live project state.
 //
-// api may be nil, in which case the trigger account is diagnosed from the
-// ledger and token sink alone.
+// A nil api or an empty branch makes the live account checks and the
+// default-branch comparison impossible, so the gate never returns Ready for
+// them: it defers with a reason instead.
 func CheckGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, api GitLabTriggerAccountAPI, owner, repo, branch string) GitLabTriggerDispatchGate {
 	var deferred []string
+	if api == nil {
+		deferred = append(deferred, "the trigger account cannot be verified against live project state without the trigger-account API")
+	}
+	if branch == "" {
+		deferred = append(deferred, "the trigger account cannot be verified without the default branch")
+	}
 	deferred = append(deferred, gitlabScheduleMigrationProblems(ctx, client, owner, repo)...)
 	if reason := gitlabTriggerDispatchOverrideRoleProblem(ctx, client, owner, repo); reason != "" {
 		deferred = append(deferred, reason)

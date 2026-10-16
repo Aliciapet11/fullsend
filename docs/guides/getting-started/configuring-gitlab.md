@@ -743,8 +743,9 @@ reason and resource IDs.
   `FULLSEND_POLL_MODE`), and the live
   `ci_pipeline_variables_minimum_override_role` must be exactly
   `no_one_allowed`. A weaker, unreadable, or unsupported setting defers, even
-  when a trigger token is already published. A deferral changes nothing, and
-  polling stays the dispatch path.
+  when a trigger token is already published. The trigger account must also be
+  ready on the default branch, verified against live GitLab state. A deferral
+  changes nothing, and polling stays the dispatch path.
 - **Deferral and unsafe token variable:** a branch-change, override-role, or
   capability deferral first removes an unsafe published token variable and
   revokes its ownership-verified trigger. A weakened or unreadable override
