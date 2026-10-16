@@ -91,7 +91,7 @@ func NewRepoPoolCFMintPreviews(
 var _ Factory = NewRepoPoolCFMintPreviews
 
 // buildCFMintDriver deploys the mint and constructs the composed driver
-// with the standard vendored-mode GitHubSetupOpts. Extracted from
+// with the standard vendored-mode InstallOpts. Extracted from
 // NewRepoPoolCFMintPreviews so the deploy → compose path can be tested
 // with a fake mintDriver.
 func buildCFMintDriver(
@@ -102,11 +102,11 @@ func buildCFMintDriver(
 	poolSize int,
 	logf func(string, ...any),
 ) (Driver, error) {
-	return buildCFMintDriverWithOpts(org, md, client, token, binary, gcpProjectID, poolSize, common.DefaultGitHubSetupOpts(), logf)
+	return buildCFMintDriverWithOpts(org, md, client, token, binary, gcpProjectID, poolSize, common.DefaultInstallOpts(), logf)
 }
 
 // buildCFMintDriverWithOpts is like buildCFMintDriver but accepts the
-// GitHubSetupOpts to install with, so a playback-runtime caller can
+// InstallOpts to install with, so a playback-runtime caller can
 // install repos with the dummy-playback runtime and its tracking-issue
 // hook instead of the normal dummy runtime.
 func buildCFMintDriverWithOpts(
@@ -115,10 +115,10 @@ func buildCFMintDriverWithOpts(
 	client forge.Client,
 	token, binary, gcpProjectID string,
 	poolSize int,
-	setupOpts common.GitHubSetupOpts,
+	installOpts common.InstallOpts,
 	logf func(string, ...any),
 ) (Driver, error) {
-	setupOpts.AppSet = envAppSet()
+	installOpts.AppSet = envAppSet()
 	ctx := context.Background()
 	mintURL, err := md.Install(ctx, org)
 	if err != nil {
@@ -130,8 +130,8 @@ func buildCFMintDriverWithOpts(
 		MintURL:      mintURL,
 		GCPProjectID: gcpProjectID,
 	}
-	ens, err := newRepoEnsurerWithOpts(e2eCfg, client, token, binary, setupOpts, logf,
-		playbackInstallHooks(setupOpts, logf))
+	ens, err := newRepoEnsurerWithOpts(e2eCfg, client, token, binary, installOpts, logf,
+		playbackInstallHooks(installOpts, logf))
 	if err != nil {
 		return nil, fmt.Errorf("cfmint factory: %w", err)
 	}
@@ -145,7 +145,8 @@ func buildCFMintDriverWithOpts(
 }
 
 // cfmintMintDriver deploys a CF Worker preview mint and uses the derived
-// preview URL as the mint endpoint for fullsend github setup.
+// preview URL as the mint endpoint declared in each repo's repos.yaml
+// entry for fullsend repos install.
 type cfmintMintDriver struct {
 	client       forge.Client
 	token        string
@@ -356,8 +357,8 @@ func envSuiteName() string {
 }
 
 // envConfigPreset returns the optional config base layer preset path or
-// URL from BEHAVIOUR_CONFIG_PRESET. Empty when unset, so github setup
-// is invoked without --config.
+// URL from BEHAVIOUR_CONFIG_PRESET. Empty when unset, so the generated
+// repos.yaml entry declares no config_base.
 func envConfigPreset() string {
 	return os.Getenv("BEHAVIOUR_CONFIG_PRESET")
 }
