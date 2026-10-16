@@ -114,9 +114,22 @@ func (f *FakeJiraClient) CreateIssue(_ context.Context, in jira.CreateIssueInput
 		n++
 	}
 	key := fmt.Sprintf("%s-%d", in.ProjectKey, n)
+	issueType := &jira.IssueType{}
+	isID := in.IssueType != ""
+	for _, r := range in.IssueType {
+		if r < '0' || r > '9' {
+			isID = false
+			break
+		}
+	}
+	if isID {
+		issueType.ID = in.IssueType
+	} else {
+		issueType.Name = in.IssueType
+	}
 	f.Issues[key] = &jira.Issue{
 		Key:    key,
-		Fields: jira.IssueFields{Summary: in.Summary, Description: description},
+		Fields: jira.IssueFields{Summary: in.Summary, Description: description, IssueType: issueType},
 	}
 	return &jira.CreatedIssue{ID: fmt.Sprintf("%d", 10000+len(f.CreatedIssues)), Key: key}, nil
 }

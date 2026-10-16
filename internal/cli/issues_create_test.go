@@ -246,6 +246,32 @@ func TestRunIssuesCreate_StdinTooLarge(t *testing.T) {
 	assert.Empty(t, fc.CreatedIssues)
 }
 
+func TestRunIssuesCreate_JiraBodyLimit(t *testing.T) {
+	for _, useStdin := range []bool{false, true} {
+		t.Run(map[bool]string{false: "flag", true: "stdin"}[useStdin], func(t *testing.T) {
+			tc, fake, err := tracker.NewFakeJiraClientWithFake("https://acme.atlassian.net")
+			require.NoError(t, err)
+			cfg := &issuesCreateConfig{
+				trackerName: trackerJira,
+				project:     "PROJ",
+				title:       "t",
+				issueType:   "Task",
+				body:        strings.Repeat("a", jira.MaxMarkdownBytes+1),
+				testClient:  tc,
+				testWriter:  &bytes.Buffer{},
+			}
+			if useStdin {
+				cfg.testStdin = strings.NewReader(cfg.body)
+				cfg.body = "-"
+			}
+			err = runIssuesCreate(context.Background(), cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "32768 bytes")
+			assert.Empty(t, fake.CreatedIssues)
+		})
+	}
+}
+
 func TestRunIssuesCreate_TrackerError(t *testing.T) {
 	fc := forge.NewFakeClient()
 	fc.Errors = map[string]error{"CreateIssue": errors.New("boom")}

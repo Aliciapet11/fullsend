@@ -153,6 +153,9 @@ func runIssuesCreate(ctx context.Context, cfg *issuesCreateConfig) error {
 			return fmt.Errorf("reading issue body: %w", err)
 		}
 	}
+	if trackerName == trackerJira && len(body) > jira.MaxMarkdownBytes {
+		return fmt.Errorf("Jira issue body exceeds maximum size of %d bytes", jira.MaxMarkdownBytes)
+	}
 
 	tc := cfg.testClient
 	if tc == nil {

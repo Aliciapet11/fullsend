@@ -79,6 +79,29 @@ func TestJiraClient_GetIssue(t *testing.T) {
 	}
 }
 
+func TestJiraClient_GetIssue_UsesCanonicalKey(t *testing.T) {
+	fc := &FakeJiraClient{Issues: map[string]*jira.Issue{
+		"proj-42": {Key: "PROJ-42"},
+		"proj-43": {},
+	}}
+	c := newTestJiraClient(t, fc, "https://acme.atlassian.net")
+	for _, tt := range []struct {
+		number int
+		key    string
+	}{
+		{42, "PROJ-42"},
+		{43, "proj-43"},
+	} {
+		issue, err := c.GetIssue(context.Background(), "proj", tt.number)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if issue.Key != tt.key || issue.URL != "https://acme.atlassian.net/browse/"+tt.key {
+			t.Errorf("GetIssue(%d) = %+v, want key and URL for %q", tt.number, issue, tt.key)
+		}
+	}
+}
+
 func TestJiraClient_GetIssue_IssueTypeAndCustomFields(t *testing.T) {
 	custom := map[string]json.RawMessage{
 		"customfield_10875": json.RawMessage(`"https://github.com/acme/widgets/pull/7"`),
@@ -725,6 +748,9 @@ func TestJiraClient_CreateIssue(t *testing.T) {
 	if len(fj.CreatedIssues) != 1 || fj.CreatedIssues[0] != want {
 		t.Fatalf("CreatedIssues = %+v, want [%+v]", fj.CreatedIssues, want)
 	}
+	if stored := fj.Issues[issue.Key].Fields.IssueType; stored == nil || stored.ID != "10003" {
+		t.Errorf("stored issue type = %+v, want ID 10003", stored)
+	}
 	if issue.Number != 1 || issue.Title != "Sub-task title" || issue.Body != "Some **bold** text" ||
 		issue.URL != "https://acme.atlassian.net/browse/PROJ-1" {
 		t.Errorf("CreateIssue returned unexpected issue: %+v", issue)
@@ -738,6 +764,24 @@ func TestJiraClient_CreateIssue(t *testing.T) {
 	}
 	if got.Title != "Sub-task title" || got.Body != "Some **bold** text" {
 		t.Errorf("GetIssue after CreateIssue = %+v", got)
+	}
+}
+
+func TestJiraClient_CreateIssue_NamedTypeRoundTrips(t *testing.T) {
+	jc, _, err := NewFakeJiraClientWithFake("https://acme.atlassian.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := jc.CreateIssue(context.Background(), "PROJ", "Task title", "body", CreateIssueOptions{IssueType: "Task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := jc.GetIssue(context.Background(), "PROJ", created.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IssueType != "Task" {
+		t.Errorf("GetIssue after CreateIssue type = %q, want Task", got.IssueType)
 	}
 }
 

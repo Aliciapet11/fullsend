@@ -96,6 +96,16 @@ otherwise ignored.
 
 ## `fullsend issues create`
 
+### Prerequisites
+
+You need permission to create issues in the target project, its identifier
+(`owner/repo` for GitHub or GitLab, or a project key for Jira), and a tracker
+API token. Supply the token with `--token` or the relevant
+[environment variable](#environment-variables). For Jira Cloud, also supply
+the instance URL and user email with `--jira-url` and `--jira-email`, or set
+`JIRA_BASE_URL` and `JIRA_USER_EMAIL`. Jira also requires an issue type;
+use the issue type's name or ID with `--type`.
+
 Creates a new issue and prints its number, URL, and (for Jira) key as
 JSON:
 
@@ -109,8 +119,10 @@ JSON:
 ```
 
 `key` is only present for Jira. `--body` is the issue description as
-Markdown, or `-` to read it from stdin (capped at 2 MB). For Jira, the
-body is converted to Atlassian Document Format.
+Markdown, or `-` to read it from stdin (capped at 2 MiB). Jira issue
+descriptions are limited to 32 KiB of Markdown, whether supplied directly
+or through stdin. Fullsend converts that Markdown to Atlassian Document
+Format (ADF), Jira's structured format for rich text.
 
 ```bash
 fullsend issues create \

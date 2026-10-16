@@ -90,6 +90,20 @@ func TestCreateIssue_NotRetriedOnServerError(t *testing.T) {
 	assert.Equal(t, 1, calls, "a non-idempotent create must not be retried on 5xx")
 }
 
+func TestCreateIssue_NotRetriedOnRateLimit(t *testing.T) {
+	t.Parallel()
+	client, mux := setupTest(t)
+	calls := 0
+	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		writeJSON(t, w, http.StatusTooManyRequests, map[string]any{"errorMessages": []string{"rate limit exceeded"}})
+	})
+
+	_, err := client.CreateIssue(context.Background(), CreateIssueInput{ProjectKey: "PROJ", IssueType: "10003", Summary: "t"})
+	require.Error(t, err)
+	assert.Equal(t, 1, calls, "a non-idempotent create must not be retried on 429")
+}
+
 func TestCreateIssue_BadRequest(t *testing.T) {
 	t.Parallel()
 	client, mux := setupTest(t)

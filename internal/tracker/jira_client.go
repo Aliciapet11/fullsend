@@ -119,15 +119,19 @@ func (c *JiraClient) GetIssue(ctx context.Context, project string, number int) (
 	if issue.Fields.IssueType != nil {
 		issueType = issue.Fields.IssueType.Name
 	}
+	canonicalKey := issue.Key
+	if canonicalKey == "" {
+		canonicalKey = key
+	}
 	return &Issue{
 		Number:       number,
 		Title:        issue.Fields.Summary,
 		Body:         Body(jira.ADFToMarkdown(issue.Fields.Description)),
-		URL:          c.baseURL + "/browse/" + key,
+		URL:          c.baseURL + "/browse/" + canonicalKey,
 		Labels:       issue.Fields.Labels,
 		IssueType:    issueType,
 		CustomFields: issue.Fields.CustomFields,
-		Key:          key,
+		Key:          canonicalKey,
 	}, nil
 }
 
