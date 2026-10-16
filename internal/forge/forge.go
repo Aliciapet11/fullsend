@@ -114,6 +114,11 @@ const (
 	// variable is no longer read by the job and is never deleted — see
 	// gitlabUninstallSecrets in internal/repos/uninstall.go.
 	SecretOpenAIAPIKey = "FULLSEND_OPENAI_API_KEY"
+	// SecretInferenceGatewayAPIKey is the inference gateway's API key for
+	// inference.gateway.auth api-key (ADR 0138): a forge secret (GitHub) or
+	// masked CI/CD variable (GitLab) the runner reads under this name.
+	// Setup does not write it; the repository admin sets it.
+	SecretInferenceGatewayAPIKey = "FULLSEND_INFERENCE_GATEWAY_API_KEY"
 
 	// Legacy uninstall-only variables — GitLab.
 	VarLegacyBotTokenSecret = "FULLSEND_BOT_TOKEN_SECRET"
@@ -138,6 +143,27 @@ const (
 	// document (per-role lock, token IDs, expiry dates, phase). It
 	// never stores token values. See internal/gitlabroles and #7500.
 	VarGitLabRoleRotation = "FULLSEND_GITLAB_ROLE_ROTATION"
+
+	// VarGitLabPollerGenerations is the protected, unmasked Poller
+	// identity-generation document (current, pending, and retiring Poller
+	// account IDs and the pending generation's handoff phase). It never
+	// stores token values. Not yet written by any command. See #8210.
+	VarGitLabPollerGenerations = "FULLSEND_GITLAB_POLLER_GENERATIONS"
+
+	// VarGitLabTriggerAccount is the protected, unmasked ledger for the
+	// trigger-only GitLab service account (account, bootstrap PAT,
+	// deploy-key and branch-grant, and pipeline trigger token IDs, plus
+	// the lifecycle phase). It never stores token values or private keys.
+	// Written by repos install and removed by repos uninstall only after
+	// every resource it records is gone; see #8437 and #8438.
+	VarGitLabTriggerAccount = "FULLSEND_GITLAB_TRIGGER_ACCOUNT"
+
+	// SecretGitLabTriggerAccountToken is the pipeline trigger token owned by
+	// the trigger-only service account. It is stored as a masked, protected
+	// CI/CD variable that no pipeline reads until the dispatch route of #8438
+	// is activated; the existing polling path and FULLSEND_TRIGGER_TOKEN are
+	// unaffected. Never logged and never written to the ledger.
+	SecretGitLabTriggerAccountToken = "FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN"
 )
 
 // GitLab CI pipeline-variable minimum-override roles.
@@ -1137,6 +1163,16 @@ type Client interface {
 	// returns ErrNotSupported.
 	GrantProtectedBranchMergeUser(ctx context.Context, owner, repo, branch string, userID int) error
 
+	// RevokeProtectedBranchMergeUserEntry removes the single user merge-access
+	// entry identified by entryID from the exact-name protected-branch rule for
+	// branch. It exists so a caller that added a grant (and learned its entry ID
+	// from a ProtectedBranchAccess it read back) can undo exactly that grant
+	// without touching any other entry for the same user. It refuses an entry
+	// that is not a grant for userID, never touches wildcard rules, and is a
+	// no-op when the entry or rule is already gone. Used on GitLab; GitHub
+	// returns ErrNotSupported.
+	RevokeProtectedBranchMergeUserEntry(ctx context.Context, owner, repo, branch string, entryID, userID int) error
+
 	// Pipeline schedules and branch-restricted CI variables live on
 	// the base Client because both GitHub Actions and GitLab CI support
 	// timed triggers. However, the branch-restricted/protected variable
@@ -1240,6 +1276,14 @@ type Client interface {
 	// Returns ErrNotFound if the project does not exist. GitHub returns
 	// ErrNotSupported.
 	SetPipelineVariablesMinimumOverrideRole(ctx context.Context, owner, repo, role string) error
+	// GetJobTokenRepositoryPushAllowed returns the GitLab project setting
+	// ci_push_repository_for_job_token_allowed, which lets a job's
+	// CI_JOB_TOKEN push to the project repository. Returns ErrNotSupported
+	// if the field is absent from GitLab's response (an instance or edition
+	// that does not report the setting), so callers can fail closed rather
+	// than treat an unreported setting as disabled. Returns ErrNotFound if
+	// the project does not exist. GitHub returns ErrNotSupported.
+	GetJobTokenRepositoryPushAllowed(ctx context.Context, owner, repo string) (bool, error)
 
 	// Commit comparison
 	// CompareCommits compares two commits and returns their relationship
@@ -1323,14 +1367,21 @@ func (v PipelineInputValue) MarshalJSON() ([]byte, error) {
 }
 
 // ProtectedBranchAccess is one grant on a protected branch.
-// A role-based grant has AccessLevel set and UserID/GroupID zero.
-// A user or group grant has the corresponding ID set.
+// A role-based grant has AccessLevel set and UserID/GroupID/DeployKeyID zero.
+// A user, group, or deploy-key grant has the corresponding ID set. GitLab
+// reports a deploy-key grant with a Maintainer AccessLevel, but it admits
+// only the key, not every Maintainer, so callers must not read it as a role
+// grant. ID is the forge's
+// identifier of this individual entry (zero when the forge does not report
+// one); it lets a caller remove exactly this entry later.
 // GitLab access levels: 0 (No one), 30 (Developer), 40 (Maintainer),
 // 60 (Admin). A role-based grant of N allows identities at N or above.
 type ProtectedBranchAccess struct {
+	ID          int
 	AccessLevel int
 	UserID      int
 	GroupID     int
+	DeployKeyID int
 }
 
 // ProtectedBranchRule is the protection configuration for a branch.

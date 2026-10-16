@@ -174,7 +174,7 @@ func (c *LiveClient) updateRepoSecret(ctx context.Context, owner, repo, name, va
 // error rather than a reason to retry with masked=false.
 func maskingRequired(name string) bool {
 	switch name {
-	case forge.SecretOpenAIAPIKey, forge.SecretTriggerToken, forge.SecretWebhookSecret,
+	case forge.SecretOpenAIAPIKey, forge.SecretTriggerToken, forge.SecretWebhookSecret, forge.SecretGitLabTriggerAccountToken,
 		forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken:
 		return true
 	}
@@ -1360,8 +1360,11 @@ func (c *LiveClient) UpdateResourceGroupProcessMode(ctx context.Context, owner, 
 // ---------------------------------------------------------------------------
 
 // UpdateCIVariable upserts a CI/CD variable (update if exists, create if not).
+// It targets the wildcard-scoped definition, the one GetRepoVariable reads, so
+// a same-named variable defined only for a named environment is left alone and
+// a created variable is always visible to wildcard reads.
 func (c *LiveClient) UpdateCIVariable(ctx context.Context, owner, repo, name, value string, protected bool) error {
-	path := fmt.Sprintf("/projects/%s/variables/%s", projectPath(owner, repo), url.PathEscape(name))
+	path := wildcardVariablePath(owner, repo, name)
 	body := map[string]any{
 		"value":     value,
 		"protected": protected,
@@ -1376,11 +1379,12 @@ func (c *LiveClient) UpdateCIVariable(ctx context.Context, owner, repo, name, va
 	if errors.Is(err, forge.ErrNotFound) {
 		createPath := fmt.Sprintf("/projects/%s/variables", projectPath(owner, repo))
 		createBody := map[string]any{
-			"key":           name,
-			"value":         value,
-			"protected":     protected,
-			"masked":        false,
-			"variable_type": "env_var",
+			"key":               name,
+			"value":             value,
+			"protected":         protected,
+			"masked":            false,
+			"variable_type":     "env_var",
+			"environment_scope": "*",
 		}
 		resp, err = c.post(ctx, createPath, createBody)
 		if err != nil {
@@ -1427,20 +1431,25 @@ func (c *LiveClient) IsProtectedBranch(ctx context.Context, owner, repo, branch 
 }
 
 type gitlabProtectedAccess struct {
+	ID          int  `json:"id"`
 	AccessLevel int  `json:"access_level"`
 	UserID      *int `json:"user_id"`
 	GroupID     *int `json:"group_id"`
+	DeployKeyID *int `json:"deploy_key_id"`
 }
 
 func convertProtectedAccess(levels []gitlabProtectedAccess) []forge.ProtectedBranchAccess {
 	out := make([]forge.ProtectedBranchAccess, 0, len(levels))
 	for _, l := range levels {
-		a := forge.ProtectedBranchAccess{AccessLevel: l.AccessLevel}
+		a := forge.ProtectedBranchAccess{ID: l.ID, AccessLevel: l.AccessLevel}
 		if l.UserID != nil {
 			a.UserID = *l.UserID
 		}
 		if l.GroupID != nil {
 			a.GroupID = *l.GroupID
+		}
+		if l.DeployKeyID != nil {
+			a.DeployKeyID = *l.DeployKeyID
 		}
 		out = append(out, a)
 	}
@@ -1695,6 +1704,49 @@ func (c *LiveClient) GrantProtectedBranchMergeUser(ctx context.Context, owner, r
 	resp, err := c.patch(ctx, path, body)
 	if err != nil {
 		return fmt.Errorf("grant protected branch merge: %w", err)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// RevokeProtectedBranchMergeUserEntry removes one user merge-access entry,
+// identified by its entry ID, from the branch's exact-name protected-branch
+// rule. The entry is looked up first: it is removed only when it is a user
+// grant for userID on the exact-name rule, so a stale or mismatched ID can never
+// remove an administrator's entry or a wildcard rule's access. A missing rule or
+// entry is already the desired state and succeeds without a request.
+func (c *LiveClient) RevokeProtectedBranchMergeUserEntry(ctx context.Context, owner, repo, branch string, entryID, userID int) error {
+	if entryID <= 0 || userID <= 0 {
+		return fmt.Errorf("revoke protected branch merge: invalid entry ID %d or user ID %d", entryID, userID)
+	}
+	exact, err := c.getProtectedBranchExact(ctx, owner, repo, branch)
+	if err != nil {
+		return fmt.Errorf("revoke protected branch merge: %w", err)
+	}
+	if exact == nil {
+		return nil
+	}
+	found := false
+	for _, l := range exact.MergeAccessLevels {
+		if l.ID != entryID {
+			continue
+		}
+		if l.UserID != userID {
+			return fmt.Errorf("revoke protected branch merge: entry %d is not a grant for user %d", entryID, userID)
+		}
+		found = true
+	}
+	if !found {
+		return nil
+	}
+	path := fmt.Sprintf("/projects/%s/protected_branches/%s",
+		projectPath(owner, repo), url.PathEscape(branch))
+	body := map[string]any{
+		"allowed_to_merge": []map[string]any{{"id": entryID, "_destroy": true}},
+	}
+	resp, err := c.patch(ctx, path, body)
+	if err != nil {
+		return fmt.Errorf("revoke protected branch merge: %w", err)
 	}
 	resp.Body.Close()
 	return nil

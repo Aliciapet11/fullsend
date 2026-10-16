@@ -55,6 +55,18 @@ func OTLPEnabled() bool {
 		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) != ""
 }
 
+// valueFreeParseErrors lists fixed net/url parse error messages that never
+// quote any part of the input.
+var valueFreeParseErrors = map[string]bool{
+	"missing protocol scheme": true,
+	"empty url":               true,
+	"first path segment in URL cannot contain colon": true,
+	"net/url: invalid control character in URL":      true,
+	"net/url: invalid userinfo":                      true,
+	"invalid IP-literal":                             true,
+	"missing ']' in host":                            true,
+}
+
 // sanitizeError strips raw URLs and escape sequences from errors to avoid leaking credentials.
 func sanitizeError(err error) string {
 	if err == nil {
@@ -67,6 +79,21 @@ func sanitizeError(err error) string {
 			return fmt.Sprintf("%s: invalid URL escape", urlErr.Op)
 		}
 		if urlErr.Err != nil {
+			// url.Parse quotes the offending port text, which can hold a
+			// secret (e.g. "http://user:pass" with the '@host' missing).
+			if strings.HasPrefix(urlErr.Err.Error(), "invalid port ") {
+				return fmt.Sprintf("%s: invalid port after host", urlErr.Op)
+			}
+			// Other url.Parse failures (e.g. "invalid host: ParseAddr(...)"
+			// for a bracketed host) can quote part of the input, so only
+			// verified value-free messages are kept; the rest are reduced
+			// to a generic reason.
+			if urlErr.Op == "parse" {
+				if valueFreeParseErrors[urlErr.Err.Error()] {
+					return fmt.Sprintf("%s: %v", urlErr.Op, urlErr.Err)
+				}
+				return fmt.Sprintf("%s: invalid URL", urlErr.Op)
+			}
 			return fmt.Sprintf("%s: %v", urlErr.Op, urlErr.Err)
 		}
 		return urlErr.Op
@@ -178,25 +205,40 @@ func validateEndpoint(envVar, ep string) error {
 		return nil
 	}
 
+	// Errors never echo the endpoint value: a misconfigured endpoint can carry
+	// credentials in userinfo, the query string, or (when the scheme is
+	// missing) a userinfo-like prefix that url.Parse reads as the scheme.
 	u, err := url.Parse(ep)
 	if err != nil {
 		return fmt.Errorf("%s: %s", envVar, sanitizeError(err))
 	}
 
-	redacted := u.Redacted()
 	if u.Scheme == "" {
-		return fmt.Errorf("%s: endpoint %q has no scheme, it is required", envVar, redacted)
+		return fmt.Errorf("%s: endpoint has no scheme, it is required", envVar)
 	}
 
 	if u.Scheme != "https" && u.Scheme != "http" {
-		return fmt.Errorf("%s: endpoint %q uses the %q scheme which is not supported", envVar, redacted, u.Scheme)
+		if wellKnownSchemes[u.Scheme] {
+			return fmt.Errorf("%s: endpoint scheme %q is not supported, use http or https", envVar, u.Scheme)
+		}
+		return fmt.Errorf("%s: endpoint scheme is not supported, use http or https", envVar)
 	}
 
 	if u.Host == "" {
-		return fmt.Errorf("%s: endpoint %q has no host, it is required", envVar, redacted)
+		return fmt.Errorf("%s: endpoint has no host, it is required", envVar)
 	}
 
 	return nil
+}
+
+// wellKnownSchemes lists unsupported schemes that are safe to name in
+// validation errors. Any other parsed scheme may be part of a secret (e.g.
+// the "user" in a schemeless "user:pass@host:port"), so it is not echoed.
+var wellKnownSchemes = map[string]bool{
+	"grpc": true, "grpcs": true,
+	"ws": true, "wss": true,
+	"tcp": true, "udp": true, "unix": true,
+	"ftp": true, "ftps": true, "file": true,
 }
 
 // ValidateOTLPHeaders checks the OTEL header env vars (OTEL_EXPORTER_OTLP_HEADERS
@@ -350,12 +392,13 @@ func operatorAttrValueLimit() (int, bool) {
 // warnContentCaptureAttrLimit warns on stderr when the Level 3 content
 // gate is on but an operator's finite attribute value-length limit is
 // configured. The operator limit wins over the gate's cap lift
-// (spanLimits), so the SDK will cut any gen_ai.output.messages value over
-// the limit mid-JSON — in both sinks, with no fullsend.content.truncated
-// marker (that marker reflects only collector-side cuts) — silently
-// breaking the documented consumer contract. Telemetry never fails a run
-// (ADR 0050), so the collision is surfaced, not fatal. An explicit -1
-// (unlimited) cannot cut and is not a conflict.
+// (spanLimits), so the SDK will cut any gen_ai.input.messages or
+// gen_ai.output.messages value over the limit mid-JSON — in both sinks,
+// with no fullsend.content.truncated marker (that marker reflects only
+// collector-side cuts) — silently breaking the documented consumer
+// contract. Telemetry never fails a run (ADR 0050), so the collision is
+// surfaced, not fatal. An explicit -1 (unlimited) cannot cut and is not a
+// conflict.
 func warnContentCaptureAttrLimit() {
 	if !ContentCaptureEnabled() {
 		return
@@ -363,7 +406,7 @@ func warnContentCaptureAttrLimit() {
 	if limit, ok := operatorAttrValueLimit(); ok && limit >= 0 {
 		fmt.Fprintf(os.Stderr,
 			"fullsend: content capture is enabled but the operator attribute value length limit (%d) is set; "+
-				"gen_ai.output.messages values over the limit will be cut mid-JSON (unparseable, and "+
+				"gen_ai.input.messages and gen_ai.output.messages values over the limit will be cut mid-JSON (unparseable, and "+
 				"fullsend.content.truncated will not flag the cut) — raise the limit or unset it to keep content parseable\n",
 			limit)
 	}
@@ -384,7 +427,7 @@ func Setup(dir string, serviceVersion string) (trace.Tracer, func(context.Contex
 		return tracenoop.NewTracerProvider().Tracer(""), noop
 	}
 
-	f, err := os.OpenFile(filepath.Join(dir, TelemetryFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filepath.Join(dir, TelemetryFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return tracenoop.NewTracerProvider().Tracer(""), noop
 	}

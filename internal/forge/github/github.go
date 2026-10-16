@@ -1827,7 +1827,7 @@ func decodeBlobSHA(resp *http.Response) (string, error) {
 
 // GetFileContent retrieves the content of a file from a repository.
 func (c *LiveClient) GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error) {
-	resp, err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path))
+	resp, err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, escapePathSegments(path)))
 	if err != nil {
 		return nil, fmt.Errorf("get file content: %w", err)
 	}
@@ -4656,6 +4656,11 @@ func (c *LiveClient) GrantProtectedBranchMergeUser(_ context.Context, _, _, _ st
 	return forge.ErrNotSupported
 }
 
+// RevokeProtectedBranchMergeUserEntry is not supported on GitHub.
+func (c *LiveClient) RevokeProtectedBranchMergeUserEntry(_ context.Context, _, _, _ string, _, _ int) error {
+	return forge.ErrNotSupported
+}
+
 // CreatePipeline is not supported on GitHub.
 func (c *LiveClient) CreatePipeline(_ context.Context, _, _, _ string, _ map[string]string) (*forge.Pipeline, error) {
 	return nil, forge.ErrNotSupported
@@ -4765,6 +4770,11 @@ func (c *LiveClient) GetPipelineVariablesMinimumOverrideRole(_ context.Context, 
 // SetPipelineVariablesMinimumOverrideRole is not supported on GitHub.
 func (c *LiveClient) SetPipelineVariablesMinimumOverrideRole(_ context.Context, _, _, _ string) error {
 	return forge.ErrNotSupported
+}
+
+// GetJobTokenRepositoryPushAllowed is not supported on GitHub.
+func (c *LiveClient) GetJobTokenRepositoryPushAllowed(_ context.Context, _, _ string) (bool, error) {
+	return false, forge.ErrNotSupported
 }
 
 // ForceCommitFileToBranch is not supported on GitHub.

@@ -1,5 +1,7 @@
 # Mint service administration
 
+> Background: [How fullsend authenticates](../user/how-fullsend-authenticates.md).
+
 This guide covers deploying and managing the fullsend token mint. The mint is the OIDC token exchange service that lets GitHub Actions workflows authenticate as GitHub Apps — it is infrastructure that serves all enrolled organizations and repositories. The mint can be deployed on GCP (Cloud Function) or Cloudflare (Worker).
 
 | Command | Description |
@@ -336,7 +338,7 @@ Per-org mint enrollment was removed along with per-org installation ([ADR 0044](
 - `fullsend mint enroll <org>` and `fullsend mint unenroll <org>` with a bare org argument now fail. Enroll and unenroll each repository with an `owner/repo` target.
 - `fullsend mint deploy --allowed-orgs` was removed. Passing it fails with `unknown flag: --allowed-orgs`.
 - `mint deploy` no longer writes `ALLOWED_ORGS` on GCP or Cloudflare, and `mint status` no longer reports it.
-- The fullsend action no longer runs a vendored CLI from the per-org location `bin/fullsend`. It only uses `.fullsend/bin/fullsend`, which per-repo installs create with `--vendor`. If `bin/fullsend` exists, the action logs a warning and ignores it.
+- The fullsend action no longer runs a vendored CLI from the per-org location `bin/fullsend`. It only uses `.fullsend/bin/fullsend`, which per-repo installs create when the repository resolves `vendor: true` in `repos.yaml` (for example `fullsend repos set defaults.vendor true`, then `fullsend repos install`; `fullsend github setup --vendor` does the same for a repository installed with `github setup`). If `bin/fullsend` exists, the action logs a warning and ignores it.
 
 Mints that older CLI versions deployed or enrolled orgs in can still hold org-level state. The mint authorizes callers only through `PER_REPO_WIF_REPOS` and ignores `ALLOWED_ORGS`, so this cleanup is hygiene: leftover entries do not grant access to the mint. The CLI cannot remove them anymore, so clean them up manually.
 

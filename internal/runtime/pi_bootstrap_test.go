@@ -282,7 +282,7 @@ func TestPiRuntimeRun_StreamsFixtureAndReportsMetrics(t *testing.T) {
 	require.NotEmpty(t, events)
 	init, ok := events[0].(InitEvent)
 	require.True(t, ok, "InitEvent is emitted first")
-	assert.Equal(t, "claude-opus-4-6", init.Model, "bare model id, as Claude Code reports it")
+	assert.Equal(t, "claude-opus-5-5", init.Model, "bare model id, as Claude Code reports it")
 	assert.Equal(t, "0.84.2", init.Version, "pi version comes from Bootstrap's preflight")
 	inits := 0
 	for _, e := range events {
@@ -294,7 +294,7 @@ func TestPiRuntimeRun_StreamsFixtureAndReportsMetrics(t *testing.T) {
 
 	assert.Equal(t, 1, metrics.NumTurns)
 	assert.Equal(t, int32(1), metrics.ToolCalls.Load())
-	assert.Equal(t, "claude-opus-4-6", metrics.Model)
+	assert.Equal(t, "claude-opus-5-5", metrics.Model)
 	assert.InDelta(t, 0.015, metrics.TotalCostUSD, 0.001)
 
 	teed, err := os.ReadFile(outPath)
@@ -333,7 +333,7 @@ func TestPiRuntimeRun_FoldsSubagentUsage(t *testing.T) {
 	assert.Equal(t, 0, exit)
 
 	require.NotNil(t, metrics.PerModelUsage)
-	parent := metrics.PerModelUsage["anthropic-vertex/claude-opus-4-6"]
+	parent := metrics.PerModelUsage["anthropic-vertex/claude-opus-5-5"]
 	child := metrics.PerModelUsage["anthropic-vertex/claude-sonnet-4-6"]
 	assert.Equal(t, 1, parent.Requests, "the parent's own iteration is one request, keyed by its full model spec")
 	assert.Equal(t, 2, child.Requests, "a failed sub-agent still spent tokens")
@@ -342,7 +342,7 @@ func TestPiRuntimeRun_FoldsSubagentUsage(t *testing.T) {
 	assert.Equal(t, parent.InputTokens+child.InputTokens, metrics.InputTokens)
 	assert.Equal(t, parent.CacheReadInputTokens+10, metrics.CacheReadInputTokens)
 	assert.Equal(t, parent.CacheCreationInputTokens+5, metrics.CacheCreationInputTokens)
-	assert.Equal(t, "claude-opus-4-6", metrics.Model, "the reported model stays the bare parent id")
+	assert.Equal(t, "claude-opus-5-5", metrics.Model, "the reported model stays the bare parent id")
 
 	// The read consumes the file, so a retry iteration whose
 	// ClearIterationArtifacts failed cannot count the same children twice.
@@ -380,7 +380,7 @@ func TestPiRuntimeRun_NoSubagentUsageLeavesMetricsAlone(t *testing.T) {
 	// an iteration missing from the breakdown makes the run's
 	// per_model_usage stop matching its totals.
 	require.Len(t, metrics.PerModelUsage, 1)
-	parent := metrics.PerModelUsage["anthropic-vertex/claude-opus-4-6"]
+	parent := metrics.PerModelUsage["anthropic-vertex/claude-opus-5-5"]
 	assert.Equal(t, 1, parent.Requests)
 	assert.InDelta(t, metrics.TotalCostUSD, parent.CostUSD, 1e-9, "no children means the parent entry is the whole breakdown")
 }
@@ -541,6 +541,62 @@ func TestPiRuntimeBootstrap_SkillDirsOnlyAddsRead(t *testing.T) {
 	require.NoError(t, json.Unmarshal(storedUpload(t, store, PiRuntime{}.ConfigDir()+"/fullsend-manifest.json"), &m))
 	assert.Equal(t, []string{"bash", "read"}, m.Tools)
 	assert.Equal(t, []string{"go"}, m.BashAllowlist)
+}
+
+func TestPiRuntimeBootstrap_NestedForgeSkillsShareBasename(t *testing.T) {
+	work := t.TempDir()
+	logPath := filepath.Join(work, "openshell.log")
+	fakeOpenshellPi(t, logPath, filepath.Join(work, "store"), "/dev/null")
+
+	root := t.TempDir()
+	labelsDir := filepath.Join(root, "issue-labels", "github")
+	reviewDir := filepath.Join(root, "pr-review", "github")
+	require.NoError(t, os.MkdirAll(labelsDir, 0o755))
+	require.NoError(t, os.MkdirAll(reviewDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(labelsDir, "SKILL.md"),
+		[]byte("---\nname: issue-labels\n---\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(reviewDir, "SKILL.md"),
+		[]byte("---\nname: pr-review-github\n---\n"), 0o644))
+
+	in := bootstrapInput{
+		sandboxName: "sb",
+		agentPath:   writeAgentFile(t, testAgentDef),
+		agentName:   "triage",
+		skillDirs:   []string{labelsDir, reviewDir},
+	}
+	require.NoError(t, PiRuntime{}.Bootstrap(in))
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	cfg := PiRuntime{}.ConfigDir()
+	assert.Contains(t, string(log), cfg+"/skills/issue-labels")
+	assert.Contains(t, string(log), cfg+"/skills/pr-review-github")
+	assert.NotContains(t, string(log), cfg+"/skills/github")
+}
+
+func TestPiRuntimeBootstrap_RejectsInvalidSkillDestinationName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path func(root string) string
+	}{
+		{"dotdot", func(root string) string { return root + "/sub/.." }},
+		{"dot", func(root string) string { return root + "/sub/." }},
+		{"control-char", func(root string) string { return root + "/bad\x01name" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := t.TempDir()
+			fakeOpenshellPi(t, filepath.Join(work, "openshell.log"), filepath.Join(work, "store"), "/dev/null")
+
+			err := PiRuntime{}.Bootstrap(bootstrapInput{
+				sandboxName: "sb",
+				agentPath:   writeAgentFile(t, testAgentDef),
+				agentName:   "triage",
+				skillDirs:   []string{tc.path(t.TempDir())},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid sandbox name")
+		})
+	}
 }
 
 func TestPiRuntimeExtractTranscripts(t *testing.T) {
@@ -738,10 +794,10 @@ func TestPiAgentTool_ManifestBlock(t *testing.T) {
 		assert.Equal(t, []string{piVertexExtensionPath, cfg + "/fullsend-hooks.js"}, m.Agent.Extensions,
 			"only the provider extensions the image has (the probe found anthropic-vertex, not xai-vertex), then the hook adapter")
 		assert.Equal(t, map[string]string{
-			"default": "anthropic-vertex/claude-opus-4-6",
-			"opus":    "anthropic-vertex/claude-opus-4-6",
-			"sonnet":  "anthropic-vertex/claude-sonnet-4-6",
-			"haiku":   "anthropic-vertex/claude-haiku-4-5",
+			"default": "anthropic-vertex/claude-opus-5-5",
+			"opus":    "anthropic-vertex/claude-opus-5-5",
+			"sonnet":  "anthropic-vertex/claude-sonnet-5-5",
+			"haiku":   "anthropic-vertex/claude-haiku-5-5",
 			"fable":   "anthropic-vertex/claude-fable-5-1",
 		}, m.Agent.Models)
 		assert.Equal(t, map[string][]string{
@@ -835,7 +891,7 @@ func TestPiAgentTool_ManifestBlock(t *testing.T) {
 		t.Setenv(piProviderEnv, piXaiVertexProvider)
 		m, _, _ := bootstrap(t, "---\nname: review\nmodel: grok-4.6\n---\nbody", false)
 		assert.Equal(t, "xai-vertex/xai/grok-4.6", m.Agent.Models["default"])
-		assert.Equal(t, "anthropic-vertex/claude-sonnet-4-6", m.Agent.Models["sonnet"], "aliases are Claude models on the Anthropic Vertex provider regardless of the parent's provider")
+		assert.Equal(t, "anthropic-vertex/claude-sonnet-5-5", m.Agent.Models["sonnet"], "aliases are Claude models on the Anthropic Vertex provider regardless of the parent's provider")
 	})
 
 	t.Run("config aliases reach the sub-agent model table", func(t *testing.T) {
@@ -855,9 +911,9 @@ func TestPiAgentTool_ManifestBlock(t *testing.T) {
 		require.NotNil(t, m.Agent)
 		assert.Equal(t, "anthropic-vertex/claude-sonnet-5", m.Agent.Models["sonnet"],
 			"per-repo config alias overrides the fleet default in the child model table")
-		assert.Equal(t, "anthropic-vertex/claude-opus-4-6", m.Agent.Models["opus"],
+		assert.Equal(t, "anthropic-vertex/claude-opus-5-5", m.Agent.Models["opus"],
 			"unstated aliases keep the fleet default")
-		assert.Equal(t, "anthropic-vertex/claude-haiku-4-5", m.Agent.Models["haiku"],
+		assert.Equal(t, "anthropic-vertex/claude-haiku-5-5", m.Agent.Models["haiku"],
 			"unstated aliases keep the fleet default")
 		assert.Equal(t, "anthropic-vertex/claude-fable-5-1", m.Agent.Models["fable"],
 			"unstated aliases keep the fleet default")
@@ -885,7 +941,7 @@ func TestPiAgentTool_ManifestBlock(t *testing.T) {
 		require.NotNil(t, m.Agent)
 		assert.Equal(t, "google-vertex/gemini-3.8-flash", m.Agent.Models["haiku"],
 			"a provider-qualified override passes through verbatim, as it does for the parent")
-		assert.Equal(t, "anthropic-vertex/claude-opus-4-6", m.Agent.Models["opus"],
+		assert.Equal(t, "anthropic-vertex/claude-opus-5-5", m.Agent.Models["opus"],
 			"bare fleet defaults still get the Anthropic Vertex prefix")
 	})
 

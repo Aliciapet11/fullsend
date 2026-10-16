@@ -30,6 +30,11 @@ type cfmintConfig struct {
 	perRepoWIFRepos   string
 	workflowHostRepos string
 	appSet            string
+	// statusGitHubGroup is the ORG/TEAM passed as --status-github-group
+	// (with --status-auth=oidc,github), so members of the pool org's
+	// mint-status team can query /v1/status with a GitHub user token.
+	// Empty leaves status auth at the CLI default (OIDC only).
+	statusGitHubGroup string
 }
 
 // NewRepoPoolCFMintPreviews is a Factory that deploys a CF preview
@@ -41,7 +46,8 @@ type cfmintConfig struct {
 // BEHAVIOUR_SUITE_NAME (default "bt"), and app set from
 // BEHAVIOUR_APP_SET (default "fullsend-test"). Pool size defaults to
 // DefaultPoolSize. WIF and workflow-host repo lists are computed from
-// the org and pool size.
+// the org and pool size; the workflow-host list also carries each
+// slot's mint-probe host (see buildWorkflowHostRepoList).
 func NewRepoPoolCFMintPreviews(
 	org string,
 	client forge.Client,
@@ -64,8 +70,9 @@ func NewRepoPoolCFMintPreviews(
 		pemDir:            pemDir,
 		suiteName:         envSuiteName(),
 		perRepoWIFRepos:   buildRepoList(org, poolSize),
-		workflowHostRepos: buildRepoList(org, poolSize),
+		workflowHostRepos: buildWorkflowHostRepoList(org, poolSize),
 		appSet:            envAppSet(),
+		statusGitHubGroup: mintStatusGitHubGroup(org),
 	}
 
 	md, err := newCFMintDriver(client, token, binary, gcpProjectID, logf, cfg)
@@ -134,7 +141,7 @@ func buildCFMintDriverWithOpts(
 	if err != nil {
 		return nil, err
 	}
-	return withRateLimitReporter(d, client), nil
+	return withRateLimitReporter(withMintURL(d, mintURL), client), nil
 }
 
 // cfmintMintDriver deploys a CF Worker preview mint and uses the derived
@@ -256,7 +263,18 @@ func CFMintDeployArgs(alias, workerName string, cfg cfmintConfig) []string {
 	if cfg.appSet != "" {
 		args = append(args, "--app-set", cfg.appSet)
 	}
+	args = appendStatusAuthArgs(args, cfg.statusGitHubGroup)
 	return args
+}
+
+// appendStatusAuthArgs appends the flags that enable GitHub user-token
+// auth on the mint's /v1/status for members of group (ORG/TEAM). OIDC
+// status auth stays enabled. An empty group appends nothing.
+func appendStatusAuthArgs(args []string, group string) []string {
+	if group == "" {
+		return args
+	}
+	return append(args, "--status-auth", "oidc,github", "--status-github-group", group)
 }
 
 // CFMintTeardownArgs builds the CLI arguments for `fullsend mint delete --platform=cloudflare`.
@@ -371,6 +389,21 @@ func buildRepoList(org string, poolSize int) string {
 	repos := make([]string, poolSize)
 	for i := range poolSize {
 		repos[i] = fmt.Sprintf("%s/test-repo-%02d", org, i+1)
+	}
+	return strings.Join(repos, ",")
+}
+
+// buildWorkflowHostRepoList constructs the mint's WORKFLOW_HOST_REPOS
+// for a pool: every org/test-repo-NN plus its per-slot mint-probe host
+// org/test-repo-NN-mint-host (MintProbeHostRepoSuffix). Only the pool
+// repos are enrolled callers (PER_REPO_WIF_REPOS); the probe hosts are
+// workflow hosts only, so a reusable workflow there can mint for the
+// leased repo that calls it but never on its own behalf.
+func buildWorkflowHostRepoList(org string, poolSize int) string {
+	repos := make([]string, 0, 2*poolSize)
+	for i := range poolSize {
+		name := fmt.Sprintf("%s/test-repo-%02d", org, i+1)
+		repos = append(repos, name, name+MintProbeHostRepoSuffix)
 	}
 	return strings.Join(repos, ",")
 }

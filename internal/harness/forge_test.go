@@ -85,8 +85,9 @@ func TestResolveForge_SkillsConcat(t *testing.T) {
 }
 
 // TestResolveForge_SkillsOverrideByBasename verifies that a forge skill
-// whose basename matches a top-level skill replaces it instead of producing
-// a duplicate (see #5408).
+// whose identity matches a top-level skill replaces it instead of producing
+// a duplicate (see #5408); neither path is on disk, so the identity is the
+// basename.
 func TestResolveForge_SkillsOverrideByBasename(t *testing.T) {
 	h := &Harness{
 		Agent:  "agents/test.md",
@@ -100,6 +101,149 @@ func TestResolveForge_SkillsOverrideByBasename(t *testing.T) {
 
 	require.NoError(t, h.ResolveForge("github"))
 	assert.Equal(t, []string{"skills/code-implementation", "skills/common-b"}, SkillSources(h.Skills))
+}
+
+// TestResolveForge_NestedForgeSkillsShareBasename is the #7830 regression:
+// two forge skills whose directories share a leaf name (github, gitlab)
+// must both survive ResolveForge instead of the second silently replacing
+// the first.
+func TestResolveForge_NestedForgeSkillsShareBasename(t *testing.T) {
+	h := &Harness{
+		Agent: "a.md",
+		Forge: map[string]*ForgeConfig{
+			"github": {Skills: []SkillEntry{
+				{Source: "skills/issue-labels/github"},
+				{Source: "skills/pr-review/github"},
+			}},
+		},
+	}
+
+	require.NoError(t, h.ResolveForge("github"))
+	assert.Equal(t, []string{
+		"skills/issue-labels/github",
+		"skills/pr-review/github",
+	}, SkillSources(h.Skills))
+}
+
+func TestResolveForge_ReviewHarnessKeepsForgeSkills(t *testing.T) {
+	h := &Harness{
+		Agent: "agents/review.md",
+		Skills: []SkillEntry{
+			{Source: "skills/pr-review"},
+			{Source: "skills/code-review"},
+			{Source: "skills/docs-review"},
+			{Source: "skills/pr-risk-assessment"},
+		},
+		Forge: map[string]*ForgeConfig{
+			"github": {Skills: []SkillEntry{
+				{Source: "skills/github-forge"},
+				{Source: "skills/issue-labels/github"},
+				{Source: "skills/pr-review/github"},
+			}},
+			"gitlab": {Skills: []SkillEntry{
+				{Source: "skills/gitlab-forge"},
+				{Source: "skills/issue-labels/gitlab"},
+				{Source: "skills/pr-review/gitlab"},
+			}},
+		},
+	}
+
+	require.NoError(t, h.ResolveForge("github"))
+	assert.Equal(t, []string{
+		"skills/pr-review",
+		"skills/code-review",
+		"skills/docs-review",
+		"skills/pr-risk-assessment",
+		"skills/github-forge",
+		"skills/issue-labels/github",
+		"skills/pr-review/github",
+	}, SkillSources(h.Skills))
+}
+
+func TestResolveForge_RetroHarnessKeepsForgeSkills(t *testing.T) {
+	h := &Harness{
+		Agent: "agents/retro.md",
+		Skills: []SkillEntry{
+			{Source: "skills/retro-analysis"},
+			{Source: "skills/finding-agent-runs"},
+			{Source: "skills/agent-scaffolding"},
+			{Source: "skills/autonomy-readiness"},
+		},
+		Forge: map[string]*ForgeConfig{
+			"github": {Skills: []SkillEntry{
+				{Source: "skills/github-forge"},
+				{Source: "skills/retro-analysis/github"},
+				{Source: "skills/finding-agent-runs/github"},
+			}},
+		},
+	}
+
+	require.NoError(t, h.ResolveForge("github"))
+	assert.Equal(t, []string{
+		"skills/retro-analysis",
+		"skills/finding-agent-runs",
+		"skills/agent-scaffolding",
+		"skills/autonomy-readiness",
+		"skills/github-forge",
+		"skills/retro-analysis/github",
+		"skills/finding-agent-runs/github",
+	}, SkillSources(h.Skills))
+}
+
+func TestResolveForge_GitlabNestedForgeSkillsShareBasename(t *testing.T) {
+	h := &Harness{
+		Agent: "a.md",
+		Forge: map[string]*ForgeConfig{
+			"gitlab": {Skills: []SkillEntry{
+				{Source: "skills/issue-labels/gitlab"},
+				{Source: "skills/pr-review/gitlab"},
+			}},
+		},
+	}
+
+	require.NoError(t, h.ResolveForge("gitlab"))
+	assert.Equal(t, []string{
+		"skills/issue-labels/gitlab",
+		"skills/pr-review/gitlab",
+	}, SkillSources(h.Skills))
+}
+
+// TestResolveForge_ForgeSkillDeclaredNameOverridesUnrelatedTopLevelSkill
+// documents a known gap (#7830 follow-up, still open): mergeSkills's
+// override key is skill.SandboxName, which for an already-resolved
+// absolute path is the declared SKILL.md `name:` rather than the
+// directory basename. A forge skill living at a directory with no
+// relation to a top-level skill can still silently replace it, purely by
+// declaring the same name — mergeSkills has no way to distinguish that
+// from an intentional override (the same #5408 child-replaces-base
+// mechanism this test exercises is by design; only the identity source
+// changed). mergeSkills logs the replacement so it is not silent, but does
+// not reject it.
+func TestResolveForge_ForgeSkillDeclaredNameOverridesUnrelatedTopLevelSkill(t *testing.T) {
+	dir := t.TempDir()
+
+	topLevel := filepath.Join(dir, "code-review")
+	require.NoError(t, os.MkdirAll(topLevel, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(topLevel, "SKILL.md"),
+		[]byte("---\nname: code-review\n---\n# top-level code-review\n"), 0o644))
+
+	unrelated := filepath.Join(dir, "totally-unrelated-dir")
+	require.NoError(t, os.MkdirAll(unrelated, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(unrelated, "SKILL.md"),
+		[]byte("---\nname: code-review\n---\n# unrelated skill declaring the same name\n"), 0o644))
+
+	h := &Harness{
+		Agent:  "agents/review.md",
+		Skills: []SkillEntry{{Source: topLevel}},
+		Forge: map[string]*ForgeConfig{
+			"github": {Skills: []SkillEntry{{Source: unrelated}}},
+		},
+	}
+
+	require.NoError(t, h.ResolveForge("github"))
+	// The unrelated directory silently replaced the top-level skill slot
+	// because both declare the same SKILL.md name — logged, not an error.
+	assert.Equal(t, []string{unrelated}, SkillSources(h.Skills))
 }
 
 func TestResolveForge_NilSkillsInherits(t *testing.T) {
@@ -706,12 +850,12 @@ func TestResolveForge_HostFilesMerge(t *testing.T) {
 	h := &Harness{
 		Agent: "agents/test.md",
 		HostFiles: []HostFile{
-			{Src: "env/common.env", Dest: "/run/env/common.env"},
+			{Src: "env/common.env", Dest: "/tmp/run/env/common.env"},
 		},
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Src: "env/github/triage.env", Dest: "/run/env/forge.env"},
+					{Src: "env/github/triage.env", Dest: "/tmp/run/env/forge.env"},
 				},
 			},
 		},
@@ -720,21 +864,21 @@ func TestResolveForge_HostFilesMerge(t *testing.T) {
 	require.NoError(t, h.ResolveForge("github"))
 	require.Len(t, h.HostFiles, 2)
 	assert.Equal(t, "env/common.env", h.HostFiles[0].Src)
-	assert.Equal(t, "/run/env/common.env", h.HostFiles[0].Dest)
+	assert.Equal(t, "/tmp/run/env/common.env", h.HostFiles[0].Dest)
 	assert.Equal(t, "env/github/triage.env", h.HostFiles[1].Src)
-	assert.Equal(t, "/run/env/forge.env", h.HostFiles[1].Dest)
+	assert.Equal(t, "/tmp/run/env/forge.env", h.HostFiles[1].Dest)
 }
 
 func TestResolveForge_HostFilesOverrideSameDest(t *testing.T) {
 	h := &Harness{
 		Agent: "agents/test.md",
 		HostFiles: []HostFile{
-			{Src: "env/default.env", Dest: "/run/env/forge.env"},
+			{Src: "env/default.env", Dest: "/tmp/run/env/forge.env"},
 		},
 		Forge: map[string]*ForgeConfig{
 			"gitlab": {
 				HostFiles: []HostFile{
-					{Src: "env/gitlab/triage.env", Dest: "/run/env/forge.env"},
+					{Src: "env/gitlab/triage.env", Dest: "/tmp/run/env/forge.env"},
 				},
 			},
 		},
@@ -743,14 +887,14 @@ func TestResolveForge_HostFilesOverrideSameDest(t *testing.T) {
 	require.NoError(t, h.ResolveForge("gitlab"))
 	require.Len(t, h.HostFiles, 1)
 	assert.Equal(t, "env/gitlab/triage.env", h.HostFiles[0].Src)
-	assert.Equal(t, "/run/env/forge.env", h.HostFiles[0].Dest)
+	assert.Equal(t, "/tmp/run/env/forge.env", h.HostFiles[0].Dest)
 }
 
 func TestResolveForge_HostFilesNilInherits(t *testing.T) {
 	h := &Harness{
 		Agent: "agents/test.md",
 		HostFiles: []HostFile{
-			{Src: "env/common.env", Dest: "/run/env/common.env"},
+			{Src: "env/common.env", Dest: "/tmp/run/env/common.env"},
 		},
 		Forge: map[string]*ForgeConfig{
 			"github": {},
@@ -768,7 +912,7 @@ func TestResolveForge_HostFilesNilTopLevel(t *testing.T) {
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Src: "env/github.env", Dest: "/run/env/github.env"},
+					{Src: "env/github.env", Dest: "/tmp/run/env/github.env"},
 				},
 			},
 		},
@@ -786,7 +930,7 @@ func TestValidate_ForgeHostFileMissingSrc(t *testing.T) {
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Dest: "/run/env/forge.env"},
+					{Dest: "/tmp/run/env/forge.env"},
 				},
 			},
 		},
@@ -820,7 +964,7 @@ func TestValidate_ForgeHostFileSrcURL(t *testing.T) {
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Src: "https://evil.com/env.file", Dest: "/run/env"},
+					{Src: "https://evil.com/env.file", Dest: "/tmp/run/env"},
 				},
 			},
 		},
@@ -837,7 +981,7 @@ func TestValidate_ForgeHostFileValid(t *testing.T) {
 		Forge: map[string]*ForgeConfig{
 			"github": {
 				HostFiles: []HostFile{
-					{Src: "env/github/triage.env", Dest: "/run/env/forge.env"},
+					{Src: "env/github/triage.env", Dest: "/tmp/run/env/forge.env"},
 				},
 			},
 		},
@@ -853,7 +997,7 @@ forge:
   gitlab:
     host_files:
       - src: env/gitlab/triage.env
-        dest: /run/env/forge.env
+        dest: /tmp/run/env/forge.env
         optional: true
 `
 	h, err := parseRaw([]byte(content))
@@ -861,7 +1005,7 @@ forge:
 	require.NotNil(t, h.Forge["gitlab"])
 	require.Len(t, h.Forge["gitlab"].HostFiles, 1)
 	assert.Equal(t, "env/gitlab/triage.env", h.Forge["gitlab"].HostFiles[0].Src)
-	assert.Equal(t, "/run/env/forge.env", h.Forge["gitlab"].HostFiles[0].Dest)
+	assert.Equal(t, "/tmp/run/env/forge.env", h.Forge["gitlab"].HostFiles[0].Dest)
 	assert.True(t, h.Forge["gitlab"].HostFiles[0].Optional)
 }
 
@@ -1346,8 +1490,8 @@ func TestResolveOverlays_ListFieldsAccumulate(t *testing.T) {
 		"profiles/base", "profiles/gh", "profiles/gh",
 	}, h.OpenShell.Profiles, "openshell profiles accumulate across overlays without dedup")
 
-	// Skills are deduplicated via mergeSkills (by basename)
-	require.Len(t, h.Skills, 3, "skills are deduplicated by basename across overlays")
+	// Skills are deduplicated via mergeSkills (by skill identity)
+	require.Len(t, h.Skills, 3, "skills are deduplicated by identity across overlays")
 	assert.Equal(t, "skills/base", h.Skills[0].Source)
 	assert.Equal(t, "skills/gh", h.Skills[1].Source)
 	assert.Equal(t, "skills/extra", h.Skills[2].Source)
@@ -1571,13 +1715,15 @@ func TestBuildConfigMap_AllFields(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, arr, "https://example.com/*")
 
-	// Issue creation config (set by NewPerRepoConfig with targetRepo)
+	// Issue creation config (set by NewPerRepoConfig): the default
+	// allowlist is upstream-only; the target repo is always implicitly
+	// allowed and needs no entry.
 	ci, ok := m["create_issues"].(map[string]any)
 	require.True(t, ok)
 	repos, ok := ci["allow_repos"].([]any)
 	require.True(t, ok)
-	assert.Contains(t, repos, "org/repo")
-	assert.Contains(t, repos, "fullsend-ai/fullsend")
+	assert.Equal(t, []any{"fullsend-ai/fullsend"}, repos)
+	assert.NotContains(t, repos, "org/repo")
 }
 
 func TestBuildConfigMap_ForgeAndTracker(t *testing.T) {
@@ -1713,7 +1859,7 @@ func TestValidateOverlayForgeConfig_OpenShellProfileWithHash(t *testing.T) {
 
 func TestValidateOverlayForgeConfig_HostFileMissingSrc(t *testing.T) {
 	fc := &ForgeConfig{
-		HostFiles: []HostFile{{Src: "", Dest: "/run/secrets/token"}},
+		HostFiles: []HostFile{{Src: "", Dest: "/tmp/run/secrets/token"}},
 	}
 	err := validateOverlayForgeConfig(0, fc)
 	require.Error(t, err)
@@ -1731,7 +1877,7 @@ func TestValidateOverlayForgeConfig_HostFileMissingDest(t *testing.T) {
 
 func TestValidateOverlayForgeConfig_HostFileURLSrc(t *testing.T) {
 	fc := &ForgeConfig{
-		HostFiles: []HostFile{{Src: "https://example.com/token.env", Dest: "/run/secrets/token"}},
+		HostFiles: []HostFile{{Src: "https://example.com/token.env", Dest: "/tmp/run/secrets/token"}},
 	}
 	err := validateOverlayForgeConfig(0, fc)
 	require.Error(t, err)
@@ -1740,7 +1886,7 @@ func TestValidateOverlayForgeConfig_HostFileURLSrc(t *testing.T) {
 
 func TestValidateOverlayForgeConfig_HostFileValid(t *testing.T) {
 	fc := &ForgeConfig{
-		HostFiles: []HostFile{{Src: "env/token.env", Dest: "/run/secrets/token"}},
+		HostFiles: []HostFile{{Src: "env/token.env", Dest: "/tmp/run/secrets/token"}},
 	}
 	err := validateOverlayForgeConfig(0, fc)
 	require.NoError(t, err)

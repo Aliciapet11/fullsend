@@ -74,18 +74,6 @@ func TestManifestValidate_OpenAIWIF(t *testing.T) {
 	assert.Contains(t, err.Error(), "GitHub only")
 }
 
-func TestUpdateInferenceAuth_RejectsGitLabOpenAIWIF(t *testing.T) {
-	m := singleRepoGitLabManifest(InferenceAuthVertexWIF)
-	gl := forge.NewFakeClient()
-	gl.Repos = []forge.Repository{{Name: "api", FullName: "acme/api"}}
-	clients := &perForgeClientFactory{clients: map[string]forge.Client{ForgeGitLab: gl}}
-
-	_, err := UpdateInferenceAuth(context.Background(), ManifestEditConfig{Manifest: m}, []string{"acme/api"}, InferenceAuthOpenAIWIF, clients)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "acme/api")
-	assert.Contains(t, err.Error(), "GitHub only")
-}
-
 func TestOpenAIWIFIdentifiers_Resolution(t *testing.T) {
 	ctx := context.Background()
 	full := config.OpenAIWIFConfig{Audience: "aud", IdentityProviderID: "idp", ServiceAccountID: "sa"}
@@ -231,7 +219,14 @@ func TestConverge_OpenAIWIFCommittedConfigSatisfiesReadiness(t *testing.T) {
 	sc := &fakeScaffoldCommit{}
 	result, err := Converge(context.Background(), openAIWIFConvergeCfg("acme/api"), newTestClientFactory(fc), sc.fn(), noopProgress)
 	require.NoError(t, err)
-	require.Empty(t, result.Failed())
+	// Readiness is satisfied by the committed identifiers; the markerless
+	// file then blocks the fresh install on adoption before any write.
+	failed := result.Failed()
+	require.Len(t, failed, 1)
+	assert.Contains(t, failed[0].Error.Error(), "adoption required")
+	assert.NotContains(t, failed[0].Error.Error(), "no OpenAI WIF identifiers")
+	assert.False(t, sc.called, "no scaffold commit while adoption is required")
+	assertNoForgeWrites(t, fc)
 }
 
 func TestConverge_OpenAIWIFFreshInstallPreservesCommittedConfig(t *testing.T) {
@@ -244,7 +239,10 @@ func TestConverge_OpenAIWIFFreshInstallPreservesCommittedConfig(t *testing.T) {
 	sc := &spyScaffoldCommit{}
 	result, err := Converge(context.Background(), openAIWIFConvergeCfg("acme/api"), newTestClientFactory(fc), sc.fn(), noopProgress)
 	require.NoError(t, err)
-	require.Empty(t, result.Failed())
+	failed := result.Failed()
+	require.Len(t, failed, 1)
+	assert.Contains(t, failed[0].Error.Error(), "adoption required")
+	assertNoForgeWrites(t, fc)
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -254,8 +252,11 @@ func TestConverge_OpenAIWIFFreshInstallPreservesCommittedConfig(t *testing.T) {
 			delivered = f.Content
 		}
 	}
-	require.NotNil(t, delivered, "scaffold commit must deliver %s", preset.OverlayPath)
-	assert.Equal(t, string(committed), string(delivered), "existing configuration must survive delivery unchanged")
+	// A markerless overlay is an adoption case even without a config key
+	// (#8218): the fresh install stops before any write, so the existing
+	// configuration and its identifiers survive unchanged.
+	assert.Nil(t, delivered, "markerless %s must not be replaced by delivery", preset.OverlayPath)
+	assert.Equal(t, string(committed), string(fc.FileContents["acme/api/"+preset.OverlayPath]))
 }
 
 func TestConverge_OpenAIWIFMissingOrPartialIdentifiersFailBeforeWrites(t *testing.T) {
@@ -389,13 +390,15 @@ func TestConverge_OpenAIWIFReadinessUsesExistingConfigWhenAdoptionBlocksOverlay(
 	sc := &spyScaffoldCommit{}
 	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
 	require.NoError(t, err)
-	require.Empty(t, result.Failed())
+	failed := result.Failed()
+	require.Len(t, failed, 1)
+	assert.Contains(t, failed[0].Error.Error(), "adoption required")
+	assert.NotContains(t, failed[0].Error.Error(), "no OpenAI WIF identifiers")
+	assertNoForgeWrites(t, fc)
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	for _, f := range sc.files {
-		assert.NotEqual(t, preset.OverlayPath, f.Path, "adoption-blocked overlay must not be written")
-	}
+	assert.Empty(t, sc.files, "adoption-blocked fresh install must not commit anything")
 }
 
 func TestConverge_OpenAIWIFReadinessIgnoresManagedOverlayRejectedBySafetyGate(t *testing.T) {
@@ -449,7 +452,7 @@ func TestConverge_SwitchFromOpenAIWIFRejectedWhileIdentifiersRemain(t *testing.T
 		assert.Empty(t, fc.CreatedSecrets, "no credential written before the rejection")
 		assert.Contains(t, fc.VariableValues, "acme/api/"+forge.VarOpenAIAudience, "user-owned variables are never deleted")
 	})
-	t.Run("committed configuration block", func(t *testing.T) {
+	t.Run("markerless committed configuration is rejected at the overlay gate", func(t *testing.T) {
 		fc, cfg := installedOpenAISwitchFixture(t)
 		fc.FileContents["acme/api/"+preset.OverlayPath] = openAIWIFConfigYAML(t, config.OpenAIWIFConfig{Audience: "aud"})
 
@@ -458,7 +461,7 @@ func TestConverge_SwitchFromOpenAIWIFRejectedWhileIdentifiersRemain(t *testing.T
 		require.NoError(t, err)
 		failed := result.Failed()
 		require.Len(t, failed, 1)
-		assert.Contains(t, failed[0].Error.Error(), "inference.openai block")
+		assert.Contains(t, failed[0].Error.Error(), "adoption required")
 		assert.False(t, sc.called)
 		assert.Empty(t, fc.CreatedSecrets)
 	})
@@ -965,12 +968,32 @@ func TestConverge_OpenAIWIFPinnedRequiredGCPSecretsAreAvailabilityAware(t *testi
 
 		cfg := openAIWIFConvergeCfg("acme/api")
 		cfg.InferenceProject = "my-project"
-		cfg.InferenceRegion = "us-central1"
 		cfg.WIFProvider = "projects/999/locations/global/workloadIdentityPools/fullsend-inference/providers/github-oidc"
 		sc := &fakeScaffoldCommit{}
 		result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
 		require.NoError(t, err)
 		require.Empty(t, result.Failed())
+	})
+	t.Run("accepted when the effective configuration declares the GCP pair (#8220)", func(t *testing.T) {
+		fc := newFakeClientForBatch("acme/api")
+		setOpenAIWIFVariables(fc, "acme/api", openAIWIFVariables...)
+		serve(fc)
+
+		cfg := openAIWIFConvergeCfg("acme/api")
+		cfg.Manifest.Defaults.Config = mustManagedConfig(t, "inference:\n  project: my-project\n  wif_provider: projects/999/locations/global/workloadIdentityPools/fullsend-inference/providers/github-oidc\n")
+		sc := &fakeScaffoldCommit{}
+		result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+		require.NoError(t, err)
+		require.Empty(t, result.Failed())
+		project, ok := createdSecretValue(fc, "acme/api", forge.SecretGCPProjectID)
+		require.True(t, ok, "the declared pair is written for Vertex sub-agents")
+		assert.Equal(t, "my-project", project)
+		for _, v := range fc.Variables {
+			assert.NotContains(t, v.Name, "OPENAI_API_KEY")
+		}
+		for _, s := range fc.CreatedSecrets {
+			assert.NotContains(t, s.Name, "FULLSEND_OPENAI_", "OpenAI WIF identifiers are configuration, never secrets")
+		}
 	})
 }
 
@@ -1299,7 +1322,7 @@ func TestConverge_OpenAIWIFPinnedCallerPermissionsRejectBeforeWrites(t *testing.
 			fc.FileContentsRef["fullsend-ai/fullsend/"+path+"@v1.0.0"] = []byte(strings.ReplaceAll(string(source), "id-token: write", "id-token: none"))
 			before := maps.Clone(fc.VariableValues)
 			cfg := openAIWIFConvergeCfg("acme/api")
-			cfg.InferenceProject, cfg.InferenceProjectNumber, cfg.InferenceRegion = "test-project", "123456789", "us-central1"
+			cfg.InferenceProject, cfg.InferenceProjectNumber = "test-project", "123456789"
 			sc := &fakeScaffoldCommit{}
 			result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
 			require.NoError(t, err)

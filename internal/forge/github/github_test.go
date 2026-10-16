@@ -466,6 +466,34 @@ func TestGetFileContent(t *testing.T) {
 	assert.Equal(t, "key: value", string(data))
 }
 
+func TestGetFileContent_EscapesPathSegments(t *testing.T) {
+	var gotURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.RequestURI
+		json.NewEncoder(w).Encode(map[string]any{
+			"content":  base64.StdEncoding.EncodeToString([]byte("key: value")),
+			"encoding": "base64",
+		})
+	}))
+	defer srv.Close()
+
+	client := newTestClient(t, srv)
+	tests := []struct {
+		path string
+		want string
+	}{
+		{".github/workflows/custom#caller.yml", "/repos/owner/repo/contents/.github/workflows/custom%23caller.yml"},
+		{".github/workflows/what?.yml", "/repos/owner/repo/contents/.github/workflows/what%3F.yml"},
+		{".github/workflows/100%25.yml", "/repos/owner/repo/contents/.github/workflows/100%2525.yml"},
+	}
+	for _, tt := range tests {
+		data, err := client.GetFileContent(context.Background(), "owner", "repo", tt.path)
+		require.NoError(t, err, tt.path)
+		assert.Equal(t, "key: value", string(data))
+		assert.Equal(t, tt.want, gotURI, tt.path)
+	}
+}
+
 func TestGetRef(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "GET", r.Method)
@@ -5178,6 +5206,10 @@ func TestUnsupportedMethods(t *testing.T) {
 		err := client.GrantProtectedBranchMergeUser(ctx, "o", "r", "main", 1)
 		assert.ErrorIs(t, err, forge.ErrNotSupported)
 	})
+	t.Run("RevokeProtectedBranchMergeUserEntry", func(t *testing.T) {
+		err := client.RevokeProtectedBranchMergeUserEntry(ctx, "o", "r", "main", 5, 1)
+		assert.ErrorIs(t, err, forge.ErrNotSupported)
+	})
 	t.Run("CreatePipeline", func(t *testing.T) {
 		_, err := client.CreatePipeline(ctx, "o", "r", "main", nil)
 		assert.ErrorIs(t, err, forge.ErrNotSupported)
@@ -5246,6 +5278,10 @@ func TestUnsupportedMethods(t *testing.T) {
 	})
 	t.Run("SetPipelineVariablesMinimumOverrideRole", func(t *testing.T) {
 		err := client.SetPipelineVariablesMinimumOverrideRole(ctx, "o", "r", forge.PipelineVarOverrideOwner)
+		assert.ErrorIs(t, err, forge.ErrNotSupported)
+	})
+	t.Run("GetJobTokenRepositoryPushAllowed", func(t *testing.T) {
+		_, err := client.GetJobTokenRepositoryPushAllowed(ctx, "o", "r")
 		assert.ErrorIs(t, err, forge.ErrNotSupported)
 	})
 	t.Run("ForceCommitFileToBranch", func(t *testing.T) {

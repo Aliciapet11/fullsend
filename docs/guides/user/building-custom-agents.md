@@ -125,7 +125,7 @@ Write to `$FULLSEND_OUTPUT_DIR/agent-result.json`:
 | `name` | Must match the filename (without `.md`) |
 | `tools` | The tools the agent may use, in Claude Code's names (`Read`, `Grep`, `Glob`, `LS`, `Bash(gh,jq)`, ...). Restrict to what's needed. On pi the names are translated, and two of them surprise people — see [What to write in `tools:`](../../runtimes/pi.md#what-to-write-in-tools) |
 | `model` | LLM model (`opus`, `sonnet`, etc.) |
-| `skills` | [Skill](../../glossary.md#skill) directories to mount (relative to `skills/`) |
+| `skills` | [Skill](../../glossary.md#skill) names to load, as uploaded under `skills/`: a skill's declared `SKILL.md` `name:`, or its directory basename when none is declared |
 | `disallowedTools` | Bash patterns the agent is forbidden from running |
 
 ### Design principles
@@ -484,8 +484,12 @@ if [[ -n "${FULLSEND_AGENT_EXIT_REASON:-}" ]]; then
 fi
 ```
 
-Unlike API or infrastructure errors (which skip the post-script entirely),
-behavioral exits still run the post-script so it can report accurately.
+Without a `validation_loop`, a behavioral exit runs the post-script and the run
+succeeds. Any other agent failure fails the run, but the post-script still runs
+when the agent left its result file (`FULLSEND_OUTPUT_FILE`, default
+`agent-result.json`) and it parses as a JSON object; `FULLSEND_AGENT_EXIT_CODE`
+is then set. With a loop, validation decides. See
+[How a run ends](../../cli/run.md#how-a-run-ends).
 
 ### Post-script security considerations
 

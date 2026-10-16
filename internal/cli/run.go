@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -95,6 +96,9 @@ const (
 	// Run-scoped inference providers resolved from the selected agent.
 	runProviderVertex = "vertex"
 	runProviderOpenAI = "openai"
+	// runProviderGateway marks a pi or codex parent on the inference gateway route
+	// (a gateway/ model, ADR 0137).
+	runProviderGateway = "gateway"
 	// runProviderNone marks runtimes that do no inference (dummy,
 	// dummy-playback).
 	runProviderNone = "none"
@@ -119,13 +123,13 @@ var preflightCheckTimeout = 30 * time.Second
 // outage from hanging teardown indefinitely; remint failure is non-fatal.
 //
 // Set to mintclient.MaxMintDuration rather than an unrelated fixed number:
-// mintclient.MintToken has its own retry schedule (fetchOIDCJWT up to 3
-// attempts, callMint up to 5, both with exponential backoff — see that
-// const's doc for the full accounting), which can already take longer
-// than a shorter, arbitrarily-chosen bound. A bound shorter than the
-// client's own schedule would routinely cut retries short mid-backoff and
-// fall through to the expired token this remint exists to replace — the
-// exact failure this remint exists to fix (#7231).
+// mintclient.MintToken has its own retry schedule (fetchOIDCJWT for up to
+// about a minute, callMint up to 5 attempts, both with exponential
+// backoff — see that const's doc for the full accounting), which can
+// already take longer than a shorter, arbitrarily-chosen bound. A bound
+// shorter than the client's own schedule would routinely cut retries
+// short mid-backoff and fall through to the expired token this remint
+// exists to replace — the exact failure this remint exists to fix (#7231).
 var remintForPostScriptTimeout = mintclient.MaxMintDuration
 
 // defaultAgentsRepoURLPrefix is the base URL for fetching agent harnesses
@@ -231,6 +235,14 @@ type aggregateMetrics struct {
 	// iteration's result modelUsage. A run on a runtime without sub-agents
 	// keeps metrics.json as it was.
 	PerModelUsage map[string]agentruntime.ModelUsage `json:"per_model_usage,omitempty"`
+	// FallbackFrom lists the models the run moved off before Model took
+	// over (#8426; see agentruntime.RunMetrics.FallbackFrom), from the last
+	// iteration that fell back. Absent when none did.
+	FallbackFrom []string `json:"fallback_from,omitempty"`
+	// FallbackReasons says why the run moved off each FallbackFrom entry,
+	// at the same index (see agentruntime.RunMetrics.FallbackReasons), from
+	// the same iteration. Absent when none fell back.
+	FallbackReasons []string `json:"fallback_reasons,omitempty"`
 }
 
 func writeMetricsJSON(dir string, m aggregateMetrics) error {
@@ -446,8 +458,8 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().IntVar(&sOpts.statusNum, "status-number", 0, "issue/PR number for status comments")
 	cmd.Flags().IntVar(&sOpts.statusComment, "status-comment-id", 0, "ID of the triggering comment, for comment-scoped reactions on slash-command runs (optional)")
 	cmd.Flags().StringVar(&sOpts.mintURL, "mint-url", "", "mint service URL for on-demand status tokens (default: $FULLSEND_MINT_URL)")
-	cmd.Flags().StringVar(&oFlags.runtime, "runtime", "", "override the agent runtime from config.yaml for this run (claude, pi, codex, dummy or dummy-playback; also $FULLSEND_RUNTIME)")
-	cmd.Flags().StringVar(&oFlags.model, "model", "", "override the harness/agent model for this run (alias such as opus/sonnet/haiku, a model id, or provider/id on pi and codex — codex takes OpenAI ids only; also $FULLSEND_MODEL)")
+	cmd.Flags().StringVar(&oFlags.runtime, "runtime", "", "override the agent runtime from config.yaml for this run (claude, pi, codex, opencode, dummy or dummy-playback; also $FULLSEND_RUNTIME)")
+	cmd.Flags().StringVar(&oFlags.model, "model", "", "override the harness/agent model for this run (alias such as opus/sonnet/haiku, a model id, or provider/id on pi, codex, and opencode — codex takes OpenAI ids and gateway/<model> only; also $FULLSEND_MODEL)")
 	cmd.Flags().StringVar(&oFlags.effort, "effort", "", "override the harness effort level for this run (low, medium, high, xhigh, max; also $FULLSEND_EFFORT)")
 	_ = cmd.MarkFlagRequired("target-repo")
 
@@ -992,7 +1004,15 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// stay parent-only: a Vertex parent with an OpenAI persona still needs
 	// its own Vertex ADC validated, regardless of what its children run on.
 	parentNeedsOpenAIProvider := agentruntime.NeedsOpenAIProvider(runtimeBackend.Runtime.Name(), h.Model, agentDefModel, configModelAliases)
-	provider := runInferenceProvider(runtimeBackend.Runtime.Name(), parentNeedsOpenAIProvider)
+	// parentNeedsGateway is the same parent-only decision for the inference
+	// gateway route (ADR 0137): a pi parent on a gateway/ model calls no
+	// Vertex, so it must not need Vertex credentials. It depends on the
+	// model alone, not on an inference.gateway block: with no block the
+	// harness may load the extension as a plugin (the local guide), which
+	// is no Vertex call either. Its children are classified on their own,
+	// as for openai (vertexGap below).
+	parentNeedsGateway := agentruntime.NeedsGatewayRoute(runtimeBackend.Runtime.Name(), h.Model, agentDefModel, configModelAliases)
+	provider := runInferenceProvider(runtimeBackend.Runtime.Name(), parentNeedsOpenAIProvider, parentNeedsGateway)
 	// openAIChildren are the configured pi children (subagents.<persona>,
 	// subagents.default, a persona's frontmatter model:) that resolve to
 	// the openai provider. They need the run-scoped OpenAI provider even
@@ -1146,8 +1166,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// Anthropic model id. The syntax is accepted for every runtime (ids are
 	// not a closed set), so flag the likely mismatch instead of rejecting it.
 	// Check the resolved value: an alias whose entry is a provider/id spec
-	// reaches Claude Code as that spec.
-	if runtimeBackend.Runtime.Name() == "claude" && strings.Contains(resolvedModel, "/") {
+	// reaches Claude Code as that spec. A gateway/ model is the exception:
+	// it selects the inference gateway route, and Claude Code is given the
+	// id after the prefix (planGatewayRoute refuses it without a block).
+	if runtimeBackend.Runtime.Name() == "claude" && strings.Contains(resolvedModel, "/") && !isGatewayModel(resolvedModel) {
 		printer.StepWarn(fmt.Sprintf("model %q has a provider/id form, which is pi's; Claude Code expects an alias (opus, sonnet, ...) or an Anthropic model id", resolvedModel))
 	}
 	if overrides.effort != "" {
@@ -1176,6 +1198,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			// Keep the alias's own source (e.g. "--model flag") and add
 			// the remap, so neither decision is hidden.
 			modelDisplay = fmt.Sprintf("%s → %s (from %s models.aliases)", modelDisplay, resolvedModel, runCfg.source)
+		} else if id := agentruntime.BuiltinAliasModel(runtimeBackend.Runtime.Name(), h.Model, configModelAliases); id != "" {
+			// The alias's built-in default (#8426), so what it means
+			// today is visible before the run starts.
+			modelDisplay = fmt.Sprintf("%s → %s (built-in default)", modelDisplay, id)
 		}
 		printer.KeyValue("Model", modelDisplay)
 	}
@@ -1193,6 +1219,12 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			fallbacks[i] = fb
 		}
 		printer.KeyValue("Fallback models", withSource(strings.Join(fallbacks, ", "), overrides.fallbackSource))
+	} else if name := runtimeBackend.Runtime.Name(); name == "claude" || name == "pi" {
+		// The alias's built-in chain (#8426), so a downgrade the run may
+		// take is visible before it starts.
+		if chain := agentruntime.ImplicitFallbackModels(h.Model, configModelAliases); len(chain) > 0 {
+			printer.KeyValue("Fallback models", fmt.Sprintf("%s (built-in for %s, when not served)", strings.Join(chain, ", "), h.Model))
+		}
 	}
 	printer.KeyValue("Runtime", fmt.Sprintf("%s (from %s)", runtimeBackend.Runtime.Name(), runtimeConfigSource))
 	if h.Image != "" {
@@ -1370,6 +1402,38 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	if len(sandboxName) > maxSandboxNameLen {
 		return fmt.Errorf("sandbox name %q is %d characters, exceeding the OpenShell limit of %d", sandboxName, len(sandboxName), maxSandboxNameLen)
 	}
+	// Inference gateway route (ADR 0137, #8280): selected per model by the
+	// gateway/ prefix, with no precedence against the OpenAI routes, and
+	// attached in addition to every other provider, never instead of
+	// them. Decided here, before Bootstrap, because the runtime renders
+	// its gateway config from the block (PrepareGatewayRun).
+	gatewayChildren := agentruntime.GatewayChildren(runtimeBackend.Runtime.Name(), h.Agent, agentSubagents, harness.SkillSources(h.Skills), agentName, configModelAliases)
+	gatewayModels := []string{agentruntime.EffectiveModel(resolvedModel, agentDefModel)}
+	for _, c := range gatewayChildren {
+		gatewayModels = append(gatewayModels, c.Spec)
+	}
+	needsGateway := parentNeedsGateway || len(gatewayChildren) > 0
+	if runtimeBackend.Runtime.Name() == "claude" {
+		if err := validateClaudeGatewayFallbacks(parentNeedsGateway, overrides.fallbackModels, configModelAliases); err != nil {
+			printer.StepFail("Inference gateway route unavailable")
+			return err
+		}
+	}
+	gatewayPlan, err := planGatewayRoute(runCfg, runtimeBackend, sandboxName, gatewayModels, needsGateway)
+	if err != nil {
+		printer.StepFail("Inference gateway route unavailable")
+		return err
+	}
+	if gatewayPlan != nil {
+		iterations := 1
+		if h.ValidationLoop != nil && h.ValidationLoop.MaxIterations > 0 {
+			iterations = h.ValidationLoop.MaxIterations
+		}
+		gatewayPlan.runLifetime = gatewayAPIKeyLifetimeFor(iterations, time.Duration(effectiveTimeoutMinutes(h))*time.Minute)
+		if gatewayPlan.prepared != nil {
+			defer gatewayPlan.prepared.ClearGatewayRun(sandboxName)
+		}
+	}
 	// runScopedProviders maps a harness provider name to the run-scoped
 	// instance created for it; sandbox creation attaches the latter.
 	runScopedProviders := map[string]string{}
@@ -1427,25 +1491,25 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			printer.StepFail("Failed to load provider definitions")
 			return fmt.Errorf("loading provider definitions: %w", err)
 		}
-		warnReservedProviderNameOverrides(localDefs, result.Providers, printer)
-		listedReservedProfiles := warnReservedProfileCopies(result.Profiles, printer)
 
 		// A bare provider name with no local or URL-resolved definition
 		// falls back to the definition the scaffold embeds in this binary
 		// (providers/<name>.yaml): workspace preparation layers providers/
 		// in CI, but a local per-repo checkout carries only a .gitkeep.
-		localDefs = appendEmbeddedProviderDefs(localDefs, result.Providers, h.Providers, printer)
-		allDefs, shadowedProviders := mergeProviderDefs(localDefs, result.Providers)
-		for _, name := range shadowedProviders {
+		providerDefs := appendEmbeddedProviderDefs(localDefs, result.Providers, h.Providers, printer)
+		allDefs, selectedResolved, shadowedResolved := mergeProviderDefs(providerDefs, result.Providers)
+		for _, name := range shadowedResolved {
 			printer.StepWarn(fmt.Sprintf("Local provider %q shadows URL-resolved provider of the same name", name))
 		}
-		urlProviderNames := make(map[string]bool, len(result.Providers))
-		for _, rp := range result.Providers {
+		urlProviderNames := make(map[string]bool, len(selectedResolved))
+		for _, rp := range selectedResolved {
 			urlProviderNames[rp.Def.Name] = true
 		}
-		for _, name := range shadowedProviders {
-			delete(urlProviderNames, name)
-		}
+
+		warnReservedProviderNameOverrides(localDefs, result.Providers, printer)
+		providerOverrides := providerOverridePaths(localDefs, selectedResolved)
+		warnReservedProfileCopies(result.Profiles, printer)
+		profileOverrides := profileOverridePaths(result.Profiles)
 
 		// Run-scoped providers are created synchronously, before the
 		// shared ones: their credential is resolved in process (a WIF
@@ -1465,7 +1529,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 					// and stays live for this release (warned about by
 					// warnReservedProfileCopies); importing the embedded one
 					// now would replace it under the same id (#7268).
-					if _, listed := listedReservedProfiles[pd.Type]; !listed {
+					if _, hasProfileOverride := profileOverrides[pd.Type]; !hasProfileOverride {
 						if err := ensureEmbeddedProfile(ctx, pd.Type, printer); err != nil {
 							return err
 						}
@@ -1564,7 +1628,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 				if err := sandbox.EnsureProvider(ctx, pd.Name, pd.Type, pd.Credentials, pd.Config, urlProviderNames[pd.Name]); err != nil {
 					printer.StepFail("Failed to create provider " + pd.Name)
 					mu.Lock()
-					errs = append(errs, fmt.Errorf("ensuring provider %q: %w", pd.Name, err))
+					errs = append(errs, wrapEnsureProviderError(pd, providerOverrides, profileOverrides, err))
 					mu.Unlock()
 					return
 				}
@@ -1585,6 +1649,35 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		}
 
 		allProviderNames = applyRunScopedProviderNames(dropSkippedProviders(sandboxProviderNames(h.Providers, result.Providers), skippedProviders), runScopedProviders)
+	}
+
+	// The gateway provider is the runner's, not the harness's: it is
+	// created whenever the route applies, alongside whatever the harness
+	// declared. Its refresher is independent of the OpenAI ones, so a run
+	// on both routes keeps two handoffs. Like them it reads the forge's
+	// OIDC env and spawns openshell, so it is paused around the pre-script
+	// remints, and the sandbox cleanup defer stops it before the sandbox
+	// is deleted (its own stop-defers would only fire after the
+	// post-script, under LIFO).
+	var gatewayHandles []gatewayProviderHandle
+	var stopGatewayRefreshers []func()
+	if gatewayPlan != nil {
+		if err := sandbox.EnableProvidersV2(); err != nil {
+			printer.StepFail("Failed to enable providers v2")
+			return fmt.Errorf("enabling providers v2: %w", err)
+		}
+		gwHandle, err := startGatewayRoute(ctx, gatewayPlan, sandboxName, printer)
+		if err != nil {
+			return err
+		}
+		gatewayHandles = append(gatewayHandles, gwHandle)
+		allProviderNames = append(allProviderNames, gwHandle.name)
+		// LIFO: the refresher stops before the provider is deleted.
+		defer cleanupRunScopedProvider(gwHandle.name, []string{gatewayCredentialKey}, keepSandbox, printer)
+		stopGatewayRefreshers = startGatewayRefreshers(gatewayHandles, printer)
+		for _, stop := range stopGatewayRefreshers {
+			defer stop()
+		}
 	}
 
 	// A subagents entry on openai with no openai provider to attach would
@@ -1700,9 +1793,16 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		for _, stop := range stopOpenAIRefreshers {
 			stop()
 		}
+		for _, stop := range stopGatewayRefreshers {
+			stop()
+		}
 		preRestore, remintErr := maybeRemintAgentTokenForStage(ctx, h, mintURL, forgePlatform, harness.PrivilegeStagePreScript, runtimeLevel, printer)
 		stopOpenAIRefreshers = startOpenAIRefreshers(openAIHandles, printer)
 		for _, stop := range stopOpenAIRefreshers {
+			defer stop()
+		}
+		stopGatewayRefreshers = startGatewayRefreshers(gatewayHandles, printer)
+		for _, stop := range stopGatewayRefreshers {
 			defer stop()
 		}
 		if remintErr != nil {
@@ -1712,9 +1812,16 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		for _, stop := range stopOpenAIRefreshers {
 			stop()
 		}
+		for _, stop := range stopGatewayRefreshers {
+			stop()
+		}
 		preRestore()
 		stopOpenAIRefreshers = startOpenAIRefreshers(openAIHandles, printer)
 		for _, stop := range stopOpenAIRefreshers {
+			defer stop()
+		}
+		stopGatewayRefreshers = startGatewayRefreshers(gatewayHandles, printer)
+		for _, stop := range stopGatewayRefreshers {
 			defer stop()
 		}
 		if err != nil {
@@ -1780,13 +1887,27 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// after the agent has retried its first request.
 		if err := checkOpenAIEgressInspected(ctx, sandboxName); err != nil {
 			printer.StepFail("Sandbox policy cannot deliver the OpenAI credential")
+			discardSandbox(sandboxName, runDir, keepSandbox, printer)
 			return err
 		}
-		// From here a refresh must also re-seed the running agent's
-		// credential file (when its runtime has one).
-		for _, h := range openAIHandles {
-			h.sandboxUp.Store(true)
+	}
+	if gatewayPlan != nil {
+		// The same preflight for the configured gateway host: the token
+		// only reaches it through an inspected route.
+		if err := checkGatewayEgressInspected(ctx, sandboxName, gatewayPlan.host); err != nil {
+			printer.StepFail("Sandbox policy cannot deliver the inference gateway credential")
+			discardSandbox(sandboxName, runDir, keepSandbox, printer)
+			return err
 		}
+	}
+	// From here a refresh must also re-seed the running agent's credential
+	// file (when its runtime has one). Set only once every preflight has
+	// passed, so no refresher re-seeds a sandbox a failed one deletes.
+	for _, h := range openAIHandles {
+		h.sandboxUp.Store(true)
+	}
+	for _, gh := range gatewayHandles {
+		gh.sandboxUp.Store(true)
 	}
 
 	// repoExtractedOK tracks whether hostRepositoryDownloadDir is safe
@@ -1826,26 +1947,22 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 
 	// Post-script runs after sandbox cleanup (defers are LIFO).
 	// When a validation_loop is configured, the post-script only runs if
-	// validation passed (ADR 0022). When no validation_loop exists (e.g.,
-	// the code agent), the post-script runs unconditionally after a
-	// successful agent run — the post-script itself is responsible for
-	// any output checks it needs.
+	// validation passed (ADR 0022). Without one it runs after a successful
+	// agent run, and after a failed agent only when the agent left a result
+	// file that parses (#8305): the result is still reported, and the run
+	// still fails. The post-script itself is responsible for any further
+	// output checks it needs.
 	if h.PostScript != "" {
 		defer func() {
 			if noPostScript {
 				printer.StepWarn(fmt.Sprintf("Skipping post-script %s: --no-post-script", h.PostScript))
 				return
 			}
-			if h.ValidationLoop != nil && !validationPassed {
-				printer.StepWarn("Skipping post-script: validation did not pass")
-				return
+			gate := postScriptGate(h, validationPassed, transcriptErrorOverride, runErr, filepath.Join(runDir, fmt.Sprintf("iteration-%d", runCount), "output"))
+			if gate.message != "" {
+				printer.StepWarn(gate.message)
 			}
-			if runErr != nil {
-				printer.StepWarn("Skipping post-script: agent run failed")
-				return
-			}
-			if transcriptErrorOverride {
-				printer.StepWarn("Skipping post-script: agent reported error via transcript")
+			if !gate.run {
 				return
 			}
 			postStart := time.Now()
@@ -1858,7 +1975,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			// privilege-downgrade case it fails closed on instead.
 			// os.Setenv is safe here: sandbox streaming and OIDC refresh
 			// goroutines have already been torn down (LIFO defers). The
-			// OpenAI credential refreshers are the exception — their own
+			// OpenAI credential refreshers are the exception (the gateway
+			// refreshers were stopped by the sandbox cleanup defer) — their own
 			// stop-defers are registered earlier in the function, so under
 			// LIFO they would not fire until after this defer completes —
 			// so stop them explicitly first to avoid racing this os.Setenv
@@ -1942,6 +2060,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			if agentExitReason != "" {
 				postCmd.Env = append(postCmd.Env, fmt.Sprintf("FULLSEND_AGENT_EXIT_REASON=%s", agentExitReason))
 			}
+			// Set only when the post-script runs after a failed agent (#8305).
+			if gate.agentExitCode != 0 {
+				postCmd.Env = append(postCmd.Env, fmt.Sprintf("FULLSEND_AGENT_EXIT_CODE=%d", gate.agentExitCode))
+			}
 			postCmd.Stdout = os.Stdout
 			postCmd.Stderr = os.Stderr
 			if err := postCmd.Run(); err != nil {
@@ -1955,6 +2077,11 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		}()
 	}
 	defer func() {
+		// The gateway refreshers re-seed this sandbox; stop them before it
+		// goes, and before the post-script and its remint run.
+		for _, stop := range stopGatewayRefreshers {
+			stop()
+		}
 		// Collect OpenShell logs before sandbox deletion for post-mortem debugging.
 		collectOpenshellLogs(sandboxName, runDir, printer)
 
@@ -2392,14 +2519,14 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// append, the previous validation failure is injected so the agent
 		// can self-correct instead of re-running blindly (#1050, #6494).
 		agentPrompt := ""
+		promptSanitized := 0
 		if iteration > 1 && feedbackEnabled && validationFeedback != "" {
-			var sanitizedFindings int
-			agentPrompt, sanitizedFindings = buildFeedbackPrompt(validationFeedback)
+			agentPrompt, promptSanitized = buildFeedbackPrompt(validationFeedback)
 			printer.StepInfo("Injecting validation feedback into agent prompt")
-			if sanitizedFindings > 0 {
+			if promptSanitized > 0 {
 				printer.StepWarn(fmt.Sprintf(
 					"Unicode sanitization altered validation feedback (%d finding(s) stripped)",
-					sanitizedFindings))
+					promptSanitized))
 			}
 		}
 
@@ -2432,8 +2559,10 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// later spans. Nil when the Level 3 gate is off; nil is inert. The
 		// tool-span tracker is per iteration for the same reason and is not
 		// gated: execute_tool spans are metadata.
-		collector := newContentCollectorIfEnabled()
+		collector := newContentCollectorIfEnabled(h.RunnerEnv)
+		collector.attachInput(agentSpan, agentPrompt, promptHidesAlterations(validationFeedback, promptSanitized))
 		toolSpans := newToolSpanTracker(tracer, agentCtx)
+		toolSpans.runnerEnv = h.RunnerEnv
 		var metrics agentruntime.RunMetrics
 		hooksSettings := ""
 		if h.SecurityEnabled() {
@@ -2513,7 +2642,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		// Check the tee'd output.jsonl for is_error:true result events.
 		// The transcript is checked regardless of exit code to catch both:
 		// 1. API/infra failures where Claude exits 0 but reports errors
-		//    (is_error:true) — these skip the post-script entirely (#2786).
+		//    (is_error:true) — these count as exit 1 (#2786), which skips
+		//    the post-script unless postScriptGate lets a result through.
 		// 2. Behavioral limits (error_max_turns, error_max_budget_usd) where
 		//    Claude exits non-zero mid-work — these pass the reason to
 		//    the post-script so it can report accurately (#6877).
@@ -2548,7 +2678,8 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		finalizeAgentSpan(agentSpan, nil, iteration, exitCode, genAISystem, rt.Name(), &metrics, transcriptErrMsg, toolSpans)
 
 		printer.Blank()
-		// Non-zero exit is a warning, not a failure — the validation loop is the success gate.
+		// Non-zero exit is a warning here, not a failure — with a loop, validation is
+		// the success gate; without one, runTerminalError fails the run (#8305).
 		if lastExitCode == 0 {
 			printer.StepDone(fmt.Sprintf("Agent exited with code %d (%.1fs)", exitCode, time.Since(agentStart).Seconds()))
 		} else {
@@ -2810,7 +2941,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	}
 	printer.Blank()
 
-	return runTerminalError(h.ValidationLoop != nil, validationPassed, lastIterTimedOut, runCount, lastIterElapsed, timeout)
+	return runTerminalError(h.ValidationLoop != nil, validationPassed, lastIterTimedOut, lastExitCode, agentExitReason, runCount, lastIterElapsed, timeout)
 }
 
 func bootstrapCommon(sandboxName, fullsendBinary string, h *harness.Harness) error {
@@ -3013,6 +3144,11 @@ var oidcDenyKeys = map[string]bool{
 	// script maps it to OPENAI_API_KEY and unsets it; if it is ever still
 	// present it holds the real key and must stay runner-only too.
 	"FULLSEND_OPENAI_API_KEY": true,
+	// The inference gateway's api-key credential (ADR 0138) reaches the
+	// sandbox only as the run-scoped gateway provider's placeholder, the
+	// same way: no harness expansion may copy it, and pre/post scripts
+	// never see it.
+	gatewayAPIKeyEnv: true,
 	// The GitLab webhook fast-path credentials `fullsend repos install`
 	// provisions as protected, wildcard-scoped CI/CD variables. The trigger
 	// token is a bearer credential that starts pipelines on the protected
@@ -3128,6 +3264,7 @@ var reservedSandboxKeys = map[string]bool{
 	"FULLSEND_TIMEOUT_MINUTES":    true,
 	"FULLSEND_ITERATION_DEADLINE": true,
 	"TRACEPARENT":                 true,
+	runnerPathVar:                 true,
 	// OPENAI_API_KEY is reserved through oidcDenyKeys (merged by init()).
 	// GH_WORKFLOW_TOKEN is reserved through providerOnlyKeys (merged by init()).
 }
@@ -3255,6 +3392,79 @@ const (
 	iterationEnvFile = iterationEnvDir + "/iteration.env"
 )
 
+// hostFileChmodCommand is the sandbox command that marks an uploaded host file
+// executable. dest is harness text, so it is quoted: unquoted, a dest holding
+// `;` or a space would run as shell after validation already passed it.
+// ValidateHostFileDest requires an absolute path, so it cannot start with "-".
+func hostFileChmodCommand(dest string) string {
+	return "chmod +x " + shellQuote(dest)
+}
+
+// runnerPathVar holds the PATH .env builds, captured before the .env.d loop
+// and marked read-only, so runnerPathRestoreLine can put it back in front
+// after every harness-controlled entry.
+const runnerPathVar = "FULLSEND_RUNNER_PATH"
+
+// runnerPathCaptureLine records the PATH .env has just exported. `readonly`
+// is a special builtin, so an .env.d file that assigns the same name is an
+// error: under a POSIX sh such as dash it aborts the sourcing shell, and under
+// any shell the pinned value stands. The subshell probe asks whether the name
+// is already read-only — true only on a second `. .env` in the same shell —
+// rather than whether it is set, so a value inherited from the exec
+// environment (never read-only: the attribute does not cross exec) is
+// overwritten, not trusted.
+func runnerPathCaptureLine() string {
+	return fmt.Sprintf(`if ( %s= ) 2>/dev/null; then %s="$PATH"; readonly %s; fi`, runnerPathVar, runnerPathVar, runnerPathVar)
+}
+
+// runnerPathRestoreLine puts the runner's PATH back in front after the .env.d
+// files and env.sandbox exports. This enforces reservedSandboxKeys' PATH entry
+// for host_files env files too: a directory an .env.d file prepends cannot
+// come before the runner's entries, so it cannot change which binary a name
+// the runner's PATH already provides resolves to. Directories it adds still
+// follow, so an extra toolchain directory keeps working for names not found
+// earlier.
+//
+// ${PATH:+:$PATH} appends nothing when an .env.d file left PATH empty, rather
+// than a trailing empty entry, which the shell reads as the current directory.
+func runnerPathRestoreLine() string {
+	return fmt.Sprintf(`export PATH="$%s${PATH:+:$PATH}"`, runnerPathVar)
+}
+
+// runnerPathLines are the first lines of .env: the runner's PATH, then its
+// read-only copy. /sandbox/workspace/bin comes last, after the image's own
+// PATH: host_files can drop files there, so it may add commands (my-tool.sh,
+// and the runner's own fullsend and fullsend-check-output, which exist only
+// there) but not replace one the image provides — python3 and tirith for the
+// security hooks, node for codex and pi, git, find.
+func runnerPathLines() []string {
+	pathExport := "export PATH=/usr/local/go/bin"
+	pathExport += ":$HOME/go/bin"
+	pathExport += ":$PATH"
+	pathExport += fmt.Sprintf(":%s/bin", sandbox.SandboxWorkspace)
+	return []string{pathExport, runnerPathCaptureLine()}
+}
+
+// harnessEnvLines are the last lines of .env: the harness-controlled entries,
+// then the runner-owned lines that must come after them.
+func harnessEnvLines(h *harness.Harness) []string {
+	// Source all env files from .env.d/ (populated by host_files with expand: true).
+	lines := []string{fmt.Sprintf("for f in %s/.env.d/*.env; do [ -f \"$f\" ] && . \"$f\"; done", sandbox.SandboxWorkspace)}
+
+	// ADR 0055: export env.sandbox vars. Placed after .env.d sourcing so
+	// env.sandbox takes precedence on collision — the common use case is
+	// overriding a single var from a shared host_files .env file.
+	lines = append(lines, buildSandboxEnvLines(h)...)
+
+	// The runner's PATH goes back in front after every harness-controlled
+	// entry, the same ordering rule as iteration.env below.
+	lines = append(lines, runnerPathRestoreLine())
+
+	// Runner-owned budget, deadline, and TRACEPARENT come after every
+	// harness-controlled entry so none of them can shadow the values (#7042).
+	return append(lines, iterationEnvSourceLine())
+}
+
 // iterationEnvSourceLine is the last line bootstrapEnv writes to .env. The
 // `if` keeps .env's exit status 0 while the file is absent.
 func iterationEnvSourceLine() string {
@@ -3333,9 +3543,12 @@ func timeoutNoRetryMessage(elapsed, timeout time.Duration) string {
 
 // runTerminalError decides how the run ends after the post-loop steps. A
 // valid result wins; the timeout error replaces "validation failed" only when
-// nothing validated (#7042). Without a loop the timeout alone fails the run
-// (#5075).
-func runTerminalError(hasLoop, validationPassed, timedOut bool, runCount int, elapsed, timeout time.Duration) error {
+// nothing validated (#7042). Without a loop the timeout fails the run (#5075),
+// and so does a failed agent (#8305): exitCode is the runner's lastExitCode,
+// already 1 for an exit 0 with a transcript-reported error (#2786). A
+// behavioral limit exit (exitReason, #6877) does not fail a run without a
+// loop, so the post-script still runs and can report the interruption.
+func runTerminalError(hasLoop, validationPassed, timedOut bool, exitCode int, exitReason string, runCount int, elapsed, timeout time.Duration) error {
 	timeoutErr := fmt.Errorf("agent timed out after %s without completing (timeout: %s)", elapsed.Round(time.Second), timeout)
 	switch {
 	case hasLoop && !validationPassed && timedOut:
@@ -3344,23 +3557,109 @@ func runTerminalError(hasLoop, validationPassed, timedOut bool, runCount int, el
 		return fmt.Errorf("validation failed after %d iteration(s)", runCount)
 	case !hasLoop && timedOut:
 		return timeoutErr
+	case !hasLoop && exitCode != 0 && !(exitCode > 0 && isBehavioralExitSubtype(exitReason)):
+		return &agentFailedError{exitCode: exitCode}
 	}
 	return nil
+}
+
+// agentFailedError ends a run without a validation_loop whose agent failed
+// (#8305). The post-script gate tells it apart from other run errors.
+type agentFailedError struct {
+	exitCode int
+}
+
+func (e *agentFailedError) Error() string {
+	return fmt.Sprintf("agent failed with exit code %d", e.exitCode)
+}
+
+// postScriptDecision says whether the post-script runs, with the warning to
+// print. agentExitCode is set when it runs after a failed agent.
+type postScriptDecision struct {
+	run           bool
+	message       string
+	agentExitCode int
+}
+
+// postScriptGate decides whether the post-script runs once the agent is done.
+// With a validation_loop it needs a validated result (ADR 0022). Without one
+// it runs after a successful agent, and after a failed agent only when the
+// agent left a result file that parses (#8305), so the result is still
+// reported while the run fails. --no-post-script is checked by the caller.
+func postScriptGate(h *harness.Harness, validationPassed, transcriptErrorOverride bool, runErr error, outputDir string) postScriptDecision {
+	if h.ValidationLoop != nil && !validationPassed {
+		return postScriptDecision{message: "Skipping post-script: validation did not pass"}
+	}
+	var agentErr *agentFailedError
+	if errors.As(runErr, &agentErr) {
+		resultFile, ok := agentResultFile(h, outputDir)
+		if !ok {
+			return postScriptDecision{message: fmt.Sprintf("Skipping post-script: agent failed with exit code %d and left no result file that parses", agentErr.exitCode)}
+		}
+		return postScriptDecision{
+			run:           true,
+			message:       fmt.Sprintf("Agent failed with exit code %d but left %s: running the post-script; the run still fails", agentErr.exitCode, filepath.Base(resultFile)),
+			agentExitCode: agentErr.exitCode,
+		}
+	}
+	if runErr != nil {
+		return postScriptDecision{message: "Skipping post-script: agent run failed"}
+	}
+	if transcriptErrorOverride {
+		return postScriptDecision{message: "Skipping post-script: agent reported error via transcript"}
+	}
+	return postScriptDecision{run: true}
+}
+
+// agentResultMaxBytes caps how much of the sandbox-written result file the
+// runner reads; a larger file counts as no result.
+const agentResultMaxBytes = 4 << 20
+
+// agentResultFile returns the agent's result file in outputDir when it exists
+// and holds a JSON object. The name is the harness's FULLSEND_OUTPUT_FILE,
+// defaulting to agent-result.json as fullsend-check-output does.
+func agentResultFile(h *harness.Harness, outputDir string) (string, bool) {
+	name := h.RunnerEnv["FULLSEND_OUTPUT_FILE"]
+	if name == "" {
+		name = "agent-result.json"
+	}
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		return "", false
+	}
+	path := filepath.Join(outputDir, name)
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, agentResultMaxBytes+1))
+	if err != nil || len(data) > agentResultMaxBytes {
+		return "", false
+	}
+	var obj map[string]any
+	if json.Unmarshal(data, &obj) != nil || obj == nil {
+		return "", false
+	}
+	return path, true
 }
 
 func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, runtimeEnvExports []string, fetchEnv ...fetchServiceEnv) error {
 	remoteEnvFile := sandbox.SandboxWorkspace + "/.env"
 	outputDir := sandbox.SandboxWorkspace + "/output"
 
+	// Validate already refuses runner-owned dests; checked again before
+	// anything is uploaded so a harness that reached bootstrap by another
+	// route cannot overwrite the .env written below or a runner binary.
+	for i, hf := range h.HostFiles {
+		if err := harness.ValidateHostFileDest(hf.Dest); err != nil {
+			return fmt.Errorf("host_files[%d]: %w", i, err)
+		}
+	}
+
 	var lines []string
 
 	// Infrastructure vars.
-	pathExport := fmt.Sprintf("export PATH=%s/bin", sandbox.SandboxWorkspace)
-	pathExport += ":/usr/local/go/bin"
-	pathExport += ":$HOME/go/bin"
-	pathExport += ":$PATH"
-
-	lines = append(lines, pathExport)
+	lines = append(lines, runnerPathLines()...)
 	lines = append(lines, runtimeEnvExports...)
 	lines = append(lines, fmt.Sprintf("export FULLSEND_OUTPUT_DIR=%s", outputDir))
 	lines = append(lines, fmt.Sprintf("export FULLSEND_TARGET_REPO_DIR=%s", remoteRepositoryDir))
@@ -3407,17 +3706,7 @@ func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, r
 		lines = append(lines, fmt.Sprintf("export FULLSEND_FETCH_TOKEN='%s'", escToken))
 	}
 
-	// Source all env files from .env.d/ (populated by host_files with expand: true).
-	lines = append(lines, fmt.Sprintf("for f in %s/.env.d/*.env; do [ -f \"$f\" ] && . \"$f\"; done", sandbox.SandboxWorkspace))
-
-	// ADR 0055: export env.sandbox vars. Placed after .env.d sourcing so
-	// env.sandbox takes precedence on collision — the common use case is
-	// overriding a single var from a shared host_files .env file.
-	lines = append(lines, buildSandboxEnvLines(h)...)
-
-	// Runner-owned budget, deadline, and TRACEPARENT come after every
-	// harness-controlled entry so none of them can shadow the values (#7042).
-	lines = append(lines, iterationEnvSourceLine())
+	lines = append(lines, harnessEnvLines(h)...)
 
 	content := strings.Join(lines, "\n") + "\n"
 
@@ -3486,8 +3775,7 @@ func bootstrapEnv(sandboxName, remoteRepositoryDir string, h *harness.Harness, r
 		// landing in a bin/ directory.
 		// https://github.com/fullsend-ai/fullsend/issues/345#issuecomment-4300740512
 		if strings.Contains(hf.Dest, "/bin/") {
-			chmodCmd := fmt.Sprintf("chmod +x %s", hf.Dest)
-			if _, _, _, execErr := sandbox.Exec(sandboxName, chmodCmd, 10*time.Second); execErr != nil {
+			if _, _, _, execErr := sandbox.Exec(sandboxName, hostFileChmodCommand(hf.Dest), 10*time.Second); execErr != nil {
 				return fmt.Errorf("chmod host file %s in sandbox: %w", hf.Dest, execErr)
 			}
 		}
@@ -3604,6 +3892,28 @@ func buildFeedbackPrompt(feedback string) (string, int) {
 		sanitizedFindings
 }
 
+// promptHidesAlterations reports whether the retry prompt's telemetry copy
+// (contentCollector.attachInput) must be recorded masked whole: the
+// sanitizer stripped something (sanitized > 0), which the collector's own
+// normalizer can then no longer see — a stripped colour code can take a
+// token's first letter with it, and what is left matches no pattern — or
+// the feedback was cut at maxFeedbackBytes while it held what the
+// collector recognises only whole: compatibility characters, which only
+// its fold joins, or a URL whose userinfo, query or fragment maskURLs
+// masks — a cut can take the '@' that marks userinfo and leave the
+// password before it. Feedback cut with neither is recorded.
+func promptHidesAlterations(feedback string, sanitized int) bool {
+	if sanitized > 0 {
+		return true
+	}
+	if len(feedback) <= maxFeedbackBytes {
+		return false
+	}
+	var urls []security.Finding
+	maskURLs(feedback, &urls)
+	return len(urls) > 0 || !security.NewUnicodeNormalizer().Scan(feedback).Safe
+}
+
 // sanitizeFeedbackUnicode strips dangerous non-rendering Unicode characters
 // from validation feedback before it enters the agent prompt. It uses the
 // same UnicodeNormalizer that backs the PostToolUse hook chain's scan_text,
@@ -3708,28 +4018,60 @@ const minRedactableSecretLen = 8
 // never passed through our env (a key baked into a fixture, a hook printing
 // its own).
 func redactFeedback(feedback string, runnerEnv map[string]string) string {
-	for key, value := range runnerEnv {
-		if len(value) < minRedactableSecretLen || !sensitiveEnvKey(key) {
-			continue
-		}
-		feedback = strings.ReplaceAll(feedback, value, "[REDACTED:"+key+"]")
-	}
-	// Provider-only keys live in the process environment, not RunnerEnv.
-	// Redact their literals the same way so they cannot reach the agent
-	// prompt or the uploaded run directory (#6649).
-	for key := range providerOnlyKeys {
-		value := os.Getenv(key)
-		if len(value) < minRedactableSecretLen {
-			continue
-		}
-		feedback = strings.ReplaceAll(feedback, value, "[REDACTED:"+key+"]")
-	}
+	// Provider-only keys live in the process environment, not RunnerEnv;
+	// replaceEnvSecrets redacts their literals in the same pass so they
+	// cannot reach the agent prompt or the uploaded run directory (#6649).
+	feedback, _ = replaceEnvSecrets(feedback, runnerEnv)
 	// ScanResult.Sanitized is empty when the scanner changed nothing, so the
 	// original text is the fallback — not an empty prompt.
 	if res := security.NewSecretRedactor().Scan(feedback); res.Sanitized != "" {
 		return res.Sanitized
 	}
 	return feedback
+}
+
+// replaceEnvSecrets is the literal pass: the value of each sensitive runner
+// env key, and of each providerOnlyKeys entry in the process environment
+// (kept out of RunnerEnv, #6649), when it holds minRedactableSecretLen bytes
+// or more and occurs in text, becomes [REDACTED:<key>]. It returns the keys
+// it replaced. Both sources go in one pass, longer values first, then key
+// order: a value that contains another is replaced whole, whichever source
+// holds it, and the text is the same on every run.
+func replaceEnvSecrets(text string, runnerEnv map[string]string) (string, []string) {
+	var replaced []string
+	for _, l := range envLiterals(runnerEnv) {
+		if !strings.Contains(text, l.value) {
+			continue
+		}
+		text = strings.ReplaceAll(text, l.value, "[REDACTED:"+l.key+"]")
+		replaced = append(replaced, l.key)
+	}
+	return text, replaced
+}
+
+// envLiteral is one value the literal pass replaces, with the key it
+// names in the mask.
+type envLiteral struct{ key, value string }
+
+// envLiterals lists the values replaceEnvSecrets replaces — longer values
+// first, then key order, so a value that contains another is replaced
+// whole whichever source holds it.
+func envLiterals(runnerEnv map[string]string) []envLiteral {
+	var literals []envLiteral
+	for key, value := range runnerEnv {
+		if len(value) >= minRedactableSecretLen && sensitiveEnvKey(key) {
+			literals = append(literals, envLiteral{key, value})
+		}
+	}
+	for key := range providerOnlyKeys {
+		if value := os.Getenv(key); len(value) >= minRedactableSecretLen {
+			literals = append(literals, envLiteral{key, value})
+		}
+	}
+	slices.SortFunc(literals, func(a, b envLiteral) int {
+		return cmp.Or(cmp.Compare(len(b.value), len(a.value)), cmp.Compare(a.key, b.key), cmp.Compare(a.value, b.value))
+	})
+	return literals
 }
 
 // writeValidationFeedback writes the validation failure output to a file in
@@ -3892,6 +4234,10 @@ func aggregateRunMetrics(agg *aggregateMetrics, m *agentruntime.RunMetrics, iter
 	agg.Iterations = iteration
 	if m.Model != "" {
 		agg.Model = m.Model
+	}
+	if len(m.FallbackFrom) > 0 {
+		agg.FallbackFrom = append([]string(nil), m.FallbackFrom...)
+		agg.FallbackReasons = append([]string(nil), m.FallbackReasons...)
 	}
 	// Iterations are retries of the same task, so the per-model entries add
 	// up the same way the totals do.
@@ -4134,7 +4480,7 @@ type transcriptCheckOutcome struct {
 //  1. Behavioral limits (error_max_turns, error_max_budget_usd): pass the reason
 //     to the post-script so it can report accurately. See #6877.
 //  2. API/infra failures with exit code 0: override the exit code to 1 so
-//     the post-script is skipped. See #2786.
+//     the run counts as failed. See #2786.
 //  3. Non-behavioral errors with non-zero exit code: the exit code already
 //     signals failure; the transcript error enriches span telemetry.
 func classifyTranscriptError(errMsg, subtype string, exitCode int) transcriptCheckOutcome {
@@ -4319,12 +4665,43 @@ func resolveTraceIdentity(ctx context.Context, tracer trace.Tracer, inboundTP, i
 	}
 }
 
+// deleteSandboxFn deletes a sandbox (sandbox.Delete). Override in tests to
+// record the deletion or return an error without a gateway.
+var deleteSandboxFn = sandbox.Delete
+
+// collectOpenshellLogsFn copies a sandbox's OpenShell logs into the run
+// directory (collectOpenshellLogs). Override in tests to record the call
+// without a gateway.
+var collectOpenshellLogsFn = collectOpenshellLogs
+
+// discardSandbox deletes a sandbox that failed a credential egress
+// preflight. Those preflights run before the run's own sandbox cleanup
+// defer is registered (it must follow the post-script's), so without this
+// a failed preflight would leave the sandbox running. Like that defer it
+// collects the OpenShell logs first: a policy failure is when they help.
+// --keep-sandbox keeps it, as it does for every other failure.
+func discardSandbox(sandboxName, runDir string, keep bool, printer *ui.Printer) {
+	collectOpenshellLogsFn(sandboxName, runDir, printer)
+	if keep {
+		printer.StepWarn(fmt.Sprintf("Sandbox kept (--keep-sandbox): %s", sandboxName))
+		return
+	}
+	if err := deleteSandboxFn(sandboxName); err != nil {
+		printer.StepWarn("Sandbox cleanup failed: " + err.Error())
+		return
+	}
+	printer.StepDone("Sandbox deleted after the failed preflight")
+}
+
 // runInferenceProvider maps the resolved runtime to the provider the parent
-// agent calls.
-func runInferenceProvider(runtimeName string, needsOpenAI bool) string {
+// agent calls. A parent model resolves to at most one of openai and
+// gateway; every other pi, Claude Code or OpenCode parent stays on Vertex.
+func runInferenceProvider(runtimeName string, needsOpenAI, needsGateway bool) string {
 	switch {
 	case needsOpenAI:
 		return runProviderOpenAI
+	case needsGateway:
+		return runProviderGateway
 	case runtimeName == "dummy" || runtimeName == "dummy-playback":
 		return runProviderNone
 	default:
@@ -5200,12 +5577,15 @@ func buildScanContextCommand(repoDir, traceID string) string {
 	sort.Strings(inames) // deterministic ordering
 	inameExpr := strings.Join(inames, " -o ")
 
-	// Source .env to get PATH where fullsend is installed
+	// Source .env for the run's environment. The scanner is the binary
+	// bootstrapCommon uploaded, named by its absolute path so the version
+	// that runs matches the runner whatever PATH .env ends up with.
 	envFile := sandbox.SandboxWorkspace + "/.env"
+	scanner := sandbox.SandboxWorkspace + "/bin/fullsend"
 
 	return fmt.Sprintf(
-		". %s && FULLSEND_TRACE_ID='%s' find '%s' -maxdepth %d -type f \\( %s \\) -exec fullsend scan context {} +",
-		envFile, traceID, escapedDir, maxContextScanDepth, inameExpr,
+		". %s && FULLSEND_TRACE_ID='%s' find '%s' -maxdepth %d -type f \\( %s \\) -exec %s scan context {} +",
+		envFile, traceID, escapedDir, maxContextScanDepth, inameExpr, scanner,
 	)
 }
 
@@ -6765,36 +7145,83 @@ func dedupResolvedProfiles(profiles []resolve.ResolvedProfile) []resolve.Resolve
 }
 
 // mergeProviderDefs merges local and URL-resolved provider definitions.
-// Local defs have highest precedence; among URL-resolved defs, last
-// occurrence wins (child over base). The returned slice is deterministically
-// ordered: local defs first, then URL-resolved names in sorted order.
+// Local defs have highest precedence. URL-resolved defs must already be
+// deduplicated by the caller using dedupResolvedProviders (child over base).
+// allDefs is deterministically ordered: local defs first, then URL-resolved
+// names in sorted order. selectedResolved contains the included resolved defs.
 // shadowed returns the names of URL-resolved providers that were overridden
 // by a local provider of the same name.
-func mergeProviderDefs(localDefs []harness.ProviderDef, urlProviders []resolve.ResolvedProvider) (allDefs []harness.ProviderDef, shadowed []string) {
-	seen := make(map[string]bool, len(localDefs)+len(urlProviders))
-	allDefs = make([]harness.ProviderDef, 0, len(localDefs)+len(urlProviders))
+func mergeProviderDefs(localDefs []harness.ProviderDef, resolvedProviders []resolve.ResolvedProvider) (allDefs []harness.ProviderDef, selectedResolved []resolve.ResolvedProvider, shadowed []string) {
+	localNames := make(map[string]struct{}, len(localDefs))
 	for _, ld := range localDefs {
-		seen[ld.Name] = true
-		allDefs = append(allDefs, ld)
+		localNames[ld.Name] = struct{}{}
 	}
-	lastByName := make(map[string]resolve.ResolvedProvider, len(urlProviders))
-	for _, rp := range urlProviders {
-		lastByName[rp.Def.Name] = rp
-	}
-	urlNames := make([]string, 0, len(lastByName))
-	for name := range lastByName {
-		if !seen[name] {
-			urlNames = append(urlNames, name)
+
+	sortedResolved := append([]resolve.ResolvedProvider(nil), resolvedProviders...)
+	sort.Slice(sortedResolved, func(i, j int) bool {
+		return sortedResolved[i].Def.Name < sortedResolved[j].Def.Name
+	})
+
+	selectedResolved = make([]resolve.ResolvedProvider, 0, len(sortedResolved))
+	for _, rp := range sortedResolved {
+		if _, isShadowed := localNames[rp.Def.Name]; isShadowed {
+			shadowed = append(shadowed, rp.Def.Name)
 		} else {
-			shadowed = append(shadowed, name)
+			selectedResolved = append(selectedResolved, rp)
 		}
 	}
-	sort.Strings(urlNames)
-	sort.Strings(shadowed)
-	for _, name := range urlNames {
-		allDefs = append(allDefs, lastByName[name].Def)
+
+	allDefs = make([]harness.ProviderDef, 0, len(localDefs)+len(selectedResolved))
+	allDefs = append(allDefs, localDefs...)
+	for _, rp := range selectedResolved {
+		allDefs = append(allDefs, rp.Def)
 	}
-	return allDefs, shadowed
+	return allDefs, selectedResolved, shadowed
+}
+
+// wrapEnsureProviderError preserves the existing provider context and error
+// chain while adding migration guidance only for reserved provider/profile
+// copies that actually participate in the failed provider operation.
+func wrapEnsureProviderError(pd harness.ProviderDef, providerOverrides, profileOverrides map[string]string, err error) error {
+	wrapped := fmt.Errorf("ensuring provider %q: %w", pd.Name, err)
+	hint := providerMigrationHint(pd, providerOverrides, profileOverrides)
+	if hint == "" {
+		return wrapped
+	}
+	return fmt.Errorf("%w\n\n%s\n", wrapped, hint)
+}
+
+func providerMigrationHint(pd harness.ProviderDef, providerOverrides, profileOverrides map[string]string) string {
+	providerPath, hasProviderOverride := providerOverrides[pd.Name]
+	profilePath, hasProfileOverride := profileOverrides[pd.Type]
+	if !hasProviderOverride && !hasProfileOverride {
+		return ""
+	}
+
+	var definitions []string
+	if hasProviderOverride {
+		label := pd.Name
+		if providerPath != "" {
+			label = providerPath
+		}
+		definitions = append(definitions, fmt.Sprintf("provider %s", quotePathForLog(label)))
+	}
+	if hasProfileOverride {
+		label := pd.Type
+		if profilePath != "" {
+			label = profilePath
+		}
+		definitions = append(definitions, fmt.Sprintf("profile %s", quotePathForLog(label)))
+	}
+	return fmt.Sprintf(`Note: %s may be outdated; use fullsend's corresponding built-in definitions instead (see "Upgrading agents generated before built-in providers" in docs/guides/user/bring-your-own-agent.md).`,
+		strings.Join(definitions, " and "))
+}
+
+// quotePathForLog prevents repository file names from injecting log lines
+// (%q escapes newlines and control characters) or a legacy "##[" workflow
+// command, which the runner matches anywhere in a line.
+func quotePathForLog(path string) string {
+	return strings.ReplaceAll(fmt.Sprintf("%q", path), "##[", `#\#[`)
 }
 
 // builtinProviderNames are the provider names fullsend ships an embedded
@@ -6847,12 +7274,31 @@ func warnReservedProviderNameOverrides(localDefs []harness.ProviderDef, resolved
 		if rp.FromURL {
 			warn(rp.Def.Name, "the URL-resolved copy")
 		} else {
-			// A repository file name must not inject log lines (%q escapes
-			// newlines and control characters) or a legacy "##[" workflow
-			// command, which the runner matches anywhere in a line.
-			warn(rp.Def.Name, "the copy at "+strings.ReplaceAll(fmt.Sprintf("%q", rp.LocalPath), "##[", `#\#[`))
+			warn(rp.Def.Name, "the copy at "+quotePathForLog(rp.LocalPath))
 		}
 	}
+}
+
+// providerOverridePaths records reserved local and selected resolved copies
+// for failure hints.
+func providerOverridePaths(localDefs []harness.ProviderDef, selectedResolved []resolve.ResolvedProvider) map[string]string {
+	paths := make(map[string]string, len(localDefs)+len(selectedResolved))
+	for _, def := range localDefs {
+		if isBuiltinProviderName(def.Name) {
+			paths[def.Name] = ""
+		}
+	}
+	for _, rp := range selectedResolved {
+		if !isBuiltinProviderName(rp.Def.Name) {
+			continue
+		}
+		localPath := ""
+		if !rp.FromURL {
+			localPath = rp.LocalPath
+		}
+		paths[rp.Def.Name] = localPath
+	}
+	return paths
 }
 
 // rejectReservedProfileID fails when the run resolved a provider profile
@@ -6867,25 +7313,39 @@ func rejectReservedProfileID(id string, resolved []resolve.ResolvedProfile) erro
 	return nil
 }
 
-// warnReservedProfileCopies warns once for each reserved profile id that
-// the harness lists its own copy of (openshell.profiles, by path or URL),
-// whether or not a provider in this run uses it, and returns those ids.
-// For one release the listed copy stays live: the caller does not import
-// the embedded profile over it. fullsend-openai is skipped here because it
-// is already an error (rejectReservedProfileID) (#7268).
-func warnReservedProfileCopies(resolved []resolve.ResolvedProfile, printer *ui.Printer) map[string]struct{} {
-	listed := make(map[string]struct{})
+// warnReservedProfileCopies warns for each reserved profile id that the
+// harness lists its own copy of (openshell.profiles, by path or URL), whether
+// or not a provider in this run uses it. Resolved profiles must already be
+// deduplicated by the caller using dedupResolvedProfiles. For one release the
+// listed copy stays live: the caller does not import the embedded profile over
+// it. fullsend-openai is skipped here because it is already an error
+// (rejectReservedProfileID) (#7268).
+func warnReservedProfileCopies(resolved []resolve.ResolvedProfile, printer *ui.Printer) {
 	for _, rp := range resolved {
 		if rp.ID == openAIProviderType || !isReservedProfileID(rp.ID) {
 			continue
 		}
-		if _, seen := listed[rp.ID]; seen {
-			continue
-		}
-		listed[rp.ID] = struct{}{}
 		printer.StepWarn(fmt.Sprintf("provider profile %q will be rejected in a future release: the id is reserved for the copy built into fullsend. Your copy is still used for now. Remove it from openshell.profiles and declare the bare provider name %q instead", rp.ID, strings.TrimPrefix(rp.ID, "fullsend-")))
 	}
-	return listed
+}
+
+// profileOverridePaths collects reserved profiles for provider failure hints
+// and marks copies that should remain live for this run. Empty values are
+// retained for URL copies so map membership still prevents the embedded
+// profile from replacing a listed copy.
+func profileOverridePaths(resolved []resolve.ResolvedProfile) map[string]string {
+	overrides := make(map[string]string)
+	for _, rp := range resolved {
+		if rp.ID == openAIProviderType || !isReservedProfileID(rp.ID) {
+			continue
+		}
+		localPath := ""
+		if !rp.FromURL {
+			localPath = rp.LocalPath
+		}
+		overrides[rp.ID] = localPath
+	}
+	return overrides
 }
 
 // appendEmbeddedProviderDefs adds the scaffold's embedded definition for

@@ -99,10 +99,16 @@ type systemEvent struct {
 	Subtype           string `json:"subtype"`
 	Model             string `json:"model"`
 	ClaudeCodeVersion string `json:"claude_code_version"`
+	SessionID         string `json:"session_id"`
 	Attempt           int    `json:"attempt"`
 	MaxRetries        int    `json:"max_retries"`
 	RetryDelayMs      int    `json:"retry_delay_ms"`
 	Error             string `json:"error"`
+	// OriginalModel, FallbackModel and Trigger are set on a
+	// "model_fallback" event.
+	OriginalModel string `json:"original_model"`
+	FallbackModel string `json:"fallback_model"`
+	Trigger       string `json:"trigger"`
 	// PluginErrors stays raw so a malformed value cannot fail decoding of
 	// the whole init event; decodePluginErrors reads it entry by entry.
 	PluginErrors json.RawMessage `json:"plugin_errors"`
@@ -334,12 +340,19 @@ func parseClaudeStream(r io.Reader, onEvent func(AgentEvent)) error {
 			switch se.Subtype {
 			case "init":
 				onEvent(InitEvent{
-					Model:   se.Model,
-					Version: se.ClaudeCodeVersion,
+					Model:     se.Model,
+					Version:   se.ClaudeCodeVersion,
+					SessionID: se.SessionID,
 				})
 				for _, pe := range decodePluginErrors(se.PluginErrors) {
 					onEvent(pe)
 				}
+			case "model_fallback":
+				// Claude Code moved to the next --fallback-model entry
+				// within the session (2.1.296 does so on a Vertex 404 as
+				// "trigger":"last_resort"); the init event still names
+				// the model that failed.
+				onEvent(ModelFallbackEvent{From: se.OriginalModel, To: se.FallbackModel, Trigger: se.Trigger})
 			case "api_retry":
 				onEvent(RetryEvent{
 					Attempt:    se.Attempt,
@@ -389,17 +402,21 @@ func parseClaudeStream(r io.Reader, onEvent func(AgentEvent)) error {
 				case "thinking_delta":
 					onEvent(ThinkingEvent{Text: d.Thinking})
 				case "input_json_delta":
-					if toolInputJSON.Len() < maxToolInputSize {
-						toolInputJSON.WriteString(d.PartialJSON)
+					// Cut the delta that crosses the cap: the input is
+					// incomplete past it either way, and Arguments
+					// carries whatever accumulated.
+					if room := maxToolInputSize - toolInputJSON.Len(); room > 0 {
+						toolInputJSON.WriteString(d.PartialJSON[:min(room, len(d.PartialJSON))])
 					}
 				}
 
 			case "content_block_stop":
 				if currentToolName != "" {
 					onEvent(ToolUseEvent{
-						ID:      currentToolID,
-						Name:    currentToolName,
-						Summary: extractSafeContext(currentToolName, json.RawMessage(toolInputJSON.String())),
+						ID:        currentToolID,
+						Name:      currentToolName,
+						Summary:   extractSafeContext(currentToolName, json.RawMessage(toolInputJSON.String())),
+						Arguments: toolInputJSON.String(),
 					})
 					currentToolName = ""
 					currentToolID = ""
@@ -517,9 +534,10 @@ func parseClaudeStream(r io.Reader, onEvent func(AgentEvent)) error {
 					}
 				case "tool_use":
 					onEvent(ToolUseEvent{
-						ID:      item.ID,
-						Name:    item.Name,
-						Summary: extractSafeContext(item.Name, item.Input),
+						ID:        item.ID,
+						Name:      item.Name,
+						Summary:   extractSafeContext(item.Name, item.Input),
+						Arguments: string(item.Input),
 					})
 				}
 			}
@@ -640,6 +658,11 @@ func recordClaudeMetrics(metrics *RunMetrics, evt AgentEvent) {
 		if metrics.Model == "" {
 			metrics.Model = e.Model
 		}
+	case ModelFallbackEvent:
+		if e.To != "" {
+			metrics.Model = e.To
+		}
+		metrics.recordFallback(e.From, claudeCodeFallbackReason(e.Trigger))
 	case TokensEvent:
 		// Capture cumulative token usage from the stream so cancelled
 		// runs (no ResultEvent) retain non-zero telemetry (#6905).

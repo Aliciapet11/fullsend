@@ -61,7 +61,7 @@ See [architecture.md](architecture.md).
 
 ### Agent Runtime
 
-The agent itself in execution — the LLM, its tool-use loop, and the interface to the model provider. This is the thing that actually reasons and acts; everything else in the architecture exists to support, constrain, or coordinate it. Claude Code is the default runtime; [pi](https://github.com/earendil-works/pi) and [Codex](https://github.com/openai/codex) are available as opt-in runtimes (`runtime: pi`, `runtime: codex`), and OpenCode is a stub. Other projects call this layer a [harness](#harness); see that entry for the naming difference. See [runtimes.md](runtimes.md).
+The agent itself in execution — the LLM, its tool-use loop, and the interface to the model provider. This is the thing that actually reasons and acts; everything else in the architecture exists to support, constrain, or coordinate it. Claude Code is the default runtime; [pi](https://github.com/earendil-works/pi) and [Codex](https://github.com/openai/codex) are available as opt-in runtimes (`runtime: pi`, `runtime: codex`), and [OpenCode](https://opencode.ai) is an experimental opt-in runtime limited to read-only agents until the security-hook adapter lands (`runtime: opencode`). Other projects call this layer a [harness](#harness); see that entry for the naming difference. See [runtimes.md](runtimes.md).
 See [architecture.md](architecture.md) and [agent-infrastructure.md](problems/agent-infrastructure.md).
 
 ### AGENTS.md
@@ -89,7 +89,7 @@ See [autonomy-spectrum.md](problems/autonomy-spectrum.md).
 
 ### Base Composition
 
-The mechanism for customizing an agent's harness: a thin harness file sets `base:` to a local path or URL pointing at an upstream harness, then declares only the fields that differ. Scalars override the base value; `skills` merges with deduplication by basename (child overrides); `plugins`, `providers`, `openshell.profiles`, and `api_servers` concatenate (base + child, no dedup at composition time); `env.runner` and `env.sandbox` merge as independent maps (child keys win); `runner_env` is deprecated in favor of `env.runner`. Replaced the deprecated [`customized/` directory](#customized-directory) overlay, which required copying and maintaining an entire upstream YAML file to change a single field. Same mechanism as colloquial "harness composition."
+The mechanism for customizing an agent's harness: a thin harness file sets `base:` to a local path or URL pointing at an upstream harness, then declares only the fields that differ. Scalars override the base value; `skills` merges with deduplication by skill identity (declared `SKILL.md` name when on disk, otherwise basename — child overrides a matching base entry; nested forge skills that share a leaf directory name are kept); `plugins`, `providers`, `openshell.profiles`, and `api_servers` concatenate (base + child, no dedup at composition time); `env.runner` and `env.sandbox` merge as independent maps (child keys win); `runner_env` is deprecated in favor of `env.runner`. Replaced the deprecated [`customized/` directory](#customized-directory) overlay, which required copying and maintaining an entire upstream YAML file to change a single field. Same mechanism as colloquial "harness composition."
 See [ADR 0045](ADRs/0045-forge-portable-harness-schema.md), [ADR 0055](ADRs/0055-unified-env-var-delivery.md), [ADR 0064](ADRs/0064-deprecate-customized-directory-overlay.md), and [Configuring Agent Behavior](guides/user/customizing-agents.md).
 
 ### Blast Radius
@@ -99,7 +99,7 @@ See [security-threat-model.md](problems/security-threat-model.md) and [architect
 
 ### Built-in Skill
 
-A [skill](#skill) listed in a [default agent](#default-agent)'s harness in `fullsend-ai/agents`. Documented under [Agents reference](agents/) (each agent page carries a `Source` link to its harness YAML). Teams typically [add](#additive-skill) alongside built-ins; replacing one by basename via [base composition](#base-composition) or the historical overlay is a [skill override](#skill-override).
+A [skill](#skill) listed in a [default agent](#default-agent)'s harness in `fullsend-ai/agents`. Documented under [Agents reference](agents/) (each agent page carries a `Source` link to its harness YAML). Teams typically [add](#additive-skill) alongside built-ins; replacing one by skill identity via [base composition](#base-composition) or the historical overlay is a [skill override](#skill-override).
 See [Configuring with skills](guides/user/customizing-with-skills.md#built-in-skills).
 
 ### BYOA
@@ -158,6 +158,11 @@ See [Agents reference](agents/) and [Default, derived, and custom agents](guides
 
 An agent that uses `base` [base composition](#base-composition) from a [default agent](#default-agent) but replaces identity-defining components — system prompt (`agent:`), [pre-script](#pre-script) / [post-script](#post-script), mint `role:` (unless that agent's docs recommend a specific role override), or `validation_loop` — beyond documented [extension points](#extension-point). Changing install-time `slug:` alone does **not** make the agent derived. It reuses default lineage but is no longer recognizably that default. Example: changing the post-script so the agent can call a forge API the stock script does not support. Contrast with [configured default](#configured-default-agent) and [custom agent](#custom-agent).
 See [Default, derived, and custom agents](guides/user/default-vs-custom.md).
+
+### Direct OIDC Trust
+
+The inference gateway's `auth: oidc` mode: the gateway validates the job's forge OIDC token itself, with no token exchange. It is not [WIF](#wif-workload-identity-federation).
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
 
 ## E
 
@@ -218,6 +223,11 @@ See [architecture.md](architecture.md).
 A distinct GitHub App installation representing a specific agent role (e.g., triage, coder, reviewer). Each agent role gets its own identity so that actions are attributable and permissions can be scoped per-role. Identity is not the same as trust — an agent's identity lets it authenticate; trust derives from repository permissions and CODEOWNERS, not from which credentials the agent holds.
 See [architecture.md](architecture.md) and [agent-architecture.md](problems/agent-architecture.md).
 
+### Installation Token
+
+A short-lived GitHub App token that the token mint issues in exchange for the job's OIDC token. Agents use it for forge writes such as comments and pull requests.
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
+
 ## L
 
 ### Label State Machine
@@ -267,6 +277,11 @@ See [Distributed Tracing](guides/infrastructure/distributed-tracing.md) and [ADR
 
 ## P
 
+### Placeholder
+
+A stand-in value the sandbox holds instead of a real credential. The OpenShell proxy swaps in the real credential on the way out, so the credential never enters the sandbox.
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
+
 ### Policy Store
 
 Where agent behavioral rules live — autonomy levels, review requirements, allowed operations, and escalation rules. Policy is distinct from the harness (which configures *how* an agent works) and from intent (which defines *what* work is authorized). Policy defines the *boundaries* of agent behavior — what an agent is allowed to do regardless of what it's asked to do. The adopting organization's `.fullsend` repository is the natural home for policy configuration.
@@ -291,7 +306,7 @@ See [ADR 0002](ADRs/0002-initial-fullsend-design.md).
 
 ### Repo Skill
 
-A [skill](#skill) committed under the target repo (typically `.agents/skills/`, often symlinked as `.claude/skills`). Discovered under the Claude Code and Codex runtimes (Codex keeps project trust untrusted, Claude Code parity — see [Codex](runtimes/codex.md)). Novel names are [additive](#additive-skill). A repo skill whose name matches a [built-in skill](#built-in-skill) is **shadowed**: built-ins upload to the personal-level config dir (`CLAUDE_CONFIG_DIR/skills/`), while repo skills stay at the project level (`.claude/skills/`); Claude Code's personal-over-project precedence ignores the repo copy — there is no bootstrap error or fail-fast, but on Claude Code Fullsend emits a warning when a repo skill basename collides with a harness-listed skill. That shadowing is not a [skill override](#skill-override). Use a unique name, or replace intentionally via [base composition](#base-composition) (same basename on the child harness `skills:` list). With `runtime: pi`, project trust is disabled (`--no-approve` / `defaultProjectTrust: never`), so repo-committed skills under `.agents/skills` are not discovered at all — see [runtime implementation](contributing/runtime-implementation.md).
+A [skill](#skill) committed under the target repo (typically `.agents/skills/`, often symlinked as `.claude/skills`). Discovered under the Claude Code and Codex runtimes (Codex keeps project trust untrusted, Claude Code parity — see [Codex](runtimes/codex.md)). Novel names are [additive](#additive-skill). A repo skill whose name matches a [built-in skill](#built-in-skill) is **shadowed**: built-ins upload to the personal-level config dir (`CLAUDE_CONFIG_DIR/skills/`), while repo skills stay at the project level (`.claude/skills/`); Claude Code's personal-over-project precedence ignores the repo copy — there is no bootstrap error or fail-fast, but on Claude Code Fullsend emits a warning when a repo skill's identity (declared `SKILL.md` name, or basename) collides with a harness-listed skill's identity. That shadowing is not a [skill override](#skill-override). Use a unique name, or replace intentionally via [base composition](#base-composition) (matching skill identity — declared `SKILL.md` name, or basename — on the child harness `skills:` list). With `runtime: pi`, project trust is disabled (`--no-approve` / `defaultProjectTrust: never`), so repo-committed skills under `.agents/skills` are not discovered at all — see [runtime implementation](contributing/runtime-implementation.md).
 See [Configuring with skills — Skill precedence](guides/user/customizing-with-skills.md#skill-precedence).
 
 ### Rework Rate
@@ -322,7 +337,7 @@ See [architecture.md](architecture.md), [codebase-context.md](problems/codebase-
 
 ### Skill Override
 
-Intentionally **replacing** a [built-in skill](#built-in-skill) so the agent does not load the shipped version. Distinct from an [additive skill](#additive-skill) (new unique name). Under [base composition](#base-composition), `skills` merges with **deduplication by basename** — a child entry with the same basename overrides the base. Historically also done via `customized/skills/` ([ADR 0035](ADRs/0035-layered-content-resolution.md)), now deprecated ([ADR 0064](ADRs/0064-deprecate-customized-directory-overlay.md) / [Customized Directory](#customized-directory)). Classification: still [configured default](#configured-default-agent) when you only replace the skill (not `agent:` or scripts). Do not rely on a same-named [repo skill](#repo-skill) for override — that path is shadowed without fail-fast (see [Repo Skill](#repo-skill) / [Skill precedence](guides/user/customizing-with-skills.md#skill-precedence)). Fail-fast on duplicate basenames applies only when two harness-listed skills collide in `SkillDirs()`, not to repo-vs-built-in collisions.
+Intentionally **replacing** a [built-in skill](#built-in-skill) so the agent does not load the shipped version. Distinct from an [additive skill](#additive-skill) (new unique name). Under [base composition](#base-composition), `skills` merges with **deduplication by skill identity** (declared `SKILL.md` name when on disk, otherwise basename) — a child entry with the same identity overrides the base. Nested forge skills that share a leaf directory (`skills/issue-labels/github` vs `skills/pr-review/github`) are not treated as the same skill. Historically also done via `customized/skills/` ([ADR 0035](ADRs/0035-layered-content-resolution.md)), now deprecated ([ADR 0064](ADRs/0064-deprecate-customized-directory-overlay.md) / [Customized Directory](#customized-directory)). Classification: still [configured default](#configured-default-agent) when you only replace the skill (not `agent:` or scripts). Do not rely on a same-named [repo skill](#repo-skill) for override — that path is shadowed without fail-fast (see [Repo Skill](#repo-skill) / [Skill precedence](guides/user/customizing-with-skills.md#skill-precedence)). Fail-fast on duplicate sandbox names applies only when two harness-listed skills collide in `SkillDirs()`, not to repo-vs-built-in collisions.
 See [Base composition](#base-composition), [ADR 0045](ADRs/0045-forge-portable-harness-schema.md), and [Default, derived, and custom agents](guides/user/default-vs-custom.md).
 
 ### Stage
@@ -364,6 +379,11 @@ The overloading of "trust" across these contexts has been a recurring source of 
 See [security-threat-model.md](problems/security-threat-model.md) and [agent-architecture.md](problems/agent-architecture.md).
 
 ## W
+
+### WIF (Workload Identity Federation)
+
+A token exchange in which a provider trusts the job's OIDC token and returns its own short-lived access token. Fullsend uses GCP WIF for Vertex AI and OpenAI Workload Identity for OpenAI models; the inference gateway's [direct OIDC trust](#direct-oidc-trust) is not WIF.
+See [How fullsend authenticates](guides/user/how-fullsend-authenticates.md).
 
 ### Work Coordinator
 

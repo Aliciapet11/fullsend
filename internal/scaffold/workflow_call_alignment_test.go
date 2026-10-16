@@ -2,6 +2,7 @@ package scaffold
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -317,6 +318,7 @@ func TestReusableWorkflowsShareCommonInputs(t *testing.T) {
 		"FULLSEND_GCP_WIF_PROVIDER",
 		"FULLSEND_GCP_PROJECT_ID",
 		"FULLSEND_OPENAI_API_KEY",
+		"FULLSEND_INFERENCE_GATEWAY_API_KEY",
 		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
 		"OTEL_EXPORTER_OTLP_HEADERS",
 	}
@@ -490,6 +492,53 @@ func TestOpenAIAPIKeySecretThreading(t *testing.T) {
 				section := extractStepSection(t, content, marker)
 				assert.Contains(t, section, export,
 					"%q step must export FULLSEND_OPENAI_API_KEY as OPENAI_API_KEY", marker)
+			})
+		}
+	})
+}
+
+// TestInferenceGatewayAPIKeySecretThreading validates that the inference
+// gateway's api-key credential (ADR 0138) is forwarded by every scaffold
+// shim and this repo's own shims, declared by every reusable callee, and
+// exported under its own name on every agent step, which is where the
+// runner reads it.
+func TestInferenceGatewayAPIKeySecretThreading(t *testing.T) {
+	const name = "FULLSEND_INFERENCE_GATEWAY_API_KEY"
+	forward := name + ": ${{ secrets." + name + " }}"
+	for _, tc := range []struct {
+		name    string
+		content func(t *testing.T) []byte
+	}{
+		{"scaffold/templates/shim-per-repo.yaml", loadScaffoldFile("templates/shim-per-repo.yaml")},
+		{"scaffold/prioritize.yml", loadScaffoldFile(".github/workflows/prioritize.yml")},
+		{"fullsend.yaml", loadRepoFile(".github/workflows/fullsend.yaml")},
+		{"prioritize.yml", loadRepoFile(".github/workflows/prioritize.yml")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Contains(t, string(tc.content(t)), forward, "%s must forward %s", tc.name, name)
+		})
+	}
+
+	declaration := name + ":\n        required: false"
+	t.Run("reusable-prioritize.yml", func(t *testing.T) {
+		content := string(loadRepoFile(".github/workflows/reusable-prioritize.yml")(t))
+		assert.Contains(t, content, declaration, "reusable-prioritize.yml must declare %s", name)
+		assert.Contains(t, content, forward, "reusable-prioritize.yml must export %s", name)
+	})
+	t.Run("reusable-dispatch.yml", func(t *testing.T) {
+		content := string(loadRepoFile(".github/workflows/reusable-dispatch.yml")(t))
+		assert.Contains(t, content, declaration, "reusable-dispatch.yml must declare %s", name)
+		for _, marker := range []string{
+			"Run triage agent",
+			"Run code agent",
+			"Run review agent",
+			"Run fix agent",
+			"Run retro agent",
+			"Run prioritize agent",
+			"Run harness agent",
+		} {
+			t.Run(marker, func(t *testing.T) {
+				assert.Contains(t, extractStepSection(t, content, marker), forward, "%q step must export %s", marker, name)
 			})
 		}
 	})
@@ -756,13 +805,17 @@ func TestCustomAppSetReviewBotWiring(t *testing.T) {
 				section := extractStepSection(t, s, stepName)
 				assert.Contains(t, section, "FULLSEND_APP_SET: ${{ vars.FULLSEND_APP_SET || 'fullsend-ai' }}",
 					"%s must receive the configured app-set prefix", stepName)
-				if stepName == "Pre-fetch review body" {
-					assert.Contains(t, section, `--arg custom_bot "${CUSTOM_REVIEW_BOT}"`)
-					assert.Contains(t, section, `($custom_bot != "" and .user.login == $custom_bot)`)
-				}
 			}
 		})
 	}
+
+	// The "Pre-fetch review body" step delegates to the vendored script
+	// (#8353); the custom review-bot filter now lives there, not inline.
+	t.Run("pre-fetch-review-body-script", func(t *testing.T) {
+		script := string(loadRepoFile(".github/scripts/pre-fetch-review-body.sh")(t))
+		assert.Contains(t, script, `--arg custom_bot "${CUSTOM_REVIEW_BOT}"`)
+		assert.Contains(t, script, `($custom_bot != "" and .user.login == $custom_bot)`)
+	})
 }
 
 // TestDispatchPunctuationStrip ensures reusable-dispatch.yml strips trailing
@@ -1509,31 +1562,53 @@ func TestGCPSetupOccursInsideSingleRun(t *testing.T) {
 		assert.Equal(t, "${{ inputs.gcp_project_id }}", steps["Run fullsend"].Env["FULLSEND_GCP_PROJECT_ID"])
 		assert.Equal(t, 1, runInvocations)
 	})
+}
 
-	t.Run("functional tests", func(t *testing.T) {
-		path := filepath.Join("..", "..", ".github", "workflows", "functional-tests.yml")
-		content, err := os.ReadFile(path)
+// TestWorkflowDispatchInputsHaveDescriptions guards #7903: SchemaStore's
+// workflow schema (check-jsonschema before SchemaStore #5277) rejects a
+// workflow_dispatch input without a description, failing adopters' lint.
+func TestWorkflowDispatchInputsHaveDescriptions(t *testing.T) {
+	check := func(t *testing.T, name string, raw []byte) {
+		var wf struct {
+			On yaml.Node `yaml:"on"`
+		}
+		require.NoError(t, yaml.Unmarshal(raw, &wf), "%s: invalid YAML", name)
+		if wf.On.Kind != yaml.MappingNode { // on: push / [push, pull_request]
+			return
+		}
+		var on struct {
+			WorkflowDispatch struct {
+				Inputs map[string]struct {
+					Description string `yaml:"description"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_dispatch"`
+		}
+		require.NoError(t, wf.On.Decode(&on), "%s: invalid on:", name)
+		for input, def := range on.WorkflowDispatch.Inputs {
+			assert.NotEmpty(t, strings.TrimSpace(def.Description),
+				"%s: workflow_dispatch input %q needs a description", name, input)
+		}
+	}
+
+	checked := 0
+	require.NoError(t, fs.WalkDir(content, "fullsend-repo", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.Contains(path, ".github/workflows/") {
+			return err
+		}
+		raw, err := content.ReadFile(path)
 		require.NoError(t, err)
-		var workflow struct {
-			Jobs map[string]struct {
-				Steps []struct {
-					Name string            `yaml:"name"`
-					Env  map[string]string `yaml:"env"`
-				} `yaml:"steps"`
-			} `yaml:"jobs"`
-		}
-		require.NoError(t, yaml.Unmarshal(content, &workflow))
-		var runEnv map[string]string
-		for _, step := range workflow.Jobs["functional-tests"].Steps {
-			if step.Name == "Run functional tests" {
-				runEnv = step.Env
-				break
-			}
-		}
-		require.NotNil(t, runEnv, "Run functional tests step not found")
-		// Functional tests authenticate in an earlier step; GCP inputs here
-		// would make the run replace that credential file with direct WIF.
-		assert.NotContains(t, runEnv, "FULLSEND_GCP_WIF_PROVIDER")
-		assert.NotContains(t, runEnv, "FULLSEND_GCP_PROJECT_ID")
-	})
+		check(t, path, raw)
+		checked++
+		return nil
+	}))
+
+	repoWorkflows, err := filepath.Glob(filepath.Join("..", "..", ".github", "workflows", "*.y*ml"))
+	require.NoError(t, err)
+	for _, path := range repoWorkflows {
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		check(t, path, raw)
+		checked++
+	}
+	require.Greater(t, checked, 1, "expected to scan scaffold and repo workflows")
 }

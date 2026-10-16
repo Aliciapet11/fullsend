@@ -172,7 +172,12 @@ func TestConverge_SwitchToAPIKeyKeepsCredentialsWhileInheritedVariablesUnverifie
 		populateGitLabInstalled(fc, "acme", "api")
 		populateGitLabScaffoldContent(t, fc, "acme", "api", "v2.5.0")
 		populateGitLabTypedRoot(t, fc, "acme", "api", fc.FileContents["acme/api/"+fullsendPipelineInclude])
-		fc.FileContents["acme/api/"+preset.OverlayPath] = openAIWIFConfigYAML(t, config.OpenAIWIFConfig{Audience: "aud", IdentityProviderID: "idp", ServiceAccountID: "sa"})
+		// A managed overlay that matches the manifest and retains
+		// inference.openai, so convergence reaches the cleanup guard
+		// instead of stopping at adoption.
+		cfg.Manifest.GitLab.Repos[0].Config = mustManagedConfig(t,
+			"inference:\n  openai:\n    audience: aud\n    identity_provider_id: idp\n    service_account_id: sa\n")
+		fc.FileContents["acme/api/"+preset.OverlayPath] = mustDesiredManaged(t, cfg.Manifest, "acme", "api")
 		client := partialInheritedClient{FakeClient: fc, scopes: []string{"group top", "instance"}}
 		scopes, err := unverifiedOpenAIWIFScopes(context.Background(), client, "acme", "api")
 		require.NoError(t, err)
@@ -210,7 +215,7 @@ func TestConverge_OpenAIWIFVendoredInstallChecksVendorSource(t *testing.T) {
 	vendoredCfg := func(read func(string) ([]byte, error)) ConvergeConfig {
 		cfg := openAIWIFConvergeCfg("acme/api")
 		vendor := true
-		cfg.VendorOverride = &vendor
+		cfg.Manifest.Defaults.Vendor = &vendor
 		cfg.ReadVendoredWorkflow = read
 		return cfg
 	}
@@ -269,7 +274,7 @@ func TestConverge_OpenAIWIFEstablishedVendoredInstallChecksInstalledWorkflowsWit
 	vendoredCfg := func() ConvergeConfig {
 		cfg := openAIWIFConvergeCfg("acme/api")
 		vendor := true
-		cfg.VendorOverride = &vendor
+		cfg.Manifest.Defaults.Vendor = &vendor
 		cfg.ReadVendoredWorkflow = func(string) ([]byte, error) { return reusableWorkflowFixture(true, false), nil }
 		return cfg
 	}
@@ -286,6 +291,9 @@ func TestConverge_OpenAIWIFEstablishedVendoredInstallChecksInstalledWorkflowsWit
 		})
 		require.NoError(t, err)
 		for _, f := range files {
+			if f.Path == preset.OverlayPath {
+				continue // keep the overlay the installed fixture carries
+			}
 			fc.FileContents["acme/api/"+f.Path] = f.Content
 		}
 		for _, path := range openAIWIFReusableWorkflows {
@@ -313,7 +321,6 @@ func TestConverge_OpenAIWIFEstablishedVendoredInstallChecksInstalledWorkflowsWit
 			full := convergeCfgWithDefaults(newConvergeManifest("acme/api"))
 			cfg.InferenceProject = full.InferenceProject
 			cfg.InferenceProjectNumber = full.InferenceProjectNumber
-			cfg.InferenceRegion = full.InferenceRegion
 			cfg.WIFProvider = full.WIFProvider
 			return cfg
 		}
@@ -367,7 +374,7 @@ func TestConverge_OpenAIWIFEstablishedVendoredInstallDryRunMatchesLiveWithPendin
 	vendoredCfg := func(dryRun bool) ConvergeConfig {
 		cfg := managedWIFConvergeCfg(t, "")
 		vendor := true
-		cfg.VendorOverride = &vendor
+		cfg.Manifest.Defaults.Vendor = &vendor
 		cfg.ReadVendoredWorkflow = func(string) ([]byte, error) { return reusableWorkflowFixture(true, false), nil }
 		cfg.DryRun = dryRun
 		return cfg
@@ -384,6 +391,9 @@ func TestConverge_OpenAIWIFEstablishedVendoredInstallDryRunMatchesLiveWithPendin
 		})
 		require.NoError(t, err)
 		for _, f := range files {
+			if f.Path == preset.OverlayPath {
+				continue // keep the overlay the installed fixture carries
+			}
 			fc.FileContents["acme/api/"+f.Path] = f.Content
 		}
 		for _, path := range openAIWIFReusableWorkflows {

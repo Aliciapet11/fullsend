@@ -88,24 +88,24 @@ func TestBuildRunCommand_HooksGuardPlacement(t *testing.T) {
 	envSource := ". " + sandbox.SandboxWorkspace + "/.env"
 
 	t.Run("hooks disabled leaves the launch unchanged", func(t *testing.T) {
-		cmd := buildRunCommand(RunParams{AgentBaseName: "agent", RepoDir: "/repo"}, claudeHookDigests{})
-		assert.True(t, strings.HasPrefix(cmd, "cd /repo && "+envSource+" && claude --print"), cmd)
+		cmd := buildRunCommand(RunParams{AgentBaseName: "agent", RepoDir: "/repo"})
+		assert.True(t, strings.HasPrefix(cmd, "cd /repo && "+claudeBinaryPin()+" && "+envSource+" && unset -f claude && "+claudeLoaderEnvUnset+" && \"$"+claudeBinaryVar+"\" --print"), cmd)
 		assert.NotContains(t, cmd, "sha256sum")
 	})
 
 	t.Run("hooks enabled guards before and after .env", func(t *testing.T) {
 		d := claudeHookDigests{HooksJSON: strings.Repeat("a", 64), HookScripts: testCodexHookScripts()}
-		cmd := buildRunCommand(RunParams{
+		cmd := buildRunCommandWithDigests(RunParams{
 			AgentBaseName:     "agent",
 			RepoDir:           "/repo",
 			HooksSettingsPath: security.SandboxHooksSettings,
 		}, d)
-		guard := claudeHooksGuard(d)
-		want := "cd /repo && " + guard + " && " + envSource +
-			" && unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT" +
-			" && unset -f test command cut wc sha256sum find echo && " + guard + " && claude --print"
+		guard := claudeHooksGuard(d, true)
+		want := "cd /repo && " + claudeBinaryPin() + " && " + guard + " && " + envSource +
+			" && unset -f claude test command cut wc sha256sum find echo && " + claudeLoaderEnvUnset +
+			" && " + guard + " && \"$" + claudeBinaryVar + "\" --print"
 		assert.True(t, strings.HasPrefix(cmd, want), cmd)
-		assert.Greater(t, strings.Index(cmd, "unset PYTHONPATH"), strings.Index(cmd, envSource),
+		assert.Greater(t, strings.Index(cmd, "unset LD_PRELOAD"), strings.Index(cmd, envSource),
 			"the LD_* unset must come after .env is sourced")
 		assert.Contains(t, guard, "'"+d.HooksJSON+"'")
 	})
@@ -173,7 +173,7 @@ func (f *claudeGuardFixture) install(t *testing.T) {
 // launch runs one iteration's command line and returns its output and error.
 func (f *claudeGuardFixture) launch(t *testing.T, d claudeHookDigests) (string, error) {
 	t.Helper()
-	cmd := buildRunCommand(RunParams{
+	cmd := buildRunCommandWithDigests(RunParams{
 		AgentBaseName:     "agent",
 		RepoDir:           f.repoDir,
 		HooksSettingsPath: security.SandboxHooksSettings,
@@ -478,7 +478,7 @@ func TestInstallClaudeHooks_RecordsDigests(t *testing.T) {
 	t.Setenv("PATH", stubDir)
 
 	hooks := security.SandboxHookConfig{}
-	require.NoError(t, installClaudeHooks(name, hooks))
+	require.NoError(t, installClaudeHooks(name, hooks, nil))
 
 	got, ok := lookupClaudeHookDigests(name)
 	require.True(t, ok)
@@ -494,7 +494,7 @@ func TestInstallClaudeHooks_NoDigestsOnFailure(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(stubDir, "openshell"), []byte(claudeHooksStubScript("", "*hooks.json*")), 0o755))
 	t.Setenv("PATH", stubDir)
 
-	require.Error(t, installClaudeHooks(name, security.SandboxHookConfig{}))
+	require.Error(t, installClaudeHooks(name, security.SandboxHookConfig{}, nil))
 	_, ok := lookupClaudeHookDigests(name)
 	assert.False(t, ok)
 }

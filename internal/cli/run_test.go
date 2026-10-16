@@ -182,6 +182,15 @@ func neutralizeAgentsRepoFallback(t *testing.T) {
 	t.Cleanup(func() { defaultAgentsRepoURLPrefix = orig })
 }
 
+// writePolicyFixture commits a one-field OpenShell policy so ValidateFilesExist
+// accepts a harness that names policy: policies/base.yaml.
+func writePolicyFixture(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "policies", "base.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("version: 1\n"), 0o644))
+}
+
 // useFakeOpenshell prepends testdata/ to PATH so the stub openshell binary
 // is found instead of a real installation, causing tests to fail fast at
 // sandbox.CheckGateway instead of actually running agents. Also
@@ -223,6 +232,7 @@ func TestRunAgent_HarnessLoadPipeline(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -231,7 +241,7 @@ func TestRunAgent_HarnessLoadPipeline(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -253,6 +263,7 @@ func TestRunAgent_YMLFallback(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -261,7 +272,7 @@ func TestRunAgent_YMLFallback(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yml"),
-		[]byte("agent: agents/code.md\nrole: test\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -298,6 +309,7 @@ func TestRunAgent_HarnessLoadWithOrgConfig(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -306,7 +318,7 @@ func TestRunAgent_HarnessLoadWithOrgConfig(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -328,6 +340,7 @@ func TestRunAgent_PerRepoConfig(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -336,7 +349,7 @@ func TestRunAgent_PerRepoConfig(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -660,12 +673,14 @@ func TestRunAgent_URLRefsNoOrgConfig(t *testing.T) {
 func TestRunAgent_WithURLBase(t *testing.T) {
 	// Harness with a URL base — exercises the baseDeps logging loop.
 	useFakeOpenshell(t)
-	baseContent := []byte("agent: agents/shared.md\nrole: test\n")
+	baseContent := []byte("agent: agents/shared.md\nrole: test\npolicy: policies/base.yaml\n")
 	baseHash := fetch.ComputeSHA256(baseContent)
+	policyContent := []byte("version: 1\n")
 
 	srv, policy := newLockTestServer(t, map[string][]byte{
-		"/base.yaml":        baseContent,
-		"/agents/shared.md": []byte("# shared agent"),
+		"/base.yaml":          baseContent,
+		"/agents/shared.md":   []byte("# shared agent"),
+		"/policies/base.yaml": policyContent,
 	})
 
 	dir := t.TempDir()
@@ -720,6 +735,7 @@ func TestRunAgent_ProviderProfileOrchestration(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -730,6 +746,7 @@ func TestRunAgent_ProviderProfileOrchestration(t *testing.T) {
 		filepath.Join(dir, "harness", "code.yaml"),
 		[]byte(fmt.Sprintf(`agent: agents/code.md
 role: test
+policy: policies/base.yaml
 providers:
   - "%s/providers/my-claude.yaml#sha256=%s"
 openshell:
@@ -777,6 +794,7 @@ func TestRunAgent_BareBuiltinProviderResolvesEmbeddedDefinitionAndProfile(t *tes
 	logPath := recordingProvidersStub(t)
 
 	dir := t.TempDir()
+	writePolicyFixture(t, dir)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
 
@@ -790,7 +808,7 @@ func TestRunAgent_BareBuiltinProviderResolvesEmbeddedDefinitionAndProfile(t *tes
 	// binary's embedded scaffold.
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\nproviders:\n  - vertex-ai\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\nproviders:\n  - vertex-ai\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -829,8 +847,9 @@ func runAgentWithProviderFiles(t *testing.T, harnessYAML string, files map[strin
 	logPath := recordingProvidersStub(t)
 	dir = t.TempDir()
 	files["agents/code.md"] = "You are a coding agent."
-	files["harness/code.yaml"] = harnessYAML
+	files["harness/code.yaml"] = harnessYAML + "policy: policies/base.yaml\n"
 	files["config.yaml"] = "agents:\n  - harness/code.yaml\n"
+	files["policies/base.yaml"] = "version: 1\n"
 	for rel, content := range files {
 		path := filepath.Join(dir, rel)
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
@@ -913,6 +932,7 @@ func TestRunAgent_UnlistedProfileDirectoryFileIsNotImported(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "profiles"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -934,7 +954,7 @@ func TestRunAgent_UnlistedProfileDirectoryFileIsNotImported(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\nopenshell:\n  profiles:\n    - profiles/listed.yaml\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\nopenshell:\n  profiles:\n    - profiles/listed.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -1026,7 +1046,7 @@ func TestBuildScanContextCommand_SourcesEnv(t *testing.T) {
 	cmd := buildScanContextCommand("/sandbox/workspace/repo", traceID)
 	assert.Contains(t, cmd, ". /sandbox/workspace/.env &&")
 	assert.Contains(t, cmd, "FULLSEND_TRACE_ID='"+traceID+"'")
-	assert.Contains(t, cmd, "-exec fullsend scan context")
+	assert.Contains(t, cmd, "-exec /sandbox/workspace/bin/fullsend scan context")
 }
 
 func TestBuildScanContextCommand_AcceptsAdoptedTraceID(t *testing.T) {
@@ -1108,6 +1128,7 @@ func TestRunAgent_ConfigAgentLocalPath(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "custom.md"),
@@ -1116,7 +1137,7 @@ func TestRunAgent_ConfigAgentLocalPath(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "custom.yaml"),
-		[]byte("agent: agents/custom.md\nrole: test\n"),
+		[]byte("agent: agents/custom.md\nrole: test\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -1135,12 +1156,14 @@ func TestRunAgent_ConfigAgentLocalPath(t *testing.T) {
 
 func TestRunAgent_ConfigAgentURL(t *testing.T) {
 	useFakeOpenshell(t)
-	harnessContent := []byte("agent: agents/remote.md\nrole: test\n")
+	harnessContent := []byte("agent: agents/remote.md\nrole: test\npolicy: policies/base.yaml\n")
 	harnessHash := fetch.ComputeSHA256(harnessContent)
+	policyContent := []byte("version: 1\n")
 
 	srv, policy := newLockTestServer(t, map[string][]byte{
 		"/harness/triage.yaml": harnessContent,
 		"/agents/remote.md":    []byte("You are a remote agent."),
+		"/policies/base.yaml":  policyContent,
 	})
 
 	dir := t.TempDir()
@@ -1182,11 +1205,12 @@ func TestRunAgent_ConfigAgentOverridesScaffold(t *testing.T) {
 		[]byte("You are a custom code agent."),
 		0o644,
 	))
+	writePolicyFixture(t, dir)
 	// Config-driven local path agent named "code" — should take precedence
 	// over any scaffold "code" harness wrapper.
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -2509,6 +2533,8 @@ func TestOIDCDenyKeys_Completeness(t *testing.T) {
 		"OPENAI_API_KEY",
 		// The GitLab CI/CD variable carrying the real key must stay runner-only.
 		"FULLSEND_OPENAI_API_KEY",
+		// The inference gateway's api-key credential (ADR 0138).
+		"FULLSEND_INFERENCE_GATEWAY_API_KEY",
 		// The GitLab webhook fast-path credentials must stay runner-only.
 		"FULLSEND_TRIGGER_TOKEN",
 		"FULLSEND_WEBHOOK_SECRET",
@@ -3167,6 +3193,19 @@ func TestTruncateUTF8_ShortInputUnchanged(t *testing.T) {
 	assert.NotContains(t, truncateUTF8("short", maxFeedbackBytes), "[truncated]")
 }
 
+func TestReplaceEnvSecrets_LongerValuesGoFirst(t *testing.T) {
+	// One value inside another: replacing the short one first would leave
+	// the rest of the long one in the text, and map order would pick.
+	short := strings.Repeat("v", minRedactableSecretLen)
+	long := short + "-and-more"
+	env := map[string]string{"A_TOKEN": short, "B_TOKEN": long}
+	for range 50 {
+		got, keys := replaceEnvSecrets("x "+long+" y "+short, env)
+		require.Equal(t, "x [REDACTED:B_TOKEN] y [REDACTED:A_TOKEN]", got)
+		require.Equal(t, []string{"B_TOKEN", "A_TOKEN"}, keys)
+	}
+}
+
 func TestRedactFeedback_RedactsRunnerCredentialLiterals(t *testing.T) {
 	// The validation script runs with the full runner env, which for the code
 	// and fix harnesses includes PUSH_TOKEN \u2014 a credential that must never
@@ -3226,6 +3265,43 @@ func TestWriteValidationFeedback_RedactsBeforeWritingFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "s3cret-push-value-1234")
 	assert.Contains(t, string(data), "[REDACTED:PUSH_TOKEN]")
+}
+
+func TestReplaceEnvSecrets_OneLongestFirstPassOverBothSources(t *testing.T) {
+	short := strings.Repeat("v", minRedactableSecretLen)
+	long := short + "-and-more"
+	for name, tc := range map[string]struct{ runner, process string }{
+		"runner value inside the provider value": {short, long},
+		"provider value inside the runner value": {long, short},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(workflowTokenEnv, tc.process)
+			env := map[string]string{"PUSH_TOKEN": tc.runner}
+			got, _ := replaceEnvSecrets("a "+long+" b "+short, env)
+			longKey, shortKey := "PUSH_TOKEN", workflowTokenEnv
+			if tc.process == long {
+				longKey, shortKey = workflowTokenEnv, "PUSH_TOKEN"
+			}
+			assert.Equal(t, "a [REDACTED:"+longKey+"] b [REDACTED:"+shortKey+"]", got)
+			assert.Equal(t, got, redactFeedback("a "+long+" b "+short, env), "redactFeedback runs the same pass")
+		})
+	}
+}
+
+func TestReplaceEnvSecrets_ProviderOnlyValues(t *testing.T) {
+	t.Setenv(workflowTokenEnv, "abcdefgh")
+	got, keys := replaceEnvSecrets("x abcdefgh y", nil)
+	assert.Equal(t, "x [REDACTED:"+workflowTokenEnv+"] y", got)
+	assert.Equal(t, []string{workflowTokenEnv}, keys)
+
+	got, keys = replaceEnvSecrets("nothing here", nil)
+	assert.Equal(t, "nothing here", got)
+	assert.Empty(t, keys, "a value absent from the text is not reported")
+
+	t.Setenv(workflowTokenEnv, "abcdefg") // under minRedactableSecretLen
+	got, keys = replaceEnvSecrets("x abcdefg y", nil)
+	assert.Equal(t, "x abcdefg y", got)
+	assert.Empty(t, keys)
 }
 
 func TestRedactFeedback_RedactsWorkflowTokenFromProcessEnv(t *testing.T) {
@@ -3754,6 +3830,7 @@ func TestRunAgent_RelativeOutputDirResolvesBeforeGateway(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
 		[]byte("You are a coding agent."),
@@ -3761,7 +3838,7 @@ func TestRunAgent_RelativeOutputDirResolvesBeforeGateway(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -4254,6 +4331,10 @@ func preflightTestSetup(t *testing.T, harnessYAML string) string {
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "scripts"), 0o755))
+	writePolicyFixture(t, dir)
+	if !strings.Contains(harnessYAML, "policy:") {
+		harnessYAML += "policy: policies/base.yaml\n"
+	}
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "config.yaml"),
@@ -4328,6 +4409,7 @@ func TestRunAgent_PreflightCheck_NilValidationLoop(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "config.yaml"),
@@ -4341,7 +4423,7 @@ func TestRunAgent_PreflightCheck_NilValidationLoop(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: test\n"),
+		[]byte("agent: agents/code.md\nrole: test\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 
@@ -4550,8 +4632,8 @@ func TestIterationTimedOutUnlessBehavioral(t *testing.T) {
 	// With the behavioral exit not counted as a timeout, the run ends
 	// without a terminal error, so the post-script (guarded on runErr) runs.
 	timedOut := iterationTimedOutUnlessBehavioral(2, late, timeout, "error_max_turns")
-	assert.NoError(t, runTerminalError(false, false, timedOut, 1, late, timeout))
-	assert.NoError(t, runTerminalError(true, true, timedOut, 1, late, timeout))
+	assert.NoError(t, runTerminalError(false, false, timedOut, 2, "error_max_turns", 1, late, timeout))
+	assert.NoError(t, runTerminalError(true, true, timedOut, 2, "error_max_turns", 1, late, timeout))
 }
 
 // TestIterationEnvSourceLine pins the last line of .env: sourcing an absent
@@ -4647,7 +4729,9 @@ func TestTimeoutNoRetryMessage(t *testing.T) {
 
 // TestRunTerminalError covers the retry contract of #7042: a killed
 // iteration ends the run with the timeout error, a valid result still wins,
-// and an early exit with invalid output stays a validation failure.
+// and an early exit with invalid output stays a validation failure. Without
+// a loop a failed agent fails the run (#8305), except for a behavioral limit
+// exit, which keeps the post-script reachable (#6877).
 func TestRunTerminalError(t *testing.T) {
 	t.Parallel()
 	const timeout = 20 * time.Minute
@@ -4655,21 +4739,31 @@ func TestRunTerminalError(t *testing.T) {
 		name            string
 		hasLoop, passed bool
 		timedOut        bool
+		exitCode        int
+		exitReason      string
 		runCount        int
 		elapsed         time.Duration
 		wantErrMsg      string // empty = no error
 	}{
-		{name: "loop, killed at budget, nothing valid", hasLoop: true, timedOut: true, runCount: 1, elapsed: timeout, wantErrMsg: "agent timed out after 20m0s without completing (timeout: 20m0s)"},
-		{name: "loop, killed at budget, output validated", hasLoop: true, passed: true, timedOut: true, runCount: 1, elapsed: timeout},
-		{name: "loop, early exit with invalid output", hasLoop: true, runCount: 2, elapsed: 3 * time.Minute, wantErrMsg: "validation failed after 2 iteration(s)"},
+		{name: "loop, killed at budget, nothing valid", hasLoop: true, timedOut: true, exitCode: -1, runCount: 1, elapsed: timeout, wantErrMsg: "agent timed out after 20m0s without completing (timeout: 20m0s)"},
+		{name: "loop, killed at budget, output validated", hasLoop: true, passed: true, timedOut: true, exitCode: -1, runCount: 1, elapsed: timeout},
+		{name: "loop, early exit with invalid output", hasLoop: true, exitCode: 1, runCount: 2, elapsed: 3 * time.Minute, wantErrMsg: "validation failed after 2 iteration(s)"},
 		{name: "loop, validation passed", hasLoop: true, passed: true, runCount: 1, elapsed: 3 * time.Minute},
-		{name: "no loop, killed at budget", timedOut: true, runCount: 1, elapsed: 19 * time.Minute, wantErrMsg: "agent timed out after 19m0s without completing (timeout: 20m0s)"},
+		{name: "loop, validation passed after non-zero exit", hasLoop: true, passed: true, exitCode: 1, runCount: 1, elapsed: 3 * time.Minute},
+		{name: "no loop, killed at budget", timedOut: true, exitCode: 1, runCount: 1, elapsed: 19 * time.Minute, wantErrMsg: "agent timed out after 19m0s without completing (timeout: 20m0s)"},
 		{name: "no loop, exited in time", runCount: 1, elapsed: 3 * time.Minute},
+		{name: "no loop, non-zero exit", exitCode: 1, runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code 1"},
+		{name: "no loop, non-zero exit with other code", exitCode: 2, runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code 2"},
+		{name: "no loop, killed exit before the budget", exitCode: -1, runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code -1"},
+		{name: "no loop, non-behavioral transcript reason", exitCode: 1, exitReason: "error_unknown", runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code 1"},
+		{name: "no loop, turn limit", exitCode: 1, exitReason: "error_max_turns", runCount: 1, elapsed: 3 * time.Minute},
+		{name: "no loop, budget limit", exitCode: 1, exitReason: "error_max_budget_usd", runCount: 1, elapsed: 3 * time.Minute},
+		{name: "no loop, killed exit with behavioral reason", exitCode: -1, exitReason: "error_max_turns", runCount: 1, elapsed: 3 * time.Minute, wantErrMsg: "agent failed with exit code -1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := runTerminalError(tc.hasLoop, tc.passed, tc.timedOut, tc.runCount, tc.elapsed, timeout)
+			err := runTerminalError(tc.hasLoop, tc.passed, tc.timedOut, tc.exitCode, tc.exitReason, tc.runCount, tc.elapsed, timeout)
 			if tc.wantErrMsg == "" {
 				assert.NoError(t, err)
 				return
@@ -4677,6 +4771,93 @@ func TestRunTerminalError(t *testing.T) {
 			require.EqualError(t, err, tc.wantErrMsg)
 		})
 	}
+}
+
+// TestPostScriptGate pins #8305: without a loop a failed agent still gets its
+// post-script when it left a result file that parses, and the run error stays.
+// With a loop the gate is unchanged (ADR 0022).
+func TestPostScriptGate(t *testing.T) {
+	t.Parallel()
+	writeResult := func(t *testing.T, name, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+		return dir
+	}
+	noLoop := &harness.Harness{}
+	withLoop := &harness.Harness{ValidationLoop: &harness.ValidationLoop{Script: "validate.sh"}}
+	agentFailed := runTerminalError(false, false, false, 1, "", 1, time.Minute, time.Hour)
+
+	t.Run("no loop, failed agent, valid result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", `{"status":"error"}`))
+		assert.True(t, got.run)
+		assert.Equal(t, 1, got.agentExitCode)
+		assert.Contains(t, got.message, "the run still fails")
+		require.EqualError(t, agentFailed, "agent failed with exit code 1")
+	})
+	t.Run("no loop, transcript error recorded as exit 1, valid result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, true, agentFailed, writeResult(t, "agent-result.json", `{}`))
+		assert.True(t, got.run)
+	})
+	t.Run("no loop, failed agent, FULLSEND_OUTPUT_FILE names the result", func(t *testing.T) {
+		t.Parallel()
+		h := &harness.Harness{RunnerEnv: map[string]string{"FULLSEND_OUTPUT_FILE": "code-result.json"}}
+		got := postScriptGate(h, false, false, agentFailed, writeResult(t, "code-result.json", `{"ok":true}`))
+		assert.True(t, got.run)
+	})
+	t.Run("no loop, failed agent, no result", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, agentFailed, t.TempDir())
+		assert.False(t, got.run)
+		assert.Contains(t, got.message, "left no result file that parses")
+	})
+	t.Run("no loop, failed agent, result does not parse", func(t *testing.T) {
+		t.Parallel()
+		for _, content := range []string{"not json", "[1,2]", "null"} {
+			got := postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", content))
+			assert.False(t, got.run, content)
+		}
+	})
+	t.Run("no loop, result over the size cap", func(t *testing.T) {
+		t.Parallel()
+		big := `{"pad":"` + strings.Repeat("x", agentResultMaxBytes) + `"}`
+		assert.False(t, postScriptGate(noLoop, false, false, agentFailed, writeResult(t, "agent-result.json", big)).run)
+	})
+	t.Run("no loop, FULLSEND_OUTPUT_FILE with a path is refused", func(t *testing.T) {
+		t.Parallel()
+		dir := writeResult(t, "agent-result.json", `{}`)
+		h := &harness.Harness{RunnerEnv: map[string]string{"FULLSEND_OUTPUT_FILE": "../" + filepath.Base(dir) + "/agent-result.json"}}
+		assert.False(t, postScriptGate(h, false, false, agentFailed, dir).run)
+	})
+	t.Run("no loop, successful agent", func(t *testing.T) {
+		t.Parallel()
+		got := postScriptGate(noLoop, false, false, nil, t.TempDir())
+		assert.True(t, got.run)
+		assert.Zero(t, got.agentExitCode)
+	})
+	t.Run("no loop, other run error", func(t *testing.T) {
+		t.Parallel()
+		timedOut := runTerminalError(false, false, true, -1, "", 1, time.Hour, time.Hour)
+		got := postScriptGate(noLoop, false, false, timedOut, writeResult(t, "agent-result.json", `{}`))
+		assert.False(t, got.run)
+	})
+	t.Run("loop, validation passed", func(t *testing.T) {
+		t.Parallel()
+		assert.True(t, postScriptGate(withLoop, true, false, nil, t.TempDir()).run)
+	})
+	t.Run("loop, validation failed with a result present", func(t *testing.T) {
+		t.Parallel()
+		runErr := runTerminalError(true, false, false, 1, "", 2, time.Minute, time.Hour)
+		got := postScriptGate(withLoop, false, false, runErr, writeResult(t, "agent-result.json", `{}`))
+		assert.False(t, got.run)
+		assert.Equal(t, "Skipping post-script: validation did not pass", got.message)
+	})
+	t.Run("loop, validation passed but transcript error", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, postScriptGate(withLoop, true, true, nil, t.TempDir()).run)
+	})
 }
 
 func TestShouldStartFetchService_AllowRuntimeFetch(t *testing.T) {
@@ -5437,6 +5618,41 @@ func TestEmitDiagnosticWithContext(t *testing.T) {
 	assert.Contains(t, output, "triage")
 	assert.Contains(t, output, "warning")
 	assert.Contains(t, output, "role")
+}
+
+func TestRunAgent_ErrorOnMissingPolicy(t *testing.T) {
+	useFakeOpenshell(t)
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "agents", "code.md"),
+		[]byte("You are a coding agent."),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "harness", "code.yaml"),
+		[]byte("agent: agents/code.md\nrole: test\n"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "config.yaml"),
+		[]byte("agents:\n  - harness/code.yaml\n"),
+		0o644,
+	))
+
+	var buf bytes.Buffer
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(&buf)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "policy field is required")
+	assert.Contains(t, err.Error(), "fullsend agent new")
+	assert.NotContains(t, err.Error(), "openshell")
+	assert.NotContains(t, err.Error(), "ConfigurationInvalid")
 }
 
 func TestRunAgent_ErrorOnMissingRole(t *testing.T) {
@@ -7120,6 +7336,7 @@ func TestRunAgent_FallsBackToFULLSEND_MINT_URL(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -7128,7 +7345,7 @@ func TestRunAgent_FallsBackToFULLSEND_MINT_URL(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: coder\n"),
+		[]byte("agent: agents/code.md\nrole: coder\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -7170,6 +7387,7 @@ func TestRunAgent_MintsRuntimePrivilegeLevel(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -7178,7 +7396,7 @@ func TestRunAgent_MintsRuntimePrivilegeLevel(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: coder\nprivilege_levels:\n  runtime: read\n"),
+		[]byte("agent: agents/code.md\nrole: coder\npolicy: policies/base.yaml\nprivilege_levels:\n  runtime: read\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -7216,6 +7434,7 @@ func TestRunAgent_WarnsWhenNoMintURL(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -7224,7 +7443,7 @@ func TestRunAgent_WarnsWhenNoMintURL(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: coder\n"),
+		[]byte("agent: agents/code.md\nrole: coder\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -7303,6 +7522,7 @@ func TestRunAgent_GitLabSkipsMint(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -7311,7 +7531,7 @@ func TestRunAgent_GitLabSkipsMint(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: coder\n"),
+		[]byte("agent: agents/code.md\nrole: coder\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -7401,6 +7621,7 @@ func TestRunAgent_SetsEnvFromFlags(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -7409,7 +7630,7 @@ func TestRunAgent_SetsEnvFromFlags(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: coder\nrunner_env:\n  MY_REPO: ${REPO_FULL_NAME}\n  MY_TARGET: ${TARGET_REPO_DIR}\n  MY_ISSUE: ${ISSUE_NUMBER}\n"),
+		[]byte("agent: agents/code.md\nrole: coder\npolicy: policies/base.yaml\nrunner_env:\n  MY_REPO: ${REPO_FULL_NAME}\n  MY_TARGET: ${TARGET_REPO_DIR}\n  MY_ISSUE: ${ISSUE_NUMBER}\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -7449,6 +7670,7 @@ func TestRunAgent_StatusNotifierSetup(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "agents", "code.md"),
@@ -7457,7 +7679,7 @@ func TestRunAgent_StatusNotifierSetup(t *testing.T) {
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "harness", "code.yaml"),
-		[]byte("agent: agents/code.md\nrole: coder\n"),
+		[]byte("agent: agents/code.md\nrole: coder\npolicy: policies/base.yaml\n"),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -7831,7 +8053,7 @@ func TestMergeProviderDefs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, shadowed := mergeProviderDefs(tt.local, tt.url)
+			got, _, shadowed := mergeProviderDefs(tt.local, dedupResolvedProviders(tt.url))
 			var names []string
 			for _, d := range got {
 				names = append(names, d.Name)

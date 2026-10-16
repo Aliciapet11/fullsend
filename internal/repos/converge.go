@@ -23,22 +23,14 @@ import (
 // It replaces the former two-phase architecture where BatchInstall
 // handled new repos and Upgrade + Sync handled already-installed repos.
 type ConvergeConfig struct {
-	Manifest       *Manifest
-	DryRun         bool
-	RepoFilter     []string
+	Manifest   *Manifest
+	DryRun     bool
+	RepoFilter []string
+	// ExcludeRepos lists owner/repo names (case-insensitive) that Converge
+	// skips entirely, such as repos whose GitLab trigger-account containment
+	// failed: they take no scaffold, config, variable, or schedule write.
+	ExcludeRepos   []string
 	MaxConcurrency int
-
-	// Roles is the list of agent roles to install (e.g., "triage", "coder").
-	Roles []string
-
-	// RolesExplicit is true when the caller explicitly passed --roles,
-	// as opposed to Roles carrying the flag's own default value. Fresh
-	// installs of a repo with a declared configuration preset use this
-	// to decide whether to write roles into the overlay (explicit
-	// override) or leave them unset so the preset's roles (or the
-	// code-default fallback) take effect through the layered accessor
-	// chain — see BuildScaffoldFiles.
-	RolesExplicit bool
 
 	// UpstreamRef is the git ref (SHA) used to pin scaffold workflow refs.
 	UpstreamRef string
@@ -61,25 +53,30 @@ type ConvergeConfig struct {
 	// unless this is set.
 	ReactivateSchedules bool
 
-	// InferenceProject is the GCP project ID for inference.
+	// InferenceProject is the --vertex-project input: the GCP project ID
+	// written as FULLSEND_GCP_PROJECT_ID. A repository whose effective
+	// configuration declares inference.project uses that value when this
+	// is empty, and rejects a different value (see vertexCredentialInputs).
+	// The region is never an input: FULLSEND_GCP_REGION comes from the
+	// effective configuration (ResolvedConfig.InferenceRegion, #8220).
 	InferenceProject string
-	// InferenceProjectNumber is the numeric GCP project number,
-	// auto-derived from InferenceProject when WIFProvider is not set.
+	// InferenceProjectNumber is the numeric GCP project number of
+	// InferenceProject, auto-derived when no WIF provider is supplied.
 	InferenceProjectNumber string
-	// InferenceRegion is the GCP region for inference.
-	InferenceRegion string
 
-	// WIFProvider, when set, is used as the WIF provider resource name
-	// for all repos instead of constructing per-repo provider IDs via
-	// BuildRepoProviderID. This supports org-scoped WIF providers
-	// (e.g., assertion.repository_owner == 'acme').
+	// WIFProvider is the --vertex-wif-provider input. When set (or when
+	// a repository's effective configuration declares
+	// inference.wif_provider) it is used verbatim instead of constructing
+	// a per-repo provider ID via BuildRepoProviderID. This supports
+	// org-scoped WIF providers (e.g., assertion.repository_owner ==
+	// 'acme').
 	WIFProvider string
 
 	// ResolveProjectNumber, when set, derives the numeric project number
-	// for InferenceProject when InferenceProjectNumber and WIFProvider are
-	// both unset. It is called at most once, and only when a vertex-wif
-	// repository needs a derived WIF provider, so OpenAI-only runs never
-	// perform GCP lookups.
+	// of a repository's effective GCP project when no WIF provider is
+	// supplied. It is called at most once per project, and only when a
+	// Vertex-using repository needs a derived WIF provider, so OpenAI-only
+	// runs never perform GCP lookups.
 	ResolveProjectNumber func(ctx context.Context, projectID string) (string, error)
 
 	// OpenAIAPIKey is the static OpenAI API key written as
@@ -101,12 +98,6 @@ type ConvergeConfig struct {
 	// persisted as FULLSEND_APP_SET. Empty means ReviewAppClientID was
 	// resolved for the built-in default app set.
 	ReviewAppClientIDAppSet string
-
-	// VendorOverride, when non-nil, overrides the manifest's resolved
-	// vendor setting for all repos in this convergence run. This lets
-	// `repos install --vendor` take effect without modifying the
-	// manifest. When nil, the per-repo resolved Vendor field is used.
-	VendorOverride *bool
 
 	// ReadVendoredWorkflow, when non-nil, returns the content of a reusable
 	// workflow (for example .github/workflows/reusable-prioritize.yml) that
@@ -279,6 +270,12 @@ type convergeDiscovery struct {
 	configErr error
 	err       error
 
+	// staleVendored holds the Fullsend-owned assets an earlier vendored
+	// install left in a GitHub repository whose vendor setting is false.
+	// Read before any forge write so a malformed vendor manifest or a
+	// failed read changes nothing.
+	staleVendored *scaffold.StaleVendoredAssets
+
 	// credsPresent reports that every inference secret for the repo's
 	// inference.auth existed before this run. credsSupplied reports that
 	// the run supplied inputs for that method, so its secrets are
@@ -289,6 +286,32 @@ type convergeDiscovery struct {
 	// FULLSEND_OPENAI_API_KEY variable, which this run would reuse, is not
 	// both masked and protected. Only set when no replacement key is supplied.
 	unsafeOpenAIKey bool
+
+	// vertexProject and vertexWIFProvider are this repository's effective
+	// Vertex credential inputs (see vertexCredentialInputs): the
+	// command-line values, else those its effective configuration declares.
+	vertexProject     string
+	vertexWIFProvider string
+	// gcpRegionExists reports that FULLSEND_GCP_REGION existed before this
+	// run, or that convergeVariables writes it (a declared region is
+	// probed even when the variable is missing). Without a declared
+	// region the probe does not report the variable, so discovery
+	// records its presence separately.
+	gcpRegionExists bool
+}
+
+// withVertexInputs returns cfg with this repository's effective Vertex
+// credential inputs in InferenceProject and WIFProvider, so the
+// per-repository convergence paths read them from the usual fields. A
+// project number pre-resolved for the command-line project does not carry
+// over to a different declared project.
+func (d convergeDiscovery) withVertexInputs(cfg ConvergeConfig) ConvergeConfig {
+	if d.vertexProject != cfg.InferenceProject {
+		cfg.InferenceProjectNumber = ""
+	}
+	cfg.InferenceProject = d.vertexProject
+	cfg.WIFProvider = d.vertexWIFProvider
+	return cfg
 }
 
 // hasComponent returns true if the named component is present in the probe results.
@@ -355,8 +378,10 @@ func missingSecretNames(components []ComponentStatus, auth string) []string {
 var gitlabMaskableRe = regexp.MustCompile(`^[A-Za-z0-9_+=/@:.~-]{8,}$`)
 
 // inferenceInputsSupplied reports whether this run supplied credential
-// inputs for auth: --vertex-project for vertex-wif, --openai-api-key
-// for openai-api-key. For openai-wif, --vertex-project supplies the
+// inputs for auth: a GCP project for vertex-wif (--vertex-project or the
+// inference.project the effective configuration declares; cfg carries the
+// repository's effective inputs, see withVertexInputs), --openai-api-key
+// for openai-api-key. For openai-wif, the GCP project supplies the
 // optional GCP pair used by Vertex sub-agents.
 func inferenceInputsSupplied(cfg ConvergeConfig, auth string) bool {
 	if auth == InferenceAuthOpenAIAPIKey {
@@ -365,13 +390,13 @@ func inferenceInputsSupplied(cfg ConvergeConfig, auth string) bool {
 	return cfg.InferenceProject != ""
 }
 
-// inferenceInputFlags names the command-line inputs that supply the
-// credentials for auth.
+// inferenceInputFlags names the inputs that supply the credentials for
+// auth.
 func inferenceInputFlags(auth string) string {
 	if auth == InferenceAuthOpenAIAPIKey {
 		return "--openai-api-key"
 	}
-	return "--vertex-project and --vertex-region (plus --vertex-wif-provider when the project number cannot be derived)"
+	return "--vertex-project, or declare config.inference.project in repos.yaml (plus --vertex-wif-provider or config.inference.wif_provider when the project number cannot be derived)"
 }
 
 // inferenceSecretValues returns the secret values to write for auth from
@@ -680,6 +705,41 @@ func workflowPresent(components []ComponentStatus) bool {
 	return hasComponent(components, "workflow")
 }
 
+// pristineInstallation reports whether the repository has no established
+// Fullsend installation: either no component at all, or the credential-only
+// state of a pending initialization. Install writes variables and secrets
+// before it delivers the shim workflow and both configuration files through
+// the initialization PR/MR, so a retry after a failure at any point in that
+// sequence (a variable or secret write, branch creation, or the PR/MR itself)
+// sees only credentials and no workflow. On GitLab the CLI additionally
+// creates the pipeline schedules right after the initialization MR opens,
+// before it merges, so those are pending-install resources too: they run
+// nothing without the shim workflow and scaffold. That state is derived from
+// the probed components alone, so it does not depend on the scaffold branch,
+// which is shared with uninstall and can be stale: the retry exemption
+// applies only when every present component is a variable, secret or
+// pipeline schedule and the shim workflow is absent. Any other component
+// (thin callers, scaffold files or auxiliary scripts) is evidence of a live
+// or partially delivered installation and keeps the safety gate. Readiness
+// diagnostics about user-owned or inherited OpenAI identifiers are not
+// installation evidence and are ignored. Nothing executes from these
+// resources alone, so there is no effective configuration to relax.
+// FreshInstall additionally requires both layer files to be absent
+// (pristineFirstInstall), so a repository with any committed configuration
+// also keeps the gate.
+func pristineInstallation(components []ComponentStatus) bool {
+	for _, c := range components {
+		if !c.Present || c.Name == openAIWIFComponent || c.Name == openAIWIFResidualComponent {
+			continue
+		}
+		if !strings.HasPrefix(c.Name, "var:") && !strings.HasPrefix(c.Name, "secret:") &&
+			scheduleSpecByComponent(c.Name) == nil {
+			return false
+		}
+	}
+	return true
+}
+
 // Converge processes every repo in the manifest through a single
 // convergence pipeline: probe → diff → apply. For each repo it
 // determines what components exist and what actions are needed, then
@@ -718,103 +778,67 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 	}
 
 	if len(cfg.RepoFilter) > 0 {
-		var unmatched []string
-		var filterErr error
-		repos, unmatched, filterErr = filterRepos(repos, cfg.RepoFilter)
-		if filterErr != nil {
-			return nil, filterErr
+		// Every selector must select a declared repository, before any
+		// probe or write (#8219).
+		repos, err = selectDeclaredRepos(manifest, repos, cfg.RepoFilter)
+		if err != nil {
+			return nil, err
 		}
-		for _, p := range unmatched {
-			progress("", "filter", fmt.Sprintf("--repo filter %q matched no manifest entries", p))
+	}
+	if len(cfg.ExcludeRepos) > 0 {
+		excluded := make(map[string]bool, len(cfg.ExcludeRepos))
+		for _, name := range cfg.ExcludeRepos {
+			excluded[strings.ToLower(name)] = true
 		}
+		kept := make([]ResolvedRepo, 0, len(repos))
+		for _, rr := range repos {
+			if !excluded[strings.ToLower(rr.Owner+"/"+rr.Repo)] {
+				kept = append(kept, rr)
+			}
+		}
+		repos = kept
 	}
 	if len(repos) == 0 {
 		return &ConvergeBatchResult{}, nil
 	}
 
-	// Validate inference flags. When --vertex-wif-provider is set,
-	// --vertex-project-number is not required (the project number is
-	// embedded in the provider path).
-	if cfg.WIFProvider != "" {
-		// --vertex-project and --vertex-region are required
-		// alongside --vertex-wif-provider because the secret-writing
-		// paths gate on InferenceProject to decide whether to write
-		// FULLSEND_GCP_PROJECT_ID and FULLSEND_GCP_WIF_PROVIDER.
-		if cfg.InferenceProject == "" {
-			return nil, fmt.Errorf("--vertex-project is required when --vertex-wif-provider is set")
-		}
-		if !IsValidGCPProjectID(cfg.InferenceProject) {
-			return nil, fmt.Errorf("--vertex-project %q is not a valid GCP project ID (must be 6-30 lowercase letters, digits, hyphens; start with a letter)", cfg.InferenceProject)
-		}
-		if !IsValidGCPRegion(cfg.InferenceRegion) {
-			return nil, fmt.Errorf("--vertex-region %q is not a valid GCP region (must be lowercase letters, digits, hyphens; start with a letter)", cfg.InferenceRegion)
-		}
-		if !WIFProviderPattern.MatchString(cfg.WIFProvider) {
-			return nil, fmt.Errorf("--vertex-wif-provider %q is not a valid WIF provider (expected projects/{number}/locations/global/workloadIdentityPools/{pool}/providers/{id})", cfg.WIFProvider)
-		}
-	} else {
-		// A project number the caller can derive on demand counts as
-		// supplied; it is resolved lazily for vertex-wif repos only.
-		projectNumber := cfg.InferenceProjectNumber
-		derivable := projectNumber == "" && cfg.ResolveProjectNumber != nil && cfg.InferenceProject != ""
-		if derivable {
-			projectNumber = "derived"
-		}
-		inferenceFlags := []struct{ name, val string }{
-			{"--vertex-project", cfg.InferenceProject},
-			{"--vertex-project-number", projectNumber},
-			{"--vertex-region", cfg.InferenceRegion},
-		}
-		var inferenceSet, inferenceMissing []string
-		for _, f := range inferenceFlags {
-			if f.val != "" {
-				inferenceSet = append(inferenceSet, f.name)
-			} else {
-				inferenceMissing = append(inferenceMissing, f.name)
-			}
-		}
-		if len(inferenceSet) > 0 && len(inferenceMissing) > 0 {
-			return nil, fmt.Errorf("incomplete inference flags: %s set but %s missing — all three are required when any is specified",
-				strings.Join(inferenceSet, ", "), strings.Join(inferenceMissing, ", "))
-		}
-
-		if cfg.InferenceProject != "" {
-			if !IsValidGCPProjectID(cfg.InferenceProject) {
-				return nil, fmt.Errorf("--vertex-project %q is not a valid GCP project ID (must be 6-30 lowercase letters, digits, hyphens; start with a letter)", cfg.InferenceProject)
-			}
-			if !IsValidGCPRegion(cfg.InferenceRegion) {
-				return nil, fmt.Errorf("--vertex-region %q is not a valid GCP region (must be lowercase letters, digits, hyphens; start with a letter)", cfg.InferenceRegion)
-			}
-			if !derivable && !IsNumeric(cfg.InferenceProjectNumber) {
-				return nil, fmt.Errorf("--vertex-project-number must be numeric, got %q", cfg.InferenceProjectNumber)
-			}
-		}
+	// Validate the command-line Vertex inputs up front. Each repository
+	// combines them with the values its effective configuration declares
+	// (vertexCredentialInputs); the region is never an input (#8220).
+	if cfg.InferenceProject != "" && !IsValidGCPProjectID(cfg.InferenceProject) {
+		return nil, fmt.Errorf("--vertex-project %q is not a valid GCP project ID (must be 6-30 lowercase letters, digits, hyphens; start with a letter)", cfg.InferenceProject)
+	}
+	if cfg.WIFProvider != "" && !WIFProviderPattern.MatchString(cfg.WIFProvider) {
+		return nil, fmt.Errorf("--vertex-wif-provider %q is not a valid WIF provider (expected projects/{number}/locations/global/workloadIdentityPools/{pool}/providers/{id})", cfg.WIFProvider)
+	}
+	if cfg.InferenceProjectNumber != "" && !IsNumeric(cfg.InferenceProjectNumber) {
+		return nil, fmt.Errorf("--vertex-project-number must be numeric, got %q", cfg.InferenceProjectNumber)
 	}
 
-	// Lazily derive the project number at most once, and only for a
-	// vertex-wif repository that needs a derived WIF provider.
-	var (
-		projectNumberOnce sync.Once
-		projectNumber     = cfg.InferenceProjectNumber
-		projectNumberErr  error
-	)
-	resolveProjectNumber := func() (string, error) {
-		projectNumberOnce.Do(func() {
-			if projectNumber != "" || cfg.ResolveProjectNumber == nil || cfg.InferenceProject == "" {
-				return
-			}
-			n, err := cfg.ResolveProjectNumber(ctx, cfg.InferenceProject)
-			switch {
-			case err != nil:
-				projectNumberErr = fmt.Errorf("deriving project number for --vertex-project %q: %w (set --vertex-wif-provider to skip the lookup)", cfg.InferenceProject, err)
-			case !IsNumeric(n):
-				projectNumberErr = fmt.Errorf("derived project number for %q is not numeric: %q", cfg.InferenceProject, n)
-			default:
-				projectNumber = n
-				progress("", "inference", fmt.Sprintf("Derived project number %s from project %s", n, cfg.InferenceProject))
-			}
-		})
-		return projectNumber, projectNumberErr
+	// Lazily derive project numbers, at most once per project and only for
+	// a Vertex-using repository that needs a derived WIF provider. Called
+	// from the serial validation loop below.
+	projectNumbers := make(map[string]string)
+	resolveProjectNumber := func(project string) (string, error) {
+		if project == cfg.InferenceProject && cfg.InferenceProjectNumber != "" {
+			return cfg.InferenceProjectNumber, nil
+		}
+		if n, ok := projectNumbers[project]; ok {
+			return n, nil
+		}
+		if cfg.ResolveProjectNumber == nil {
+			return "", fmt.Errorf("cannot derive the project number of GCP project %q: pass --vertex-wif-provider or declare config.inference.wif_provider in repos.yaml", project)
+		}
+		n, err := cfg.ResolveProjectNumber(ctx, project)
+		switch {
+		case err != nil:
+			return "", fmt.Errorf("deriving project number for GCP project %q: %w (pass --vertex-wif-provider or declare config.inference.wif_provider to skip the lookup)", project, err)
+		case !IsNumeric(n):
+			return "", fmt.Errorf("derived project number for %q is not numeric: %q", project, n)
+		}
+		projectNumbers[project] = n
+		progress("", "inference", fmt.Sprintf("Derived project number %s from project %s", n, project))
+		return n, nil
 	}
 
 	// Create a ref resolver for SHA resolution and ancestry checks.
@@ -859,6 +883,7 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 	discoveries := make([]convergeDiscovery, len(repos))
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
+	store := newPresetCache()
 
 	for i, r := range repos {
 		wg.Add(1)
@@ -879,6 +904,30 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 			// nothing is probed or written for it.
 			if authErr := resolved.RequireInferenceAuth(); authErr != nil {
 				discoveries[idx] = convergeDiscovery{repo: rr, resolved: resolved, configErr: authErr}
+				return
+			}
+			// Load the declared preset before any forge call so a hash
+			// mismatch or invalid source fails the repo without applying
+			// changes, and so the effective infrastructure values (mint
+			// URL, region, Vertex inputs) come from the same layers that
+			// are committed (#8220).
+			var presetData []byte
+			if resolved.Config != "" {
+				data, loadErr := store.Load(ctx, resolved.Config, resolved.ConfigHash)
+				if loadErr != nil {
+					discoveries[idx] = convergeDiscovery{repo: rr, resolved: resolved, configErr: fmt.Errorf("loading config preset: %w", loadErr)}
+					return
+				}
+				presetData = data
+				resolved.ProposedBase = data
+			}
+			if infraErr := resolved.applyEffectiveInfrastructure(); infraErr != nil {
+				discoveries[idx] = convergeDiscovery{repo: rr, resolved: resolved, configErr: infraErr}
+				return
+			}
+			vertexProject, vertexWIF, inputErr := vertexCredentialInputs(cfg, resolved)
+			if inputErr != nil {
+				discoveries[idx] = convergeDiscovery{repo: rr, resolved: resolved, configErr: inputErr}
 				return
 			}
 			repoFullName := rr.Owner + "/" + rr.Repo
@@ -914,11 +963,12 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 			// Build expected values for all static variables so
 			// ProbeComponents can detect value drift — not just
 			// FULLSEND_MINT_URL but also FULLSEND_GCP_REGION,
-			// FULLSEND_REVIEW_CLIENT_ID, and FULLSEND_APP_SET.
+			// FULLSEND_REVIEW_CLIENT_ID, and FULLSEND_APP_SET. The mint
+			// URL and region are the effective configuration's values.
 			expectedVars, varValErr := staticExpectedVarValues(InstallConfig{
 				Forge:             resolved.Forge,
 				MintURL:           resolved.MintURL,
-				InferenceRegion:   inferenceRegionForAuth(resolved.InferenceAuth, cfg.InferenceRegion),
+				InferenceRegion:   resolved.expectedInferenceRegion(),
 				ReviewAppClientID: reviewClientID,
 				AppSet:            effectiveAppSet,
 			}, resolved.MintURL)
@@ -930,6 +980,28 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 			if probeErr != nil {
 				discoveries[idx] = convergeDiscovery{repo: rr, resolved: resolved, err: probeErr}
 				return
+			}
+			// Without a declared region an existing FULLSEND_GCP_REGION is
+			// preserved (see expectedInferenceRegion): it becomes the value
+			// any write in this run uses, so the code default is written
+			// only where the variable is missing.
+			regionExists := hasComponent(probed, "var:"+forge.VarGCPRegion)
+			// A declared region is probed even when the variable is
+			// missing, so convergeVariables writes it; convergeSecrets
+			// must not write it a second time.
+			if resolved.InferenceRegionDeclared && inferenceRegionForAuth(resolved.InferenceAuth, resolved.InferenceRegion) != "" {
+				regionExists = true
+			}
+			if resolved.InferenceRegion != "" && !resolved.InferenceRegionDeclared {
+				existing, exists, regionErr := fc.Client.GetRepoVariable(ctx, rr.Owner, rr.Repo, forge.VarGCPRegion)
+				if regionErr != nil {
+					discoveries[idx] = convergeDiscovery{repo: rr, resolved: resolved, err: fmt.Errorf("checking variable %s: %w", forge.VarGCPRegion, regionErr)}
+					return
+				}
+				if exists && existing != "" {
+					resolved.InferenceRegion = existing
+					regionExists = true
+				}
 			}
 
 			// An existing GitLab OpenAI key that this run would reuse must
@@ -949,12 +1021,16 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 			}
 
 			discoveries[idx] = convergeDiscovery{
-				repo:            rr,
-				resolved:        resolved,
-				components:      probed,
-				appSet:          effectiveAppSet,
-				reviewClientID:  reviewClientID,
-				unsafeOpenAIKey: unsafeKey,
+				repo:              rr,
+				resolved:          resolved,
+				components:        probed,
+				preset:            presetData,
+				appSet:            effectiveAppSet,
+				reviewClientID:    reviewClientID,
+				unsafeOpenAIKey:   unsafeKey,
+				vertexProject:     vertexProject,
+				vertexWIFProvider: vertexWIF,
+				gcpRegionExists:   regionExists,
 			}
 		}(i, r)
 	}
@@ -981,6 +1057,9 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 	if cfg.InferenceProject != "" && !usesVertex {
 		return nil, fmt.Errorf("--vertex-project was supplied but no selected repository uses inference.auth %s or %s", InferenceAuthVertexWIF, InferenceAuthOpenAIWIF)
 	}
+	if cfg.WIFProvider != "" && !usesVertex {
+		return nil, fmt.Errorf("--vertex-wif-provider was supplied but no selected repository uses inference.auth %s or %s", InferenceAuthVertexWIF, InferenceAuthOpenAIWIF)
+	}
 
 	// Phase 2: parallel convergence — apply needed actions.
 	result := &ConvergeBatchResult{
@@ -991,6 +1070,9 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 	type candidateInfo struct {
 		discovery   convergeDiscovery
 		wifProvider string
+		// cfg is the run's configuration with this repository's
+		// effective Vertex credential inputs (withVertexInputs).
+		cfg ConvergeConfig
 	}
 	candidates := make([]candidateInfo, len(discoveries))
 	type wifEntry struct {
@@ -998,7 +1080,6 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 		index        int
 	}
 	wifSeen := make(map[string]wifEntry)
-	store := newPresetCache()
 	warnedRemote := make(map[string]bool)
 
 	for i, d := range discoveries {
@@ -1019,23 +1100,42 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 			continue
 		}
 
-		// Load declared presets before any writes so a hash mismatch or
-		// invalid source fails the repo without applying changes.
-		if d.resolved.Config != "" {
-			data, loadErr := store.Load(ctx, d.resolved.Config, d.resolved.ConfigHash)
-			if loadErr != nil {
-				result.Results[i] = ConvergeResult{
-					Owner: d.repo.Owner,
-					Repo:  d.repo.Repo,
-					Error: fmt.Errorf("loading config preset: %w", loadErr),
-				}
-				continue
+		// A repository with no Fullsend component at all, or only the
+		// credentials of a pending initialization whose shim workflow has not
+		// merged, has no established installation; with neither configuration
+		// file present it is pristine, and the layered safety gate has no
+		// existing configuration to protect. Install, dry run and status
+		// share this predicate (pristineInstallation), so a retry of the same
+		// pending initialization is judged like its first run.
+		d.resolved.FreshInstall = pristineInstallation(d.components)
+
+		// The declared preset was loaded during discovery, before any
+		// forge call (a load failure is reported as a configuration error).
+		if d.resolved.Config != "" && shouldWarnRemotePreset(d.resolved.Config, d.resolved.ConfigHash, warnedRemote) {
+			progress(d.repo.Owner+"/"+d.repo.Repo, "preset",
+				"Remote preset fetched without config_base.sha256; content integrity is not verified")
+		}
+		// With no resolved preset the desired base layer is no file at
+		// all: stop before any writes rather than silently keeping an
+		// existing .fullsend/config.base.yaml outside management (#8218).
+		if baseErr := checkUndeclaredBase(ctx, d.resolved); baseErr != nil {
+			result.Results[i] = ConvergeResult{
+				Owner: d.repo.Owner,
+				Repo:  d.repo.Repo,
+				Error: baseErr,
 			}
-			d.preset = data
-			if shouldWarnRemotePreset(d.resolved.Config, d.resolved.ConfigHash, warnedRemote) {
-				progress(d.repo.Owner+"/"+d.repo.Repo, "preset",
-					"Remote preset fetched without config_base.sha256; content integrity is not verified")
+			continue
+		}
+		// A declared preset must not replace an invalid base, or relax the
+		// effective configuration without an explicit declaration. Both
+		// layers are checked before any variable, secret or file write.
+		if baseErr := checkDeclaredBase(ctx, d.resolved, d.preset); baseErr != nil {
+			result.Results[i] = ConvergeResult{
+				Owner: d.repo.Owner,
+				Repo:  d.repo.Repo,
+				Error: baseErr,
 			}
+			continue
 		}
 
 		// Render the managed configuration before any writes so a
@@ -1051,6 +1151,21 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 				continue
 			}
 			d.managedConfig = body
+			// An installed repository is also gated on its overlay before
+			// any variable, secret or schedule write: those run ahead of
+			// the scaffold phase that plans the overlay, so the gate there
+			// would fire only after they had changed the repository. A
+			// fresh install is gated before Install in its own path.
+			if workflowPresent(d.components) {
+				if gateErr := checkEstablishedOverlayGate(ctx, d.resolved, body); gateErr != nil {
+					result.Results[i] = ConvergeResult{
+						Owner: d.repo.Owner,
+						Repo:  d.repo.Repo,
+						Error: gateErr,
+					}
+					continue
+				}
+			}
 		}
 
 		// The openai-api-key route is unreachable while WIF identifiers
@@ -1092,8 +1207,9 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 		// the selected method's secrets must already exist or this run
 		// must supply inputs for that method (which then replace them).
 		auth := d.resolved.InferenceAuth
+		repoCfg := d.withVertexInputs(cfg)
 		d.credsPresent = secretsPresent(d.components, auth)
-		d.credsSupplied = inferenceInputsSupplied(cfg, auth)
+		d.credsSupplied = inferenceInputsSupplied(repoCfg, auth)
 		if !d.credsPresent && !d.credsSupplied {
 			result.Results[i] = ConvergeResult{
 				Owner: d.repo.Owner,
@@ -1135,21 +1251,21 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 		// Compute WIF for vertex-wif repos whose secrets are written.
 		var wif string
 		if d.credsSupplied && auth != InferenceAuthOpenAIAPIKey {
-			number := cfg.InferenceProjectNumber
-			if cfg.WIFProvider == "" && number == "" {
-				n, numErr := resolveProjectNumber()
+			var number string
+			if repoCfg.WIFProvider == "" {
+				n, numErr := resolveProjectNumber(repoCfg.InferenceProject)
 				if numErr != nil {
-					// The lookup is shared by every vertex-wif repo in the
-					// batch; fail the run before any write.
+					// A lookup is shared by every repository on the same
+					// project; fail the run before any write.
 					return nil, numErr
 				}
 				number = n
 			}
 			switch {
-			case cfg.WIFProvider != "":
-				// Explicit WIF provider — use it verbatim for all repos.
-				// No per-repo derivation or collision check needed.
-				wif = cfg.WIFProvider
+			case repoCfg.WIFProvider != "":
+				// Explicit WIF provider (command line or declared) — use it
+				// verbatim. No per-repo derivation or collision check needed.
+				wif = repoCfg.WIFProvider
 			case d.resolved.Forge == ForgeGitHub && number != "":
 				providerID := mintcore.BuildRepoProviderID(d.repo.Owner, d.repo.Repo)
 				wif = fmt.Sprintf("projects/%s/locations/global/workloadIdentityPools/%s/providers/%s",
@@ -1176,7 +1292,7 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 					number, mintcore.DefaultInferencePool)
 			}
 		}
-		candidates[i] = candidateInfo{discovery: d, wifProvider: wif}
+		candidates[i] = candidateInfo{discovery: d, wifProvider: wif, cfg: repoCfg}
 	}
 
 	// Run convergence in parallel.
@@ -1209,7 +1325,7 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 			}
 			defer func() { <-sem }()
 
-			cr := convergeRepo(ctx, ci.discovery, ci.wifProvider, cfg,
+			cr := convergeRepo(ctx, ci.discovery, ci.wifProvider, ci.cfg,
 				refResolver, commitScaffold, progress)
 
 			mu.Lock()
@@ -1220,6 +1336,36 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 	wg2.Wait()
 
 	return result, nil
+}
+
+// blockedFreshInstall reports a fresh install that stopped before any forge
+// write because the existing .fullsend/config.yaml needs adoption
+// (ADR-0122) or the layered safety gate rejected the managed configuration.
+// The repository is left untouched, so it is not Installed, and the block
+// is an error: the install did not happen and the operator must act.
+func blockedFreshInstall(cr ConvergeResult, repoFullName string, adoptionRequired bool, rejected *ComponentAction, dryRun bool, progress ProgressFunc) ConvergeResult {
+	stage := "install"
+	if dryRun {
+		stage = "dry-run"
+	}
+	if adoptionRequired {
+		detail := fmt.Sprintf("%s exists without the managed-configuration ownership marker; adoption required before this repository can be installed (ADR-0122); nothing was written", preset.OverlayPath)
+		if rejected != nil && rejected.Action == ActionSafetyRejected {
+			detail = detail + "; " + rejected.Detail
+		}
+		cr.Actions = append(cr.Actions, ComponentAction{
+			Component: preset.OverlayPath,
+			Action:    ActionAdoptionRequired,
+			Detail:    detail,
+		})
+		progress(repoFullName, stage, detail)
+		cr.Error = errors.New(detail)
+		return cr
+	}
+	cr.Actions = append(cr.Actions, *rejected)
+	progress(repoFullName, stage, rejected.Detail)
+	cr.Error = errors.New(rejected.Detail)
+	return cr
 }
 
 // convergeRepo processes a single repo through the convergence pipeline.
@@ -1243,11 +1389,7 @@ func convergeRepo(ctx context.Context,
 		WIFProvider: wifProvider,
 	}
 	if resolved.Forge == ForgeGitLab {
-		vendor := resolved.Vendor
-		if cfg.VendorOverride != nil {
-			vendor = *cfg.VendorOverride
-		}
-		if vendor {
+		if resolved.Vendor {
 			cr.Error = fmt.Errorf("GitLab vendor mode is unsupported: its installer does not execute a matching vendored binary")
 			return cr
 		}
@@ -1300,6 +1442,15 @@ func convergeRepo(ctx context.Context,
 		cr.Error = contractErr
 		return cr
 	}
+	// Read stale vendored assets (GitHub, vendor: false) before any forge
+	// write, so a malformed vendor manifest or a failed read changes
+	// nothing.
+	staleVendored, staleErr := findStaleVendored(ctx, resolved)
+	if staleErr != nil {
+		cr.Error = fmt.Errorf("checking stale vendored assets: %w", staleErr)
+		return cr
+	}
+	d.staleVendored = staleVendored
 	// Treat the repo as new until the workflow file is on the default
 	// branch. Variables and secrets are written before the scaffold
 	// commit (see Install), so anyComponentPresent is true while an
@@ -1345,16 +1496,22 @@ func convergeRepo(ctx context.Context,
 		var configSafetyRejected *ComponentAction
 		var existingUnmanagedConfig []byte
 		if resolved.ConfigManaged {
-			existing, readErr := resolved.ForgeConfig.Client.GetFileContent(ctx, rr.Owner, rr.Repo, preset.OverlayPath)
-			if readErr != nil && !forge.IsNotFound(readErr) {
+			existing, found, readErr := readExistingFile(ctx, resolved.ForgeConfig.Client, rr.Owner, rr.Repo, preset.OverlayPath)
+			if readErr != nil {
 				cr.Error = fmt.Errorf("reading existing %s: %w", preset.OverlayPath, readErr)
 				return cr
 			}
-			if forge.IsNotFound(readErr) {
-				existing = nil
+			// Validate every found overlay, marked or not, as the
+			// established-path gate, status and preflight do: the safety
+			// comparison does not check decoded values such as runtime.
+			if found {
+				if valErr := validateExistingOverlay(existing); valErr != nil {
+					cr.Error = fmt.Errorf("convergence errors: %w", valErr)
+					return cr
+				}
 			}
-			configAdoptionRequired = len(existing) > 0 && !hasManagedConfigMarker(existing)
-			configSafetyRejected = checkManagedConfigSafetyGate(ctx, resolved, existing)
+			configAdoptionRequired = overlayNeedsAdoption(found, existing)
+			configSafetyRejected = managedSafetyRejectedAction(ctx, resolved)
 		} else if auth == InferenceAuthOpenAIWIF {
 			// Readiness above may have been satisfied by identifiers in an
 			// unmanaged config.yaml already on the default branch. The
@@ -1369,10 +1526,16 @@ func convergeRepo(ctx context.Context,
 				existingUnmanagedConfig = existing
 			}
 		}
-		// Obsolete inference credentials must outlive a blocked
-		// replacement configuration: the old runtime/model configuration
-		// stays active until the adoption or safety rejection is resolved.
-		configBlocked := configAdoptionRequired || configSafetyRejected != nil
+		// A blocked fresh install stops here, before Install or any other
+		// forge write (variables, secrets, scaffold files, the PR/MR), in a
+		// dry run and a live run alike. Writing the credentials and
+		// scaffold without the configuration they depend on would leave a
+		// half-installed repository, and the previous runtime/model
+		// configuration stays active until the adoption or safety
+		// rejection is resolved.
+		if configAdoptionRequired || configSafetyRejected != nil {
+			return blockedFreshInstall(cr, repoFullName, configAdoptionRequired, configSafetyRejected, cfg.DryRun, progress)
+		}
 
 		// Resolve the target ref and scaffold inputs before branching on
 		// DryRun, not after: a dry run must run the same pin-resolution,
@@ -1385,23 +1548,27 @@ func convergeRepo(ctx context.Context,
 		ref, tag, manifestRef := rref.ref, rref.tag, rref.manifestRef
 
 		vendor := resolved.Vendor
-		if cfg.VendorOverride != nil {
-			vendor = *cfg.VendorOverride
-		}
 		if vendor && resolved.Forge == ForgeGitLab {
 			progress(rr.Owner+"/"+rr.Repo, "vendor",
 				"vendor enabled but GitLab CI templates do not yet reference the vendored binary")
 		}
 
-		installRoles := defaultRoles(cfg.Roles)
-		if len(d.preset) > 0 && !cfg.RolesExplicit {
-			// A base preset is declared and the caller did not
-			// explicitly pass --roles: leave Roles unset so
-			// BuildScaffoldFiles writes a stub overlay and the
-			// preset's own roles (or its code-default fallback) take
-			// effect via the layered accessor chain, instead of the
-			// fleet-wide default roles shadowing them.
+		// Roles are declared in the manifest (config.roles in repos.yaml)
+		// and rendered from there. A declared base preset leaves Roles
+		// unset so BuildScaffoldFiles writes a stub overlay and the
+		// preset's own roles (or its code-default fallback) take effect
+		// via the layered accessor chain, instead of the fleet-wide
+		// default roles shadowing them.
+		installRoles := config.PerRepoDefaultRoles()
+		if len(d.preset) > 0 {
 			installRoles = nil
+		}
+
+		// FULLSEND_GCP_REGION is written with the Vertex credentials, or
+		// whenever the effective configuration declares a region.
+		installRegion := ""
+		if d.credsSupplied || resolved.InferenceRegionDeclared {
+			installRegion = inferenceRegionForAuth(auth, resolved.InferenceRegion)
 		}
 
 		installCfg := InstallConfig{
@@ -1411,7 +1578,7 @@ func convergeRepo(ctx context.Context,
 			Roles:             installRoles,
 			MintURL:           resolved.MintURL,
 			InferenceAuth:     auth,
-			InferenceRegion:   inferenceRegionForAuth(auth, cfg.InferenceRegion),
+			InferenceRegion:   installRegion,
 			UpstreamRef:       ref,
 			UpstreamTag:       tag,
 			Pinned:            manifestRef != "",
@@ -1425,12 +1592,11 @@ func convergeRepo(ctx context.Context,
 			// Supplied inputs replace every secret of the selected
 			// method; without inputs the existing secrets are reused
 			// (validation already required them to be present).
-			ReuseSecrets:                  !d.credsSupplied,
-			VendorBinary:                  vendor,
-			Preset:                        d.preset,
-			ManagedConfig:                 d.managedConfig,
-			ExistingConfig:                existingUnmanagedConfig,
-			ManagedConfigAdoptionRequired: configAdoptionRequired || configSafetyRejected != nil,
+			ReuseSecrets:   !d.credsSupplied,
+			VendorBinary:   vendor,
+			Preset:         d.preset,
+			ManagedConfig:  d.managedConfig,
+			ExistingConfig: existingUnmanagedConfig,
 		}
 		if d.credsSupplied {
 			if auth == InferenceAuthOpenAIAPIKey {
@@ -1461,6 +1627,27 @@ func convergeRepo(ctx context.Context,
 			}
 		}
 
+		// Stale vendored assets from an earlier vendored install are
+		// removed in the install commit. Plan against the files the
+		// install delivers, before any forge write.
+		var staleVendoredPlanned *staleVendoredPlan
+		var staleVendoredActions []ComponentAction
+		if d.staleVendored != nil && len(d.staleVendored.Paths) > 0 {
+			installFiles, buildErr := BuildScaffoldFiles(installCfg)
+			if buildErr != nil {
+				cr.Error = fmt.Errorf("generating scaffold files: %w", buildErr)
+				return cr
+			}
+			plan, planErr := planStaleVendoredCleanup(ctx, resolved, d.staleVendored, installFiles,
+				freshCallerContent(resolved, staleVendoredDriftConfig(d, cfg)))
+			if planErr != nil {
+				cr.Error = fmt.Errorf("checking stale vendored assets: %w", planErr)
+				return cr
+			}
+			staleVendoredPlanned = plan
+			_, staleVendoredActions = applyStaleVendoredPlan(installFiles, plan, cfg.DryRun, repoFullName, progress)
+		}
+
 		if cfg.DryRun {
 			cr.Installed = true
 			if resolved.Forge == ForgeGitLab {
@@ -1479,23 +1666,20 @@ func convergeRepo(ctx context.Context,
 				Action:    "add",
 				Detail:    "Would install (new)",
 			})
+			cr.Actions = append(cr.Actions, staleVendoredActions...)
 			cr.Actions = append(cr.Actions, plannedInferenceSecretActions(d, progress)...)
-			// The previous credentials stay while the replacement
-			// configuration is blocked on adoption or a safety rejection.
-			if !configBlocked {
-				dryCleanup := removeObsoleteInferenceSecrets(ctx, resolved, true, true, nil, progress)
-				cr.Actions = append(cr.Actions, dryCleanup...)
-				// A lookup failure means the removals cannot be determined, so
-				// the preview must not be reported as successful.
-				var dryCleanupErrors []string
-				for _, a := range dryCleanup {
-					if a.Action == "error" {
-						dryCleanupErrors = append(dryCleanupErrors, a.Detail)
-					}
+			dryCleanup := removeObsoleteInferenceSecrets(ctx, resolved, true, true, nil, progress)
+			cr.Actions = append(cr.Actions, dryCleanup...)
+			// A lookup failure means the removals cannot be determined, so
+			// the preview must not be reported as successful.
+			var dryCleanupErrors []string
+			for _, a := range dryCleanup {
+				if a.Action == "error" {
+					dryCleanupErrors = append(dryCleanupErrors, a.Detail)
 				}
-				if len(dryCleanupErrors) > 0 {
-					cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(dryCleanupErrors, "; "))
-				}
+			}
+			if len(dryCleanupErrors) > 0 {
+				cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(dryCleanupErrors, "; "))
 			}
 			if len(d.preset) > 0 {
 				cr.Actions = append(cr.Actions, ComponentAction{
@@ -1505,34 +1689,25 @@ func convergeRepo(ctx context.Context,
 				})
 			}
 			if d.resolved.ConfigManaged {
-				if configAdoptionRequired {
-					detail := fmt.Sprintf("%s exists without the managed-configuration ownership marker; adoption required before it can be written (ADR-0122)", preset.OverlayPath)
-					if configSafetyRejected != nil && configSafetyRejected.Action == ActionSafetyRejected {
-						detail = detail + "; " + configSafetyRejected.Detail
-					}
-					cr.Actions = append(cr.Actions, ComponentAction{
-						Component: preset.OverlayPath,
-						Action:    ActionAdoptionRequired,
-						Detail:    detail,
-					})
-					progress(repoFullName, "dry-run", detail)
-				} else if configSafetyRejected != nil {
-					cr.Actions = append(cr.Actions, *configSafetyRejected)
-					progress(repoFullName, "dry-run", configSafetyRejected.Detail)
-					cr.Error = fmt.Errorf("%s", configSafetyRejected.Detail)
-				} else {
-					cr.Actions = append(cr.Actions, ComponentAction{
-						Component: preset.OverlayPath,
-						Action:    "add",
-						Detail:    "would write managed configuration as " + preset.OverlayPath,
-					})
-				}
+				cr.Actions = append(cr.Actions, ComponentAction{
+					Component: preset.OverlayPath,
+					Action:    "add",
+					Detail:    "would write managed configuration as " + preset.OverlayPath,
+				})
 			}
 			progress(repoFullName, "dry-run", "Would install (new)")
 			return cr
 		}
 
-		installResult, installErr := Install(ctx, installCfg, resolved.ForgeConfig.Client, commitScaffold, progress)
+		installCommit := commitScaffold
+		if staleVendoredPlanned.deletable() {
+			installCommit = func(ctx context.Context, owner, repo string, files []forge.TreeFile, direct bool, installed bool) error {
+				files, _ = applyStaleVendoredPlan(files, staleVendoredPlanned, false, repoFullName, func(string, string, string) {})
+				return commitScaffold(ctx, owner, repo, files, direct, installed)
+			}
+		}
+
+		installResult, installErr := Install(ctx, installCfg, resolved.ForgeConfig.Client, installCommit, progress)
 		if installErr != nil {
 			cr.Error = installErr
 			if installResult != nil {
@@ -1549,39 +1724,22 @@ func convergeRepo(ctx context.Context,
 			Action:    "add",
 			Detail:    "Installed",
 		})
+		cr.Actions = append(cr.Actions, staleVendoredActions...)
 		// The selected method's credentials were written before the
 		// scaffold commit; only now remove the other method's secrets.
 		// This runs on every successful install, including a retry after an
 		// earlier run wrote the credentials but failed to complete setup or
 		// to delete the obsolete secrets.
-		if !configBlocked {
-			cleanup := removeObsoleteInferenceSecrets(ctx, resolved, false, false, installResult.ScaffoldFiles, progress)
-			cr.Actions = append(cr.Actions, cleanup...)
-			var cleanupErrors []string
-			for _, a := range cleanup {
-				if a.Action == "error" {
-					cleanupErrors = append(cleanupErrors, a.Detail)
-				}
-			}
-			if len(cleanupErrors) > 0 {
-				cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(cleanupErrors, "; "))
+		cleanup := removeObsoleteInferenceSecrets(ctx, resolved, false, false, installResult.ScaffoldFiles, progress)
+		cr.Actions = append(cr.Actions, cleanup...)
+		var cleanupErrors []string
+		for _, a := range cleanup {
+			if a.Action == "error" {
+				cleanupErrors = append(cleanupErrors, a.Detail)
 			}
 		}
-		if configAdoptionRequired {
-			detail := fmt.Sprintf("%s exists without the managed-configuration ownership marker; adoption required before it can be converged automatically (ADR-0122)", preset.OverlayPath)
-			if configSafetyRejected != nil && configSafetyRejected.Action == ActionSafetyRejected {
-				detail = detail + "; " + configSafetyRejected.Detail
-			}
-			cr.Actions = append(cr.Actions, ComponentAction{
-				Component: preset.OverlayPath,
-				Action:    ActionAdoptionRequired,
-				Detail:    detail,
-			})
-			progress(repoFullName, "install", detail)
-		} else if configSafetyRejected != nil {
-			cr.Actions = append(cr.Actions, *configSafetyRejected)
-			progress(repoFullName, "install", configSafetyRejected.Detail)
-			cr.Error = fmt.Errorf("%s", configSafetyRejected.Detail)
+		if len(cleanupErrors) > 0 {
+			cr.Error = fmt.Errorf("convergence errors: %s", strings.Join(cleanupErrors, "; "))
 		}
 		return cr
 	}
@@ -1767,11 +1925,7 @@ func checkPinnedOpenAICredentialContract(ctx context.Context, resolved ResolvedC
 	if rref.manifestRef == "" || refResolver == nil {
 		return nil
 	}
-	vendor := resolved.Vendor
-	if cfg.VendorOverride != nil {
-		vendor = *cfg.VendorOverride
-	}
-	if vendor {
+	if resolved.Vendor {
 		// A vendored install commits the running binary's embedded
 		// templates, which always satisfy the contract.
 		return nil
@@ -1831,7 +1985,7 @@ func scaffoldDeliveryPlanned(files []forge.TreeFile, actions []ComponentAction, 
 	}
 	for _, a := range actions {
 		switch a.Action {
-		case "none", "orphan", "error", ActionAdoptionRequired, ActionSafetyRejected:
+		case "none", "orphan", "error", ActionAdoptionRequired, ActionSafetyRejected, ActionPending:
 		default:
 			return true
 		}
@@ -2071,9 +2225,10 @@ func convergeSecrets(ctx context.Context,
 	var actions []ComponentAction
 
 	// FULLSEND_GCP_REGION is probed only when present; establish it with
-	// the Vertex credentials (e.g. after switching from openai-api-key).
-	region := inferenceRegionForAuth(auth, cfg.InferenceRegion)
-	if region != "" && !hasComponent(d.components, "var:"+forge.VarGCPRegion) {
+	// the Vertex credentials (e.g. after switching from openai-api-key),
+	// using the effective configuration's region.
+	region := inferenceRegionForAuth(auth, resolved.InferenceRegion)
+	if region != "" && !d.gcpRegionExists {
 		if cfg.DryRun {
 			actions = append(actions, ComponentAction{
 				Component: "var:" + forge.VarGCPRegion,
@@ -2931,11 +3086,7 @@ func convergeRefFiles(ctx context.Context,
 		templateFiles, tplErr := collectGitLabUpgradeTemplates(
 			gitlabAgentRunnerTags(cfg.Manifest), gitlabControlRunnerTags(cfg.Manifest), templateRef, templateTag,
 		)
-		vendor := resolved.Vendor
-		if cfg.VendorOverride != nil {
-			vendor = *cfg.VendorOverride
-		}
-		if resolver != nil && !vendor && isExplicitPin {
+		if resolver != nil && !resolved.Vendor && isExplicitPin {
 			remote, remoteErr := FetchRemoteScaffold(ctx, resolver.client, targetRef, newRef, ForgeGitLab,
 				gitlabAgentRunnerTags(cfg.Manifest), gitlabControlRunnerTags(cfg.Manifest), false)
 			if remoteErr != nil {
@@ -3048,15 +3199,12 @@ func convergeScaffoldFiles(ctx context.Context,
 	ref, tag, manifestRef := rref.ref, rref.tag, rref.manifestRef
 
 	repairVendor := resolved.Vendor
-	if cfg.VendorOverride != nil {
-		repairVendor = *cfg.VendorOverride
-	}
 
 	installCfg := InstallConfig{
 		Owner:             resolved.Owner,
 		Repo:              resolved.Repo,
 		Forge:             resolved.Forge,
-		Roles:             defaultRoles(cfg.Roles),
+		Roles:             config.PerRepoDefaultRoles(),
 		MintURL:           resolved.MintURL,
 		UpstreamRef:       ref,
 		UpstreamTag:       tag,
@@ -3190,12 +3338,9 @@ func convergeContentDriftFiles(ctx context.Context,
 	// Use the shared driftInstallConfig builder, then overlay the
 	// converge-specific resolved ref and tag.
 	installCfg := driftInstallConfig(resolved, dcfg)
-	installCfg.Roles = defaultRoles(cfg.Roles)
+	installCfg.Roles = config.PerRepoDefaultRoles()
 	installCfg.UpstreamRef = ref
 	installCfg.UpstreamTag = tag
-	if cfg.VendorOverride != nil {
-		installCfg.VendorBinary = *cfg.VendorOverride
-	}
 
 	// When vendored, the running binary's embedded templates match the
 	// binary being committed to the repo — no version-skew concern, so
@@ -3451,16 +3596,6 @@ func resolveTargetRef(ctx context.Context, fullsendRef, upstreamRef, upstreamTag
 	return resolvedRef{ref: ref, tag: tag, manifestRef: manifestRef}
 }
 
-// defaultRoles returns the provided roles or falls back to the
-// per-repo defaults. Centralises the roles-defaulting pattern shared
-// by convergeRepo and convergeScaffoldFiles.
-func defaultRoles(roles []string) []string {
-	if len(roles) == 0 {
-		return config.PerRepoDefaultRoles()
-	}
-	return roles
-}
-
 // convergeRepoCredentials applies variable, credential, and schedule changes.
 func convergeRepoCredentials(ctx context.Context, d convergeDiscovery, wifProvider string, cfg ConvergeConfig, progress ProgressFunc) ([]ComponentAction, error) {
 	var actions []ComponentAction
@@ -3584,7 +3719,6 @@ func collectConvergeScaffoldFiles(ctx context.Context, d convergeDiscovery, cfg 
 	contentDriftFiles, contentDriftActions := convergeContentDriftFiles(
 		ctx, resolved, cfg, refResolver, refFileSet,
 		DriftConfig{
-			InferenceRegion:   cfg.InferenceRegion,
 			ReviewAppClientID: d.reviewClientID,
 			AgentRunnerTags:   gitlabAgentRunnerTags(cfg.Manifest),
 			ControlRunnerTags: gitlabControlRunnerTags(cfg.Manifest),
@@ -3617,9 +3751,10 @@ func collectConvergeScaffoldFiles(ctx context.Context, d convergeDiscovery, cfg 
 
 	// 2d-iii: Configuration preset — replace .fullsend/config.base.yaml
 	// wholesale when a preset is declared and the installed bytes differ.
-	// No declared preset is a no-op so an existing base file is preserved
-	// without comparison. Managed-configuration handling is independent
-	// (2d-iv).
+	// With no declared preset the desired state is no base file; an
+	// existing one was already rejected by the pre-write check
+	// (checkUndeclaredBase), so this is a no-op. Managed-configuration
+	// handling is independent (2d-iv).
 	presetFiles, presetActions := convergePresetFiles(ctx, resolved, d.preset, cfg.DryRun, progress)
 	actions = append(actions, presetActions...)
 	var presetErrors []string
@@ -3649,16 +3784,37 @@ func collectConvergeScaffoldFiles(ctx context.Context, d convergeDiscovery, cfg 
 		return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", strings.Join(configErrors, "; "))
 	}
 	allScaffoldFiles = append(allScaffoldFiles, configFiles...)
+
+	// 2d-v: Stale vendored assets — with vendoring off, delete the
+	// Fullsend-owned files an earlier vendored install committed in this
+	// same scaffold commit, after rewriting Fullsend's callers away from
+	// the local reusable workflows being deleted.
+	if d.staleVendored != nil && len(d.staleVendored.Paths) > 0 {
+		plan, planErr := planStaleVendoredCleanup(ctx, resolved, d.staleVendored, allScaffoldFiles,
+			establishedCallerContent(ctx, resolved, staleVendoredDriftConfig(d, cfg), refResolver))
+		if planErr != nil {
+			detail := fmt.Sprintf("checking stale vendored assets: %v", planErr)
+			actions = append(actions, ComponentAction{Component: staleVendoredComponent, Action: "error", Detail: detail})
+			return allScaffoldFiles, actions, fmt.Errorf("convergence errors: %s", detail)
+		}
+		var staleActions []ComponentAction
+		allScaffoldFiles, staleActions = applyStaleVendoredPlan(allScaffoldFiles, plan, cfg.DryRun, resolved.Owner+"/"+resolved.Repo, progress)
+		actions = append(actions, staleActions...)
+	}
 	return allScaffoldFiles, actions, nil
 }
 
 // convergeEstablishedPhases collects scaffold changes once, preserving the
-// credential-before-planning order except where vendored WIF preflight must
-// establish usable delivery before any credential can change.
+// credential-before-planning order except where planning must finish before
+// any credential can change: vendored WIF preflight must establish usable
+// delivery, and stale vendored asset cleanup must complete its caller reads,
+// rendering and planning so a failure there leaves variables and secrets
+// untouched. The one plan is then reused for the scaffold commit.
 func convergeEstablishedPhases(ctx context.Context, d convergeDiscovery, wifProvider string, cfg ConvergeConfig, refResolver *RefResolver, progress ProgressFunc, vendoredWIFSource bool) ([]forge.TreeFile, []ComponentAction, []ComponentAction, error) {
 	var orderedActions []ComponentAction
 	resolved := d.resolved
-	if !vendoredWIFSource {
+	planFirst := vendoredWIFSource || (d.staleVendored != nil && len(d.staleVendored.Paths) > 0)
+	if !planFirst {
 		actions, err := convergeRepoCredentials(ctx, d, wifProvider, cfg, progress)
 		orderedActions = append(orderedActions, actions...)
 		if err != nil {
@@ -3684,7 +3840,7 @@ func convergeEstablishedPhases(ctx context.Context, d convergeDiscovery, wifProv
 		}
 	}
 
-	if vendoredWIFSource {
+	if planFirst {
 		actions, err := convergeRepoCredentials(ctx, d, wifProvider, cfg, progress)
 		orderedActions = append(orderedActions, actions...)
 		return files, scaffoldActions, orderedActions, err
