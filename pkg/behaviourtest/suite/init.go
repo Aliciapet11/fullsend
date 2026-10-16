@@ -37,15 +37,21 @@ type TemplateRouter func(scenario *godog.Scenario) (*world.World, error)
 
 // InitRoutedScenario is InitScenario for a suite whose scenarios run
 // against different template Worlds. Compatibility tags are evaluated
-// against base first, so a skipped scenario is never routed; every other
-// scenario is cloned from the template route returns, and its After hook
-// deallocates through that template's Driver. A routing error fails the
-// scenario before any step runs.
+// against base first, so a skipped scenario, or one whose tags are
+// malformed (which fails with the tag error), is never routed; every
+// other scenario is cloned from the template route returns, and its
+// After hook deallocates through that template's Driver. A routing error
+// fails the scenario before any step runs.
 func InitRoutedScenario(sc *godog.ScenarioContext, base *world.World, route TemplateRouter) {
 	sc.Before(func(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
 		tags := tagNames(scenario.Tags)
-		if err := SkipErrorForTagNames(tags, base); errors.Is(err, godog.ErrSkip) {
-			return ctx, err
+		if SkipErrorForTagNames(tags, base) != nil {
+			// A skip or a malformed tag: the scenario is never routed, so
+			// it consumes no org capacity. beforeScenario returns the same
+			// error and, for a malformed tag, attaches a World (cloned from
+			// base, without a driver) so the After hook can still write a
+			// failure summary.
+			return beforeScenario(ctx, tags, base, scenario.Name)
 		}
 		template, err := route(scenario)
 		if err != nil {

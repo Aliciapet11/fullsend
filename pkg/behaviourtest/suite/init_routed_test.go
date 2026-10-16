@@ -113,6 +113,38 @@ func TestInitRoutedScenario_RoutesEachScenarioToItsTemplate(t *testing.T) {
 	}
 }
 
+func TestInitRoutedScenario_MalformedTagIsNotRouted(t *testing.T) {
+	const feature = `Feature: malformed
+  @requires:capability:
+  Scenario: bad tag
+    Given a routed probe step
+`
+	base := &world.World{Config: env.RunnerConfig{SCM: "github", InstallMode: "per-repo"}}
+	var routed []string
+	var stepRan bool
+	suiteRunner := godog.TestSuite{
+		Name: "malformed",
+		ScenarioInitializer: func(sc *godog.ScenarioContext) {
+			InitRoutedScenario(sc, base, func(s *godog.Scenario) (*world.World, error) {
+				routed = append(routed, s.Name)
+				return nil, errors.New("must not be routed")
+			})
+			sc.Step(`^a routed probe step$`, func() error {
+				stepRan = true
+				return nil
+			})
+		},
+		Options: &godog.Options{
+			Format:          "progress",
+			Output:          io.Discard,
+			FeatureContents: []godog.Feature{{Name: "malformed.feature", Contents: []byte(feature)}},
+		},
+	}
+	assert.NotEqual(t, 0, suiteRunner.Run(), "a malformed tag fails the suite")
+	assert.Empty(t, routed, "a malformed-tag scenario must not consume org capacity")
+	assert.False(t, stepRan)
+}
+
 func TestInitRoutedScenario_RoutingErrorFailsScenario(t *testing.T) {
 	base := &world.World{Config: env.RunnerConfig{SCM: "github", InstallMode: "per-repo"}}
 	route := func(sc *godog.Scenario) (*world.World, error) {

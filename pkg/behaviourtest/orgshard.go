@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"math/rand/v2"
 	"os"
 	"sort"
 	"strconv"
@@ -39,10 +41,9 @@ const (
 	// Override with BEHAVIOUR_ORG_QUOTA_RESERVE.
 	defaultOrgQuotaReserve = 500
 
-	// quotaResetGrace treats an org whose primary budget resets within
-	// this window as having its full limit: the reset lands while the
-	// org's drivers are still being set up.
-	quotaResetGrace = 5 * time.Minute
+	// reserveRetryBackoff is the mean pause before a run that could not
+	// complete its multi-org reservation retries it from scratch.
+	reserveRetryBackoff = 15 * time.Second
 )
 
 // quotaPolicy turns an org's observed primary REST budget into the
@@ -50,7 +51,6 @@ const (
 type quotaPolicy struct {
 	ScenarioCost int
 	Reserve      int
-	ResetGrace   time.Duration
 	Now          func() time.Time
 }
 
@@ -61,7 +61,6 @@ func quotaPolicyFromEnv() (quotaPolicy, error) {
 	p := quotaPolicy{
 		ScenarioCost: defaultScenarioAPICost,
 		Reserve:      defaultOrgQuotaReserve,
-		ResetGrace:   quotaResetGrace,
 		Now:          time.Now,
 	}
 	if v := os.Getenv("BEHAVIOUR_SCENARIO_API_COST"); v != "" {
@@ -89,11 +88,12 @@ func (p quotaPolicy) now() time.Time {
 }
 
 // budget is the primary REST budget the policy counts on: the observed
-// remaining requests, or the full limit when the budget resets within
-// ResetGrace.
+// remaining requests, or the full limit once the budget's reset time
+// has passed. A reset still in the future is not counted, since
+// quota-consuming setup starts before it lands.
 func (p quotaPolicy) budget(rl forge.RateLimit) int {
 	b := rl.Remaining
-	if !rl.Reset.IsZero() && rl.Limit > b && !rl.Reset.After(p.now().Add(p.ResetGrace)) {
+	if !rl.Reset.IsZero() && rl.Limit > b && !rl.Reset.After(p.now()) {
 		b = rl.Limit
 	}
 	return b
@@ -138,7 +138,10 @@ func (l orgLease) quotaString() string {
 // them to e2etest, tests to fakes.
 type orgPoolDeps struct {
 	// Acquire locks one org from pool and returns it with its token.
-	Acquire func(ctx context.Context, pool []string) (org, token string, err error)
+	// With wait it blocks until an org frees up or the lock timeout
+	// expires; without, it makes one pass over the pool and fails when
+	// every org is locked.
+	Acquire func(ctx context.Context, pool []string, wait bool) (org, token string, err error)
 	// Release unlocks an org Acquire returned.
 	Release func(org, token string)
 	// SampleQuota reports the org token's primary REST budget.
@@ -156,21 +159,59 @@ type orgPlanConfig struct {
 	// PerOrgCap is the provisioning cap per org in multi-org mode.
 	PerOrgCap int
 	Policy    quotaPolicy
+	// ReserveTimeout bounds how long acquireOrgsForDemand keeps
+	// releasing and retrying a reservation it could not complete.
+	ReserveTimeout time.Duration
+	// RetryBackoff is the mean pause, jittered, before such a retry.
+	RetryBackoff time.Duration
 }
 
 // acquireOrgsForDemand locks pool orgs until their capacity covers the
 // run's provisioning scenario instances (at least one org when any
 // scenario will run). An org whose budget leaves room for no
-// provisioning scenario is released and passed over. When the pool
+// provisioning scenario is released and passed over. Only the first org
+// is waited for. While holding an incomplete reservation it never
+// blocks on another org: if none is free it releases everything it
+// holds and retries after a jittered pause, so concurrent runs cannot
+// each hold part of the pool and wait on each other. When the pool
 // cannot cover the run it releases every org it locked and returns an
 // error naming the shortfall, each org's budget and the acquire error.
-func acquireOrgsForDemand(ctx context.Context, deps orgPoolDeps, cfg orgPlanConfig, demand suiteDemand) (_ []orgLease, retErr error) {
+func acquireOrgsForDemand(ctx context.Context, deps orgPoolDeps, cfg orgPlanConfig, demand suiteDemand) ([]orgLease, error) {
 	if demand.Eligible == 0 {
 		deps.Logf("[org-shard] no scenario will run (%d selected, %d skipped by tags); not acquiring a pool org", demand.Selected, demand.Skipped)
 		return nil, nil
 	}
-	var leases []orgLease
 	var passedOver []string
+	lowQuota := make(map[string]bool)
+	deadline := time.Now().Add(cfg.ReserveTimeout)
+	for {
+		leases, retryable, err := reserveOrgs(ctx, deps, cfg, demand, lowQuota, &passedOver)
+		if err == nil {
+			return leases, nil
+		}
+		if !retryable || !time.Now().Before(deadline) {
+			return nil, err
+		}
+		pause := cfg.RetryBackoff
+		if pause > 0 {
+			pause = pause/2 + rand.N(pause)
+		}
+		deps.Logf("[org-shard] could not complete the reservation (%v); released the orgs held, retrying in %s", err, pause)
+		select {
+		case <-time.After(pause):
+		case <-ctx.Done():
+			return nil, capacityError(cfg, demand, nil, passedOver, ctx.Err())
+		}
+	}
+}
+
+// reserveOrgs makes one attempt at a complete reservation. It releases
+// every org it locked when it fails. retryable reports a failure to
+// acquire a further org while already holding some, which a later
+// attempt may avoid. lowQuota carries the orgs passed over for low
+// budget between attempts.
+func reserveOrgs(ctx context.Context, deps orgPoolDeps, cfg orgPlanConfig, demand suiteDemand, lowQuota map[string]bool, passedOver *[]string) (_ []orgLease, retryable bool, retErr error) {
+	var leases []orgLease
 	defer func() {
 		if retErr != nil {
 			for _, l := range leases {
@@ -179,12 +220,12 @@ func acquireOrgsForDemand(ctx context.Context, deps orgPoolDeps, cfg orgPlanConf
 		}
 	}()
 
-	excluded := make(map[string]bool)
+	excluded := maps.Clone(lowQuota)
 	covered := 0
 	need := demand.Provisioning
 	for len(leases) == 0 || covered < need {
 		if err := ctx.Err(); err != nil {
-			return nil, capacityError(cfg, demand, leases, passedOver, err)
+			return nil, false, capacityError(cfg, demand, leases, *passedOver, err)
 		}
 		var candidates []string
 		for _, org := range cfg.Pool {
@@ -193,11 +234,11 @@ func acquireOrgsForDemand(ctx context.Context, deps orgPoolDeps, cfg orgPlanConf
 			}
 		}
 		if len(candidates) == 0 {
-			return nil, capacityError(cfg, demand, leases, passedOver, errors.New("no pool org left to try"))
+			return nil, false, capacityError(cfg, demand, leases, *passedOver, errors.New("no pool org left to try"))
 		}
-		org, token, err := deps.Acquire(ctx, candidates)
+		org, token, err := deps.Acquire(ctx, candidates, len(leases) == 0)
 		if err != nil {
-			return nil, capacityError(cfg, demand, leases, passedOver, err)
+			return nil, len(leases) > 0 && ctx.Err() == nil, capacityError(cfg, demand, leases, *passedOver, err)
 		}
 		excluded[org] = true
 		rl, known := deps.SampleQuota(ctx, org, token)
@@ -224,7 +265,8 @@ func acquireOrgsForDemand(ctx context.Context, deps orgPoolDeps, cfg orgPlanConf
 		}
 		if !usable {
 			deps.Logf("[org-shard] passing over %s: budget %s leaves room for no provisioning scenario (estimated %d requests each, reserve %d)", org, lease.quotaString(), cfg.Policy.ScenarioCost, cfg.Policy.Reserve)
-			passedOver = append(passedOver, fmt.Sprintf("%s (%s)", org, lease.quotaString()))
+			*passedOver = append(*passedOver, fmt.Sprintf("%s (%s)", org, lease.quotaString()))
+			lowQuota[org] = true
 			deps.Release(org, token)
 			continue
 		}
@@ -232,7 +274,7 @@ func acquireOrgsForDemand(ctx context.Context, deps orgPoolDeps, cfg orgPlanConf
 		leases = append(leases, lease)
 		covered += lease.Capacity
 	}
-	return leases, nil
+	return leases, false, nil
 }
 
 func capacityError(cfg orgPlanConfig, demand suiteDemand, leases []orgLease, passedOver []string, cause error) error {
@@ -329,7 +371,7 @@ func (a *shardAssigner) Router() suite.TemplateRouter {
 			return nil, err
 		}
 		if shard.Template == nil {
-			return nil, fmt.Errorf("org %s has no template World", shard.Org)
+			return nil, fmt.Errorf("org %q has no template World", shard.Org)
 		}
 		return shard.Template, nil
 	}
@@ -454,7 +496,7 @@ func (s *shardedSuite) Run(ctx context.Context, demand suiteDemand, body func(*s
 	wg.Wait()
 	for i := range errs {
 		if errs[i] != nil {
-			errs[i] = fmt.Errorf("setting up org %s: %w", leases[i].Org, errs[i])
+			errs[i] = fmt.Errorf("setting up org %q: %w", leases[i].Org, errs[i])
 		}
 	}
 	if err := errors.Join(errs...); err != nil {

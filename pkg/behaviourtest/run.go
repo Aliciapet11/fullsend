@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
@@ -88,8 +89,12 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 	runID := uuid.New().String()
 	sharded := &shardedSuite{
 		Deps: orgPoolDeps{
-			Acquire: func(ctx context.Context, pool []string) (string, string, error) {
-				return e2etest.AcquireOrg(ctx, e2eCfg, runID, pool, e2eCfg.LockTimeout, t.Logf)
+			Acquire: func(ctx context.Context, pool []string, wait bool) (string, string, error) {
+				timeout := time.Duration(0)
+				if wait {
+					timeout = e2eCfg.LockTimeout
+				}
+				return e2etest.AcquireOrg(ctx, e2eCfg, runID, pool, timeout, t.Logf)
 			},
 			Release: func(org, token string) {
 				e2etest.ReleaseLock(context.Background(), e2etest.NewLiveClient(token), org, runID, t)
@@ -104,6 +109,9 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 			SingleOrg: cfg.Environment == "stage",
 			PerOrgCap: maxProvisioningPerOrg,
 			Policy:    policy,
+
+			ReserveTimeout: e2eCfg.LockTimeout,
+			RetryBackoff:   reserveRetryBackoff,
 		},
 		Setup: func(ctx context.Context, lease orgLease) (*shardSetup, error) {
 			org, token := lease.Org, lease.Token

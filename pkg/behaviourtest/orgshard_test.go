@@ -52,6 +52,8 @@ type fakeOrgPool struct {
 	double      []string
 	acquireErr  error
 	onAcquire   func(org string)
+	onRelease   func(org string) // called with mu held, after the release
+	waits       []bool           // the wait argument of every Acquire call
 	log         *eventLog
 }
 
@@ -78,32 +80,46 @@ func poolOrgs(n int) []string {
 
 func (p *fakeOrgPool) deps(t *testing.T) orgPoolDeps {
 	return orgPoolDeps{
-		Acquire: func(ctx context.Context, pool []string) (string, string, error) {
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			if p.acquireErr != nil {
-				return "", "", p.acquireErr
+		Acquire: func(ctx context.Context, pool []string, wait bool) (string, string, error) {
+			// Like e2etest.AcquireOrg: one pass over the pool, then
+			// (when waiting) polling until an org frees up.
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				p.mu.Lock()
+				p.waits = append(p.waits, wait)
+				if p.acquireErr != nil {
+					p.mu.Unlock()
+					return "", "", p.acquireErr
+				}
+				for _, org := range pool {
+					if p.unavailable[org] || p.held[org] {
+						continue
+					}
+					p.held[org] = true
+					p.acquired = append(p.acquired, org)
+					if p.onAcquire != nil {
+						p.onAcquire(org)
+					}
+					p.mu.Unlock()
+					return org, "token-" + org, nil
+				}
+				p.mu.Unlock()
+				if !wait || !time.Now().Before(deadline) {
+					return "", "", fmt.Errorf("could not acquire any org from pool after 10m0s (tried %d orgs)", len(pool))
+				}
+				select {
+				case <-time.After(time.Millisecond):
+				case <-ctx.Done():
+					return "", "", ctx.Err()
+				}
 			}
-			for _, org := range pool {
-				if p.unavailable[org] {
-					continue
-				}
-				if p.held[org] {
-					p.double = append(p.double, org)
-					continue
-				}
-				p.held[org] = true
-				p.acquired = append(p.acquired, org)
-				if p.onAcquire != nil {
-					p.onAcquire(org)
-				}
-				return org, "token-" + org, nil
-			}
-			return "", "", fmt.Errorf("could not acquire any org from pool after 10m0s (tried %d orgs)", len(pool))
 		},
 		Release: func(org, token string) {
 			p.mu.Lock()
 			defer p.mu.Unlock()
+			if p.onRelease != nil {
+				defer p.onRelease(org)
+			}
 			if !p.held[org] || token != "token-"+org {
 				p.double = append(p.double, "release:"+org)
 			}
@@ -246,7 +262,7 @@ func defaultPlan(orgs int) orgPlanConfig {
 	return orgPlanConfig{
 		Pool:      poolOrgs(orgs),
 		PerOrgCap: maxProvisioningPerOrg,
-		Policy:    quotaPolicy{ScenarioCost: defaultScenarioAPICost, Reserve: defaultOrgQuotaReserve, ResetGrace: quotaResetGrace},
+		Policy:    quotaPolicy{ScenarioCost: defaultScenarioAPICost, Reserve: defaultOrgQuotaReserve},
 	}
 }
 
@@ -579,6 +595,71 @@ func TestAcquireOrgsForDemand_AcquireErrorReleasesHeldOrgs(t *testing.T) {
 	assert.Empty(t, h.pool.held)
 }
 
+func TestAcquireOrgsForDemand_NeverBlocksWhileHoldingPartialReservation(t *testing.T) {
+	h := newShardHarness(t, 2)
+	// Another run holds halfsend-02 until this run releases halfsend-01.
+	h.pool.unavailable["halfsend-02"] = true
+	h.pool.onRelease = func(org string) {
+		if org == "halfsend-01" {
+			delete(h.pool.unavailable, "halfsend-02")
+		}
+	}
+	plan := defaultPlan(2)
+	plan.ReserveTimeout = time.Minute
+	plan.RetryBackoff = time.Millisecond
+
+	leases, err := acquireOrgsForDemand(context.Background(), h.pool.deps(t), plan, suiteDemand{Eligible: 40, Provisioning: 40})
+	require.NoError(t, err)
+	require.Len(t, leases, 2)
+	assert.Equal(t, []string{"halfsend-01", "halfsend-01", "halfsend-02"}, h.pool.acquired,
+		"the incomplete first reservation is released before retrying")
+	assert.Equal(t, []string{"halfsend-01"}, h.pool.released)
+	// Only an acquisition made while holding nothing may wait.
+	assert.Equal(t, []bool{true, false, true, false}, h.pool.waits)
+}
+
+func TestAcquireOrgsForDemand_GivesUpAfterReserveTimeout(t *testing.T) {
+	h := newShardHarness(t, 2)
+	h.pool.unavailable["halfsend-02"] = true
+	plan := defaultPlan(2)
+	plan.ReserveTimeout = 30 * time.Millisecond
+	plan.RetryBackoff = time.Millisecond
+
+	_, err := acquireOrgsForDemand(context.Background(), h.pool.deps(t), plan, suiteDemand{Eligible: 40, Provisioning: 40})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "insufficient pool-org capacity")
+	assert.Empty(t, h.pool.held, "nothing is left locked")
+	assert.ElementsMatch(t, h.pool.acquired, h.pool.released)
+}
+
+func TestAcquireOrgsForDemand_CompetingPartialReservationsDoNotDeadlock(t *testing.T) {
+	h := newShardHarness(t, 2)
+	plan := defaultPlan(2)
+	plan.ReserveTimeout = 10 * time.Second
+	plan.RetryBackoff = 2 * time.Millisecond
+	deps := h.pool.deps(t)
+
+	// Two runs each need both orgs of a two-org pool, so each could
+	// grab one and wait forever on the other.
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			leases, err := acquireOrgsForDemand(context.Background(), deps, plan, suiteDemand{Eligible: 40, Provisioning: 40})
+			errs[i] = err
+			for _, l := range leases {
+				deps.Release(l.Org, l.Token)
+			}
+		}()
+	}
+	wg.Wait()
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+	assert.Empty(t, h.pool.held)
+}
+
 func TestAcquireOrgsForDemand_Cancelled(t *testing.T) {
 	h := newShardHarness(t, 12)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -610,14 +691,16 @@ func TestAcquireOrgsForDemand_UnknownQuotaUsesCap(t *testing.T) {
 
 func TestQuotaPolicy(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
-	p := quotaPolicy{ScenarioCost: 200, Reserve: 500, ResetGrace: 5 * time.Minute, Now: func() time.Time { return now }}
+	p := quotaPolicy{ScenarioCost: 200, Reserve: 500, Now: func() time.Time { return now }}
 
 	assert.Equal(t, 20, p.capacity(forge.RateLimit{Limit: 5000, Remaining: 5000, Reset: now.Add(time.Hour)}, true, 20))
 	assert.Equal(t, 20, p.capacity(forge.RateLimit{Limit: 12500, Remaining: 12500}, true, 20), "capped")
 	assert.Equal(t, 10, p.capacity(forge.RateLimit{Limit: 5000, Remaining: 2500, Reset: now.Add(time.Hour)}, true, 20))
 	assert.Equal(t, 0, p.capacity(forge.RateLimit{Limit: 5000, Remaining: 300, Reset: now.Add(time.Hour)}, true, 20))
-	assert.Equal(t, 20, p.capacity(forge.RateLimit{Limit: 5000, Remaining: 10, Reset: now.Add(2 * time.Minute)}, true, 20),
-		"a budget that resets during setup counts at its full limit")
+	assert.Equal(t, 0, p.capacity(forge.RateLimit{Limit: 5000, Remaining: 10, Reset: now.Add(2 * time.Minute)}, true, 20),
+		"a reset that has not happened yet is not counted: setup would run into 403s first")
+	assert.Equal(t, 20, p.capacity(forge.RateLimit{Limit: 5000, Remaining: 10, Reset: now.Add(-time.Second)}, true, 20),
+		"a budget whose reset time has passed counts at its full limit")
 	assert.Equal(t, 20, p.capacity(forge.RateLimit{}, false, 20))
 	assert.True(t, p.coversReserve(forge.RateLimit{Remaining: 500}, true))
 	assert.False(t, p.coversReserve(forge.RateLimit{Remaining: 499, Reset: now.Add(time.Hour)}, true))
@@ -634,7 +717,6 @@ func TestQuotaPolicyFromEnv(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, defaultScenarioAPICost, p.ScenarioCost)
 	assert.Equal(t, defaultOrgQuotaReserve, p.Reserve)
-	assert.Equal(t, quotaResetGrace, p.ResetGrace)
 
 	t.Setenv("BEHAVIOUR_SCENARIO_API_COST", "250")
 	t.Setenv("BEHAVIOUR_ORG_QUOTA_RESERVE", "0")
@@ -697,9 +779,9 @@ func TestShardedSuite_TeardownOnSetupFailure(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.False(t, called, "no scenario runs when an org fails to set up")
-	assert.Contains(t, err.Error(), "setting up org halfsend-02: unsupported BEHAVIOUR_CI")
-	assert.Contains(t, err.Error(), "setting up org halfsend-03: deploying mint")
-	assert.Contains(t, err.Error(), "setting up org halfsend-04: panic: setup panic")
+	assert.Contains(t, err.Error(), `setting up org "halfsend-02": unsupported BEHAVIOUR_CI`)
+	assert.Contains(t, err.Error(), `setting up org "halfsend-03": deploying mint`)
+	assert.Contains(t, err.Error(), `setting up org "halfsend-04": panic: setup panic`)
 	assert.Len(t, h.pool.acquired, 4)
 	assert.Contains(t, h.drivers, "halfsend-02", "the partly set up org's driver is finalized")
 	h.assertTornDown(t)
@@ -766,7 +848,7 @@ func TestShardAssigner_RouterAndCapacity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "a", w.Org)
 	_, err = router(&godog.Scenario{Uri: "x.feature", Name: "two"})
-	assert.ErrorContains(t, err, "org b has no template World")
+	assert.ErrorContains(t, err, `org "b" has no template World`)
 	assert.Equal(t, 0, newShardAssigner(nil, t.Logf).driverCapacity())
 }
 

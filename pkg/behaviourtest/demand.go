@@ -59,8 +59,8 @@ type suiteDemand struct {
 
 // summarizeDemand classifies instances. skip returns godog.ErrSkip for
 // an instance that compatibility tags skip; any other error (a malformed
-// tag) fails the scenario in its Before hook, so the instance still runs
-// against an org but never reaches a provisioning step.
+// tag) fails the scenario in its Before hook before it is routed to an
+// org, so the instance is counted as eligible but never as provisioning.
 func summarizeDemand(instances []scenarioInstance, skip func(tags []string) error) suiteDemand {
 	var d suiteDemand
 	for _, inst := range instances {
@@ -139,12 +139,12 @@ func loadScenarioInstances(paths []string, tagFilter string) ([]scenarioInstance
 func parseFeatureInstances(path, uri string, line int, newID func() string) ([]scenarioInstance, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("opening feature %s: %w", path, err)
+		return nil, fmt.Errorf("opening feature %q: %w", path, err)
 	}
 	defer f.Close()
 	doc, err := gherkin.ParseGherkinDocument(f, newID)
 	if err != nil {
-		return nil, fmt.Errorf("parsing feature %s: %w", path, err)
+		return nil, fmt.Errorf("parsing feature %q: %w", path, err)
 	}
 	scenarioLines := scenarioLinesByID(doc)
 	var out []scenarioInstance
