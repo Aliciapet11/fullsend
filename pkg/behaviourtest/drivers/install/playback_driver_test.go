@@ -111,20 +111,20 @@ func TestPlaybackInstallHooks_AfterInstall_CreateIssueError(t *testing.T) {
 	assert.ErrorContains(t, err, "creating playback tracking issue")
 }
 
-func TestPlaybackSetupOpts_DefaultsToVendoredDummy(t *testing.T) {
+func TestPlaybackInstallOpts_DefaultsToVendoredDummy(t *testing.T) {
 	t.Setenv("PLAYBACK_RUNTIME", "")
 	opts := playbackInstallOpts()
 	assert.True(t, opts.Vendor)
 	assert.Empty(t, opts.Runtime)
 }
 
-func TestPlaybackSetupOpts_HonoursEnvOverride(t *testing.T) {
+func TestPlaybackInstallOpts_HonoursEnvOverride(t *testing.T) {
 	t.Setenv("PLAYBACK_RUNTIME", "dummy-playback")
 	opts := playbackInstallOpts()
 	assert.Equal(t, "dummy-playback", opts.Runtime)
 }
 
-// TestPlaybackSetupOpts_PropagatesConfigPreset is a regression test for a
+// TestPlaybackInstallOpts_PropagatesConfigPreset is a regression test for a
 // factory-path bug: NewRepoPoolCFMintPreviews builds its InstallOpts via
 // playbackInstallOpts instead of common.DefaultInstallOpts, and the
 // replacement silently dropped BEHAVIOUR_CONFIG_PRESET (unlike
@@ -132,7 +132,7 @@ func TestPlaybackSetupOpts_HonoursEnvOverride(t *testing.T) {
 // made ordinary DEV suites silently lose their requested preset even when
 // PLAYBACK_RUNTIME is unset. playbackInstallOpts must forward the preset so
 // it reaches the generated repos.yaml entry as config_base.source.
-func TestPlaybackSetupOpts_PropagatesConfigPreset(t *testing.T) {
+func TestPlaybackInstallOpts_PropagatesConfigPreset(t *testing.T) {
 	t.Setenv("PLAYBACK_RUNTIME", "")
 	t.Setenv("BEHAVIOUR_CONFIG_PRESET", "https://example.com/preset.yaml")
 	opts := playbackInstallOpts()
@@ -149,11 +149,11 @@ func TestPlaybackSetupOpts_PropagatesConfigPreset(t *testing.T) {
 	assert.NotContains(t, manifest, "runtime:", "the preset's runtime is inherited")
 }
 
-// TestPlaybackSetupOpts_ConfigPresetAndRuntime is a regression test
+// TestPlaybackInstallOpts_ConfigPresetAndRuntime is a regression test
 // covering the combined preset + explicit playback runtime case: the
 // installed runtime must match what doEnsure's post-install validation
 // expects (opts.Runtime), even when a config preset is also set.
-func TestPlaybackSetupOpts_ConfigPresetAndRuntime(t *testing.T) {
+func TestPlaybackInstallOpts_ConfigPresetAndRuntime(t *testing.T) {
 	t.Setenv("PLAYBACK_RUNTIME", "dummy-playback")
 	t.Setenv("BEHAVIOUR_CONFIG_PRESET", "https://example.com/preset.yaml")
 	opts := playbackInstallOpts()
