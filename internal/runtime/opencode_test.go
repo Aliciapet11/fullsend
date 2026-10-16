@@ -74,27 +74,44 @@ func TestTranslateOpenCodeModel(t *testing.T) {
 	assert.Equal(t, "google-vertex-anthropic/claude-sonnet-5-5@default", translateOpenCodeModel("sonnet", nil))
 	// Empty falls back to the default alias.
 	assert.Equal(t, "google-vertex-anthropic/claude-opus-5-5@default", translateOpenCodeModel("", nil))
-	// A bare (non-alias) id gets the provider prefix.
-	assert.Equal(t, "google-vertex-anthropic/claude-3-5", translateOpenCodeModel("claude-3-5", nil))
+	// A bare (non-alias) id gets the provider prefix and, on Vertex, @default.
+	assert.Equal(t, "google-vertex-anthropic/claude-3-5@default", translateOpenCodeModel("claude-3-5", nil))
+	// A bare id that already has an @version keeps it.
+	assert.Equal(t, "google-vertex-anthropic/claude-3-5@20241022", translateOpenCodeModel("claude-3-5@20241022", nil))
 	// A provider/model spec passes through unchanged.
 	assert.Equal(t, "openai/gpt-5", translateOpenCodeModel("openai/gpt-5", nil))
 
 	// Provider override from the environment.
 	t.Setenv(openCodeProviderEnv, "myprov")
 	assert.Equal(t, "myprov/claude-opus-5-5@default", translateOpenCodeModel("opus", nil))
+	// Only google-vertex-anthropic gets @default appended.
+	assert.Equal(t, "myprov/claude-3-5", translateOpenCodeModel("claude-3-5", nil))
+
+	// The suffix also applies when the env names the Vertex provider explicitly.
+	t.Setenv(openCodeProviderEnv, "google-vertex-anthropic")
+	assert.Equal(t, "google-vertex-anthropic/claude-3-5@default", translateOpenCodeModel("claude-3-5", nil))
 }
 
 func TestTranslateOpenCodeModel_ConfigAliases(t *testing.T) {
 	t.Setenv(openCodeProviderEnv, "")
 
-	// Per-repo alias overrides the built-in alias.
+	// Per-repo alias overrides the built-in alias; a bare id gets @default
+	// on Vertex (#7823).
 	overrides := map[string]string{"sonnet": "claude-sonnet-5"}
-	assert.Equal(t, "google-vertex-anthropic/claude-sonnet-5", translateOpenCodeModel("sonnet", overrides))
-	// An alias not overridden still uses the built-in.
+	assert.Equal(t, "google-vertex-anthropic/claude-sonnet-5@default", translateOpenCodeModel("sonnet", overrides))
+	// An alias not overridden still uses the built-in, with a single suffix.
 	assert.Equal(t, "google-vertex-anthropic/claude-opus-5-5@default", translateOpenCodeModel("opus", overrides))
+	// An override that already carries an @version is left untouched.
+	overrides = map[string]string{"opus": "claude-opus-4-6@20250901"}
+	assert.Equal(t, "google-vertex-anthropic/claude-opus-4-6@20250901", translateOpenCodeModel("opus", overrides))
 	// A per-repo alias that maps to a provider/id spec passes through.
 	overrides = map[string]string{"sonnet": "xai/grok-4.6"}
 	assert.Equal(t, "xai/grok-4.6", translateOpenCodeModel("sonnet", overrides))
+
+	// A non-Vertex provider from the environment gets no suffix.
+	t.Setenv(openCodeProviderEnv, "myprov")
+	overrides = map[string]string{"sonnet": "claude-sonnet-5"}
+	assert.Equal(t, "myprov/claude-sonnet-5", translateOpenCodeModel("sonnet", overrides))
 }
 
 func TestMergedOpenCodeModelAliases(t *testing.T) {

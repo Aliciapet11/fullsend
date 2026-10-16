@@ -91,11 +91,15 @@ A model is `provider/model`. The aliases resolve to ids in OpenCode's built-in m
 | `sonnet` | `google-vertex-anthropic/claude-sonnet-5-5@default` |
 | `haiku` | `google-vertex-anthropic/claude-haiku-5-5@default` |
 | `fable` | `google-vertex-anthropic/claude-fable-5-1@default` |
-| A bare id | the id, prefixed with `FULLSEND_OPENCODE_PROVIDER` (default `google-vertex-anthropic`) |
+| A bare id | the id, prefixed with `FULLSEND_OPENCODE_PROVIDER` (default `google-vertex-anthropic`); on `google-vertex-anthropic`, `@default` is appended when the id has no `@` suffix |
 | `provider/model` | unchanged |
 
 The harness or `--model` wins over the agent's `model:` frontmatter. `models.aliases` in
-`.fullsend/config.yaml` can retarget an alias.
+`.fullsend/config.yaml` can retarget an alias. A bare id there gets `@default`: `sonnet: claude-sonnet-5`
+becomes `google-vertex-anthropic/claude-sonnet-5@default`. That matches the catalog for 4.6 and later
+models only. Older models are listed under a dated id, so give it in full
+(`sonnet: claude-sonnet-4-5@20250929`); an id with an `@` suffix is left as is. An explicit
+`google-vertex-anthropic/...` spec passes through unchanged, so it must carry the catalog suffix too.
 
 **There is no fallback chain.** Vertex enables models per project. On a project that does not serve
 5.5, Claude Code falls back to 4.6, but OpenCode fails. Name a model your project serves, as in the
