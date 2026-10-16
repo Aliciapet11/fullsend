@@ -210,9 +210,12 @@ make behaviour-test
 
 The suite runs scenarios in parallel by default (`GODOG_CONCURRENCY=12`,
 matching the repo pool size). Each scenario gets its own `World` clone and
-leases a unique `test-repo-NN` from the pool, so no cross-scenario state
-is shared. The `behaviour-test` Make target includes `-race` to catch
-data races under concurrent execution.
+leases a unique `test-repo-NN` from its org's pool, so no cross-scenario state
+is shared. `GODOG_CONCURRENCY` limits the active scenarios across all of the
+run's orgs together (see [Pool orgs and the per-org scenario cap](#pool-orgs-and-the-per-org-scenario-cap)),
+so a run that uses three orgs still runs at most 12 scenarios at once. The
+`behaviour-test` Make target includes `-race` to catch data races under
+concurrent execution.
 
 To adjust concurrency:
 
@@ -230,6 +233,23 @@ GODOG_CONCURRENCY=1 make behaviour-test
 Serial mode (`GODOG_CONCURRENCY=1`) is useful when debugging a single
 scenario or when `-v` output from multiple scenarios would interleave.
 
+### Pool orgs and the per-org scenario cap
+
+GitHub's primary REST budget is per app installation, so each pool org has its own budget. Running the whole suite against one org drains that org's budget while the other orgs' budgets go unused. `RunSuite` (`pkg/behaviourtest/run.go`) therefore spreads the run over several DEV pool orgs, inside one `go test` process and one godog run. No feature tags or CI matrix decide the split.
+
+1. **Count the work.** Before acquiring any org, the runner parses the feature paths and expands every Scenario Outline row (`loadScenarioInstances` in `pkg/behaviourtest/demand.go`). It applies `GODOG_TAGS` and the [compatibility tags](#compatibility-tags), as godog would. It then counts the scenario instances that will run. An instance is *provisioning* when one of its steps, background steps included, is `the enrolled test repository`, the only step that leases a fresh repo and runs a fresh install. Instances that `GODOG_TAGS` filters out or that compatibility tags skip do not count, and an instance that provisions no repo does not count toward the cap.
+2. **Acquire orgs.** A DEV org takes at most 20 provisioning instances (`maxProvisioningPerOrg`). The runner locks orgs one at a time with `e2etest.AcquireOrg`, taking a separate lock per org. All locks share one run ID. Each attempt excludes the orgs the run already holds or has passed over. With full budgets, 1–20 provisioning instances use one org, 21–40 two, 41–60 three, and so on. A run whose scenarios need an org but provision no repo still takes one org. A run where no scenario will run takes none.
+3. **Check each org's budget.** After locking an org, the runner reads the org token's primary budget from the `X-RateLimit-*` headers of one read of the lock repo (`e2etest.SampleRateLimit`). The org takes `min(20, (budget - reserve) / cost)` provisioning instances. `cost` is the estimated requests per provisioning instance (`BEHAVIOUR_SCENARIO_API_COST`, default 200). `reserve` is the budget kept for suite-scoped work such as stale-resource cleanup, the mint deploy, finalize, and non-provisioning scenarios (`BEHAVIOUR_ORG_QUOTA_RESERVE`, default 500). `budget` is the remaining count, or the full limit when the budget resets within 5 minutes. An org with room for no provisioning instance is released at once and passed over. A partly depleted org takes fewer instances, and the runner acquires more orgs to cover the rest. If the pool cannot cover the run, the suite fails before any scenario starts. The error lists the shortfall and each org's remaining budget and reset time, rather than letting scenarios fail later with 403s.
+4. **Set up the orgs concurrently.** Each org gets its own stale-resource cleanup, install driver (its own preview mint on DEV), SCM and CI drivers, token, and template `World` with `Org` and `RepoOwner` set to that org. The org-independent test actors (outsider, write, triage) are resolved once and shared. Log lines from an org's drivers and scenarios carry an `[<org>]` prefix.
+5. **Route each scenario.** As godog starts a scenario, its Before hook (`suite.InitRoutedScenario`) assigns the scenario to an org. A provisioning scenario goes to the org using the smallest share of its capacity, and never past that capacity. Other scenarios go to the org with the fewest scenarios. Godog runs every selected scenario exactly once. The scenario keeps its existing steps and assertions and runs against a fresh repo in its assigned org. Its After hook deallocates through that org's driver. Each assignment is logged as `[org-shard] scenario "<feature>: <name>" (...) -> org <org>`. Failure summaries under `BEHAVIOUR_ARTIFACT_DIR` name the `org/repo` the scenario used.
+6. **Tear down.** When the suite ends, whether it passed, a scenario failed, setup failed, or the run panicked, each org's driver is finalized before that org's lock is released. Finalizing tears down the preview mint and reclaims leaked leases. The run log ends with each org's starting and ending budget, the time the suite body took, the number of provisioning and other scenarios each org ran, and the scenario names per org. Compare these lines across runs to judge whether more concurrency would help.
+
+The playback suite (`RunPlaybackSuite`) is unchanged: it acquires one org of its own with `AcquireOrg`.
+
+**STAGE is single-org.** The STAGE pool has one org (`halfsend`). With `ENVIRONMENT=stage` the runner puts every scenario in that org with no per-org cap, so the DEV 20-instance cap is **not** enforced on STAGE and no scenario is dropped. The runner still reads the org's budget. When the budget is below `reserve + cost × provisioning instances`, it logs `WARNING: single-org environment: ...` with the budget and the estimate. That warning means the run may hit primary-quota 403s within its 45-minute timeout. Only a second STAGE org would lift this limit.
+
+When you run the suite locally with a personal token (`gh auth login`), every pool org shares your user budget. The per-org figures in the log then describe that one budget, and spreading the run over orgs does not add budget.
+
 ### Playback suite
 
 The dummy-playback scenarios (`@playback`, e.g. `features/runtime/playback.feature`) run under their own target:
@@ -246,7 +266,7 @@ The `playback` job mirrors the `behaviour` job in [`.github/workflows/e2e.yml`](
 
 - **Target and environment.** Run `make playback-test` with `shell: bash`, teeing output (for example to `playback-test.log`) so `pipefail` propagates failures. Pass the same `env:` block as the behaviour job: `BEHAVIOUR_SCM=github`, `BEHAVIOUR_CI=githubactions`, `BEHAVIOUR_INSTALL_MODE=per-repo`, `E2E_GCP_*`, `TEST_*_PEM`, and the `TEST_CLOUDFLARE_*` credentials. Point `BEHAVIOUR_ARTIFACT_DIR` at a playback-specific directory (for example `${{ runner.temp }}/playback-artifacts`). You do not need to set `GODOG_TAGS` or `PLAYBACK_RUNTIME`, because `RunPlaybackSuite` sets them itself.
 - **Triggers, gate, and environment binding.** Use `needs: gate` for authorized `pull_request_target`, `merge_group`, and push to `main`; manual dispatch runs playback when `run_playback=true`. Bind to the same GitHub Environment (`stage` on push, `dev` otherwise) and set `ENVIRONMENT` to match. The job checks out and runs PR-head code with secrets, so the [CI Workflows security rules](../../contributing/ci-workflows.md#review-checklist-for-secrets-in-behaviourplayback-jobs) apply.
-- **Org reservation.** The playback and behaviour jobs share a job concurrency group within each stage workflow run, so they execute one at a time. Dev jobs use distinct groups and run concurrently, reserving separate orgs. `RunPlaybackSuite` reserves a pool org with the same `e2etest.AcquireOrg` lock that `RunSuite` uses (`orgPoolForEnvironment`), and the lock is released in `t.Cleanup`. Two limits make relying on that lock alone unsafe when both suites target the single stage org:
+- **Org reservation.** The playback and behaviour jobs share a job concurrency group within each stage workflow run, so they execute one at a time. Dev jobs use distinct groups and run concurrently, reserving separate orgs. `RunPlaybackSuite` reserves a pool org with the same `e2etest.AcquireOrg` lock that `RunSuite` takes for each of its orgs (`orgPoolForEnvironment`), and the lock is released in `t.Cleanup`. Two limits make relying on that lock alone unsafe when both suites target the single stage org:
   - `AcquireOrg` waits for the lock for the `E2E_LOCK_TIMEOUT` default of 10 minutes, far less than the 45-minute suite budget, so a job that starts while the other suite is running can fail while waiting.
   - A lock is treated as stale and reclaimed once it is older than 30 minutes (`staleLockTimeout` in `internal/e2etest`). That check uses only the lock's creation time and does not check whether the holder is still running, so a later contender can reclaim an org that a long-running suite is still using.
 
@@ -609,7 +629,7 @@ require github.com/fullsend-ai/fullsend v0.x.y // released tag, not @main
 
 Do not import `internal/mintcore` (or `internal/mintcore/mintconsts`) from packages reachable from `pkg/behaviourtest`. The nested mintcore module is resolved only by a local `replace` that downstream modules do not inherit; a leak makes `go build github.com/fullsend-ai/fullsend/pkg/behaviourtest` fail with `unknown revision internal/mintcore/v0.0.0`. Duplicate constants locally and keep the graph clean — see [Go Code](../../contributing/go-code.md).
 
-The supported entry point is `behaviourtest.RunSuite`. Driver selection, org acquisition, CLI build, concurrency, tags, and step registration are handled internally from the same environment variables as the in-repo suite (`BEHAVIOUR_SCM`, `BEHAVIOUR_CI`, `BEHAVIOUR_INSTALL_MODE`, `ENVIRONMENT`, `BEHAVIOUR_CAPABILITIES`, `BEHAVIOUR_CONFIG_PRESET`, `GODOG_TAGS`, `GODOG_CONCURRENCY`):
+The supported entry point is `behaviourtest.RunSuite`. Driver selection, org acquisition, CLI build, concurrency, tags, and step registration are handled internally from the same environment variables as the in-repo suite (`BEHAVIOUR_SCM`, `BEHAVIOUR_CI`, `BEHAVIOUR_INSTALL_MODE`, `ENVIRONMENT`, `BEHAVIOUR_CAPABILITIES`, `BEHAVIOUR_CONFIG_PRESET`, `BEHAVIOUR_SCENARIO_API_COST`, `BEHAVIOUR_ORG_QUOTA_RESERVE`, `GODOG_TAGS`, `GODOG_CONCURRENCY`):
 
 ```go
 //go:build behaviour
@@ -722,6 +742,12 @@ suiteRunner := godog.TestSuite{
 **`install.MintURLReporter` optional interface and `install.MintStatusTeamSlug`:** `MintURL() string` reports the suite's mint URL. The [CLI mint status scenarios](#cli-mint-status-scenarios) use it to get the mint address. It is a separate interface, not an `install.Driver` method, so external `install.Driver` implementations keep compiling. The mint status steps fail with a `deployment` error on a driver without it. `MintStatusTeamSlug` (`mint-status`) names the team the CF mint drivers pass as `--status-github-group <org>/mint-status`.
 
 **`world.World.CLIBinary`, `world.World.WriteToken` and `world.World.MintStatus` additions:** `RunSuite` sets `CLIBinary` to the CLI it builds and `WriteToken` to `TEST_ACTOR_WRITE_PAT`. `MintStatus` (type `world.MintStatus`) holds the CLI mint status scenario state. All three are non-breaking additions. A custom bootstrap must set `CLIBinary` and `WriteToken` to run the mint status scenarios.
+
+**`behaviourtest.RunSuite` spreads the run over pool orgs:** `RunSuite` now acquires as many pool orgs as the run's provisioning scenarios need, with at most 20 per DEV org (see [Pool orgs and the per-org scenario cap](#pool-orgs-and-the-per-org-scenario-cap)). Callers do not change. External suites also get the per-org split. Two new optional environment variables tune the quota check: `BEHAVIOUR_SCENARIO_API_COST` and `BEHAVIOUR_ORG_QUOTA_RESERVE`.
+
+**`suite.InitRoutedScenario` and `suite.TemplateRouter` additions:** `InitRoutedScenario(sc, base, route)` is `InitScenario` for a suite whose scenarios run against different template Worlds. Compatibility tags are evaluated against `base`, and every other scenario is cloned from the World `route` returns. `InitScenario` is unchanged. Both are non-breaking additions.
+
+**`steps.EnrolledTestRepositoryStep` addition:** This constant is the pattern of the step that leases a fresh pool repo. `RunSuite` matches scenario steps against it to count provisioning scenarios. It is a non-breaking addition.
 
 **`ci.EmptyMatrixWaiter` optional interface:** `WaitForHarnessEmptyMatrix(ctx, owner, repo string, after time.Time) (*forge.WorkflowRun, error)` backs the `the harness dispatch completes with an empty matrix` step. It is a separate interface, not a `ci.Driver` method, so external `ci.Driver` implementations keep compiling; the step fails with an explanatory error on a driver without it. Only the GitHub Actions reference driver implements it.
 

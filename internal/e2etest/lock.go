@@ -205,6 +205,21 @@ func ReleaseLock(ctx context.Context, client forge.Client, org, runID string, t 
 	releaseLock(ctx, client, org, runID, t)
 }
 
+// SampleRateLimit reads the primary REST budget of client's credential
+// while the run holds org's lock. It makes one read of the held lock
+// repo, whose response carries the X-RateLimit-* headers, and returns
+// what client observed. ok is false when client does not track the
+// headers (forge.RateLimitReporter) or no response carried them; the
+// read's own error is not returned because only the headers matter.
+func SampleRateLimit(ctx context.Context, client forge.Client, org string) (state forge.RateLimit, ok bool) {
+	reporter, isReporter := client.(forge.RateLimitReporter)
+	if !isReporter {
+		return forge.RateLimit{}, false
+	}
+	_, _ = client.GetRepo(ctx, org, lockRepo)
+	return reporter.RateLimit()
+}
+
 // tryReclaimStaleLock checks whether the lock on org is stale (older than
 // staleLockTimeout) and force-acquires it if so. Returns true if the lock
 // was reclaimed. This runs during the first pass so stale locks from
