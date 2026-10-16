@@ -749,7 +749,23 @@ reason and resource IDs.
   trigger account's deploy key can push to the protected default branch; an
   enabled, unreadable, or unreported setting defers. The trigger account must
   also be ready on the default branch, verified against live GitLab state. A deferral
-  changes nothing, and polling stays the dispatch path.
+  changes nothing, and polling stays the dispatch path. Only when every check
+  passes does install record the activation, as a separate protected
+  `FULLSEND_GITLAB_DISPATCH_ACTIVATION` variable bound to the exact ledger
+  generation (nonce and resource IDs); each later install, repair, rotation,
+  containment pass or uninstall deletes it first, so the child-pipeline
+  dispatch route is never selected or admitted on a ready account alone. The
+  `FULLSEND_GITLAB_TRIGGER_ACCOUNT` ledger itself gains no field, so an older
+  CLI keeps reading it. An older CLI does not know the activation variable: if
+  it rotates, repairs or removes the account, the record no longer matches the
+  ledger and the scaffold falls back to the Poller route until a current CLI
+  install records a fresh activation. The gate also defers when a committed CI
+  job, other than Fullsend's own, would run in a trigger or agent child
+  (`source=pipeline`) pipeline. A newer scaffold with an older CLI is refused
+  explicitly: before choosing the child-pipeline route the job runs
+  `fullsend poll --print-dispatch-routes`, and a CLI that does not list
+  `child-pipeline` stops the job before any dispatch with a message to upgrade
+  the pinned CLI.
 - **Deferral and unsafe token variable:** a branch-change, override-role, or
   capability deferral first removes an unsafe published token variable and
   revokes its ownership-verified trigger. A weakened or unreadable override
@@ -1423,7 +1439,8 @@ block so fullsend can leave it absent. When an existing, non-empty file has no
 running. For a missing or empty `.gitlab-ci.yml`, fullsend instead writes a
 fullsend-owned `workflow:` block with a name, `auto_cancel.on_new_commit:
 none`, the `CI_DEBUG_TRACE` deny rule, protected-ref `schedule`/`api`
-rules, and the protected-default-branch `trigger` rule. Later ordinary push jobs added to that file likewise need additional
+rules, and the protected-default-branch `pipeline` (child-pipeline agent
+dispatch) and `trigger` rules. Later ordinary push jobs added to that file likewise need additional
 `workflow.rules` (or an explicit `when: always` rule), or GitLab will skip
 them.
 
@@ -1440,7 +1457,8 @@ materializing when debug tracing is enabled.
 Before any credential-bearing call, the poll and agent job scripts also pin
 their own identity from the `CI_JOB_TOKEN` job record and fail closed unless
 both hold: the job's pipeline source matches that job's allowlist (poller =
-`schedule` only, agent = `api` only — `parent_pipeline` is not admitted), and
+`schedule` only, dispatcher = `trigger` only, agent = `api` or `pipeline` only
+— `parent_pipeline` is not admitted), and
 the job's ref is the project's **protected default branch**, not merely any
 protected ref. The YAML `workflow:` rules above still admit any protected
 ref, so a poll or agent pipeline dispatched against a protected

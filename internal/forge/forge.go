@@ -132,6 +132,20 @@ const (
 	VarPollMode       = "FULLSEND_POLL_MODE"
 	VarGitLabBotToken = "FULLSEND_GITLAB_BOT_TOKEN"
 
+	// VarGitLabDispatchRoute is the job-local selector the GitLab poll and
+	// dispatcher job scripts export for `fullsend poll` (#8438). It is never
+	// a CI/CD variable: the scripts derive it from the pinned pipeline's
+	// creator. "child-pipeline" starts agent pipelines with CI_JOB_TOKEN
+	// through the pipeline trigger API (source "pipeline"); unset or "api"
+	// keeps the Poller credential and the pipelines API (source "api").
+	VarGitLabDispatchRoute = "FULLSEND_GITLAB_DISPATCH_ROUTE"
+	// GitLabDispatchRouteChildPipeline is the VarGitLabDispatchRoute value
+	// that selects the CI_JOB_TOKEN child-pipeline dispatch route.
+	GitLabDispatchRouteChildPipeline = "child-pipeline"
+	// GitLabDispatchRouteAPI is the VarGitLabDispatchRoute value that keeps
+	// the Poller-credential pipelines API dispatch route.
+	GitLabDispatchRouteAPI = "api"
+
 	// VarGitLabRoleRegistry is the administrator-controlled GitLab role
 	// registry (JSON policy and credential *references*, never raw
 	// secret values). Absent or empty means built-in roles only. Must
@@ -157,6 +171,18 @@ const (
 	// Written by repos install and removed by repos uninstall only after
 	// every resource it records is gone; see #8437 and #8438.
 	VarGitLabTriggerAccount = "FULLSEND_GITLAB_TRIGGER_ACCOUNT"
+
+	// VarGitLabDispatchActivation is the protected, unmasked activation record
+	// for the trigger-account dispatch route (#8438). It is a separate variable
+	// rather than a ledger field because every released decoder of
+	// FULLSEND_GITLAB_TRIGGER_ACCOUNT rejects unknown fields before it reads the
+	// ledger version, so a new ledger field would make an older CLI fail on an
+	// activated project. The record binds to the exact ledger generation (nonce
+	// and resource IDs) it was written for, so any lifecycle change, including
+	// one made by an older CLI that does not know this variable, leaves it
+	// stale and the scaffold falls back to the Poller route. It never stores
+	// token values.
+	VarGitLabDispatchActivation = "FULLSEND_GITLAB_DISPATCH_ACTIVATION"
 
 	// SecretGitLabTriggerAccountToken is the pipeline trigger token owned by
 	// the trigger-only service account. It is stored as a masked, protected

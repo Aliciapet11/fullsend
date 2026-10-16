@@ -13,6 +13,15 @@ import (
 // (fullsendDispatcherTemplatePath) must define.
 const gitlabDispatcherJobName = "fullsend webhook dispatcher"
 
+// fullsendAgentJobName is the exact top-level key the committed agent
+// template (fullsendAgentTemplatePath) uses for the one job an agent child
+// pipeline (source=pipeline) is allowed to run. Its name interpolates the
+// stage input, so it is matched by exact raw-key equality rather than
+// evaluated; any other job or include in that template is extra work that
+// would run with the protected agent credentials outside run-agent-job.sh's
+// creator and HMAC checks (#8438).
+const fullsendAgentJobName = "fullsend $[[ inputs.stage | expand_vars ]] agent"
+
 // triggerExtraWorkRemedy is appended to every diagnostic about work other
 // than the dispatcher that a trigger pipeline would run. Fullsend never
 // rewrites user-owned jobs, so the remediation is the owner's to apply.
@@ -32,7 +41,55 @@ const triggerExtraWorkRemedy = "; add rules to it that reject $CI_PIPELINE_SOURC
 // outside the evaluator's subset) is a problem: admission cannot be ruled
 // out. A file that does not parse yields "" because GitLab cannot create a
 // pipeline from it; the readiness checks report that separately.
-func triggerExtraWorkProblem(content []byte, file, defaultBranch string, allowInclude func(*yaml.Node) bool, allowJob func(string) bool) string {
+//
+// The same check runs for source=pipeline (#8438): the trigger-account
+// child-pipeline route starts the agent pipeline with its CI_JOB_TOKEN, and
+// GitLab then records source=pipeline on the protected default branch. A
+// user job that a pipeline of that source would admit receives the same
+// protected credentials, so an unrelated job must not run in an agent child
+// pipeline either. Only the agent template include, which the Fullsend
+// wrapper admits for exactly api and pipeline sources, is allowed there.
+//
+// agentChild selects whether the source=pipeline check also runs. It is set
+// for the trigger-dispatch activation gate, which is what makes agent child
+// pipelines reachable; the webhook fast path alone never starts one, so a job
+// that only a source=pipeline pipeline would run does not defer it.
+func triggerExtraWorkProblem(content []byte, file, defaultBranch string, agentChild bool, allowInclude func(*yaml.Node) bool, allowJob func(string) bool) string {
+	if problem := triggerExtraWorkProblemForSource(content, file, defaultBranch, "trigger", allowInclude, allowJob, nil); problem != "" {
+		return problem
+	}
+	if !agentChild {
+		return ""
+	}
+	pipelineInclude := func(n *yaml.Node) bool {
+		return (allowInclude != nil && allowInclude(n)) || namesAgentInclude(n)
+	}
+	return triggerExtraWorkProblemForSource(content, file, defaultBranch, "pipeline", pipelineInclude, allowJob, nil)
+}
+
+// namesAgentInclude reports whether an include item is a local include of the
+// Fullsend agent template.
+func namesAgentInclude(item *yaml.Node) bool {
+	switch item.Kind {
+	case yaml.ScalarNode:
+		return item.Value == fullsendAgentTemplatePath
+	case yaml.MappingNode:
+		local := findMappingValue(item, "local")
+		if local == nil {
+			return false
+		}
+		value, ok := isLiteralScalarValue(local)
+		return ok && value == fullsendAgentTemplatePath
+	}
+	return false
+}
+
+// allowJobRaw, when set, accepts a top-level key by its raw (unevaluated)
+// name before the interpolation guard rejects it. It is how the agent
+// child-pipeline scan admits the one agent job whose name interpolates the
+// stage input (fullsendAgentJobName); any other interpolated key still fails
+// closed as unevaluable.
+func triggerExtraWorkProblemForSource(content []byte, file, defaultBranch, source string, allowInclude func(*yaml.Node) bool, allowJob func(string) bool, allowJobRaw func(string) bool) string {
 	docs, err := decodeGitLabDocuments(content)
 	if err != nil || len(docs) == 0 || docs[len(docs)-1].Kind != yaml.DocumentNode || len(docs[len(docs)-1].Content) == 0 {
 		return ""
@@ -41,18 +98,26 @@ func triggerExtraWorkProblem(content []byte, file, defaultBranch string, allowIn
 	if root.Kind != yaml.MappingNode {
 		return ""
 	}
-	if problem := duplicateMappingKeyProblem(root); problem != "" {
-		return file + " has a " + problem + ", so its exclusion from trigger pipelines cannot be established" + triggerExtraWorkRemedy
+	// kind and remedy name the pipeline source in diagnostics; the trigger
+	// wording is unchanged.
+	kind, alongside := "trigger pipelines", "a trigger pipeline would run alongside the dispatcher"
+	remedy := triggerExtraWorkRemedy
+	if source == "pipeline" {
+		kind, alongside = "agent child pipelines (source=pipeline)", "an agent child pipeline (source=pipeline) would run alongside the agent job"
+		remedy = "; add rules to it that reject $CI_PIPELINE_SOURCE == \"pipeline\" pipelines (Fullsend does not edit user-owned jobs)"
 	}
-	env := triggerPipelineEnv(defaultBranch)
-	if problem := triggerVariableOverrideProblem(root, env); problem != "" {
+	if problem := duplicateMappingKeyProblem(root); problem != "" {
+		return file + " has a " + problem + ", so its exclusion from " + kind + " cannot be established" + remedy
+	}
+	env := pipelineSourceEnv(defaultBranch, source)
+	if problem := triggerVariableOverrideProblem(root, env, allowJobRaw); problem != "" {
 		return file + ": " + problem
 	}
 	unevaluable := func(what string) string {
-		return fmt.Sprintf("%s has %s that cannot be evaluated, so its exclusion from trigger pipelines cannot be established%s", file, what, triggerExtraWorkRemedy)
+		return fmt.Sprintf("%s has %s that cannot be evaluated, so its exclusion from %s cannot be established%s", file, what, kind, remedy)
 	}
 	admitted := func(what string) string {
-		return fmt.Sprintf("%s has %s that a trigger pipeline would run alongside the dispatcher%s", file, what, triggerExtraWorkRemedy)
+		return fmt.Sprintf("%s has %s that %s%s", file, what, alongside, remedy)
 	}
 	// excluded reports whether rules reject or never match a trigger
 	// pipeline. ok is false when that cannot be established.
@@ -75,7 +140,15 @@ func triggerExtraWorkProblem(content []byte, file, defaultBranch string, allowIn
 	}
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		name, ok := classifyTopLevelKey(root.Content[i])
-		if !ok || hasInterpolationSyntax(name) {
+		if !ok {
+			return unevaluable("a top-level key")
+		}
+		if allowJobRaw != nil && allowJobRaw(name) {
+			// The one agent job whose interpolated name is admitted by raw
+			// equality; its execution surfaces are checked separately.
+			continue
+		}
+		if hasInterpolationSyntax(name) {
 			return unevaluable("a top-level key")
 		}
 		val := root.Content[i+1]
@@ -120,7 +193,7 @@ func triggerExtraWorkProblem(content []byte, file, defaultBranch string, allowIn
 			if job == nil || job.Kind != yaml.MappingNode {
 				return unevaluable(fmt.Sprintf("job %q", name))
 			}
-			if findMappingValue(job, "extends") != nil || findMappingValue(job, "only") != nil || findMappingValue(job, "except") != nil {
+			if jobHasUnevaluableAdmission(job) {
 				return unevaluable(fmt.Sprintf("job %q", name))
 			}
 			isExcluded, evaluable := excluded(job)
@@ -152,6 +225,17 @@ func triggerExtraWorkProblem(content []byte, file, defaultBranch string, allowIn
 // inside a bearer-token-triggered dispatcher job. before_script is not
 // reported: the dispatcher overrides it.
 func triggerGlobalExecProblem(content []byte, file string) string {
+	return globalExecProblem(content, file, "dispatcher job", "a trigger pipeline", fullsendDispatcherTemplatePath)
+}
+
+// agentGlobalExecProblem is triggerGlobalExecProblem for the agent child
+// pipeline (source=pipeline): global execution config in a committed file is
+// inherited by the agent job unless it disables default inheritance.
+func agentGlobalExecProblem(content []byte, file string) string {
+	return globalExecProblem(content, file, "agent job", "an agent child pipeline (source=pipeline)", fullsendAgentTemplatePath)
+}
+
+func globalExecProblem(content []byte, file, inheritorLabel, pipelineKind, inheritFile string) string {
 	docs, err := decodeGitLabDocuments(content)
 	if err != nil || len(docs) == 0 || docs[len(docs)-1].Kind != yaml.DocumentNode || len(docs[len(docs)-1].Content) == 0 {
 		return ""
@@ -161,10 +245,10 @@ func triggerGlobalExecProblem(content []byte, file string) string {
 		return ""
 	}
 	inherited := func(key string) string {
-		return fmt.Sprintf("%s defines global %s that the dispatcher job would inherit and run in a trigger pipeline; move it into the jobs that need it, or set inherit: default: false on the dispatcher job in %s", file, key, fullsendDispatcherTemplatePath)
+		return fmt.Sprintf("%s defines global %s that the %s would inherit and run in %s; move it into the jobs that need it, or set inherit: default: false on the %s in %s", file, key, inheritorLabel, pipelineKind, inheritorLabel, inheritFile)
 	}
 	unevaluable := func(key string) string {
-		return fmt.Sprintf("%s has %s that cannot be evaluated, so the global configuration the dispatcher job would inherit cannot be established; set inherit: default: false on the dispatcher job in %s", file, key, fullsendDispatcherTemplatePath)
+		return fmt.Sprintf("%s has %s that cannot be evaluated, so the global configuration the %s would inherit cannot be established; set inherit: default: false on the %s in %s", file, key, inheritorLabel, inheritorLabel, inheritFile)
 	}
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		name, ok := classifyTopLevelKey(root.Content[i])
@@ -206,6 +290,29 @@ func triggerGlobalExecProblem(content []byte, file string) string {
 // too, because the dispatcher's execution contract cannot be established.
 // Only an explicitly empty value is accepted.
 func triggerDispatcherExecProblem(content []byte, file string) string {
+	return jobExecSurfaceProblem(content, file, gitlabDispatcherJobName, "dispatcher job",
+		"the execution configuration it runs outside the dispatcher's authorization",
+		"which would run in a trigger pipeline outside the dispatcher's payload authorization and secret unsets")
+}
+
+// triggerAgentExecProblem is triggerDispatcherExecProblem for the agent job in
+// the agent child pipeline (source=pipeline, #8438). run-agent-job.sh performs
+// the creator and HMAC checks in the job's script; a job-level after_script,
+// services or hooks on the agent job would run outside those checks.
+func triggerAgentExecProblem(content []byte, file string) string {
+	return jobExecSurfaceProblem(content, file, fullsendAgentJobName, "agent job",
+		"the execution configuration it runs outside run-agent-job.sh's authorization",
+		"which would run in an agent child pipeline (source=pipeline) outside run-agent-job.sh's creator and HMAC checks")
+}
+
+// jobExecSurfaceProblem reports job-level after_script, services and hooks set
+// directly on the named job in a committed template. These surfaces are not
+// governed by inherit: default: false and run outside the job's script-level
+// authorization (after_script runs even after the script fails; services and
+// hooks run before it). Merge-derived and aliased values are resolved; a job
+// whose effective configuration cannot be evaluated is reported too. Only an
+// explicitly empty value is accepted.
+func jobExecSurfaceProblem(content []byte, file, jobName, jobLabel, unevalCtx, runCtx string) string {
 	docs, err := decodeGitLabDocuments(content)
 	if err != nil || len(docs) == 0 || docs[len(docs)-1].Kind != yaml.DocumentNode || len(docs[len(docs)-1].Content) == 0 {
 		return ""
@@ -214,18 +321,21 @@ func triggerDispatcherExecProblem(content []byte, file string) string {
 	if root.Kind != yaml.MappingNode {
 		return ""
 	}
-	jobNode, ok := effectiveMappingValue(root, gitlabDispatcherJobName)
+	jobNode, ok := effectiveMappingValue(root, jobName)
 	if !ok || jobNode == nil {
 		return ""
 	}
 	unevaluable := func(what string) string {
-		return fmt.Sprintf("%s has a dispatcher job with %s that cannot be evaluated, so the execution configuration it runs outside the dispatcher's authorization cannot be established; remove after_script, services and hooks from the dispatcher job", file, what)
+		return fmt.Sprintf("%s has a %s with %s that cannot be evaluated, so %s cannot be established; remove after_script, services and hooks from the %s", file, jobLabel, what, unevalCtx, jobLabel)
 	}
 	job := resolveAlias(jobNode)
 	if job == nil || job.Kind != yaml.MappingNode {
 		return unevaluable("a job definition")
 	}
-	if findMappingValue(job, "extends") != nil {
+	// extends is resolved merge-aware: an extends inherited through a YAML
+	// merge key (<<: *base) pulls in a hidden template's execution surfaces
+	// just like a direct one.
+	if v, ok := effectiveMappingValue(job, "extends"); !ok || v != nil {
 		return unevaluable("extends")
 	}
 	for _, key := range []string{"after_script", "services", "hooks"} {
@@ -243,15 +353,40 @@ func triggerDispatcherExecProblem(content []byte, file string) string {
 		if (resolved.Kind == yaml.SequenceNode || resolved.Kind == yaml.MappingNode) && len(resolved.Content) == 0 {
 			continue
 		}
-		return fmt.Sprintf("%s defines job-level %s on the dispatcher job, which would run in a trigger pipeline outside the dispatcher's payload authorization and secret unsets; remove it", file, key)
+		return fmt.Sprintf("%s defines job-level %s on the %s, %s; remove it", file, key, jobLabel, runCtx)
 	}
 	return ""
+}
+
+// jobHasUnevaluableAdmission reports whether a job sets extends, only or
+// except, directly or through a YAML merge key, or whether a merge source
+// cannot be evaluated. Those keys change the job's effective configuration or
+// admission in ways the scan does not model, so callers fail closed.
+func jobHasUnevaluableAdmission(job *yaml.Node) bool {
+	for _, key := range []string{"extends", "only", "except"} {
+		if v, ok := effectiveMappingValue(job, key); !ok || v != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatcherDisablesDefaultInheritance reports whether the committed
 // dispatcher template's job sets inherit: default: false, which stops it
 // inheriting any global or default execution configuration.
 func dispatcherDisablesDefaultInheritance(template []byte) bool {
+	return jobDisablesDefaultInheritance(template, gitlabDispatcherJobName)
+}
+
+// agentJobDisablesDefaultInheritance reports whether the committed agent
+// template's agent job sets inherit: default: false. The agent child pipeline
+// inherits global and default execution config into the agent job unless it
+// does, independently of the dispatcher's own inherit setting (#8438).
+func agentJobDisablesDefaultInheritance(template []byte) bool {
+	return jobDisablesDefaultInheritance(template, fullsendAgentJobName)
+}
+
+func jobDisablesDefaultInheritance(template []byte, jobName string) bool {
 	docs, err := decodeGitLabDocuments(template)
 	if err != nil || len(docs) == 0 || docs[len(docs)-1].Kind != yaml.DocumentNode || len(docs[len(docs)-1].Content) == 0 {
 		return false
@@ -260,7 +395,7 @@ func dispatcherDisablesDefaultInheritance(template []byte) bool {
 	if root.Kind != yaml.MappingNode {
 		return false
 	}
-	jobNode, ok := effectiveMappingValue(root, gitlabDispatcherJobName)
+	jobNode, ok := effectiveMappingValue(root, jobName)
 	if !ok || jobNode == nil {
 		return false
 	}
@@ -287,16 +422,53 @@ func dispatcherDisablesDefaultInheritance(template []byte) bool {
 // contributes nothing: GitLab runs only what is committed on the default
 // branch. Read failures are returned so the caller fails closed.
 func gitlabTriggerExtraWorkProblem(ctx context.Context, client forge.Client, owner, repo, defaultBranch string) (string, error) {
+	problem, err := gitlabExtraWorkProblem(ctx, client, owner, repo, defaultBranch, false)
+	if err != nil || problem == "" {
+		return "", err
+	}
+	// The webhook fast-path readiness report prefixes every deferral reason;
+	// gitlabExtraWorkProblem returns bare problem text so the activation gate
+	// (gitlabDispatchExtraWorkProblem) can list it without stripping a prefix.
+	return "webhook fast-path deferred: " + problem, nil
+}
+
+// gitlabDispatchExtraWorkProblem is gitlabTriggerExtraWorkProblem plus the
+// source=pipeline check (#8438): the trigger-dispatch activation gate uses it
+// so an unrelated user job cannot run in an agent child pipeline. It returns
+// bare problem text (no webhook fast-path prefix) for the gate's reason list.
+func gitlabDispatchExtraWorkProblem(ctx context.Context, client forge.Client, owner, repo, defaultBranch string) (string, error) {
+	return gitlabExtraWorkProblem(ctx, client, owner, repo, defaultBranch, true)
+}
+
+func gitlabExtraWorkProblem(ctx context.Context, client forge.Client, owner, repo, defaultBranch string, agentChild bool) (string, error) {
 	if defaultBranch == "" {
 		return "", nil
 	}
-	// Global execution defaults are only a problem when the dispatcher job
-	// inherits them, so the dispatcher template is read first.
+	// Global execution defaults are only a problem when a job that would run
+	// in a trigger or agent child pipeline inherits them, so the dispatcher
+	// template is read first.
 	checkInherited := true
 	if template, err := client.GetFileContent(ctx, owner, repo, fullsendDispatcherTemplatePath); err == nil {
 		checkInherited = !dispatcherDisablesDefaultInheritance(template)
 	} else if !forge.IsNotFound(err) {
 		return "", safeAPIError("reading "+fullsendDispatcherTemplatePath, err)
+	}
+	// The agent template is read once when the source=pipeline check runs: it
+	// is both scanned for unrelated work below and consulted here, because the
+	// agent job inherits global defaults unless it disables them, independently
+	// of the dispatcher's own inherit setting.
+	var agentContent []byte
+	if agentChild {
+		content, err := client.GetFileContent(ctx, owner, repo, fullsendAgentTemplatePath)
+		switch {
+		case err == nil:
+			agentContent = content
+			if !checkInherited && !agentJobDisablesDefaultInheritance(content) {
+				checkInherited = true
+			}
+		case !forge.IsNotFound(err):
+			return "", safeAPIError("reading "+fullsendAgentTemplatePath, err)
+		}
 	}
 	for _, f := range []struct {
 		path         string
@@ -314,19 +486,41 @@ func gitlabTriggerExtraWorkProblem(ctx context.Context, client forge.Client, own
 			}
 			return "", safeAPIError("reading "+f.path, err)
 		}
-		if problem := triggerExtraWorkProblem(content, "the committed "+f.path, defaultBranch, f.allowInclude, f.allowJob); problem != "" {
-			return "webhook fast-path deferred: " + problem, nil
+		if problem := triggerExtraWorkProblem(content, "the committed "+f.path, defaultBranch, agentChild, f.allowInclude, f.allowJob); problem != "" {
+			return problem, nil
 		}
 		if f.path == fullsendDispatcherTemplatePath {
 			// The dispatcher job itself is skipped by the job checks above;
 			// its own job-level execution surfaces are checked here.
 			if problem := triggerDispatcherExecProblem(content, "the committed "+f.path); problem != "" {
-				return "webhook fast-path deferred: " + problem, nil
+				return problem, nil
 			}
 		}
 		if checkInherited {
 			if problem := triggerGlobalExecProblem(content, "the committed "+f.path); problem != "" {
-				return "webhook fast-path deferred: " + problem, nil
+				return problem, nil
+			}
+		}
+	}
+	// The agent template itself must contain only the one agent job, no extra
+	// include or job and no execution surface outside run-agent-job.sh's
+	// checks: the agent include is admitted by name in the files above, so a
+	// job or include committed here would otherwise run in the agent child
+	// pipeline with the protected agent credentials unguarded (#8438).
+	if agentContent != nil {
+		agentFile := "the committed " + fullsendAgentTemplatePath
+		allowAgentJob := func(n string) bool { return n == fullsendAgentJobName }
+		if problem := triggerExtraWorkProblemForSource(agentContent, agentFile, defaultBranch, "pipeline", nil, nil, allowAgentJob); problem != "" {
+			return problem, nil
+		}
+		if problem := triggerAgentExecProblem(agentContent, agentFile); problem != "" {
+			return problem, nil
+		}
+		// Only the agent job's own inherit setting governs the agent template's
+		// global defaults; the dispatcher is not part of the agent child pipeline.
+		if !agentJobDisablesDefaultInheritance(agentContent) {
+			if problem := agentGlobalExecProblem(agentContent, agentFile); problem != "" {
+				return problem, nil
 			}
 		}
 	}
@@ -360,7 +554,7 @@ func gitlabDispatcherTemplateProblem(template []byte, defaultBranch string) stri
 	if job == nil || job.Kind != yaml.MappingNode {
 		return fmt.Sprintf("defines the %q job as a mapping", gitlabDispatcherJobName)
 	}
-	if findMappingValue(job, "extends") != nil || findMappingValue(job, "only") != nil || findMappingValue(job, "except") != nil {
+	if jobHasUnevaluableAdmission(job) {
 		return "defines a dispatcher job whose admission can be evaluated (extends, only and except are not supported)"
 	}
 	script, ok := effectiveMappingValue(job, "script")
@@ -428,12 +622,14 @@ func gitlabDispatcherTemplateProblem(template []byte, defaultBranch string) stri
 
 // Reject overrides wherever they occur, including workflow rules and hidden
 // templates. Their applicability cannot safely be inferred using the very
-// predefined variables they can replace.
-func triggerVariableOverrideProblem(node *yaml.Node, env map[string]*string) string {
-	return triggerVariableOverrideProblemSeen(node, env, map[*yaml.Node]bool{})
+// predefined variables they can replace. allowKeyRaw, when set, tolerates a
+// specific interpolated key (the agent job name) whose subtree is still
+// walked; any other interpolated key is still unverifiable.
+func triggerVariableOverrideProblem(node *yaml.Node, env map[string]*string, allowKeyRaw func(string) bool) string {
+	return triggerVariableOverrideProblemSeen(node, env, allowKeyRaw, map[*yaml.Node]bool{})
 }
 
-func triggerVariableOverrideProblemSeen(node *yaml.Node, env map[string]*string, seen map[*yaml.Node]bool) string {
+func triggerVariableOverrideProblemSeen(node *yaml.Node, env map[string]*string, allowKeyRaw func(string) bool, seen map[*yaml.Node]bool) string {
 	if node == nil {
 		return ""
 	}
@@ -442,7 +638,7 @@ func triggerVariableOverrideProblemSeen(node *yaml.Node, env map[string]*string,
 	}
 	seen[node] = true
 	if node.Kind == yaml.AliasNode {
-		return triggerVariableOverrideProblemSeen(node.Alias, env, seen)
+		return triggerVariableOverrideProblemSeen(node.Alias, env, allowKeyRaw, seen)
 	}
 	if node.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(node.Content); i += 2 {
@@ -450,7 +646,9 @@ func triggerVariableOverrideProblemSeen(node *yaml.Node, env map[string]*string,
 			// could resolve to "variables", so it cannot be verified.
 			sectionKey, sectionOK := classifyTopLevelKey(node.Content[i])
 			if sectionKey != "<<" && (!sectionOK || hasInterpolationSyntax(sectionKey)) {
-				return "variable overrides cannot be verified"
+				if !(sectionOK && allowKeyRaw != nil && allowKeyRaw(sectionKey)) {
+					return "variable overrides cannot be verified"
+				}
 			}
 			if sectionKey == "variables" {
 				vars := node.Content[i+1]
@@ -470,7 +668,7 @@ func triggerVariableOverrideProblemSeen(node *yaml.Node, env map[string]*string,
 		}
 	}
 	for _, child := range node.Content {
-		if problem := triggerVariableOverrideProblemSeen(child, env, seen); problem != "" {
+		if problem := triggerVariableOverrideProblemSeen(child, env, allowKeyRaw, seen); problem != "" {
 			return problem
 		}
 	}

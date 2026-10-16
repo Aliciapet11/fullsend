@@ -46,6 +46,6 @@ func TestReportGitLabTriggerDispatchGate_PrerequisitesVerified(t *testing.T) {
 	if !assert.Contains(t, out, "GitLab trigger dispatch prerequisites verified") {
 		return
 	}
-	assert.Contains(t, out, "the dispatch route is not yet activated")
+	assert.Contains(t, out, "the dispatch activation is recorded")
 	assert.NotContains(t, out, "deferred")
 }

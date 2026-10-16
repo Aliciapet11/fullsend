@@ -1,7 +1,9 @@
 package gitlab
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1152,6 +1154,63 @@ func (c *LiveClient) CreatePipelineWithInputs(ctx context.Context, owner, repo, 
 		return nil, fmt.Errorf("decode pipeline response: %w", err)
 	}
 
+	return &forge.Pipeline{ID: result.ID, WebURL: result.WebURL}, nil
+}
+
+// TriggerPipelineWithJobToken creates a downstream pipeline on ref through
+// the pipeline trigger API, authenticated by the running job's CI_JOB_TOKEN
+// and parameterized by typed pipeline inputs (#8438). GitLab records such a
+// pipeline with source "pipeline" and attributes it to the user who owns
+// the calling job, so the protected-branch admission of the new pipeline is
+// that user's, not the client's PAT owner's. The client's PRIVATE-TOKEN is
+// deliberately not sent: the job token alone authenticates the request,
+// and sending both would make the creating identity ambiguous.
+//
+// The job token travels in the JSON body, never in the URL, so it cannot
+// appear in a logged request path. The request is sent exactly once: a
+// retry after an ambiguous outcome could start a duplicate agent pipeline.
+func (c *LiveClient) TriggerPipelineWithJobToken(ctx context.Context, owner, repo, ref, jobToken string, inputs map[string]forge.PipelineInputValue) (*forge.Pipeline, error) {
+	if jobToken == "" {
+		return nil, fmt.Errorf("trigger pipeline with job token: CI job token is empty")
+	}
+	in := inputs
+	if in == nil {
+		in = map[string]forge.PipelineInputValue{}
+	}
+	bodyData, err := json.Marshal(map[string]any{
+		"token":  jobToken,
+		"ref":    ref,
+		"inputs": in,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("trigger pipeline with job token: marshal request body: %w", err)
+	}
+	path := fmt.Sprintf("/projects/%s/trigger/pipeline", projectPath(owner, repo))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL(path), bytes.NewReader(bodyData))
+	if err != nil {
+		return nil, fmt.Errorf("trigger pipeline with job token: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// The body carries the job token and is replayable, so a 307/308 would
+	// forward it (and the ref and signed inputs) to wherever the response
+	// points, cross-origin or over cleartext. Never follow redirects on this
+	// request: the redirect response is returned and rejected below.
+	noRedirect := *c.http
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("trigger pipeline with job token: http POST %s: %w", path, err)
+	}
+	if err := checkStatus(resp, http.StatusOK, http.StatusCreated); err != nil {
+		return nil, fmt.Errorf("trigger pipeline with job token: %w", err)
+	}
+	var result struct {
+		ID     int64  `json:"id"`
+		WebURL string `json:"web_url"`
+	}
+	if err := decodeJSON(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode triggered pipeline response: %w", err)
+	}
 	return &forge.Pipeline{ID: result.ID, WebURL: result.WebURL}, nil
 }
 

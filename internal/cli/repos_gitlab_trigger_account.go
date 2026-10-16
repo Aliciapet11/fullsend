@@ -68,7 +68,13 @@ func maybeConvergeGitLabTriggerAccount(ctx context.Context, opts *reposInstallCo
 		printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger account deferred: %s. Polling stays the dispatch path", repoFullName, result.Deferred))
 	case result.Ready:
 		printer.StepDone(fmt.Sprintf("[%s] GitLab trigger account ready (the dispatch route stays inactive until it is activated separately)", repoFullName))
-		reportGitLabTriggerDispatchGate(ctx, client, lifecycleOpts.API, printer, owner, repo, info.DefaultBranch)
+		gate := reportGitLabTriggerDispatchGate(ctx, client, lifecycleOpts.API, printer, owner, repo, info.DefaultBranch)
+		// Only a gate that just passed activates the route; a deferred gate
+		// leaves the ledger without the activation (the lifecycle cleared it).
+		if err := repos.SetGitLabTriggerDispatchActive(ctx, lifecycleOpts, gate.Ready); err != nil {
+			printer.StepFail(fmt.Sprintf("[%s] Recording the GitLab trigger dispatch activation failed", repoFullName))
+			return err
+		}
 	}
 	return nil
 }
@@ -78,8 +84,10 @@ func maybeConvergeGitLabTriggerAccount(ctx context.Context, opts *reposInstallCo
 // trigger account reaches it, including the one taken after GitLab refuses the
 // Poller protected-ref grant. A deferral is informational: it changes nothing
 // and polling stays the dispatch path.
-func reportGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, api repos.GitLabTriggerAccountAPI, printer *ui.Printer, owner, repo, branch string) {
-	printGitLabTriggerDispatchGate(printer, owner+"/"+repo, repos.CheckGitLabTriggerDispatchGate(ctx, client, api, owner, repo, branch))
+func reportGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, api repos.GitLabTriggerAccountAPI, printer *ui.Printer, owner, repo, branch string) repos.GitLabTriggerDispatchGate {
+	gate := repos.CheckGitLabTriggerDispatchGate(ctx, client, api, owner, repo, branch)
+	printGitLabTriggerDispatchGate(printer, owner+"/"+repo, gate)
+	return gate
 }
 
 // printGitLabTriggerDispatchGate prints a dispatch-gate result.
@@ -88,7 +96,7 @@ func printGitLabTriggerDispatchGate(printer *ui.Printer, repoFullName string, ga
 		printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch activation deferred: %s. Polling stays the dispatch path", repoFullName, strings.Join(gate.Deferred, "; ")))
 		return
 	}
-	printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch prerequisites verified (schedules migrated off pipeline variables, override role no_one_allowed, job-token repository push disabled, trigger account ready); the dispatch route is not yet activated", repoFullName))
+	printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch prerequisites verified (schedules migrated off pipeline variables, override role no_one_allowed, job-token repository push disabled, trigger account ready); the dispatch activation is recorded for pipelines the trigger account creates", repoFullName))
 }
 
 // containFailedKeys returns the owner/repo names of repos whose trigger-account

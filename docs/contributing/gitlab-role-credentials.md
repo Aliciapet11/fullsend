@@ -850,6 +850,89 @@ and the path that prepares the trigger account after the Poller protected-ref
 grant is refused. A deferral is informational and leaves polling in place. No
 dispatch path uses the token yet.
 
+**Child-pipeline agent dispatch.** A pipeline the trigger-only account creates
+on the protected default branch (a webhook `trigger` pipeline started with its
+trigger token, or a `schedule` pipeline it owns) can start the agent pipeline
+with the running job's `CI_JOB_TOKEN` through
+`POST /projects/:id/trigger/pipeline`. GitLab records that pipeline with
+source `pipeline` and attributes it to the same account, so it runs on the
+protected branch through the deploy-key grant and needs no Poller
+protected-ref access ([#8438](https://github.com/fullsend-ai/fullsend/issues/8438)).
+The route is implemented and selected per job:
+
+- `run-poll-job.sh` and `run-dispatcher-job.sh` call
+  `fullsend_select_gitlab_dispatch_route` (in `pin-ci-job-identity.sh`) after
+  the identity pin and Poller credential selection. It exports
+  `FULLSEND_GITLAB_DISPATCH_ROUTE=child-pipeline` only when the ledger is
+  `ready` with a published trigger token, the protected
+  `FULLSEND_GITLAB_DISPATCH_ACTIVATION` record names exactly that ledger
+  generation (nonce, account, deploy key, grant and trigger token IDs), and
+  both the pinned pipeline's creator and the user the running job (and so
+  `CI_JOB_TOKEN`) authenticates as, read from the authenticated `GET /job`
+  response, equal its `account_id`.
+  The job user check matters because a retried job keeps the pipeline creator
+  but runs as the retrier, whose child pipeline the agent job would reject. Any
+  other creator or job user, an unreadable one, or a missing, malformed or
+  mismatched activation record exports `api`, so polling continues through the
+  Poller credential while activation is deferred. The variable is job-local; it
+  is never a CI/CD variable. When the route would be `child-pipeline`, the
+  script first requires the installed CLI to list it in
+  `fullsend poll --print-dispatch-routes`; a CLI that predates the selector
+  rejects that flag, and the job stops explicitly before any dispatch.
+- The activation is recorded only by install, after
+  `CheckGitLabTriggerDispatchGate` returns Ready (schedules migrated off
+  pipeline variables, override role `no_one_allowed`, job-token repository
+  push disabled, no unrelated committed job reachable from a trigger or agent
+  child `source=pipeline` pipeline, trigger account ready). It is stored in
+  `FULLSEND_GITLAB_DISPATCH_ACTIVATION`, not in the ledger. Every converge,
+  rotate, containment or uninstall run deletes it before doing anything else,
+  including runs that defer, so a ready ledger with a published trigger token
+  never selects or admits the route on its own. The gate is a point-in-time
+  check: a later weakening is detected, and the activation withdrawn, on the
+  next install run.
+- `fullsend poll` (both the cron and `gitlab-webhook` drivers) then starts
+  agent pipelines with `CI_JOB_TOKEN` and the same signed typed inputs as the
+  Poller route. The request is sent once, without the Poller PAT, and the job
+  token travels only in the request body. The route requires the typed
+  pipeline-input contract; a legacy variable-based repository is refused
+  rather than dispatched through pipeline variables.
+- The root `workflow:rules` admits `source=pipeline` only on the protected
+  default branch with the stage input set, and `fullsend-pipeline.yml`
+  includes the agent template for `api` and `pipeline` only. `run-agent-job.sh`
+  admits the `api pipeline` set at the identity pin, requires the recorded
+  trigger account (ready ledger with a matching activation record) as creator for
+  `pipeline` (never the Poller), and verifies the dispatch HMAC before any role
+  credential is selected.
+- **Upgrade ordering:** the root `workflow:rules` admission for
+  `source=pipeline` reaches an existing install only when install converges the
+  root `.gitlab-ci.yml`, so converge the root before the dispatch activation is
+  recorded or a dispatch entry point moves to the trigger account; a pipeline
+  rejected by an unconverged root fails closed. Likewise, upgrade the CLI
+  before activation: the job scripts probe the installed CLI with
+  `fullsend poll --print-dispatch-routes` before selecting `child-pipeline`,
+  and a CLI that predates `FULLSEND_GITLAB_DISPATCH_ROUTE` rejects that flag,
+  so a newer scaffold with an older CLI stops explicitly before any dispatch
+  instead of dispatching through the Poller credential and failing late.
+- **Older CLIs and rollback:** every released decoder of the ledger rejects an
+  unknown field before it reads `version`, so a version bump alone would not
+  protect an older CLI. The activation therefore lives in the separate
+  `FULLSEND_GITLAB_DISPATCH_ACTIVATION` variable, and the ledger keeps exactly
+  its earlier field set: an older CLI still reads it, and install, rotate and
+  uninstall by that CLI work. The older CLI does not know the activation
+  variable and cannot withdraw it, but the record is bound to the ledger's
+  nonce and resource IDs, so any rotation, repair or removal by the older CLI
+  changes the ledger and leaves the record naming a generation that no longer
+  exists; the scaffold then selects the Poller route. A current CLI deletes a
+  stale record on its next install, containment or uninstall run. Rollback is
+  therefore just running the older CLI: dispatch falls back to the Poller
+  route.
+
+The route becomes active once install moves a dispatch entry point onto the
+trigger-only account: pointing the webhook at its trigger token and creating
+the polling schedules it owns. That ownership change and its lifecycle are not
+yet implemented, so today's webhook and schedule pipelines keep using the
+`api` route.
+
 **No schedule in #8437.** A pipeline schedule runs as its owner, and its cron,
 ref, and variables are defined by the dispatch admission rules of #8438.
 Creating one now would activate the dispatch route this change keeps inactive.
@@ -1061,9 +1144,14 @@ GitLab CI templates (`fullsend-poll.yml`, `fullsend-dispatcher.yml`,
 the `CI_JOB_TOKEN` job record (`GET /api/v4/job`) rather than from the
 overridable `CI_PROJECT_ID` / `CI_PIPELINE_ID` / `CI_COMMIT_REF_PROTECTED`
 env vars, and fails closed unless the server-side `.source` matches that
-job's disjoint allowlist (poller = `schedule` only, agent = `api` only;
-`parent_pipeline` is not admitted) and the job ref is the project's
-protected default branch. YAML `workflow:` and job `rules:` also deny
+job's disjoint allowlist (poller = `schedule` only, dispatcher = `trigger`
+only, agent = `api` or `pipeline` only; `parent_pipeline` is not admitted)
+and the job ref is the project's protected default branch. The agent job then
+requires the pipeline creator that source implies: the Poller bot for `api`,
+and for `pipeline` the account recorded in the protected
+`FULLSEND_GITLAB_TRIGGER_ACCOUNT` ledger in phase `ready`, which must not be
+the Poller identity (see **Child-pipeline agent dispatch** under
+[Trigger-only service account](#trigger-only-service-account)). YAML `workflow:` and job `rules:` also deny
 truthy `CI_DEBUG_TRACE` values (the gitlab-runner `ParseBool` truthy set:
 `1`, `t`/`T`, `true`/`TRUE`/`True`) before any admit rule, because secrets
 materialize at job init. In `run-agent-job.sh`,
@@ -1076,7 +1164,7 @@ before HMAC verification passes. The template only re-resolves the
 credential for the job's actual stage — analyst stages use
 `FULLSEND_GITLAB_ANALYST_TOKEN`, coder stages use
 `FULLSEND_GITLAB_CODER_TOKEN` — once `DISPATCH_VERIFIED` is true: the
-`api`-sourced dispatch passed HMAC verification. This is required for
+`api`- or `pipeline`-sourced dispatch passed HMAC verification. This is required for
 every job:
 `select-gitlab-role-token.sh` has no shared-token path left
 (it mirrors `gitlabroles.Resolve` on the Go side), so a sibling
@@ -1086,7 +1174,8 @@ allowed to select it there either. A missing `FULLSEND_DISPATCH_SECRET`
 now fails the job closed in every gate mode instead of silently
 skipping HMAC verification. A
 `parent_pipeline`-sourced dispatch (legacy child-pipeline installs;
-current installs only ever dispatch via `api`) is already denied at the
+current installs dispatch via `api` or the `pipeline` trigger-API route) is
+already denied at the
 identity pin before reaching this gate, so it never contributes a
 `DISPATCH_VERIFIED=true`. The job fails closed at that point
 (`exit 1`) in every gate mode, rather than continuing on the
