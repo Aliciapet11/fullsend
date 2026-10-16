@@ -582,7 +582,7 @@ func TestConverge_EstablishedMarkerlessOverlayFailsWithoutWrites(t *testing.T) {
 // PreflightProposedManagedSafety applies convergence's layered comparison to
 // the proposed manifest without writing anything: an installed repository
 // whose overlay or base would relax is rejected, a pristine first install and
-// a safe proposal pass, and an unloadable preset is reported.
+// a safe proposal pass, and an unloadable preset is left to convergence.
 func TestPreflightProposedManagedSafety(t *testing.T) {
 	presetPath := writePresetFile(t, wideningPreset)
 	for _, forgeName := range layerForges {
@@ -613,11 +613,12 @@ func TestPreflightProposedManagedSafety(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "kill_switch")
 		})
-		t.Run(forgeName+"/unloadable preset is reported", func(t *testing.T) {
+		t.Run(forgeName+"/unloadable preset is left to convergence", func(t *testing.T) {
+			// A preset load failure fails only that repository; convergence
+			// reloads it before any write and reports it there (#8516).
 			fc, cfg := blockedInstallFixture(t, forgeName, true, presetPath+".missing")
-			err := PreflightProposedManagedSafety(context.Background(), cfg.Manifest, newTestClientFactory(fc), nil)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "loading config preset")
+			require.NoError(t, PreflightProposedManagedSafety(context.Background(), cfg.Manifest, newTestClientFactory(fc), nil))
+			assertNoForgeWrites(t, fc)
 		})
 	}
 }

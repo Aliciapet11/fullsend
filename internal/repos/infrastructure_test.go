@@ -2,6 +2,7 @@ package repos
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -566,6 +567,30 @@ func TestPreflightEffectiveInfrastructure(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "disagrees with inference.project")
 	})
+}
+
+// A preset that cannot be loaded fails only the repository that declares it
+// (#8516): the run-level install preflights leave it to convergence, which
+// reports it in that repository's result while the others still converge.
+func TestPreflight_UnloadablePresetFailsOnlyItsRepository(t *testing.T) {
+	ctx := context.Background()
+	names := []string{"acme/api", "acme/web", "acme/docs"}
+	fc := newFakeClientForBatch(names...)
+	m := newConvergeManifest(names...)
+	m.GitHub.Repos[1].ConfigBase = ConfigBase{Source: filepath.Join(t.TempDir(), "missing.yaml")}
+	clients := newTestClientFactory(fc)
+
+	require.NoError(t, PreflightProposedManagedSafety(ctx, m, clients, nil))
+	require.NoError(t, PreflightEffectiveInfrastructure(ctx, m, clients, nil, "test-inference", ""))
+
+	sc := &fakeScaffoldCommit{}
+	result, err := Converge(ctx, convergeCfgWithDefaults(m), clients, sc.fn(), noopProgress)
+	require.NoError(t, err)
+	failed := result.Failed()
+	require.Len(t, failed, 1)
+	assert.Equal(t, "web", failed[0].Repo)
+	assert.Contains(t, failed[0].Error.Error(), "loading config preset")
+	assert.Len(t, result.Installed(), 2)
 }
 
 // A mint_url supplied only by an unpinned remote preset could be changed by

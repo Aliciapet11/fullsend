@@ -16,6 +16,8 @@ import (
 // manifest edits, so a mint URL conflict, an invalid declared value or a
 // flag that contradicts the declared configuration fails before any write
 // and leaves repos.yaml untouched. Every offending repository is reported.
+// A repository whose preset cannot be loaded is skipped: convergence
+// reports that failure for the repository alone.
 func PreflightEffectiveInfrastructure(ctx context.Context, m *Manifest, clients ForgeClientFactory, filter []string, inferenceProject, wifProvider string) error {
 	selected, err := selectManifestRepos(ctx, m, clients, filter)
 	if err != nil {
@@ -31,11 +33,13 @@ func PreflightEffectiveInfrastructure(ctx context.Context, m *Manifest, clients 
 		if resolved.RequireInferenceAuth() != nil {
 			continue
 		}
-		name := rr.Owner + "/" + rr.Repo
 		if resolved.Config != "" {
 			data, loadErr := store.Load(ctx, resolved.Config, resolved.ConfigHash)
 			if loadErr != nil {
-				errs = append(errs, fmt.Errorf("%s: loading config preset: %w", name, loadErr))
+				// A preset that cannot be loaded is a failure of this
+				// repository only: convergence loads it again before any
+				// forge write and reports the error in this repository's
+				// result, so one preset cannot stop the fleet (#8516).
 				continue
 			}
 			resolved.ProposedBase = data
