@@ -828,6 +828,23 @@ replacement from a fresh account generation (see below). Generic role-variable
 cleanup excludes both the ledger and the token sink, so neither is deleted
 except by the trigger-account lifecycle.
 
+**Dispatch activation gate.** `CheckGitLabTriggerDispatchGate`
+([`internal/repos/gitlab_trigger_dispatch_gate.go`](../../internal/repos/gitlab_trigger_dispatch_gate.go))
+must pass before any webhook or schedule dispatch path uses the trigger
+token ([#8438](https://github.com/fullsend-ai/fullsend/issues/8438)). It only
+reads and reports every unmet prerequisite: managed scheduled polling no longer
+uses pipeline variables (the canonical schedule specs and every live managed
+schedule; a failed schedule read defers), the live
+`ci_pipeline_variables_minimum_override_role` is exactly `no_one_allowed`
+(weaker, unreadable, and unsupported all defer; a published token or
+deploy-key grant is not taken as proof), and `DiagnoseGitLabTriggerAccount`
+reports `ready` for the default branch. `repos install` rechecks it whenever
+the trigger account converges to ready. That includes the legacy (non-typed)
+path, where the schedules still set `FULLSEND_POLL_MODE` and the gate defers,
+and the path that prepares the trigger account after the Poller protected-ref
+grant is refused. A deferral is informational and leaves polling in place. No
+dispatch path uses the token yet.
+
 **No schedule in #8437.** A pipeline schedule runs as its owner, and its cron,
 ref, and variables are defined by the dispatch admission rules of #8438.
 Creating one now would activate the dispatch route this change keeps inactive.

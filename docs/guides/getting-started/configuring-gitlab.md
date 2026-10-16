@@ -733,6 +733,18 @@ reason and resource IDs.
   merge grant for the Poller. Install still prepares the trigger account in
   that case. The Poller access failure is reported once for the repo, and the
   dispatch-route stages that follow it (the webhook fast path) stay skipped.
+- **Dispatch activation gate:** whenever install leaves the trigger account
+  ready, including after the Poller grant is refused, it rechecks the
+  prerequisites for the dispatch route that will use the trigger token and
+  reports either `GitLab trigger dispatch activation deferred: <reasons>` or
+  `GitLab trigger dispatch prerequisites verified`. The check only reads:
+  every managed polling schedule (`fullsend slash poll`, `fullsend event poll`)
+  must carry no pipeline variables (legacy schedules still set
+  `FULLSEND_POLL_MODE`), and the live
+  `ci_pipeline_variables_minimum_override_role` must be exactly
+  `no_one_allowed`. A weaker, unreadable, or unsupported setting defers, even
+  when a trigger token is already published. A deferral changes nothing, and
+  polling stays the dispatch path.
 - **Deferral and unsafe token variable:** a branch-change, override-role, or
   capability deferral first removes an unsafe published token variable and
   revokes its ownership-verified trigger. A weakened or unreadable override
