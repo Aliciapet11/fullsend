@@ -52,7 +52,7 @@ func TestLoadRunnerSecrets_ParsesAndUnsets(t *testing.T) {
 }
 
 // writeRunnerSecretsFile writes body to a mode 0600 bundle file and points
-// FULLSEND_RUNNER_SECRETS_FILE at it, as the composite action does.
+// FULLSEND_GITHUB_RUNNER_SECRETS_FILE at it, as the composite action does.
 func writeRunnerSecretsFile(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "runner-secrets.json")
@@ -99,7 +99,7 @@ func TestLoadRunnerSecrets_MissingFileFails(t *testing.T) {
 }
 
 // The composite action always sets the path; it is empty when the
-// FULLSEND_RUNNER_SECRETS secret is unset.
+// FULLSEND_GITHUB_RUNNER_SECRETS secret is unset.
 func TestLoadRunnerSecrets_EmptyFilePathIsNoOp(t *testing.T) {
 	t.Setenv(runnerSecretsFileEnv, "")
 	t.Setenv(runnerSecretsEnv, "")

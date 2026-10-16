@@ -63,7 +63,7 @@ inputs:
     default: ""
   runner_secrets:
     description: >-
-      JSON object of name → value (the FULLSEND_RUNNER_SECRETS secret).
+      JSON object of name → value (the FULLSEND_GITHUB_RUNNER_SECRETS secret).
       fullsend run resolves ${NAME} in the harness's env.runner from it,
       so the values reach host-side scripts only, never the sandbox.
       Only the Stage runner secrets step reads it: that step writes it to a
@@ -440,12 +440,12 @@ runs:
       if: inputs.agent != '__install_only__' && inputs.runner_secrets != ''
       shell: bash
       env:
-        FULLSEND_RUNNER_SECRETS: ${{ inputs.runner_secrets }}
+        FULLSEND_GITHUB_RUNNER_SECRETS: ${{ inputs.runner_secrets }}
       run: |
         set -euo pipefail
         umask 077
-        bundle="${FULLSEND_RUNNER_SECRETS}"
-        unset FULLSEND_RUNNER_SECRETS
+        bundle="${FULLSEND_GITHUB_RUNNER_SECRETS}"
+        unset FULLSEND_GITHUB_RUNNER_SECRETS
         path="$(mktemp "${RUNNER_TEMP}/fullsend-runner-secrets.XXXXXXXX")"
         # Emit the path first so the cleanup step finds the file even if
         # the write below fails.
@@ -469,7 +469,7 @@ runs:
         PR_HEAD_SHA: ${{ inputs.pr-head-sha }}
         FULLSEND_GCP_WIF_PROVIDER: ${{ inputs.gcp_wif_provider }}
         FULLSEND_GCP_PROJECT_ID: ${{ inputs.gcp_project_id }}
-        FULLSEND_RUNNER_SECRETS_FILE: ${{ steps.runner-secrets.outputs.path }}
+        FULLSEND_GITHUB_RUNNER_SECRETS_FILE: ${{ steps.runner-secrets.outputs.path }}
       run: |
         set -euo pipefail
         FULLSEND_DIR="${FULLSEND_DIR:-${GITHUB_WORKSPACE}}"

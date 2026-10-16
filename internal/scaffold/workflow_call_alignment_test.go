@@ -601,14 +601,14 @@ func TestOTELHeadersSecretThreading(t *testing.T) {
 }
 
 // TestRunnerSecretsThreading validates the in-repo half of the
-// FULLSEND_RUNNER_SECRETS channel (ADR 0136): the scaffold shim forwards
+// FULLSEND_GITHUB_RUNNER_SECRETS channel (ADR 0136): the scaffold shim forwards
 // the secret with its one fixed line, the composite action reads its
 // runner_secrets input only in the staging step, and the Run fullsend
 // step receives the staged file's path, never the value.
 func TestRunnerSecretsThreading(t *testing.T) {
 	shim := string(loadScaffoldFile("templates/shim-per-repo.yaml")(t))
-	assert.Contains(t, shim, "FULLSEND_RUNNER_SECRETS: ${{ secrets.FULLSEND_RUNNER_SECRETS }}",
-		"scaffold shim must forward FULLSEND_RUNNER_SECRETS")
+	assert.Contains(t, shim, "FULLSEND_GITHUB_RUNNER_SECRETS: ${{ secrets.FULLSEND_GITHUB_RUNNER_SECRETS }}",
+		"scaffold shim must forward FULLSEND_GITHUB_RUNNER_SECRETS")
 
 	action := string(loadRepoFile("action.yml")(t))
 	assert.Contains(t, action, "  runner_secrets:\n", "action.yml must declare the runner_secrets input")
@@ -627,16 +627,16 @@ func TestRunnerSecretsThreading(t *testing.T) {
 
 	stage := actionStep("Stage runner secrets")
 	assert.Contains(t, stage, "id: runner-secrets\n")
-	assert.Contains(t, stage, "FULLSEND_RUNNER_SECRETS: ${{ inputs.runner_secrets }}",
+	assert.Contains(t, stage, "FULLSEND_GITHUB_RUNNER_SECRETS: ${{ inputs.runner_secrets }}",
 		"the staging step must carry runner_secrets in its own env")
 	assert.Contains(t, stage, "umask 077", "the staged file must be readable by the job user only")
 	assert.Equal(t, strings.Count(action, "inputs.runner_secrets"), strings.Count(stage, "inputs.runner_secrets"),
 		"runner_secrets must reach no composite step other than Stage runner secrets")
 
 	run := actionStep("Run fullsend")
-	assert.Contains(t, run, "FULLSEND_RUNNER_SECRETS_FILE: ${{ steps.runner-secrets.outputs.path }}",
+	assert.Contains(t, run, "FULLSEND_GITHUB_RUNNER_SECRETS_FILE: ${{ steps.runner-secrets.outputs.path }}",
 		"Run fullsend step must receive the staged file path")
-	assert.NotContains(t, run, "FULLSEND_RUNNER_SECRETS:", "Run fullsend step must not receive the bundle itself")
+	assert.NotContains(t, run, "FULLSEND_GITHUB_RUNNER_SECRETS:", "Run fullsend step must not receive the bundle itself")
 
 	cleanup := actionStep("Remove staged runner secrets")
 	assert.Contains(t, cleanup, "if: always() && steps.runner-secrets.outputs.path != ''")
@@ -644,17 +644,17 @@ func TestRunnerSecretsThreading(t *testing.T) {
 	assert.Less(t, strings.Index(action, run), strings.Index(action, cleanup), "cleanup must follow Run fullsend")
 
 	prioritize := string(loadScaffoldFile(".github/workflows/prioritize.yml")(t))
-	assert.Contains(t, prioritize, "FULLSEND_RUNNER_SECRETS: ${{ secrets.FULLSEND_RUNNER_SECRETS }}",
-		"scaffold prioritize caller must forward FULLSEND_RUNNER_SECRETS")
+	assert.Contains(t, prioritize, "FULLSEND_GITHUB_RUNNER_SECRETS: ${{ secrets.FULLSEND_GITHUB_RUNNER_SECRETS }}",
+		"scaffold prioritize caller must forward FULLSEND_GITHUB_RUNNER_SECRETS")
 
 	// Every fullsend run step in the reusable workflows passes the secret,
 	// and each workflow declares it, so no stage silently drops it.
 	for _, wf := range []string{".github/workflows/reusable-dispatch.yml", ".github/workflows/reusable-prioritize.yml"} {
 		body := string(loadRepoFile(wf)(t))
-		assert.Contains(t, body, "\n      FULLSEND_RUNNER_SECRETS:\n", "%s must declare FULLSEND_RUNNER_SECRETS", wf)
+		assert.Contains(t, body, "\n      FULLSEND_GITHUB_RUNNER_SECRETS:\n", "%s must declare FULLSEND_GITHUB_RUNNER_SECRETS", wf)
 		runSteps := strings.Count(body, "\n          agent: ")
 		require.Positive(t, runSteps, "%s must have fullsend run steps", wf)
-		assert.Equal(t, runSteps, strings.Count(body, "runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}"),
+		assert.Equal(t, runSteps, strings.Count(body, "runner_secrets: ${{ secrets.FULLSEND_GITHUB_RUNNER_SECRETS }}"),
 			"%s: every fullsend run step must pass runner_secrets", wf)
 	}
 }

@@ -48,19 +48,19 @@ and overlays may set guarded fields ([ADR 0112](0112-overlays-may-set-any-harnes
 
 ## Decision
 
-As an interim adoption of #6359's passthrough-map option, until #6359 settles
-the long-term route, on GitHub a custom harness's own secrets reach host-side
-scripts through one optional stored secret, `FULLSEND_RUNNER_SECRETS`, a JSON
-object of name → string value. It covers host-side scripts only, never
-sandbox credentials, and does not replace named secrets for integrations
-fullsend owns. The reusable workflow passes it to each stage's composite action; a
-staging step writes it to a mode 0600 file under `RUNNER_TEMP` and hands
-`fullsend run` only the path. `fullsend run` deletes the file and unsets the path before any
+As an interim adoption of #6359's passthrough-map option, on GitHub a
+custom harness's own secrets reach host-side scripts through one optional
+stored secret, `FULLSEND_GITHUB_RUNNER_SECRETS`, a JSON object of name →
+string value. The name carries `GITHUB` because the channel exists only to
+get past GitHub's declared-secrets rule for reusable workflows. It covers
+host-side scripts only, never sandbox credentials, and does not replace named
+secrets for integrations fullsend owns. Each stage's composite action stages
+the object in a mode 0600 file under `RUNNER_TEMP` and hands `fullsend run`
+only the path; `fullsend run` deletes the file and unsets the path before any
 child starts, then resolves `${NAME}` in the resolved `env.runner` (after
-overlays) from the object. The object is never in the environment of
-`fullsend run` or its children; unreferenced keys reach no script, and
-scripts still run as the job user. Locally, `FULLSEND_RUNNER_SECRETS` may
-carry the object inline.
+overlays). The object is never in the environment of `fullsend run` or its
+children; unreferenced keys reach no script, and scripts still run as the job
+user. Locally, `FULLSEND_GITHUB_RUNNER_SECRETS` may carry the object inline.
 
 These rules apply to names in the GitHub object:
 
@@ -96,11 +96,19 @@ that receives a value can still leak it.
   their names are refused as keys.
 - The shim always passes the secret, and GitHub rejects a call that passes a
   secret the called workflow does not declare, so a shim rendered with an
-  older `--fullsend-ref` fails; it needs the CLI from that release. #7872
+  older `fullsend_ref` fails; it needs the CLI from that release. #7872
   tracks detecting the mismatch.
-- #6359's long-term route (an `api_servers` proxy, endpoint-bound provider
-  placeholders or an OIDC-backed broker) supersedes this channel; the secret
-  name and staging stay supported until that ADR announces a migration.
+- The expected successor is external secret manager support: the owner
+  declares a store (such as Vault through JWT auth, or GCP Secret Manager
+  through WIF) and `fullsend run` reads the referenced keys with the job's
+  OIDC token, so no secret travels through the workflow. That ADR, or the one
+  settling #6359, ends the interim role; the stored secret stays as the
+  fallback for workflows that cannot use GitHub OIDC or a WIF provider with
+  the user's secret manager.
+- An OpenShell provider is not that successor: credential drivers keep copies
+  of values the gateway is given, without reading existing backend secrets
+  ([OpenShell #1931](https://github.com/NVIDIA/OpenShell/issues/1931)), and a
+  provider delivers only into the sandbox, never to host-side scripts.
 - Known gap: until ADR 0112's guarded-field check exists, an event-guarded
   overlay can still swap `pre_script`, `post_script` or `validation_loop`, and
   so choose which script receives a referenced secret.

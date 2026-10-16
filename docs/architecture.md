@@ -134,10 +134,12 @@ repo baseline and overrides)
   the sandbox `.env` file from `env.sandbox` at bootstrap. `runner_env` is
   deprecated ([ADR 0055](ADRs/0055-unified-env-var-delivery.md), amending
   [ADR 0024](ADRs/0024-harness-definitions.md)).
-- Runner secrets on GitHub (interim until #6359 settles the long-term
-  route; integrations fullsend owns keep their own named secrets): user secrets
+- Runner secrets on GitHub (interim until external secret manager support
+  or #6359 settles the long-term route, then kept as the fallback for
+  workflows without GitHub OIDC or WIF; integrations fullsend owns keep their
+  own named secrets): user secrets
   reach host-side scripts through one
-  optional stored secret, `FULLSEND_RUNNER_SECRETS` (a JSON object of name →
+  optional stored secret, `FULLSEND_GITHUB_RUNNER_SECRETS` (a JSON object of name →
   value), staged by the composite action in a mode 0600 file that
   `fullsend run` deletes after reading, and filtered by the resolved
   `env.runner`. The bundle is never in the environment of `fullsend run` or

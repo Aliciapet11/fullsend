@@ -16,17 +16,17 @@ import (
 
 // runnerSecretsFileEnv names a file that holds the runner secrets bundle,
 // a JSON object of name → value (ADR 0136). In GitHub Actions the
-// composite action writes the FULLSEND_RUNNER_SECRETS secret to a mode
+// composite action writes the FULLSEND_GITHUB_RUNNER_SECRETS secret to a mode
 // 0600 file under RUNNER_TEMP and passes only this path, so the bundle is
 // never in the environment of fullsend run or of any process it starts.
 // fullsend run deletes the file as soon as it has read it.
-const runnerSecretsFileEnv = "FULLSEND_RUNNER_SECRETS_FILE"
+const runnerSecretsFileEnv = "FULLSEND_GITHUB_RUNNER_SECRETS_FILE"
 
 // runnerSecretsEnv carries the same bundle inline. It is a fallback for
 // local runs only: in CI the value would stay readable in
 // /proc/<pid>/environ even after fullsend run unsets it. fullsend run
 // removes it from its environment before any child process starts.
-const runnerSecretsEnv = "FULLSEND_RUNNER_SECRETS"
+const runnerSecretsEnv = "FULLSEND_GITHUB_RUNNER_SECRETS"
 
 // runnerSecretRefusedPrefixes are variable families owned by the runner
 // or the CI platform. A runner secret may not shadow any of them.
@@ -97,7 +97,7 @@ func runnerSecretDisplayName(name string) string {
 }
 
 // runnerSecretNameRefused reports whether name is runner-owned and so may
-// neither be a key in FULLSEND_RUNNER_SECRETS nor receive a runner secret
+// neither be a key in FULLSEND_GITHUB_RUNNER_SECRETS nor receive a runner secret
 // value as an env.runner key.
 func runnerSecretNameRefused(name string) bool {
 	if harnessExpansionDenied(name) || reservedSandboxKeys[name] || runnerSecretRefusedNames[name] {
@@ -112,8 +112,8 @@ func runnerSecretNameRefused(name string) bool {
 }
 
 // loadRunnerSecrets reads the runner secrets bundle from the file named by
-// FULLSEND_RUNNER_SECRETS_FILE or, for local runs, from
-// FULLSEND_RUNNER_SECRETS. It masks and registers every value for
+// FULLSEND_GITHUB_RUNNER_SECRETS_FILE or, for local runs, from
+// FULLSEND_GITHUB_RUNNER_SECRETS. It masks and registers every value for
 // redaction and returns the validated name → value map. With neither set,
 // or with a blank bundle, it returns a nil map: the run behaves as it did
 // before the channel existed.
@@ -132,7 +132,7 @@ func loadRunnerSecrets() (map[string]string, error) {
 		}
 	}
 	// The composite action always sets the path variable; it is empty when
-	// the FULLSEND_RUNNER_SECRETS secret is unset.
+	// the FULLSEND_GITHUB_RUNNER_SECRETS secret is unset.
 	hasFile = hasFile && strings.TrimSpace(path) != ""
 
 	source, raw := runnerSecretsEnv, inline

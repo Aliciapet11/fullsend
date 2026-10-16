@@ -89,7 +89,7 @@ type ComposeOpts struct {
 	// CEL when expressions as the config variable (ADR 0088).
 	Config map[string]any
 
-	// RunnerSecretNames are the names the run's FULLSEND_RUNNER_SECRETS
+	// RunnerSecretNames are the names the run's FULLSEND_GITHUB_RUNNER_SECRETS
 	// object carries (ADR 0136). An overlay that references one of them is
 	// refused unless its when: reads only runtime.forge and config. Nil or
 	// empty disables the check.

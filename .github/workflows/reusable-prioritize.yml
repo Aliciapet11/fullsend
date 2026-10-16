@@ -62,7 +62,7 @@ on:
         required: false
       OTEL_EXPORTER_OTLP_HEADERS:
         required: false
-      FULLSEND_RUNNER_SECRETS:
+      FULLSEND_GITHUB_RUNNER_SECRETS:
         description: >-
           JSON object of name to value for host-side scripts (pre_script,
           post_script, validation_loop). fullsend run resolves the names the
@@ -184,7 +184,7 @@ jobs:
           FULLSEND_INFERENCE_GATEWAY_API_KEY: ${{ secrets.FULLSEND_INFERENCE_GATEWAY_API_KEY }}
         with:
           agent: prioritize
-          runner_secrets: ${{ secrets.FULLSEND_RUNNER_SECRETS }}
+          runner_secrets: ${{ secrets.FULLSEND_GITHUB_RUNNER_SECRETS }}
           version: ${{ inputs.fullsend_version || job.workflow_sha }}
           fullsend-dir: .fullsend
           mint-url: ${{ inputs.mint_url }}
