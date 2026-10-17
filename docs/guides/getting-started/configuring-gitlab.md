@@ -287,9 +287,15 @@ For the full list of install flags, see the
 > Owners not to define CI/CD variables that override dispatch values such as
 > `CI_PIPELINE_SOURCE`, `CI_API_V4_URL`, `CI_PROJECT_DIR`, `CI_JOB_TOKEN`,
 > `CI_PIPELINE_SCHEDULE_DESCRIPTION`,
-> `FULLSEND_POLL_MODE`, or the agent input bridge's `STAGE`. Fullsend checks
-> only the scopes the installing credential can read. It does not verify the
-> others and cannot prove that no override exists there.
+> `FULLSEND_POLL_MODE`, or the agent input bridge's `STAGE`. It also trusts
+> them not to override the execution-controlling variables the scheduled poll
+> job's bootstrap runs under, such as `PATH`, `LD_PRELOAD`, `BASH_ENV`,
+> `GIT_TEMPLATE_DIR`, `GOROOT`, `GOFLAGS`, or `PYTHONPATH`. An inherited
+> override of one of those runs code of the overrider's choosing in the poll
+> job's `before_script`, **before** the job verifies its creator or HMAC, and
+> with the trigger account's credentials and `CI_JOB_TOKEN` present. Fullsend
+> checks only the scopes the installing credential can read. It does not
+> verify the others and cannot prove that no override exists there.
 
 GitLab gives instance and group CI/CD variables
 [precedence](https://docs.gitlab.com/ci/variables/#ci-cd-variable-precedence)
@@ -309,8 +315,10 @@ Without administrator access, `repos install` cannot list instance-level
 variables. Without group Owner access, it cannot list the variables of an
 ancestor group. A forbidden response means the scope is unverified, not
 unsafe: the fast path is activated or retained, and the polling schedules
-move to the trigger account, when the remaining checks pass. These checks
-still apply:
+move to the trigger account, when the remaining checks pass. When the
+schedules move, `repos install` lists the inherited scopes it could not read
+(`instance` or a group path) so you can confirm with the scope's owner that no
+reserved variable is defined there. These checks still apply:
 
 * A collision found in any scope the credential **can** read defers the
   fast path and revokes existing managed credentials. So does a
@@ -804,10 +812,14 @@ reason and resource IDs.
   the pinned CLI. Upgrade the installer and the project's `fullsend_ref` to a
   release or source commit containing #8508, then merge the scaffold repair
   **before** running `repos install` to transfer schedule ownership. The
-  minimum compatible CLI implements `fullsend poll --print-dispatch-routes`
-  and lists `child-pipeline`. A pinned older CLI cannot poll once that transfer
-  is active; use a current CLI to hand schedules back to the installer while
-  upgrading. Keep the generated agent job name: renaming it prevents the
+  route probe only gates polling: a pinned CLI that implements
+  `fullsend poll --print-dispatch-routes` and lists `child-pipeline` (any CLI
+  from #8482 onward) can still poll after the transfer. A pinned CLI older than
+  #8482 cannot poll once that transfer is active. For installer operations
+  (`repos install` and `repos uninstall`) after the transfer, the minimum CLI
+  is the first release or commit containing #8508, because earlier CLIs treat
+  account-owned schedules as foreign and refuse to proceed. Use a current CLI
+  to hand schedules back to the installer while upgrading. Keep the generated agent job name: renaming it prevents the
   activation gate from proving that the dispatched pipeline runs the guarded
   job, so restore the shipped name in the scaffold repair.
   A managed schedule left by a previous installer credential remains eligible

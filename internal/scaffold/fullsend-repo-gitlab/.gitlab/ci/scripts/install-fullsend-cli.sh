@@ -23,8 +23,8 @@ fi
 unset LD_AUDIT LD_PRELOAD LD_LIBRARY_PATH BASH_ENV TAR_OPTIONS
 # These select the git helpers/config, Go toolchain flags, or Python modules
 # that the source-pinned install path (git fetch / go build) would run.
-unset GIT_EXEC_PATH GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
-unset GOFLAGS GOENV GOTOOLCHAIN PYTHONPATH PYTHONSTARTUP PYTHONHOME
+unset GIT_EXEC_PATH GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_TEMPLATE_DIR
+unset GOFLAGS GOENV GOTOOLCHAIN GOROOT PYTHONPATH PYTHONSTARTUP PYTHONHOME
 # Private-CA trust for self-hosted GitLab. Must run before any
 # GitLab network operation (curl, git, or the fullsend Go client).
 # CI_SERVER_TLS_CA_FILE is a job-local path; it is not available on
@@ -94,10 +94,12 @@ case "${FULLSEND_VERSION}" in
     export GOPATH="${RUNNER_TEMP:-/tmp}/go"
     export GOCACHE="${RUNNER_TEMP:-/tmp}/go-cache"
     FSSRC=$(mktemp -d)
-    git init "${FSSRC}"
+    # An empty template and a null hooks path keep this checkout from
+    # running any hook copied from a template directory.
+    git init --template= "${FSSRC}"
     git -C "${FSSRC}" remote add origin "https://github.com/${FULLSEND_REPO}.git"
     git -C "${FSSRC}" fetch --depth 1 origin "${FULLSEND_VERSION}"
-    git -C "${FSSRC}" checkout FETCH_HEAD
+    git -C "${FSSRC}" -c core.hooksPath=/dev/null checkout FETCH_HEAD
     CGO_ENABLED=0 go build -C "${FSSRC}" \
       -ldflags "-X github.com/fullsend-ai/fullsend/internal/cli.version=${FULLSEND_VERSION}" \
       -o /usr/local/bin/fullsend ./cmd/fullsend/

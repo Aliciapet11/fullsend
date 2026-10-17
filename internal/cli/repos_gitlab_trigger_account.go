@@ -206,6 +206,9 @@ func printGitLabTriggerDispatchGate(printer *ui.Printer, repoFullName string, ga
 		return
 	}
 	printer.StepInfo(fmt.Sprintf("[%s] GitLab trigger dispatch prerequisites verified (schedules migrated off pipeline variables, override role no_one_allowed, job-token repository push disabled, trigger account ready); the dispatch activation is recorded for pipelines the trigger account creates", repoFullName))
+	if len(gate.UnverifiedInheritedScopes) > 0 {
+		printer.StepInfo(fmt.Sprintf("[%s] Unverified inherited CI/CD variable scopes (the installing credential cannot read them): %s. An override there of an execution-controlling variable such as PATH, LD_PRELOAD, BASH_ENV, or GIT_TEMPLATE_DIR would run before the job verifies its creator, with the trigger account's credentials; fullsend trusts instance administrators and group Owners not to set one. See the inherited CI/CD variable trust section of the GitLab configuration guide", repoFullName, strings.Join(gate.UnverifiedInheritedScopes, ", ")))
+	}
 }
 
 // containFailedKeys returns the owner/repo names of repos whose trigger-account

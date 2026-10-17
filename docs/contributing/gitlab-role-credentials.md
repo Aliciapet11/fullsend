@@ -877,10 +877,14 @@ scaffold repair merged before schedule ownership moves to the account. This
 includes a renamed generated agent job: restore its shipped name so the gate
 can verify the guarded job. Upgrade the installer and the project's
 `fullsend_ref` to a release or source commit containing #8508 and merge that
-scaffold repair before transferring ownership. The minimum compatible CLI
-implements `fullsend poll --print-dispatch-routes` and lists `child-pipeline`;
-an older pinned CLI stops scheduled polling after a transfer. A current CLI
-can hand schedules back to the installer during an upgrade. The gate also defers when the project selects a
+scaffold repair before transferring ownership. The route probe
+(`fullsend poll --print-dispatch-routes` listing `child-pipeline`) only gates
+polling and passes for any CLI from #8482 onward; a pinned CLI older than
+#8482 stops scheduled polling after a transfer. The minimum CLI for installer
+operations (`repos install`, `repos uninstall`) after a transfer is the first
+release or commit containing #8508; earlier CLIs treat account-owned schedules
+as foreign. A current CLI can hand schedules back to the installer during an
+upgrade. The gate also defers when the project selects a
 custom CI configuration path (the committed-file scans would not describe the
 pipeline GitLab runs; an unreadable project defers) and when a project, group,
 or instance CI/CD variable overrides a dispatch value used by rule evaluation,

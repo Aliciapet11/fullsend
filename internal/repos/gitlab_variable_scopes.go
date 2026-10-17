@@ -24,15 +24,27 @@ import (
 // added later, is not detected. Errors other than forbidden mean the
 // overrides could not be checked at all.
 func gitlabInheritedVariableOverrideProblem(ctx context.Context, client forge.Client, owner, repo string, env map[string]*string) (string, error) {
+	problem, _, err := gitlabInheritedVariableScan(ctx, client, owner, repo, env)
+	return problem, err
+}
+
+// gitlabInheritedVariableScan is gitlabInheritedVariableOverrideProblem plus
+// the inherited scopes it could not read ("instance" and group paths), so a
+// caller that acts on the result can report what stayed unverified.
+func gitlabInheritedVariableScan(ctx context.Context, client forge.Client, owner, repo string, env map[string]*string) (string, []string, error) {
+	var unverified []string
 	// Instance-level variables (self-managed GitLab) are inherited by every
 	// project.
 	instanceVars, instanceErr := client.ListInstanceVariables(ctx)
 	if instanceErr != nil && !forge.IsForbidden(instanceErr) {
-		return "", safeAPIError("checking instance variable overrides", instanceErr)
+		return "", nil, safeAPIError("checking instance variable overrides", instanceErr)
+	}
+	if forge.IsForbidden(instanceErr) {
+		unverified = append(unverified, "instance")
 	}
 	for _, variable := range instanceVars {
 		if _, reserved := env[variable.Name]; reserved {
-			return "webhook fast-path deferred: instance variable override: " + variable.Name, nil
+			return "webhook fast-path deferred: instance variable override: " + variable.Name, nil, nil
 		}
 	}
 	// owner may contain only the first path component for nested projects.
@@ -51,16 +63,17 @@ func gitlabInheritedVariableOverrideProblem(ctx context.Context, client forge.Cl
 			// Unverified: the remaining groups are still checked, so a
 			// readable scope's override is reported even when another scope
 			// is unreadable.
+			unverified = append(unverified, group)
 			continue
 		}
 		if groupErr != nil {
-			return "", safeAPIError("checking inherited group variable overrides", groupErr)
+			return "", nil, safeAPIError("checking inherited group variable overrides", groupErr)
 		}
 		for _, variable := range inherited {
 			if _, reserved := env[variable.Name]; reserved {
-				return "webhook fast-path deferred: group variable override: " + variable.Name, nil
+				return "webhook fast-path deferred: group variable override: " + variable.Name, nil, nil
 			}
 		}
 	}
-	return "", nil
+	return "", unverified, nil
 }

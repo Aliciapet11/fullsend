@@ -19,9 +19,15 @@ import (
 // GitLabTriggerDispatchGate is the result of CheckGitLabTriggerDispatchGate.
 // Ready is true only when every prerequisite was verified against live
 // project state; otherwise Deferred lists every reason activation must wait.
+//
+// UnverifiedInheritedScopes names the inherited CI/CD variable scopes
+// ("instance" or a group path) the installing credential could not read.
+// They do not defer activation, so a Ready gate can still carry them; they
+// are reported because an override there is not detected.
 type GitLabTriggerDispatchGate struct {
-	Ready    bool
-	Deferred []string
+	Ready                     bool
+	Deferred                  []string
+	UnverifiedInheritedScopes []string
 }
 
 // CheckGitLabTriggerDispatchGate is the activation gate that must pass before
@@ -74,7 +80,7 @@ type GitLabTriggerDispatchGate struct {
 // default-branch comparison impossible, so the gate never returns Ready for
 // them: it defers with a reason instead.
 func CheckGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, api GitLabTriggerAccountAPI, owner, repo, branch string, manifest *Manifest) GitLabTriggerDispatchGate {
-	var deferred []string
+	var deferred, unverifiedScopes []string
 	if api == nil {
 		deferred = append(deferred, "the trigger account cannot be verified against live project state without the trigger-account API")
 	}
@@ -92,9 +98,11 @@ func CheckGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, ap
 		deferred = append(deferred, reason)
 	}
 	if branch != "" {
-		if reason := gitlabDispatchVariableOverrideProblem(ctx, client, owner, repo, branch); reason != "" {
+		reason, unverified := gitlabDispatchVariableOverrideProblem(ctx, client, owner, repo, branch)
+		if reason != "" {
 			deferred = append(deferred, reason)
 		}
+		unverifiedScopes = unverified
 		if reason := gitlabTriggerScheduleMergeAccessProblem(ctx, client, owner, repo, branch); reason != "" {
 			deferred = append(deferred, reason)
 		}
@@ -125,7 +133,7 @@ func CheckGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, ap
 		}
 		deferred = append(deferred, reason)
 	}
-	return GitLabTriggerDispatchGate{Ready: len(deferred) == 0, Deferred: deferred}
+	return GitLabTriggerDispatchGate{Ready: len(deferred) == 0, Deferred: deferred, UnverifiedInheritedScopes: unverifiedScopes}
 }
 
 // GitLab requires a protected-branch schedule owner to have merge permission.
@@ -631,8 +639,9 @@ func gitlabDispatchCIConfigPathProblem(ctx context.Context, client forge.Client,
 // let a job the evaluator considers excluded run as the trigger account. A
 // failed inventory defers. Group and instance scopes the installing credential
 // cannot read are skipped as the webhook path does (see
-// gitlabInheritedVariableOverrideProblem).
-func gitlabDispatchVariableOverrideProblem(ctx context.Context, client forge.Client, owner, repo, branch string) string {
+// gitlabInheritedVariableOverrideProblem) and returned as unverified so the
+// gate result can name them.
+func gitlabDispatchVariableOverrideProblem(ctx context.Context, client forge.Client, owner, repo, branch string) (string, []string) {
 	const suffix = ", so scheduled polling and child dispatch cannot be established"
 	env := pipelineSourceEnv(branch, "schedule")
 	for _, key := range gitlabPreauthProtectedVariables {
@@ -645,7 +654,7 @@ func gitlabDispatchVariableOverrideProblem(ctx context.Context, client forge.Cli
 	}
 	vars, err := client.ListRepoVariables(ctx, owner, repo)
 	if err != nil {
-		return "could not verify that no project variable overrides a dispatch value: " + safeAPIError("checking project variable overrides", err).Error()
+		return "could not verify that no project variable overrides a dispatch value: " + safeAPIError("checking project variable overrides", err).Error(), nil
 	}
 	keys := make([]string, 0, len(vars))
 	for key := range vars {
@@ -654,17 +663,17 @@ func gitlabDispatchVariableOverrideProblem(ctx context.Context, client forge.Cli
 	sort.Strings(keys)
 	for _, key := range keys {
 		if _, reserved := env[key]; reserved {
-			return "a project variable overrides the dispatch variable " + key + suffix
+			return "a project variable overrides the dispatch variable " + key + suffix, nil
 		}
 	}
-	problem, err := gitlabInheritedVariableOverrideProblem(ctx, client, owner, repo, env)
+	problem, unverified, err := gitlabInheritedVariableScan(ctx, client, owner, repo, env)
 	if err != nil {
-		return "could not verify that no inherited variable overrides a dispatch value: " + err.Error()
+		return "could not verify that no inherited variable overrides a dispatch value: " + err.Error(), nil
 	}
 	if problem != "" {
-		return strings.TrimPrefix(problem, "webhook fast-path deferred: ") + suffix
+		return strings.TrimPrefix(problem, "webhook fast-path deferred: ") + suffix, nil
 	}
-	return ""
+	return "", unverified
 }
 
 // gitlabScheduleMigrationProblems reports managed pipeline schedules that
