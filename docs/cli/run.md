@@ -413,7 +413,10 @@ and refresh. The runner exports the gateway URL (the origin plus its path prefix
 `--model`, and skips the Vertex credential checks. The credential reaches Claude Code through an
 `apiKeyHelper` that re-reads the re-seeded token file in the `oidc` mode, or as an
 `ANTHROPIC_AUTH_TOKEN` placeholder in the `api-key` mode. Both are sent as `Authorization: Bearer`,
-as on pi. The per-host egress profile is a Claude Code rendering that admits only
+as on pi. An `api-key` block that sets `messages_auth_header: x-api-key`
+([ADR 0142](../ADRs/0142-inference-gateway-x-api-key-header-for-messages-models.md)) instead gets an
+`ANTHROPIC_API_KEY` placeholder, sent as `x-api-key` only, and pi `anthropic-messages` models send
+`x-api-key` too. The per-host egress profile is a Claude Code rendering that admits only
 `POST <prefix>/v1/messages` and `POST <prefix>/v1/messages/count_tokens` (`<prefix>` is empty for a
 bare origin). Claude Code has no plugin-carried
 setup, so a `gateway/` model without a block that applies (no block, or an `oidc` block on a run
