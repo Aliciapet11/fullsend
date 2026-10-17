@@ -348,6 +348,73 @@ func TestAcquireLock_DoesNotReclaimLockYoungerThanStaleTimeout(t *testing.T) {
 	assert.Equal(t, otherHolder, string(content))
 }
 
+// expiringClient simulates an acquisition deadline that expires mid-way
+// through tryCreateLock: once armed by the hook, the context is cancelled.
+// DeleteRepo honours its context like a real client, so a cleanup that reuses
+// the cancelled acquisition context fails and leaves the repo behind.
+type expiringClient struct {
+	*forge.FakeClient
+	cancel      context.CancelFunc
+	onWrite     bool
+	onRead      bool
+	readContent []byte
+}
+
+func (c *expiringClient) CreateOrUpdateFile(ctx context.Context, owner, repo, path, message string, content []byte) error {
+	if c.onWrite {
+		c.cancel()
+		return ctx.Err()
+	}
+	return c.FakeClient.CreateOrUpdateFile(ctx, owner, repo, path, message, content)
+}
+
+func (c *expiringClient) GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error) {
+	if c.onRead {
+		c.cancel()
+		if c.readContent != nil {
+			return c.readContent, nil
+		}
+		return nil, ctx.Err()
+	}
+	return c.FakeClient.GetFileContent(ctx, owner, repo, path)
+}
+
+func (c *expiringClient) DeleteRepo(ctx context.Context, owner, repo string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.FakeClient.DeleteRepo(ctx, owner, repo)
+}
+
+func TestTryCreateLock_DeadlineExpiryLeavesNoOrphanLockRepo(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(c *expiringClient)
+	}{
+		{"during README write", func(c *expiringClient) { c.onWrite = true }},
+		{"during verification read", func(c *expiringClient) { c.onRead = true }},
+		{"during verification retry wait", func(c *expiringClient) {
+			c.onRead = true
+			c.readContent = []byte("# e2e-lock") // auto_init default, forces a retry
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			client := &expiringClient{FakeClient: forge.NewFakeClient(), cancel: cancel}
+			tt.setup(client)
+
+			acquired, err := tryCreateLock(ctx, client, testLockOrg, "our-run", t.Logf)
+			require.Error(t, err)
+			assert.False(t, acquired)
+
+			_, getErr := client.FakeClient.GetRepo(context.Background(), testLockOrg, lockRepo)
+			assert.True(t, forge.IsNotFound(getErr), "lock repo must be deleted, got err=%v", getErr)
+		})
+	}
+}
+
 func TestSampleRateLimit_ReadsHeadersFromLockRepoRead(t *testing.T) {
 	reset := time.Now().Add(20 * time.Minute).Truncate(time.Second)
 	var gotPath string
