@@ -14,7 +14,13 @@ import (
 type runShard struct {
 	// Sharded is false when the run executes every selected scenario.
 	Sharded bool
-	Spec    shardSpec
+	// Matrix is true when the run is one job of a CI shard matrix, even
+	// when it executes every selected scenario (STAGE's single shard);
+	// Spec then names that job for the metrics file.
+	Matrix bool
+	Spec   shardSpec
+	// Planned is the scenario instances this run executes: its shard's
+	// share when Sharded, every selected instance otherwise.
 	Planned plannedShard
 	// Gate admits only this shard's scenarios; nil when not sharded.
 	Gate *shardGate
@@ -33,6 +39,7 @@ func resolveRunShard(cfg env.RunnerConfig, instances []scenarioInstance, skip fu
 	if err != nil {
 		return runShard{}, err
 	}
+	matrix := ok
 	if ok && cfg.Environment == "stage" {
 		if spec.Total > 1 {
 			return runShard{}, fmt.Errorf("STAGE runs in its single org and cannot be split across shards (%s=%d)", envShardTotal, spec.Total)
@@ -40,7 +47,20 @@ func resolveRunShard(cfg env.RunnerConfig, instances []scenarioInstance, skip fu
 		ok = false
 	}
 	if !ok {
-		return runShard{Demand: summarizeDemand(instances, skip)}, nil
+		demand := summarizeDemand(instances, skip)
+		r := runShard{
+			Matrix: matrix,
+			Planned: plannedShard{
+				Instances:    instances,
+				Provisioning: demand.Provisioning,
+				Other:        demand.Selected - demand.Provisioning,
+			},
+			Demand: demand,
+		}
+		if matrix {
+			r.Spec = spec
+		}
+		return r, nil
 	}
 	planned, gate, err := selectShard(spec, instances, skip)
 	if err != nil {
@@ -48,6 +68,7 @@ func resolveRunShard(cfg env.RunnerConfig, instances []scenarioInstance, skip fu
 	}
 	return runShard{
 		Sharded: true,
+		Matrix:  true,
 		Spec:    spec,
 		Planned: planned,
 		Gate:    gate,

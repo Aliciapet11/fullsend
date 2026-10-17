@@ -85,11 +85,16 @@ func runCLILogged(runCLI CLIRunnerFunc, logf func(string, ...any), binary, token
 		}
 	}()
 
-	out, err := runCLI(binary, token, args...)
-	close(stop)
-	wg.Wait()
-
-	inFlight, completed = processCLIProgress.end(cmd)
+	// Cleanup is deferred so the heartbeat goroutine stops and the
+	// in-flight counters drop even if runCLI panics.
+	out, err := func() (string, error) {
+		defer func() {
+			close(stop)
+			wg.Wait()
+			inFlight, completed = processCLIProgress.end(cmd)
+		}()
+		return runCLI(binary, token, args...)
+	}()
 	result := "succeeded"
 	if err != nil {
 		result = "failed"

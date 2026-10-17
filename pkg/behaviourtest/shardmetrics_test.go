@@ -76,6 +76,7 @@ func TestSuiteMetrics_UnmarkedPhasesStayZero(t *testing.T) {
 func TestSuiteMetrics_NilIsSafe(t *testing.T) {
 	var m *suiteMetrics
 	m.setShard(shardSpec{}, plannedShard{})
+	m.setPlanned(plannedShard{})
 	m.setBuild(time.Second)
 	m.setOrgSetup(time.Second)
 	m.setConcurrency(1)
@@ -114,6 +115,24 @@ func TestSuiteMetrics_Write(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(dir, "shard-metrics-3.json"))
 		require.NoError(t, err)
 		assert.Contains(t, string(data), `"shard":3`)
+	})
+	t.Run("matrix job running every instance", func(t *testing.T) {
+		dir := t.TempDir()
+		m := newSuiteMetrics(nil)
+		m.setShard(shardSpec{Index: 0, Total: 1}, plannedShard{Instances: make([]scenarioInstance, 4), Provisioning: 3, Other: 1})
+		require.NoError(t, m.write(dir, logf))
+		data, err := os.ReadFile(filepath.Join(dir, "shard-metrics-1.json"))
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"planned_instances":4`)
+	})
+	t.Run("unsharded planned counts", func(t *testing.T) {
+		m := newSuiteMetrics(nil)
+		m.setPlanned(plannedShard{Instances: make([]scenarioInstance, 4), Provisioning: 3, Other: 1})
+		r := m.report()
+		assert.Equal(t, 4, r.PlannedInstances)
+		assert.Equal(t, 3, r.PlannedProvisioning)
+		assert.Equal(t, 1, r.PlannedOther)
+		assert.Zero(t, r.Total)
 	})
 	t.Run("log only", func(t *testing.T) {
 		require.NoError(t, newSuiteMetrics(nil).write("", logf))

@@ -102,8 +102,12 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 		t.Fatal(err)
 	}
 	demand := shard.Demand
-	if shard.Sharded {
+	if shard.Matrix {
 		metrics.setShard(shard.Spec, shard.Planned)
+	} else {
+		metrics.setPlanned(shard.Planned)
+	}
+	if shard.Sharded {
 		t.Logf("[shard] shard %s runs %d of the %d selected scenario instance(s) (%d provisioning, %d other); the other shards run the rest",
 			shard.Spec, len(shard.Planned.Instances), all.Selected, shard.Planned.Provisioning, shard.Planned.Other)
 	}

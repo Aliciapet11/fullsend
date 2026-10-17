@@ -8,6 +8,7 @@ import (
 
 	"github.com/cucumber/godog"
 
+	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/drivers/ci"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/world"
 )
 
@@ -29,9 +30,7 @@ func thenHarnessDispatchedExactly(w *world.World, agent string, expected int) er
 	started := time.Now()
 	var actual int
 	var err error
-	if traced, ok := w.CI.(interface {
-		CountHarnessDispatchesWithTrace(context.Context, string, string, string, time.Time, func(string)) (int, error)
-	}); ok {
+	if traced, ok := w.CI.(ci.HarnessDispatchTracer); ok {
 		actual, err = traced.CountHarnessDispatchesWithTrace(ctx, w.Org, w.RepoName, agent, w.ScenarioStart, func(progress string) {
 			logRedacted(w, "[dispatch-count] agent=%q %s", agent, progress)
 		})

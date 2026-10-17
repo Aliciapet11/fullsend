@@ -70,6 +70,8 @@ func seconds(d time.Duration) float64 {
 	return d.Round(time.Millisecond).Seconds()
 }
 
+// setShard records which CI matrix job this run is, which also names the
+// metrics file, and the instances it executes.
 func (m *suiteMetrics) setShard(spec shardSpec, planned plannedShard) {
 	if m == nil {
 		return
@@ -78,6 +80,21 @@ func (m *suiteMetrics) setShard(spec shardSpec, planned plannedShard) {
 	defer m.mu.Unlock()
 	m.data.Shard = spec.Index + 1
 	m.data.Total = spec.Total
+	m.setPlannedLocked(planned)
+}
+
+// setPlanned records the scenario instances a run outside a CI matrix
+// executes.
+func (m *suiteMetrics) setPlanned(planned plannedShard) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setPlannedLocked(planned)
+}
+
+func (m *suiteMetrics) setPlannedLocked(planned plannedShard) {
 	m.data.PlannedInstances = len(planned.Instances)
 	m.data.PlannedProvisioning = planned.Provisioning
 	m.data.PlannedOther = planned.Other

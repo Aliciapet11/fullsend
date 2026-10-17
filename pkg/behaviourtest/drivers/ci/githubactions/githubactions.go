@@ -70,6 +70,8 @@ const (
 	harnessWorkflowFile = "fullsend.yaml"
 )
 
+var _ ci.HarnessDispatchTracer = (*Driver)(nil)
+
 // Driver implements ci.Driver against GitHub Actions.
 type Driver struct {
 	Client forge.Client
@@ -1559,9 +1561,11 @@ func (d *Driver) CountHarnessDispatches(ctx context.Context, owner, repo, agent 
 	return d.CountHarnessDispatchesWithTrace(ctx, owner, repo, agent, after, nil)
 }
 
-// CountHarnessDispatchesWithTrace reports which run is keeping an exact-count
-// assertion pending, including its trigger event and visible jobs. It uses
-// the same API responses as the count and accepts nil when logs are unwanted.
+// CountHarnessDispatchesWithTrace implements ci.HarnessDispatchTracer. It
+// counts like CountHarnessDispatches and also reports which run is keeping an
+// exact-count assertion pending, including its trigger event and visible
+// jobs. It uses the same API responses as the count and accepts nil when logs
+// are unwanted.
 func (d *Driver) CountHarnessDispatchesWithTrace(ctx context.Context, owner, repo, agent string, after time.Time, trace func(string)) (int, error) {
 	deadline := time.Now().Add(dispatchWait)
 	started := time.Now()
