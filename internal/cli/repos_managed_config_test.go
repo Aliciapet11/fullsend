@@ -433,6 +433,53 @@ func TestRunReposInstall_AdoptionRequiredRepoDoesNotBlockOthers(t *testing.T) {
 	}
 }
 
+// A skipped repository still counts when credential flags are checked: when
+// it is the only consumer of --openai-api-key, the healthy repository must
+// still converge rather than the run failing on "no selected repository uses
+// inference.auth" before the per-repo summary.
+func TestRunReposInstall_AdoptionSkippedOnlyCredentialConsumerDoesNotBlockOthers(t *testing.T) {
+	manifestYAML := `version: 1
+github:
+  mint_url: https://mint.example.com
+  fullsend_ref: v1.0.0
+  inference:
+    auth: vertex-wif
+  repos:
+    - name: acme/api
+      inference:
+        auth: openai-api-key
+    - name: acme/web
+`
+	for _, dryRun := range []bool{false, true} {
+		t.Run(map[bool]string{false: "live", true: "dry run"}[dryRun], func(t *testing.T) {
+			manifestPath := writeTestManifest(t, manifestYAML)
+			fc := newInstalledFakeClientCLI("acme/api")
+			fc.Repos = append(fc.Repos, forge.Repository{FullName: "acme/web", Name: "web", DefaultBranch: "main"})
+			fc.CollaboratorPermissions["acme/web/fullsend-app[bot]"] = "write"
+			original := []byte("kill_switch: false\n# hand-authored\n")
+			fc.FileContents[overlayPath("acme/api")] = original
+
+			opts := githubManagedInstallOpts(manifestPath, fc)
+			opts.openAIAPIKey = "test-openai-key"
+			opts.dryRun = dryRun
+			var err error
+			out := captureStdout(t, func() {
+				err = runReposInstall(context.Background(), opts)
+			})
+			require.Error(t, err)
+			assert.Equal(t, "1 repos failed", err.Error())
+			assert.Contains(t, out, "FAILED: acme/api — adoption required")
+			assert.Contains(t, out, "Install complete: 1 installed, 0 converged, 0 already current, 1 failed")
+			assert.Equal(t, original, fc.FileContents[overlayPath("acme/api")], "the unmarked file must be untouched")
+			if dryRun {
+				assert.Empty(t, fc.FileContents[overlayPath("acme/web")], "a dry run writes nothing")
+				return
+			}
+			assert.True(t, bytes.HasPrefix(fc.FileContents[overlayPath("acme/web")], []byte(managedConfigMarker)), "acme/web gets its managed overlay")
+		})
+	}
+}
+
 func TestRunReposStatus_NoConfigKeyMarkerlessOverlayRequiresAdoption(t *testing.T) {
 	manifestPath := writeTestManifest(t, githubUnmanagedManifestYAML)
 	fc := newInstalledFakeClientCLI("acme/api")
