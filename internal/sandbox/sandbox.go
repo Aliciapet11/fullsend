@@ -1912,10 +1912,11 @@ func collectPodmanLogs(sandboxName string) string {
 // ExtractOutputFiles copies all files under a remote directory in the sandbox
 // to a local output directory, preserving relative paths.
 //
-// It returns nil, nil only when the sandbox answered and has no output files.
-// A failed listing (non-zero openshell exit) or a listing in which no file
-// could be extracted returns an error, so the caller never mistakes an
-// unreadable sandbox for an agent that wrote no output.
+// A listing that openshell itself failed (non-zero exit, e.g. exec refused for
+// a sandbox that is not Ready) or a listing in which no file could be
+// extracted returns an error, so the caller does not report either as "no
+// output". The remote find still runs with "2>/dev/null || true", so a missing
+// or unreadable remoteDir reads as an empty listing and returns nil, nil.
 func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, error) {
 	if err := os.MkdirAll(localDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating local output dir: %w", err)
