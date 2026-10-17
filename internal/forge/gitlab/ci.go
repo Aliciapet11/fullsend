@@ -1221,12 +1221,25 @@ func (c *LiveClient) TriggerPipelineWithJobToken(ctx context.Context, owner, rep
 // CreatePipelineSchedule creates a pipeline schedule and attaches variables.
 // Returns the schedule ID.
 func (c *LiveClient) CreatePipelineSchedule(ctx context.Context, owner, repo, ref, description, cron string, variables map[string]string) (int64, error) {
+	return c.CreatePipelineScheduleWithActive(ctx, owner, repo, ref, description, cron, variables, true)
+}
+
+// CreatePipelineScheduleWithActive creates a pipeline schedule and attaches
+// variables. GitLab creates a schedule active unless the request says
+// otherwise, so an inactive schedule sends active=false in the create
+// request itself: a separate disable afterwards leaves a window in which the
+// schedule is active and can fire. The attribute is omitted for an active
+// schedule, keeping that request unchanged.
+func (c *LiveClient) CreatePipelineScheduleWithActive(ctx context.Context, owner, repo, ref, description, cron string, variables map[string]string, active bool) (int64, error) {
 	path := fmt.Sprintf("/projects/%s/pipeline_schedules", projectPath(owner, repo))
-	body := map[string]string{
+	body := map[string]any{
 		"ref":           ref,
 		"description":   description,
 		"cron":          cron,
 		"cron_timezone": "UTC",
+	}
+	if !active {
+		body["active"] = false
 	}
 	resp, err := c.post(ctx, path, body)
 	if err != nil {
@@ -1266,7 +1279,10 @@ func (c *LiveClient) GetPipelineSchedule(ctx context.Context, owner, repo string
 		return nil, fmt.Errorf("get pipeline schedule: %w", err)
 	}
 	var result struct {
-		ID           int64  `json:"id"`
+		ID    int64 `json:"id"`
+		Owner *struct {
+			ID int64 `json:"id"`
+		} `json:"owner"`
 		Description  string `json:"description"`
 		Ref          string `json:"ref"`
 		Cron         string `json:"cron"`
@@ -1284,6 +1300,12 @@ func (c *LiveClient) GetPipelineSchedule(ctx context.Context, owner, repo string
 		return nil, fmt.Errorf("pipeline schedule response omitted variable details; cannot verify migration")
 	}
 	schedule := &forge.PipelineSchedule{ID: result.ID, Description: result.Description, Ref: result.Ref, Cron: result.Cron, CronTimezone: result.CronTimezone, Active: result.Active, Variables: make(map[string]string)}
+	if result.Owner != nil {
+		if result.Owner.ID <= 0 {
+			return nil, fmt.Errorf("pipeline schedule response has invalid owner ID")
+		}
+		schedule.OwnerID = result.Owner.ID
+	}
 	for _, variable := range result.Variables {
 		schedule.Variables[variable.Key] = variable.Value
 	}
@@ -1327,7 +1349,10 @@ func (c *LiveClient) ListPipelineSchedules(ctx context.Context, owner, repo stri
 		}
 
 		var schedules []struct {
-			ID           int64  `json:"id"`
+			ID    int64 `json:"id"`
+			Owner *struct {
+				ID int64 `json:"id"`
+			} `json:"owner"`
 			Description  string `json:"description"`
 			Ref          string `json:"ref"`
 			Cron         string `json:"cron"`
@@ -1339,8 +1364,16 @@ func (c *LiveClient) ListPipelineSchedules(ctx context.Context, owner, repo stri
 		}
 
 		for _, s := range schedules {
+			if s.ID <= 0 || (s.Owner != nil && s.Owner.ID <= 0) {
+				return nil, fmt.Errorf("list pipeline schedules page %d: invalid schedule or owner ID", page)
+			}
+			var ownerID int64
+			if s.Owner != nil {
+				ownerID = s.Owner.ID
+			}
 			result = append(result, forge.PipelineSchedule{
 				ID:           s.ID,
+				OwnerID:      ownerID,
 				Description:  s.Description,
 				Ref:          s.Ref,
 				Cron:         s.Cron,

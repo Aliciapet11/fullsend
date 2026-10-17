@@ -9,10 +9,9 @@ import (
 
 // gitlabInheritedVariableOverrideProblem checks the instance-level and
 // ancestor-group CI/CD variables a project inherits for a definition of one
-// of the predefined variables the trigger-pipeline evaluator treats as fixed
-// (the keys of env). Such a variable takes precedence over the predefined
-// value, so the evaluator could conclude that a job is excluded from trigger
-// pipelines when GitLab would in fact run it.
+// of the reserved values (the keys of env). An inherited value takes
+// precedence over predefined and job-level values, so it can invalidate
+// dispatch routing or the trigger-pipeline evaluator's job exclusions.
 //
 // Every scope the credential can read is checked, and a definition found in
 // any of them is a problem. Listing instance-level variables needs
@@ -20,7 +19,7 @@ import (
 // which a project Maintainer usually lacks. A scope that answers forbidden is
 // unverified, not unsafe: it is skipped and the remaining scopes are still
 // checked. This deliberately trusts instance administrators and group Owners
-// not to override those predefined variables; an override in a scope the
+// not to override those reserved values; an override in a scope the
 // installing credential cannot read, whether present at install time or
 // added later, is not detected. Errors other than forbidden mean the
 // overrides could not be checked at all.
@@ -33,7 +32,7 @@ func gitlabInheritedVariableOverrideProblem(ctx context.Context, client forge.Cl
 	}
 	for _, variable := range instanceVars {
 		if _, reserved := env[variable.Name]; reserved {
-			return "webhook fast-path deferred: predefined instance variable override: " + variable.Name, nil
+			return "webhook fast-path deferred: instance variable override: " + variable.Name, nil
 		}
 	}
 	// owner may contain only the first path component for nested projects.
@@ -59,7 +58,7 @@ func gitlabInheritedVariableOverrideProblem(ctx context.Context, client forge.Cl
 		}
 		for _, variable := range inherited {
 			if _, reserved := env[variable.Name]; reserved {
-				return "webhook fast-path deferred: predefined group variable override: " + variable.Name, nil
+				return "webhook fast-path deferred: group variable override: " + variable.Name, nil
 			}
 		}
 	}

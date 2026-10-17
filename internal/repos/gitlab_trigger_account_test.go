@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,19 @@ type trigFakeGitLab struct {
 	ownerlessSchedules []int
 	// noPushKeys are deploy key IDs GitLab reports with can_push false.
 	noPushKeys map[int]bool
+	// state is the project's schedule store, shared with the installer
+	// client, so schedules the account creates are visible to both.
+	state *forge.FakeClient
+	// createIgnoresActive makes the account's schedule create ignore the
+	// requested active state; see trigEnv.ignoreActiveOnCreate.
+	createIgnoresActive bool
+}
+
+func (f *trigFakeGitLab) GetAuthenticatedUserID(context.Context) (int, error) {
+	if _, err := f.enter("GetAuthenticatedUserID"); err != nil {
+		return 0, err
+	}
+	return 42, nil
 }
 
 func newTrigFakeGitLab() *trigFakeGitLab {
@@ -317,7 +331,14 @@ func (f *trigFakeGitLab) AccountScheduleIDs(_ context.Context, _, _ string, user
 	if _, err := f.enter("AccountScheduleIDs"); err != nil {
 		return nil, err
 	}
-	return f.schedules[userID], nil
+	var out []int
+	for _, id := range f.schedules[userID] {
+		// A schedule the installer deleted is no longer reported.
+		if f.state == nil || !slices.Contains(f.state.DeletedScheduleIDs, int64(id)) {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 func (f *trigFakeGitLab) UnknownOwnerScheduleIDs(_ context.Context, _, _ string) ([]int, error) {
@@ -390,6 +411,81 @@ type trigState struct {
 	writes    int
 	// failWhen fails (once) the first write whose ledger satisfies it.
 	failWhen func(gitLabTriggerAccountState) bool
+	// failDeleteAfter, when positive, lets that many schedule deletions
+	// succeed and then fails every later one.
+	failDeleteAfter int
+	deletes         int
+	// createIgnoresActive makes the installer's schedule create ignore the
+	// requested active state, as a GitLab that does not honor the attribute
+	// would.
+	createIgnoresActive bool
+	// createWithoutID models a successful response that omits the schedule ID.
+	createWithoutID bool
+	// createOwnerOverride models a server that reports an unexpected owner
+	// for an installer-created schedule.
+	createOwnerOverride int64
+	// detailOwnerOverride models ownership changing between list and detail
+	// reads, including the read immediately before a planned delete.
+	detailOwnerOverride       map[int64]int64
+	detailDescriptionOverride map[int64]string
+	// afterDelete simulates a schedule firing just before hand-back deleted it.
+	afterDelete func()
+}
+
+func (s *trigState) CreatePipelineScheduleWithActive(ctx context.Context, owner, repo, ref, description, cron string, variables map[string]string, active bool) (int64, error) {
+	if s.createWithoutID {
+		return 0, nil
+	}
+	id, err := s.FakeClient.CreatePipelineScheduleWithActive(ctx, owner, repo, ref, description, cron, variables, active || s.createIgnoresActive)
+	if err == nil {
+		for i := range s.PipelineSchedules[owner+"/"+repo] {
+			if s.PipelineSchedules[owner+"/"+repo][i].ID == id {
+				if s.createOwnerOverride != 0 {
+					s.PipelineSchedules[owner+"/"+repo][i].OwnerID = s.createOwnerOverride
+				} else {
+					s.PipelineSchedules[owner+"/"+repo][i].OwnerID = 42
+				}
+			}
+		}
+	}
+	return id, err
+}
+
+func (s *trigState) GetPipelineSchedule(ctx context.Context, owner, repo string, id int64) (*forge.PipelineSchedule, error) {
+	detail, err := s.FakeClient.GetPipelineSchedule(ctx, owner, repo, id)
+	if err == nil && detail != nil {
+		if ownerID, ok := s.detailOwnerOverride[id]; ok {
+			detail.OwnerID = ownerID
+		}
+		if description, ok := s.detailDescriptionOverride[id]; ok {
+			detail.Description = description
+		}
+	}
+	return detail, err
+}
+
+// ignoreActiveOnCreate makes every schedule create, the installer's and the
+// trigger account's, ignore the requested active state, as a GitLab that does
+// not honor the attribute would.
+func (e *trigEnv) ignoreActiveOnCreate(ignore bool) {
+	e.state.createIgnoresActive = ignore
+	e.f.createIgnoresActive = ignore
+}
+
+func (s *trigState) DeletePipelineSchedule(ctx context.Context, owner, repo string, id int64) error {
+	if s.failDeleteAfter > 0 {
+		s.deletes++
+		if s.deletes > s.failDeleteAfter {
+			return errTrigInjected
+		}
+	}
+	if err := s.FakeClient.DeletePipelineSchedule(ctx, owner, repo, id); err != nil {
+		return err
+	}
+	if s.afterDelete != nil {
+		s.afterDelete()
+	}
+	return nil
 }
 
 func (s *trigState) UpdateCIVariable(ctx context.Context, owner, repo, name, value string, protected bool) error {
@@ -437,6 +533,8 @@ type trigEnv struct {
 
 func newTrigEnv() *trigEnv {
 	e := &trigEnv{f: newTrigFakeGitLab(), state: &trigState{FakeClient: forge.NewFakeClient()}}
+	e.f.state = e.state.FakeClient
+	e.state.Repos = append(e.state.Repos, forge.Repository{FullName: trigOwner + "/" + trigRepo, DefaultBranch: trigBranch})
 	e.state.PipelineVarOverrideRoles[trigOwner+"/"+trigRepo] = forge.PipelineVarOverrideNoOneAllowed
 	e.publish = func(_ context.Context, id int64, token string) error {
 		ok, err := e.f.enter("Publish")

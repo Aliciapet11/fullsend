@@ -124,6 +124,9 @@ type tahServer struct {
 	// with 403 (GitLab.com Free), counting each attempt in mergeGrantAttempts.
 	rejectMergeGrant   bool
 	mergeGrantAttempts int
+	// mergeRole is the branch's role-based merge grant. The default Developer
+	// grant lets the trigger account own schedules in the activation fixtures.
+	mergeRole int
 	// mergeUsers are the per-user merge grants on the default branch.
 	mergeUsers []int
 	// fallback answers requests outside the trigger-account emulation; it
@@ -151,6 +154,7 @@ func newTAHServer(t *testing.T) *tahServer {
 		entryNext:    10,
 		varGetStatus: map[string]int{},
 		overrideRole: forge.PipelineVarOverrideNoOneAllowed,
+		mergeRole:    30,
 	}
 	// The administrator's own rule for the default branch: a maintainer entry
 	// that the lifecycle must never touch.
@@ -205,6 +209,25 @@ func (s *tahServer) authenticate(r *http.Request) int {
 
 func (s *tahServer) canAdminister(uid int) bool {
 	return uid == tahAdminUserID || s.members[uid] >= 40
+}
+
+func (s *tahServer) protectedBranchPayload() map[string]any {
+	levels := make([]any, 0, len(s.push))
+	for _, e := range s.push {
+		lvl := map[string]any{"id": e.ID, "access_level": e.AccessLevel, "user_id": nil, "group_id": nil, "deploy_key_id": nil}
+		if e.DeployKeyID != 0 {
+			lvl["deploy_key_id"] = e.DeployKeyID
+		}
+		levels = append(levels, lvl)
+	}
+	merges := make([]any, 0, len(s.mergeUsers)+1)
+	if s.mergeRole > 0 {
+		merges = append(merges, map[string]any{"id": 499, "access_level": s.mergeRole, "user_id": nil, "group_id": nil, "deploy_key_id": nil})
+	}
+	for i, uid := range s.mergeUsers {
+		merges = append(merges, map[string]any{"id": 500 + i, "access_level": nil, "user_id": uid, "group_id": nil, "deploy_key_id": nil})
+	}
+	return map[string]any{"name": tahBranch, "push_access_levels": levels, "merge_access_levels": merges}
 }
 
 var tahMaskable = regexp.MustCompile(`^[a-zA-Z0-9@:.+/=_~-]+$`)
@@ -276,6 +299,15 @@ func (s *tahServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"default_branch": tahBranch, "visibility": "private",
 			"ci_pipeline_variables_minimum_override_role": s.overrideRole,
 		})
+	case p == "/admin/ci/variables" && r.Method == http.MethodGet:
+		// The activation gate inventories inherited variable overrides. The
+		// emulated instance and namespace define none.
+		s.hits["GET /admin/ci/variables"]++
+		tahJSON(w, http.StatusOK, []any{})
+	case strings.HasPrefix(p, "/groups/") && strings.HasSuffix(p, "/variables") && r.Method == http.MethodGet:
+		// The project lives in a personal namespace, which has no group.
+		s.hits["GET /groups/:id/variables"]++
+		tahJSON(w, http.StatusNotFound, map[string]any{"message": "404 Group Not Found"})
 	case strings.HasPrefix(p, "/users/") && strings.HasSuffix(p, "/keys") && r.Method == http.MethodGet:
 		s.hits["GET /users/:id/keys"]++
 		tahJSON(w, http.StatusOK, []any{})
@@ -629,24 +661,18 @@ func (s *tahServer) project(w http.ResponseWriter, r *http.Request, uid int, seg
 		w.WriteHeader(http.StatusNoContent)
 
 	// ---- Protected branch rule ----
+	case "GET /protected_branches":
+		if !s.protected {
+			tahJSON(w, http.StatusOK, []any{})
+			return
+		}
+		tahJSON(w, http.StatusOK, []any{s.protectedBranchPayload()})
 	case "GET /protected_branches/:name":
 		if seg[1] != tahBranch || !s.protected {
 			tahJSON(w, http.StatusNotFound, map[string]any{"message": "404 Not found"})
 			return
 		}
-		levels := make([]any, 0, len(s.push))
-		for _, e := range s.push {
-			lvl := map[string]any{"id": e.ID, "access_level": e.AccessLevel, "user_id": nil, "group_id": nil, "deploy_key_id": nil}
-			if e.DeployKeyID != 0 {
-				lvl["deploy_key_id"] = e.DeployKeyID
-			}
-			levels = append(levels, lvl)
-		}
-		merges := make([]any, 0, len(s.mergeUsers))
-		for i, uid := range s.mergeUsers {
-			merges = append(merges, map[string]any{"id": 500 + i, "access_level": 40, "user_id": uid, "group_id": nil, "deploy_key_id": nil})
-		}
-		tahJSON(w, http.StatusOK, map[string]any{"name": tahBranch, "push_access_levels": levels, "merge_access_levels": merges})
+		tahJSON(w, http.StatusOK, s.protectedBranchPayload())
 	case "PATCH /protected_branches/:name":
 		if seg[1] != tahBranch || !s.protected {
 			tahJSON(w, http.StatusNotFound, map[string]any{"message": "404 Not found"})
@@ -876,7 +902,7 @@ func newTAHEnv(t *testing.T) *tahEnv {
 func (e *tahEnv) converge(rotate bool) error {
 	e.t.Helper()
 	var client forge.Client = e.client
-	return maybeConvergeGitLabTriggerAccount(context.Background(), &reposInstallConfig{}, client, ui.New(e.out), "g", "p", rotate)
+	return maybeConvergeGitLabTriggerAccount(context.Background(), &reposInstallConfig{}, client, ui.New(e.out), "g", "p", rotate, nil)
 }
 
 func (e *tahEnv) install() error { return e.converge(false) }
@@ -1812,4 +1838,22 @@ func TestGitLabTriggerAccountHTTP_UninstallContainsBootstrapWhenInventoryUnreada
 	assert.Zero(t, after.PATID)
 	assert.Equal(t, led.AccountID, after.AccountID, "the ledger and account are kept for a retry")
 	e.requireLeaseReleased()
+}
+
+// The early schedule repair is a no-op without a ledger, and with a ready
+// account that owns no schedule it takes and releases the project lease and
+// changes nothing.
+func TestRepairGitLabTriggerSchedules_LiveClientNoops(t *testing.T) {
+	e := newTAHEnv(t)
+	var client forge.Client = e.client
+	require.NoError(t, repairGitLabTriggerSchedules(context.Background(), &reposInstallConfig{}, client, ui.New(e.out), "g", "p"))
+	e.requireNoLedger()
+
+	e.installReady()
+	e.out.Reset()
+	require.NoError(t, repairGitLabTriggerSchedules(context.Background(), &reposInstallConfig{}, client, ui.New(e.out), "g", "p"))
+	assert.NotContains(t, e.out.String(), "repaired")
+	e.requireLeaseReleased()
+
+	require.NoError(t, repairGitLabTriggerSchedules(context.Background(), &reposInstallConfig{dryRun: true}, client, ui.New(e.out), "g", "p"))
 }

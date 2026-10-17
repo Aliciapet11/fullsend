@@ -17,6 +17,10 @@ if [ "${CI_DEBUG_TRACE:-}" = "true" ]; then
   echo "ERROR: CI_DEBUG_TRACE enabled — aborting to protect secrets" >&2
   exit 1
 fi
+# These can make bootstrap commands execute or load untrusted code. The
+# activation gate also rejects project and readable inherited overrides, but
+# clear inherited runner values before this script invokes external commands.
+unset LD_AUDIT LD_PRELOAD LD_LIBRARY_PATH BASH_ENV TAR_OPTIONS
 # Private-CA trust for self-hosted GitLab. Must run before any
 # GitLab network operation (curl, git, or the fullsend Go client).
 # CI_SERVER_TLS_CA_FILE is a job-local path; it is not available on
@@ -35,7 +39,7 @@ if [ "${FULLSEND_VERSION}" = "latest" ]; then
   if [ -n "${GITHUB_TOKEN:-}" ]; then
     FS_AUTH_HEADER="Authorization: token ${GITHUB_TOKEN}"
   fi
-  if ! FS_RELEASE_JSON=$(curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+  if ! FS_RELEASE_JSON=$(curl -q -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
     ${FS_AUTH_HEADER:+-H "${FS_AUTH_HEADER}"} \
     "https://api.github.com/repos/${FULLSEND_REPO}/releases/latest"); then
     echo "ERROR: Failed to fetch latest release from GitHub API" >&2
@@ -59,10 +63,10 @@ case "${FULLSEND_VERSION}" in
       *)       echo "ERROR: unsupported architecture: ${FS_ARCH} (supported: x86_64, aarch64)" >&2; exit 1 ;;
     esac
     FS_BASE="https://github.com/${FULLSEND_REPO}/releases/download/${FULLSEND_VERSION}"
-    curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+    curl -q -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
       "${FS_BASE}/fullsend_${FS_VER}_linux_${FS_ARCH}.tar.gz" \
       -o /tmp/fullsend.tar.gz
-    curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+    curl -q -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
       "${FS_BASE}/checksums.txt" -o /tmp/checksums.txt
     FS_CHECKSUM_LINE=$(grep "fullsend_${FS_VER}_linux_${FS_ARCH}.tar.gz$" /tmp/checksums.txt || true)
     if [ -z "${FS_CHECKSUM_LINE}" ]; then
@@ -72,7 +76,7 @@ case "${FULLSEND_VERSION}" in
     echo "${FS_CHECKSUM_LINE}" \
       | sed "s|fullsend_${FS_VER}_linux_${FS_ARCH}.tar.gz|/tmp/fullsend.tar.gz|" \
       | sha256sum -c -
-    tar --no-same-owner -xzf /tmp/fullsend.tar.gz -C /usr/local/bin fullsend
+    TAR_OPTIONS='' tar --no-same-owner -xzf /tmp/fullsend.tar.gz -C /usr/local/bin fullsend
     rm -f /tmp/fullsend.tar.gz /tmp/checksums.txt
     ;;
   *)

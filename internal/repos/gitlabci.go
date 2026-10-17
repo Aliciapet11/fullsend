@@ -1534,8 +1534,8 @@ func gitlabVariableBridgesInputExpand(variables *yaml.Node, varName, inputName s
 	return false
 }
 
-// gitlabAgentBridgesDispatchInputs reports whether the committed agent
-// template declares a job whose variables: block bridges every dispatch
+// gitlabAgentBridgesDispatchInputs reports whether the committed managed agent
+// job's variables: block bridges every dispatch
 // input into its corresponding job variable using the exact
 // "$[[ inputs.<name> ]]" form run-agent-job.sh and HMAC verification
 // depend on. Every bridge must be an extended mapping with an explicit
@@ -1551,39 +1551,24 @@ func gitlabVariableBridgesInputExpand(variables *yaml.Node, varName, inputName s
 // reported the repair as landed — see the review finding on this guard's
 // incomplete consumption check.
 func gitlabAgentBridgesDispatchInputs(content []byte) bool {
-	docs, err := decodeGitLabDocuments(content)
-	if err != nil || len(docs) != 2 {
+	job, ok := gitlabJobNode(content, fullsendAgentJobName)
+	if !ok {
 		return false
 	}
-	root := docs[1].Content[0]
-	if root.Kind != yaml.MappingNode {
+	variables, ok := effectiveMappingValue(job, "variables")
+	if !ok || variables == nil {
 		return false
 	}
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		name, ok := classifyTopLevelKey(root.Content[i])
-		if !ok || name == "<<" || nonJobTopLevelKeys[name] || strings.HasPrefix(name, ".") {
-			continue
-		}
-		job := root.Content[i+1]
-		if job.Kind != yaml.MappingNode {
-			continue
-		}
-		variables := findMappingValue(job, "variables")
-		if variables == nil || variables.Kind != yaml.MappingNode {
-			continue
-		}
-		complete := true
-		for varName, inputName := range gitlabAgentInputVariableBridge {
-			if !gitlabVariableBridgesInputNonExpanding(variables, varName, inputName) {
-				complete = false
-				break
-			}
-		}
-		if complete {
-			return true
+	variables = resolveAlias(variables)
+	if variables == nil || variables.Kind != yaml.MappingNode || duplicateMappingKeyProblem(variables) != "" {
+		return false
+	}
+	for varName, inputName := range gitlabAgentInputVariableBridge {
+		if !gitlabVariableBridgesInputNonExpanding(variables, varName, inputName) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // gitlabPollAndAgentTemplatesLanded reports whether the committed
