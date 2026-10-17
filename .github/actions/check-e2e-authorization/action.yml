@@ -92,7 +92,7 @@ runs:
         "
             ;;
           untrusted_labeler)
-            body+="The \`ok-to-test\` label did not authorize this run because it was applied by a user without write access. Do not re-apply it yourself: ask a member of [writers](https://github.com/orgs/fullsend-ai/teams/writers) or [core](https://github.com/orgs/fullsend-ai/teams/core) to apply \`ok-to-test\` after reviewing the latest changes.
+            body+="The \`ok-to-test\` label did not authorize this run because it was applied by a user without write access. Do not re-apply it yourself: ask a reviewer on this PR, or a maintainer listed in [MAINTAINERS.md](https://github.com/fullsend-ai/fullsend/blob/main/MAINTAINERS.md), to apply \`ok-to-test\` after reviewing the latest changes.
         "
             ;;
           error)

@@ -792,7 +792,7 @@ The comment names a reason. What to do next:
 
 | Reason | Label removed? | What to do next |
 |---|---|---|
-| `untrusted_labeler` | Yes, unless someone re-applied it since | The person who applied `ok-to-test` does not have write access (for example a Triage user). Do not re-apply it yourself. Ask a member of [writers](https://github.com/orgs/fullsend-ai/teams/writers) or [core](https://github.com/orgs/fullsend-ai/teams/core) to apply it after reviewing the latest push. |
+| `untrusted_labeler` | Yes, unless someone re-applied it since | The person who applied `ok-to-test` does not have write access (for example a Triage user). Do not re-apply it yourself. Ask a reviewer on this PR, or a maintainer listed in [MAINTAINERS.md](../../../MAINTAINERS.md), to apply it after reviewing the latest push. |
 | `stale_ok_to_test` | Yes | The PR changed after the label was applied, usually by a new push. A user with write access reviews the changes and re-applies `ok-to-test`. |
 | `error` | No | The GitHub API failed during the check. Re-run the workflow. |
 | `unauthorized` | No | The author is external and there is no `ok-to-test` label. Ask a user with write access to review the PR and apply it. If you do have write access, the permission lookup may have failed: re-run the workflow first. |
