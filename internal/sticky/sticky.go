@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/statuscomment"
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
@@ -64,7 +65,9 @@ func Post(ctx context.Context, client forge.Client, owner, repo string, number i
 	}
 
 	existing := FindMarkedComment(comments, cfg.Marker, botUser)
-	markedBody := cfg.Marker + "\n" + body
+	// Escape marker syntax in the agent-written body before the runner's
+	// own marker is prepended, so the runner's marker is the only live one.
+	markedBody := cfg.Marker + "\n" + statuscomment.NeutralizeMarkers(body)
 
 	if existing != nil {
 		printer.StepStart("Found existing comment, updating in-place")
@@ -188,7 +191,7 @@ func BuildUpdatedBody(oldBody, newBody string, cfg Config) string {
 		if cfg.FooterMarker != "" {
 			stripped, _ := strings.CutPrefix(oldBody, cfg.Marker+"\n")
 			stripped, _ = strings.CutPrefix(stripped, cfg.Marker)
-			if idx := strings.Index(stripped, cfg.FooterMarker); idx >= 0 {
+			if idx := strings.LastIndex(stripped, cfg.FooterMarker); idx >= 0 {
 				footer = stripped[idx:]
 			}
 		}
@@ -207,14 +210,22 @@ func BuildUpdatedBody(oldBody, newBody string, cfg Config) string {
 	oldContent, _ := strings.CutPrefix(oldBody, cfg.Marker+"\n")
 	oldContent, _ = strings.CutPrefix(oldContent, cfg.Marker)
 
-	// Strip footer if configured.
+	// Strip footer if configured. The footer is found by its last
+	// occurrence so a copy of the footer marker inside the content does
+	// not cut the old body short.
 	var footer string
 	if cfg.FooterMarker != "" {
-		if idx := strings.Index(oldContent, cfg.FooterMarker); idx >= 0 {
+		if idx := strings.LastIndex(oldContent, cfg.FooterMarker); idx >= 0 {
 			footer = oldContent[idx:]
 			oldContent = strings.TrimRight(oldContent[:idx], "\n")
 		}
 	}
+
+	// Escape marker syntax in the old content before it moves into
+	// history. This runs only after the runner's own marker and footer
+	// are removed above, so the exact-prefix strip keeps matching on later
+	// updates and no copy of the marker accumulates in history.
+	oldContent = statuscomment.NeutralizeMarkers(oldContent)
 
 	// Extract existing <details> blocks from old content to flatten history.
 	// Try sentinel-delimited blocks first, fall back to legacy format.
