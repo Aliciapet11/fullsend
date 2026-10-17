@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/fullsend-ai/fullsend/internal/forge/jira"
 )
@@ -199,6 +200,8 @@ func (c *JiraClient) UpdateStatusComment(ctx context.Context, project string, nu
 
 // FindStatusComment implements StatusCommentClient. Property lookup is the
 // primary path; visible-body scanning keeps pre-property comments compatible.
+// The body scan only considers comments with no fullsend property whose
+// body opens with marker (see legacyMarkdown and hasLegacyMarker).
 func (c *JiraClient) FindStatusComment(ctx context.Context, project string, number int, marker string) (*Comment, bool, error) {
 	key := issueKey(project, number)
 	comments, err := c.jira.ListComments(ctx, key)
@@ -218,8 +221,7 @@ func (c *JiraClient) FindStatusComment(ctx context.Context, project string, numb
 		}
 	}
 	for i := range comments {
-		body := jira.ADFToMarkdown(comments[i].Body)
-		if strings.Contains(body, marker) {
+		if body, ok := legacyMarkdown(comments[i]); ok && hasLegacyMarker(body, marker) {
 			result := fromJiraComment(comments[i])
 			return &result, strings.Contains(body, "fullsend:status:terminal"), nil
 		}
@@ -229,6 +231,8 @@ func (c *JiraClient) FindStatusComment(ctx context.Context, project string, numb
 
 // IsStatusComment implements StatusCommentClient. The legacy body check keeps
 // timeline analysis correct while older marker-bearing comments are present.
+// It only matches a comment with no fullsend property whose body opens with
+// a status marker, so agent text that quotes one is not counted.
 func (c *JiraClient) IsStatusComment(ctx context.Context, project string, number int, commentID string) (bool, error) {
 	key := issueKey(project, number)
 	comments, err := c.jira.ListComments(ctx, key)
@@ -244,7 +248,8 @@ func (c *JiraClient) IsStatusComment(ctx context.Context, project string, number
 				return true, nil
 			}
 		}
-		return strings.Contains(jira.ADFToMarkdown(comments[i].Body), "fullsend:agent-status:"), nil
+		body, ok := legacyMarkdown(comments[i])
+		return ok && hasLegacyMarker(body, StatusMarkerOpener), nil
 	}
 	return false, nil
 }
@@ -278,6 +283,9 @@ func (c *JiraClient) CreateCommentWithMarker(ctx context.Context, project string
 //
 // If no property match is found, a legacy fallback scans comment bodies
 // for the marker string (the old behavior before property-based storage).
+// It only matches a comment that carries no fullsend property and whose
+// body opens with the marker, the layout legacy comments were written in,
+// so another comment that quotes the marker is never picked.
 // This allows transparent migration: the first update to a legacy
 // comment will set the property and strip the marker from the body.
 func (c *JiraClient) FindCommentByMarkerProperty(comments []jira.Comment, marker string) *jira.Comment {
@@ -294,12 +302,37 @@ func (c *JiraClient) FindCommentByMarkerProperty(comments []jira.Comment, marker
 	}
 	// Legacy fallback: match by body text for pre-property comments.
 	for i := range comments {
-		md := jira.ADFToMarkdown(comments[i].Body)
-		if strings.Contains(md, marker) {
+		if md, ok := legacyMarkdown(comments[i]); ok && hasLegacyMarker(md, marker) {
 			return &comments[i]
 		}
 	}
 	return nil
+}
+
+// fullsendPropertyPrefix is the key prefix shared by every comment entity
+// property fullsend writes (stickyPropertyKey, statusPropertyKey).
+const fullsendPropertyPrefix = "fullsend."
+
+// legacyMarkdown returns c's visible body as Markdown, with leading
+// whitespace trimmed, for the legacy body-embedded marker checks. ok is
+// false when c carries any fullsend comment property: such a comment was
+// written under the property-based scheme, so a marker in its body is
+// agent- or runner-written text, never the comment's own marker.
+func legacyMarkdown(c jira.Comment) (md string, ok bool) {
+	for _, prop := range c.Properties {
+		if strings.HasPrefix(prop.Key, fullsendPropertyPrefix) {
+			return "", false
+		}
+	}
+	return strings.TrimLeftFunc(jira.ADFToMarkdown(c.Body), unicode.IsSpace), true
+}
+
+// hasLegacyMarker reports whether md (from legacyMarkdown) opens with
+// marker, the layout the body-embedded scheme wrote: the marker first,
+// the content after it. Matching only that position keeps a marker
+// quoted inside agent-written text from identifying the comment.
+func hasLegacyMarker(md, marker string) bool {
+	return marker != "" && strings.HasPrefix(md, marker)
 }
 
 // MigrateAndUpdateComment updates a comment's body and ensures the

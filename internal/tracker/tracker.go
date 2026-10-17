@@ -119,6 +119,16 @@ type StatusCommentClient interface {
 	IsStatusComment(ctx context.Context, project string, number int, commentID string) (bool, error)
 }
 
+// StatusMarkerPrefix is the marker name shared by every run-status comment
+// marker ("<!-- fullsend:agent-status:<run-id> -->"). It lives here rather
+// than in internal/statuscomment, which builds the markers, because that
+// package imports tracker; defining it once lets both the marker builder
+// and the Jira legacy body check derive from the same value.
+const StatusMarkerPrefix = "fullsend:agent-status:"
+
+// StatusMarkerOpener is the literal text that opens a live status marker.
+const StatusMarkerOpener = "<!-- " + StatusMarkerPrefix
+
 // Reactor is an optional capability for adding and removing emoji
 // reactions on issues and comments. Tracker reaction support varies:
 // GitHub and GitLab support reactions on both issues and comments;
