@@ -208,22 +208,25 @@ make behaviour-test
 
 ### Parallel execution
 
-The suite runs scenarios in parallel by default (`GODOG_CONCURRENCY=12`,
-matching the repo pool size). Each scenario gets its own `World` clone and
+The suite runs scenarios in parallel by default: up to 12 per acquired org,
+matching each org's repo pool size, so a DEV run that acquires three orgs runs
+up to 36 scenarios at once. Each scenario gets its own `World` clone and
 leases a unique `test-repo-NN` from its org's pool, so no cross-scenario state
-is shared. `GODOG_CONCURRENCY` limits the active scenarios across all of the
-run's orgs together (see [Pool orgs and the per-org scenario cap](#pool-orgs-and-the-per-org-scenario-cap)),
-so a run that uses three orgs still runs at most 12 scenarios at once. The
-`behaviour-test` Make target includes `-race` to catch data races under
-concurrent execution.
+is shared, and an org never leases more than its 12 repo slots at once (its
+driver blocks further allocations). The per-org limit of 20 provisioning
+scenarios per run still applies (see [Pool orgs and the per-org scenario cap](#pool-orgs-and-the-per-org-scenario-cap)).
+STAGE uses a single org, so its default stays 12. When `GODOG_CONCURRENCY` is
+set, it is the limit for the whole suite across all of the run's orgs, not a
+per-org value. The `behaviour-test` Make target includes `-race` to catch data
+races under concurrent execution.
 
 To adjust concurrency:
 
 ```bash
-# Run at default concurrency (12)
+# Run at default concurrency (12 per acquired org)
 make behaviour-test
 
-# Run with explicit concurrency
+# Run with an explicit limit for the whole suite
 GODOG_CONCURRENCY=4 make behaviour-test
 
 # Serial mode for debugging

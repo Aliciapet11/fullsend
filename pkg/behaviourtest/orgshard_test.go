@@ -873,11 +873,15 @@ func TestShardAssigner_BalancesByCapacityShare(t *testing.T) {
 func TestShardAssigner_RouterAndCapacity(t *testing.T) {
 	d := newShardDriver("a", nil, nil)
 	d.capacity = 8
+	d2 := newShardDriver("c", nil, nil)
+	d2.capacity = 12
 	a := newShardAssigner([]*orgShard{
 		{Org: "a", Capacity: 1, Template: &world.World{Org: "a", Driver: d}},
 		{Org: "b", Capacity: 1},
+		{Org: "c", Capacity: 1, Template: &world.World{Org: "c", Driver: d2}},
 	}, t.Logf)
-	assert.Equal(t, 8, a.driverCapacity())
+	// Orgs without a template do not count; the rest add up.
+	assert.Equal(t, 20, a.driverCapacity())
 
 	router := a.Router()
 	w, err := router(&godog.Scenario{Uri: "x.feature", Name: "one"})

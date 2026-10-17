@@ -34,8 +34,9 @@ const fullsendModulePath = "github.com/fullsend-ai/fullsend"
 // step registration with external consumers. Callers supply only
 // FeaturePaths and FixturesRoot; tags, concurrency, and driver selection
 // continue to come from env vars (GODOG_TAGS, GODOG_CONCURRENCY,
-// BEHAVIOUR_*, ENVIRONMENT). GODOG_CONCURRENCY bounds the active
-// scenarios across all orgs together.
+// BEHAVIOUR_*, ENVIRONMENT). By default each acquired org runs up to its
+// driver capacity (12 repo slots) of scenarios at once; an explicit
+// GODOG_CONCURRENCY bounds the active scenarios across all orgs together.
 //
 // The test file that calls RunSuite must be built with `-tags behaviour`.
 func RunSuite(t *testing.T, opts SuiteOptions) {
@@ -161,7 +162,7 @@ func RunSuite(t *testing.T, opts SuiteOptions) {
 			}
 			concurrency = n
 			if overCapacity {
-				t.Logf("WARNING: GODOG_CONCURRENCY=%d exceeds driver capacity %d; excess workers will block in AllocateRepo", concurrency, capacity)
+				t.Logf("WARNING: GODOG_CONCURRENCY=%d exceeds the orgs' combined driver capacity %d; excess workers will block in AllocateRepo", concurrency, capacity)
 			}
 		}
 		t.Logf("[org-shard] running with %d concurrent scenario(s) across all orgs", concurrency)

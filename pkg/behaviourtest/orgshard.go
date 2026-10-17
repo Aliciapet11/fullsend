@@ -389,10 +389,11 @@ func (a *shardAssigner) Router() suite.TemplateRouter {
 	}
 }
 
-// driverCapacity is the smallest install-driver capacity across the
-// orgs, 0 when there is none. The suite defaults its aggregate
-// concurrency to it, so adding orgs never multiplies the active
-// scenarios.
+// driverCapacity is the sum of the orgs' install-driver capacities, 0
+// when there is none. Each org's driver limits that org to its own repo
+// slots, so the sum is the most scenarios the orgs can run at once. The
+// suite defaults its aggregate concurrency to it: with three orgs of 12
+// repo slots each, 36.
 func (a *shardAssigner) driverCapacity() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -401,9 +402,7 @@ func (a *shardAssigner) driverCapacity() int {
 		if s.Template == nil || s.Template.Driver == nil {
 			continue
 		}
-		if c := s.Template.Driver.Capacity(); capacity == 0 || c < capacity {
-			capacity = c
-		}
+		capacity += s.Template.Driver.Capacity()
 	}
 	return capacity
 }
