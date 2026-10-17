@@ -11,7 +11,7 @@ Fullsend agents authenticate as GitHub Apps; the table below also includes non-a
 | retro | `fullsend-ai-retro[bot]` | Files retro issues, posts PR comments |
 | prioritize | `fullsend-ai-prioritize[bot]` | Prioritizes issues |
 | renovate | `renovate-fullsend[bot]` | Dependency updates (not a fullsend agent) |
-| sync | `fullsend-ai-sync[bot]` | Converges scaffold files and per-repo variables across `.fullsend`'s `repos.yaml` targets; commits directly to `main` |
+| sync | `fullsend-ai-sync[bot]` | Converges scaffold files and per-repo variables across `.fullsend`'s `repos.yaml` targets; delivers pull requests on `fullsend/scaffold-install` |
 
 When referencing bot identities in code (e.g., trusted actor lists, dispatch filters), always verify the login name against this table. Do not assume each agent role has a unique app identity — the fix agent reuses `fullsend-ai-coder[bot]`, not a separate `fullsend-ai-fix[bot]`.
 
