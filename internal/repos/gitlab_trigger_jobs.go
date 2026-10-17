@@ -130,7 +130,8 @@ func namesLocalInclude(item *yaml.Node, path string) bool {
 // authorization; HOME and XDG_CONFIG_HOME can also select a curl config. The
 // Git, Go, and Python variables select the helpers, configuration, templates
 // (GIT_TEMPLATE_DIR can copy an executable hook into a fresh repository),
-// toolchain flags (e.g. -toolexec), toolchain root (GOROOT), or modules (a
+// toolchain flags (e.g. -toolexec), toolchain root (GOROOT), cache program
+// (GOCACHEPROG, which go build executes), or modules (a
 // committed sitecustomize.py) that install-fullsend-cli.sh and
 // run-agent-job.sh execute.
 var gitlabPreauthProtectedVariables = []string{
@@ -140,7 +141,7 @@ var gitlabPreauthProtectedVariables = []string{
 	"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy",
 	"CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
 	"GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR",
-	"GOFLAGS", "GOENV", "GOTOOLCHAIN", "GOROOT",
+	"GOFLAGS", "GOENV", "GOTOOLCHAIN", "GOROOT", "GOCACHEPROG",
 	"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
 }
 

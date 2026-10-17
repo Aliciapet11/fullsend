@@ -21,10 +21,8 @@ fi
 # activation gate also rejects project and readable inherited overrides, but
 # clear inherited runner values before this script invokes external commands.
 unset LD_AUDIT LD_PRELOAD LD_LIBRARY_PATH BASH_ENV TAR_OPTIONS
-# These select the git helpers/config, Go toolchain flags, or Python modules
-# that the source-pinned install path (git fetch / go build) would run.
-unset GIT_EXEC_PATH GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_TEMPLATE_DIR
-unset GOFLAGS GOENV GOTOOLCHAIN GOROOT PYTHONPATH PYTHONSTARTUP PYTHONHOME
+# These select Python modules that later job scripts would load.
+unset PYTHONPATH PYTHONSTARTUP PYTHONHOME
 # Private-CA trust for self-hosted GitLab. Must run before any
 # GitLab network operation (curl, git, or the fullsend Go client).
 # CI_SERVER_TLS_CA_FILE is a job-local path; it is not available on
@@ -86,6 +84,13 @@ case "${FULLSEND_VERSION}" in
   *)
     # Untagged SHA — clone and build from source (Go toolchain
     # is in the runner base image for this purpose).
+    # These select the git helpers/config and the Go toolchain flags,
+    # environment, version, root, or cache program that this source-pinned
+    # path (git fetch / go build) would run. They are cleared only here: the
+    # release-download path above runs none of them, and self-hosted or
+    # air-gapped runners may set them deliberately (e.g. GOTOOLCHAIN=local).
+    unset GIT_EXEC_PATH GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_TEMPLATE_DIR
+    unset GOFLAGS GOENV GOTOOLCHAIN GOROOT GOCACHEPROG
     if ! command -v go >/dev/null 2>&1; then
       echo "ERROR: Go 1.20+ toolchain not found — required for source builds (non-release refs)" >&2
       echo "Use a runner image with Go 1.20+ installed or pin to a release version tag" >&2

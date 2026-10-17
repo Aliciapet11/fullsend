@@ -1006,6 +1006,16 @@ func TestCheckGitLabTriggerDispatchGate_PredefinedVariableOverrideDefers(t *test
 			mutate: func(e *trigEnv) { e.state.InstanceVariables = []string{"GOROOT"} },
 			want:   "instance variable override: GOROOT",
 		},
+		"group gocacheprog variable": {
+			mutate: func(e *trigEnv) {
+				e.state.OrgVariables = map[string]bool{trigOwner + "/GOCACHEPROG": true}
+			},
+			want: "group variable override: GOCACHEPROG",
+		},
+		"instance gocacheprog variable": {
+			mutate: func(e *trigEnv) { e.state.InstanceVariables = []string{"GOCACHEPROG"} },
+			want:   "instance variable override: GOCACHEPROG",
+		},
 		"unreadable project inventory": {
 			mutate: func(e *trigEnv) { e.state.Errors["ListRepoVariables"] = errors.New("boom") },
 			want:   "could not verify that no project variable overrides a dispatch value",
@@ -1039,7 +1049,7 @@ func TestCheckGitLabTriggerDispatchGate_PredefinedVariableOverrideDefers(t *test
 }
 
 func TestCheckGitLabTriggerDispatchGate_DispatchVariableOverrideDefers(t *testing.T) {
-	for _, key := range []string{"CI_API_V4_URL", "CI_PROJECT_DIR", "CI_JOB_TOKEN", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "TAR_OPTIONS", "HOME", "XDG_CONFIG_HOME", "CURL_HOME", "CURLRC", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR", "GOFLAGS", "GOENV", "GOTOOLCHAIN", "GOROOT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "CI_PIPELINE_SCHEDULE_DESCRIPTION", forge.VarPollMode, "STAGE", forge.VarDispatchHMAC, "EVENT_PAYLOAD_CHUNK_00"} {
+	for _, key := range []string{"CI_API_V4_URL", "CI_PROJECT_DIR", "CI_JOB_TOKEN", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "TAR_OPTIONS", "HOME", "XDG_CONFIG_HOME", "CURL_HOME", "CURLRC", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR", "GOFLAGS", "GOENV", "GOTOOLCHAIN", "GOROOT", "GOCACHEPROG", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "CI_PIPELINE_SCHEDULE_DESCRIPTION", forge.VarPollMode, "STAGE", forge.VarDispatchHMAC, "EVENT_PAYLOAD_CHUNK_00"} {
 		t.Run(key, func(t *testing.T) {
 			e := readyTriggerDispatchEnv(t)
 			e.state.VariableValues[trigOwner+"/"+trigRepo+"/"+key] = "override"
@@ -1052,7 +1062,7 @@ func TestCheckGitLabTriggerDispatchGate_DispatchVariableOverrideDefers(t *testin
 
 func TestCheckGitLabTriggerDispatchGate_CommittedPreauthVariableOverrideDefers(t *testing.T) {
 	for _, path := range []string{".gitlab-ci.yml", fullsendPipelineInclude} {
-		for _, key := range []string{"CI_API_V4_URL", "CI_PROJECT_DIR", "CI_JOB_TOKEN", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "TAR_OPTIONS", "HOME", "XDG_CONFIG_HOME", "CURL_HOME", "CURLRC", "HTTP_PROXY", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR", "GOFLAGS", "GOENV", "GOTOOLCHAIN", "GOROOT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"} {
+		for _, key := range []string{"CI_API_V4_URL", "CI_PROJECT_DIR", "CI_JOB_TOKEN", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "TAR_OPTIONS", "HOME", "XDG_CONFIG_HOME", "CURL_HOME", "CURLRC", "HTTP_PROXY", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR", "GOFLAGS", "GOENV", "GOTOOLCHAIN", "GOROOT", "GOCACHEPROG", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"} {
 			for _, location := range []string{"global", "hidden job", "workflow rule"} {
 				t.Run(path+"/"+key+"/"+location, func(t *testing.T) {
 					e := readyTriggerDispatchEnv(t)

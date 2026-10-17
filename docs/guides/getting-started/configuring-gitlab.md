@@ -290,7 +290,7 @@ For the full list of install flags, see the
 > `FULLSEND_POLL_MODE`, or the agent input bridge's `STAGE`. It also trusts
 > them not to override the execution-controlling variables the scheduled poll
 > job's bootstrap runs under, such as `PATH`, `LD_PRELOAD`, `BASH_ENV`,
-> `GIT_TEMPLATE_DIR`, `GOROOT`, `GOFLAGS`, or `PYTHONPATH`. An inherited
+> `GIT_TEMPLATE_DIR`, `GOROOT`, `GOFLAGS`, `GOCACHEPROG`, or `PYTHONPATH`. An inherited
 > override of one of those runs code of the overrider's choosing in the poll
 > job's `before_script`, **before** the job verifies its creator or HMAC, and
 > with the trigger account's credentials and `CI_JOB_TOKEN` present. Fullsend
