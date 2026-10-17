@@ -79,6 +79,30 @@ func TestBuildUpdatedBody_NeutralizesMarkersInHistory(t *testing.T) {
 	assert.True(t, strings.HasSuffix(result, "<!-- fullsend:test-footer -->\n_footer_"))
 }
 
+// Cutting a <details> block out of the old body joins the text on either
+// side of it. A marker opener split around a block must still come out
+// inert, in both the legacy and the sentinel history formats.
+func TestBuildUpdatedBody_NeutralizesMarkerJoinedByHistoryRemoval(t *testing.T) {
+	cfg := Config{Marker: "<!-- fullsend:review-agent -->", KeepHistory: true}
+	newBody := cfg.Marker + "\nNew review."
+
+	for name, block := range map[string]string{
+		"legacy":   "<details><summary>Previous run</summary>x</details>",
+		"sentinel": "<details>\n<summary>Previous run</summary>\n\n" + historyStart + "\nx\n" + historyEnd + "\n\n</details>",
+	} {
+		t.Run(name, func(t *testing.T) {
+			oldBody := cfg.Marker + "\n<!" + block + "-- fullsend:triage-agent -->"
+
+			result := BuildUpdatedBody(oldBody, newBody, cfg)
+
+			assert.Len(t, liveMarkerRe.FindAllString(result, -1), 1, "only the runner's marker is live")
+			assert.Contains(t, result, "&lt;!-- fullsend:triage-agent -->")
+			assert.Nil(t, FindMarkedComment([]forge.IssueComment{{Author: "bot", Body: result}},
+				"<!-- fullsend:triage-agent -->", "bot"))
+		})
+	}
+}
+
 // The footer is found by its last occurrence, so a copy of the footer
 // marker inside the content does not cut the old body short.
 func TestBuildUpdatedBody_FooterFoundByLastOccurrence(t *testing.T) {

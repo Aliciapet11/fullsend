@@ -221,12 +221,6 @@ func BuildUpdatedBody(oldBody, newBody string, cfg Config) string {
 		}
 	}
 
-	// Escape marker syntax in the old content before it moves into
-	// history. This runs only after the runner's own marker and footer
-	// are removed above, so the exact-prefix strip keeps matching on later
-	// updates and no copy of the marker accumulates in history.
-	oldContent = statuscomment.NeutralizeMarkers(oldContent)
-
 	// Extract existing <details> blocks from old content to flatten history.
 	// Try sentinel-delimited blocks first, fall back to legacy format.
 	var historyBlocks []string
@@ -237,12 +231,20 @@ func BuildUpdatedBody(oldBody, newBody string, cfg Config) string {
 		activeRe = legacyDetailsRe
 	}
 	for _, m := range matches {
-		historyBlocks = append(historyBlocks, m[1])
+		historyBlocks = append(historyBlocks, statuscomment.NeutralizeMarkers(m[1]))
 	}
 
 	// The "current" old content is everything minus the old <details> blocks.
 	currentOld := activeRe.ReplaceAllString(oldContent, "")
 	currentOld = strings.TrimSpace(currentOld)
+
+	// Escape marker syntax in each piece that moves into history. This
+	// runs after the runner's own marker and footer are removed above, so
+	// the exact-prefix strip keeps matching on later updates and no copy
+	// of the marker accumulates in history. It also runs after the
+	// <details> blocks are cut out, since removing a block can join the
+	// text on either side of it into a new marker opener.
+	currentOld = statuscomment.NeutralizeMarkers(currentOld)
 
 	// Assemble history entries and drop the oldest ones first if the
 	// combined body would exceed the size limit. This avoids blind
