@@ -1911,6 +1911,11 @@ func collectPodmanLogs(sandboxName string) string {
 
 // ExtractOutputFiles copies all files under a remote directory in the sandbox
 // to a local output directory, preserving relative paths.
+//
+// It returns nil, nil only when the sandbox answered and has no output files.
+// A failed listing (non-zero openshell exit) or a listing in which no file
+// could be extracted returns an error, so the caller never mistakes an
+// unreadable sandbox for an agent that wrote no output.
 func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, error) {
 	if err := os.MkdirAll(localDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating local output dir: %w", err)
@@ -1922,12 +1927,17 @@ func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, erro
 	}
 	defer root.Close()
 
-	stdout, _, _, err := Exec(sandboxName,
+	stdout, stderr, exitCode, err := Exec(sandboxName,
 		fmt.Sprintf("find %s -type f 2>/dev/null || true", remoteDir),
 		10*time.Second,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("listing output files: %w", err)
+	}
+	// The remote command ends in "|| true", so a non-zero exit can only come
+	// from openshell itself (e.g. exec refused for a sandbox that is not Ready).
+	if exitCode != 0 {
+		return nil, fmt.Errorf("listing output files: exit %d: %s", exitCode, strings.TrimSpace(stderr))
 	}
 
 	trimmed := strings.TrimSpace(stdout)
@@ -1937,11 +1947,13 @@ func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, erro
 	lines := strings.Split(trimmed, "\n")
 
 	var extracted []string
+	listed := 0
 	for _, remotePath := range lines {
 		remotePath = strings.TrimSpace(remotePath)
 		if remotePath == "" {
 			continue
 		}
+		listed++
 		relPath := strings.TrimPrefix(remotePath, remoteDir)
 		relPath = strings.TrimPrefix(relPath, "/")
 
@@ -1971,5 +1983,8 @@ func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, erro
 		extracted = append(extracted, localPath)
 	}
 
+	if listed > 0 && len(extracted) == 0 {
+		return nil, fmt.Errorf("copying output files: %d listed, none copied", listed)
+	}
 	return extracted, nil
 }
