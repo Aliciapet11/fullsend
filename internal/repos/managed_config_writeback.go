@@ -88,7 +88,8 @@ func PreflightManagedConfig(ctx context.Context, m *Manifest, clients ForgeClien
 // implicit security relaxation fails the install. `repos install` calls it
 // with every manifest edit planned in memory and before any is persisted, so
 // a rejection leaves the manifest file untouched (#8218). Every offending
-// repository is reported.
+// repository is reported. A repository whose preset cannot be loaded is
+// skipped: convergence reports that failure for the repository alone.
 func PreflightProposedManagedSafety(ctx context.Context, m *Manifest, clients ForgeClientFactory, filter []string) error {
 	selected, err := selectManifestRepos(ctx, m, clients, filter)
 	if err != nil {
@@ -120,7 +121,10 @@ func PreflightProposedManagedSafety(ctx context.Context, m *Manifest, clients Fo
 		if resolved.Config != "" {
 			data, loadErr := store.Load(ctx, resolved.Config, resolved.ConfigHash)
 			if loadErr != nil {
-				errs = append(errs, fmt.Errorf("%s: loading config preset: %w", name, loadErr))
+				// A preset that cannot be loaded is a failure of this
+				// repository only: convergence loads it again before any
+				// forge write and reports the error in this repository's
+				// result, so one preset cannot stop the fleet (#8516).
 				continue
 			}
 			presetBytes = data
