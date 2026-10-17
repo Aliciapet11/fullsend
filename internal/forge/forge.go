@@ -275,6 +275,19 @@ func IsForbidden(err error) bool {
 	return errors.Is(err, ErrForbidden)
 }
 
+// ErrSignedCommitsRequired indicates that a commit was rejected because
+// the repository's rules require verified signatures and the commit is
+// not signed. Implementations wrap it together with ErrBranchProtected so
+// existing protection handling still applies, while callers can name the
+// actual rule instead of a generic protection message.
+var ErrSignedCommitsRequired = errors.New("signed commits required")
+
+// IsSignedCommitsRequired reports whether err indicates a rejection by a
+// rule that requires signed commits.
+func IsSignedCommitsRequired(err error) bool {
+	return errors.Is(err, ErrSignedCommitsRequired)
+}
+
 // UnverifiedScopesError is returned by ListInheritedRepoVariables together
 // with the variables that could be read when some inherited scopes (ancestor
 // groups, the instance) could not be inspected. Those scopes are unknown, not
@@ -842,9 +855,11 @@ type Client interface {
 	GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error)
 	DeleteFile(ctx context.Context, owner, repo, path, message string) error
 
-	// DeleteFiles atomically removes multiple paths in a single commit via the
-	// Git Trees API. Missing paths are skipped. Returns the number of paths
-	// removed, or (0, nil) when none of the paths exist.
+	// DeleteFiles atomically removes multiple paths in a single commit.
+	// Missing paths are skipped. Returns the number of paths removed, or
+	// (0, nil) when none of the paths exist. On GitHub the commit is
+	// created with the createCommitOnBranch mutation and is therefore
+	// signed by GitHub (see CommitFiles).
 	DeleteFiles(ctx context.Context, owner, repo, message string, paths []string) (deleted int, err error)
 
 	// ListDirectoryContents returns all files and subdirectories at the given
@@ -872,11 +887,25 @@ type Client interface {
 	// default branch in a single commit. It is idempotent: if all files
 	// already have the expected content and mode, no commit is created
 	// and it returns (false, nil).
+	//
+	// On GitHub, a commit whose changed files are all regular inline files
+	// (mode 100644, no LocalPath) is created with createCommitOnBranch and
+	// signed by GitHub for any credential; it cannot change an existing
+	// file's mode, so a mode-only difference counts as unchanged. Other
+	// commits (the vendored bundle) use the Git Data REST API, signed only
+	// for App installation tokens. GitLab commits count as web-based
+	// commits and are signed only where web-based commit signing is set
+	// up: the group or project setting on GitLab.com, the instance's
+	// signing key on Self-Managed and Dedicated.
+	//
+	// Returns ErrBranchProtected when a rule rejects the commit, also
+	// wrapping ErrSignedCommitsRequired for a signature rule.
 	CommitFiles(ctx context.Context, owner, repo, message string, files []TreeFile) (committed bool, err error)
 
 	// CommitFilesToBranch atomically commits multiple files to a specific
 	// branch. Like CommitFiles, it is idempotent: if all files already
-	// have the expected content, no commit is created.
+	// have the expected content, no commit is created. The signing rules
+	// documented on CommitFiles apply.
 	CommitFilesToBranch(ctx context.Context, owner, repo, branch, message string, files []TreeFile) (committed bool, err error)
 
 	// ForceCommitFileToBranch force-updates branch to a single-file commit

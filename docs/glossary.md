@@ -330,6 +330,11 @@ See [ADR 0045](ADRs/0045-forge-portable-harness-schema.md), [Default, derived, a
 An external process running alongside (but outside) the agent's sandbox that mediates access to resources the sandbox cannot natively constrain. Example: an ephemeral Git server that receives `git push` from the agent and forwards it only to the one branch the agent is authorized to write to. Unlike an MCP server (which the agent explicitly calls as a tool), a sidecar can be transparent — the agent may not know it's interacting with a mediator rather than the real service.
 See [architecture.md](architecture.md) and [#101](https://github.com/fullsend-ai/fullsend/issues/101).
 
+### Signed Commit
+
+A commit carrying a cryptographic signature the forge can verify; GitHub shows it as **Verified**, and repository rulesets can require one. The scaffold commits `fullsend repos install` creates on GitHub are signed by GitHub itself, which creates them on the operator's behalf through its API — no key on the operator's machine is involved. The exception is a vendored install, whose binary goes through an API GitHub signs only for App tokens. Distinct from the DCO `Signed-off-by` trailer, which is message text.
+See [Signed commits](cli/repos.md#signed-commits) and [ADR 0140](ADRs/0140-sign-github-scaffold-commits-via-createcommitonbranch.md).
+
 ### Skill
 
 A directory containing a `SKILL.md` file and optional companions (scripts, sub-agents, references, assets) that gives an agent scoped instructions for a task. Skills are assembled by the [harness](#harness). A skill may declare tools it is authorized to use; approving the skill implicitly authorizes those tools. Skills change *how* an agent reasons; they do not replace host-side [pre-script](#pre-script) / [post-script](#post-script) forge actions. Adding skills → usually [configured default](#configured-default-agent); see also [additive skill](#additive-skill), [skill override](#skill-override), [always-on](#always-on-skill), [on-demand](#on-demand-skill).

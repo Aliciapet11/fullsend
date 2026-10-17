@@ -709,6 +709,12 @@ See [ADR 0003](ADRs/0003-org-config-repo-convention.md) for the historical org c
   references, and config-based agent registration
   ([ADR 0045](ADRs/0045-forge-portable-harness-schema.md),
   [ADR 0064](ADRs/0064-deprecate-customized-directory-overlay.md)).
+- Scaffold delivery on GitHub: a commit made only of regular inline files is
+  created with the `createCommitOnBranch` GraphQL mutation, so GitHub signs
+  it for any credential and rulesets that require verified signatures accept
+  it; the vendored bundle (streamed binary, executable mode) keeps the Git
+  Data REST path, which is unsigned with user tokens
+  ([ADR 0140](ADRs/0140-sign-github-scaffold-commits-via-createcommitonbranch.md)).
 
 ## Multi-org deployment model
 
