@@ -447,6 +447,7 @@ func TestPostTrackerStickyComment_NeutralizesMarkersInBody(t *testing.T) {
 
 	assert.True(t, strings.HasPrefix(got, cfg.Marker+"\n"))
 	assert.Equal(t, 1, strings.Count(got, cfg.Marker), "exactly one runner marker")
+	assert.Equal(t, 1, strings.Count(got, "fullsend:triage-agent"), "no escaped copy of the runner's marker lands in history")
 	assert.Equal(t, 1, strings.Count(strings.ToLower(got), "<!-- fullsend:"), "only the runner's marker is live")
 	assert.NotContains(t, got, "<!--FULLSEND")
 	assert.Equal(t, 3, strings.Count(got, "&lt;!-- fullsend:agent-status:999 -->"), "current body and both history entries")

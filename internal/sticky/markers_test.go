@@ -44,6 +44,8 @@ func TestPost_NeutralizesMarkersInBody_AcrossUpdates(t *testing.T) {
 
 		assert.True(t, strings.HasPrefix(body, cfg.Marker+"\n"), "run %s: marker must stay at the start", run)
 		assert.Equal(t, 1, strings.Count(body, cfg.Marker), "run %s: exactly one runner marker", run)
+		assert.Equal(t, 1, strings.Count(body, "fullsend:review-agent"),
+			"run %s: no escaped copy of the runner's marker lands in history", run)
 		assert.Len(t, liveMarkerRe.FindAllString(body, -1), 1, "run %s: only the runner's marker is live", run)
 		assert.Equal(t, i+1, strings.Count(body, "&lt;!-- fullsend:agent-status:999 -->"),
 			"run %s: agent marker text is escaped once per run, not re-escaped", run)
