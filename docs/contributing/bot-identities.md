@@ -21,7 +21,7 @@ The `fullsend-ai-sync[bot]` App has a broader write path than the agent Apps lis
 
 ### Ruleset bypass
 
-The sync App still holds `bypass_mode: always` on the `fullsend-ai/fullsend` `main` ruleset from the period when scaffold convergence pushed to `main` directly after every push. Since 2026-10-16 the sync runs on releases and a schedule and delivers pull requests on `fullsend/scaffold-install`, so the bypass is no longer exercised by the sync path and can be removed once the first PR-mode runs have been observed.
+The sync App still holds `bypass_mode: always` on the `fullsend-ai/fullsend` `main` ruleset from the period when scaffold convergence pushed to `main` directly after every push. Since 2026-10-16 the sync runs on final releases (called from `release.yml`) and a schedule and delivers pull requests on `fullsend/scaffold-install`, so the bypass is no longer exercised by the sync path and can be removed once the first PR-mode runs have been observed.
 
 ### Workflow-write scope
 
@@ -29,7 +29,7 @@ The sync App has workflow-write permission, which it needs to open pull requests
 
 ### App-token push recursion
 
-GitHub's "events triggered by `GITHUB_TOKEN` will not create a new workflow run" suppression is scoped to `GITHUB_TOKEN` and does not apply to GitHub App installation tokens. While this repository dispatched the sync on every push to `main` (until 2026-10-16), a sync commit to `main` re-triggered that dispatch. Observed 2026-08-24: merge `cfdbf2ff` at 14:29 → dispatch → sync commit 14:51 → dispatch → sync commit 14:52 → dispatch → stop. Each scaffold-touching merge cost ≥2 dispatch rounds and interacted with the convergence non-idempotence tracked in #6553. The dispatch now fires on releases and the sync delivers pull requests, so the loop no longer exists; the suppression caveat still applies to any App-token push to `main`. See also [CI Workflows § Scaffold sync](ci-workflows.md#scaffold-sync).
+GitHub's "events triggered by `GITHUB_TOKEN` will not create a new workflow run" suppression is scoped to `GITHUB_TOKEN` and does not apply to GitHub App installation tokens. While this repository dispatched the sync on every push to `main` (until 2026-10-16), a sync commit to `main` re-triggered that dispatch. Observed 2026-08-24: merge `cfdbf2ff` at 14:29 → dispatch → sync commit 14:51 → dispatch → sync commit 14:52 → dispatch → stop. Each scaffold-touching merge cost ≥2 dispatch rounds and interacted with the convergence non-idempotence tracked in #6553. The dispatch now fires on final releases from `release.yml` and the sync delivers pull requests, so the loop no longer exists; the suppression caveat still applies to any App-token push to `main`. See also [CI Workflows § Scaffold sync](ci-workflows.md#scaffold-sync).
 
 ## General identity notes
 
