@@ -21,6 +21,9 @@ import (
 const (
 	openCodeDefaultProvider = "google-vertex-anthropic"
 	openCodeDefaultModel    = "opus"
+	// openCodeVertexVersionSuffix is appended to bare ids on
+	// openCodeDefaultProvider, whose catalog requires an @version suffix.
+	openCodeVertexVersionSuffix = "@default"
 	// openCodeProviderEnv overrides the provider prefix for bare model ids.
 	openCodeProviderEnv = "FULLSEND_OPENCODE_PROVIDER"
 	// openCodeRuntimeEnv tells in-sandbox skills which runtime they are on.
@@ -42,7 +45,8 @@ var openCodeDocumentedAliases = map[string]bool{
 }
 
 // translateOpenCodeModel resolves the model into OpenCode's --model value:
-// aliases map to catalog ids, bare ids get the provider prefix, provider/model
+// aliases map to catalog ids, bare ids get the provider prefix (and @default
+// on google-vertex-anthropic when they have no @ suffix), provider/model
 // passes through. configAliases overrides openCodeModelAliases per key
 // (#6882, models.aliases in .fullsend/config.yaml).
 func translateOpenCodeModel(model string, configAliases map[string]string) string {
@@ -61,6 +65,13 @@ func translateOpenCodeModel(model string, configAliases map[string]string) strin
 	}
 	if strings.Contains(model, "/") {
 		return model
+	}
+	// google-vertex-anthropic catalog ids all carry an @version suffix
+	// (#7823), so a bare id such as a models.aliases override
+	// (sonnet: claude-sonnet-5) gets @default rather than failing with
+	// ProviderModelNotFoundError.
+	if provider == openCodeDefaultProvider && !strings.Contains(model, "@") {
+		model += openCodeVertexVersionSuffix
 	}
 	return provider + "/" + model
 }
