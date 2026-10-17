@@ -391,8 +391,9 @@ flag is an error). See
     on Messages-dialect requests: `authorization` (the default, used when
     the field is absent) or `x-api-key`
     ([ADR 0142](../ADRs/0142-inference-gateway-x-api-key-header-for-messages-models.md)).
-    An older CLI or reusable workflow that does not know the field
-    rejects a config that sets it. Set `x-api-key` for a gateway that
+    A CLI or reusable workflow from v0.48.0 or earlier ignores the field
+    and sends `Authorization: Bearer`, so an `x-api-key` gateway answers
+    401. Set `x-api-key` for a gateway that
     reads the caller's key from `x-api-key` on `/v1/messages`, the header
     Anthropic documents for API keys on that API. It is valid only with
     `auth: api-key`: a resolved block in the `oidc` mode that sets
