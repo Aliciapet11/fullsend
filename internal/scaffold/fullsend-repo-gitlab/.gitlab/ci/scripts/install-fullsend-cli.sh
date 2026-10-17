@@ -21,6 +21,10 @@ fi
 # activation gate also rejects project and readable inherited overrides, but
 # clear inherited runner values before this script invokes external commands.
 unset LD_AUDIT LD_PRELOAD LD_LIBRARY_PATH BASH_ENV TAR_OPTIONS
+# These select the git helpers/config, Go toolchain flags, or Python modules
+# that the source-pinned install path (git fetch / go build) would run.
+unset GIT_EXEC_PATH GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+unset GOFLAGS GOENV GOTOOLCHAIN PYTHONPATH PYTHONSTARTUP PYTHONHOME
 # Private-CA trust for self-hosted GitLab. Must run before any
 # GitLab network operation (curl, git, or the fullsend Go client).
 # CI_SERVER_TLS_CA_FILE is a job-local path; it is not available on

@@ -127,13 +127,19 @@ func namesLocalInclude(item *yaml.Node, path string) bool {
 // (a PATH pointing into the checkout would run a repository-provided curl),
 // so matching the shipped script bytes would not mean only shipped code runs.
 // The connection variables can substitute a proxy or trust store before
-// authorization; HOME and XDG_CONFIG_HOME can also select a curl config.
+// authorization; HOME and XDG_CONFIG_HOME can also select a curl config. The
+// Git, Go, and Python variables select the helpers, configuration, toolchain
+// flags (e.g. -toolexec), or modules (a committed sitecustomize.py) that
+// install-fullsend-cli.sh and run-agent-job.sh execute.
 var gitlabPreauthProtectedVariables = []string{
 	"CI_API_V4_URL", "CI_PROJECT_DIR", "CI_JOB_TOKEN",
 	"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "TAR_OPTIONS",
 	"HOME", "XDG_CONFIG_HOME", "CURL_HOME", "CURLRC",
 	"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy",
 	"CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
+	"GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+	"GOFLAGS", "GOENV", "GOTOOLCHAIN",
+	"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
 }
 
 // allowJobRaw, when set, accepts a top-level key by its raw (unevaluated)
