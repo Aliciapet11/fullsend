@@ -102,8 +102,22 @@ ENV PATH=/opt/venv/bin:/usr/local/go/bin:/home/runner/go/bin:$PATH \
     GITHUB_TOKEN=
 
 # The hosted runner is non-root; permission-probing tests differ as root.
-# HOME is world-writable so Docker's `--user <host uid>` (not uid 1000) can
-# still write git config and caches there.
-RUN useradd -m runner && chmod 1777 /home/runner
+# Docker runs as the host's uid:gid (`--user`), so ci-local passes them as
+# RUNNER_UID/RUNNER_GID and runner gets those ids: whoami and `id -un` then
+# resolve as on the hosted runner. Podman's --userns=keep-id adds its own
+# entry, so it passes neither. A user already holding the uid (the base
+# image's ubuntu, uid 1000) is removed; an existing gid (macOS staff, 20) is
+# reused. HOME stays world-writable for any other uid.
+ARG RUNNER_UID=
+ARG RUNNER_GID=
+RUN set -e; \
+    if [ -n "$RUNNER_UID" ] && [ "$RUNNER_UID" != 0 ]; then \
+      u=$(getent passwd "$RUNNER_UID" | cut -d: -f1); [ -z "$u" ] || userdel "$u"; \
+      getent group "$RUNNER_GID" >/dev/null || groupadd -g "$RUNNER_GID" runner; \
+      useradd -l -m -u "$RUNNER_UID" -g "$RUNNER_GID" runner; \
+    else \
+      useradd -m runner; \
+    fi; \
+    chmod 1777 /home/runner
 USER runner
 WORKDIR /src

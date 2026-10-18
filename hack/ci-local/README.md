@@ -60,6 +60,46 @@ the host.
   throwaway clone, and Linux `node_modules` live in named volumes.
 - On SELinux hosts (Fedora, RHEL), mounts use `:z`, which relabels the
   checkout's files so the container can read them.
+- DNS lookups go to the host's own resolvers (see [DNS](#dns)); `ci-local`
+  adds no resolver of its own.
+
+## DNS
+
+By default the container uses the host's default resolvers, in the host's
+order: on macOS the first resolver that `scutil --dns` lists, on Linux the
+`nameserver` lines of `/run/systemd/resolve/resolv.conf` (or
+`/etc/resolv.conf`). Only IPv4 resolvers are used. Loopback and IPv6 resolvers
+can't be reached from the container. Each address is passed to the engine as
+`--dns`, so lookups go where they go on the host, which is not always where
+the engine's own forwarding sends them.
+
+Per-domain (split) DNS is not carried over. Names that the host sends to a
+separate resolver, such as a VPN's internal domains, may not resolve in the
+container. The CI targets only need public names.
+
+On Docker Desktop, `ci-local` also passes `--dns-option use-vc`, so lookups
+use TCP. With **Use kernel networking for UDP** enabled (Settings → Resources
+→ Network), UDP leaves Docker's VM directly and can't reach a resolver that
+is only routable through the host, such as a VPN's. TCP goes through the host.
+
+### Overriding and adding a fallback
+
+Set `CI_LOCAL_DNS` to a space-separated list of resolver addresses:
+
+```bash
+CI_LOCAL_DNS="<primary> <fallback>" hack/ci-local/ci-local ci
+CI_LOCAL_DNS= hack/ci-local/ci-local ci   # the engine's own DNS, no --dns
+```
+
+To find your resolvers, run `scutil --dns` (macOS) or `resolvectl status`
+(Linux). Use resolvers that you or your organization trust.
+
+The container tries resolvers in order, but it moves to the next one only
+when a resolver times out or refuses the query. A resolver that answers "no
+such name" (`NXDOMAIN`) ends the lookup. Some routers and ISP resolvers return
+`NXDOMAIN` for domains they filter, including `example.com`, which the
+`internal/fetch` tests need. Put a resolver that answers those names first,
+not after the one that filters them.
 
 ## Tool versions follow CI
 
@@ -88,9 +128,17 @@ pins. `lint.yml` pins no arm64 checksums, so on arm64 (Apple silicon) they,
 like Node and uv everywhere, are verified against the publisher's checksum
 file from the same release.
 
-Each version set leaves its own image behind. To reclaim space, remove them all
-with `podman image prune -a --filter label=fullsend-ci-local=1` (or `docker`);
-the next run rebuilds the current one. Download caches (Go, npm, uv,
+Each version set leaves its own image behind. `hack/ci-local/ci-local clean`
+removes every `ci-local` image except the current one for this checkout (add
+`--amd64` for the amd64 images). A checkout with different tool versions
+rebuilds its image on its next run. It also removes the unsuffixed
+`node_modules` volumes left by older versions of `ci-local`. It removes
+nothing by force: an image or volume that a running container uses, such as a
+`ci-local` run in another worktree, is kept and reported. It never touches the
+download caches or other images. To remove
+every `ci-local` image instead, run
+`podman image prune -a --filter label=fullsend-ci-local=1` (or `docker`); the
+next run rebuilds the current one. Download caches (Go, npm, uv,
 pre-commit) are volumes shared by all checkouts; `node_modules` volumes are per
 checkout (`fullsend-ci-local-nm-*-<checkout-hash>`), so concurrent runs in two
 worktrees never share one. Remove them all with

@@ -21,7 +21,7 @@ Targets (each maps to the command CI or the Makefile runs):
   go-build       make go-build
   coverage       make go-test, then total + per-file coverage of .go files changed vs origin/main
   lint-all       make lint-all with SKIP=check-gateway-doc-configs (as lint.yml)
-  lint           make lint (pre-commit on staged files)
+  lint           make lint with SKIP=check-gateway-doc-configs (pre-commit on staged files)
   check          make check (ruff + ty on hack/)
   lint-md-links  make lint-md-links (lychee --offline)
   script-test    make script-test (shell, python, node:test suites)
@@ -33,6 +33,8 @@ Targets (each maps to the command CI or the Makefile runs):
   all            ci + go-test go-modules go-fmt check
   shell          interactive shell in the container
   build-image    rebuild the image, re-resolving floating versions (Node 22.x, Python 3.x, uv) to latest
+  clean          remove old ci-local images (all but the current one; --amd64 for the amd64
+                 ones) and the pre-per-checkout node_modules volumes; caches are kept
 
 Not supported: behaviour-test / playback-test (need a real GitHub org, OIDC
 mint and secrets) and check-gateway-doc-configs (runs a container itself).
@@ -44,13 +46,16 @@ Options:
 
 Environment:
   CI_LOCAL_ENGINE  podman or docker (default: podman if installed)
-  CI_LOCAL_DNS     resolver for the container (default 1.1.1.1; empty = engine default)
+  CI_LOCAL_DNS     resolvers for the container, space-separated, tried in order
+                   (default: the host's own; empty = the engine's own; see README)
 
-Isolation: no host environment variables (podman builds and runs with --http-proxy=false),
-SSH agent or credential files from outside the checkout enter the container;
-only the checkout (including gitignored files), its .git directory and cache
-volumes are mounted, read-write. GH_TOKEN/GITHUB_TOKEN are empty, as on CI.
-This keeps host secrets out; it is not a sandbox against the code under test.
+Isolation: no host environment variables, SSH agent or credential files from
+outside the checkout enter the container. Podman builds and runs with
+--http-proxy=false; Docker still applies proxies from ~/.docker/config.json
+(see README). Only the checkout (including gitignored files), its .git
+directory and cache volumes are mounted, read-write. GH_TOKEN/GITHUB_TOKEN
+are empty, as on CI. This keeps host secrets out; it is not a sandbox
+against the code under test.
 EOF
 }
 
@@ -101,6 +106,11 @@ resolve_versions() {
   add LYCHEE_SHA256_AMD64 "$(grep -m1 -E 'lychee\.tar\.gz.*sha256sum' "$wf" | grep -oE '[0-9a-f]{64}')" lint.yml
   add PINACT_VERSION "$(grep -m1 -oE 'pinact/releases/download/v[0-9.]+/' "$wf" | sed -E 's#.*/v##; s#/$##')" lint.yml
   add PINACT_SHA256_AMD64 "$(grep -m1 -E 'pinact\.tar\.gz.*sha256sum' "$wf" | grep -oE '[0-9a-f]{64}')" lint.yml
+  # Docker runs as the host uid:gid (user_args); build runner with those ids
+  # so whoami/id -un resolve. Podman's keep-id adds its own passwd entry.
+  if [ "$(basename "$ENGINE")" != podman ]; then
+    BUILD_ARGS+=(--build-arg "RUNNER_UID=$(id -u)" --build-arg "RUNNER_GID=$(id -g)")
+  fi
   # Tag by platform + versions + everything the build copies in (Containerfile
   # and the fetch/sumof helpers), so any of them changing triggers a rebuild
   # (and hosts sharing an image store never mix arches).
@@ -185,7 +195,7 @@ done
 EOF
     ;;
   lint-all) echo 'SKIP=check-gateway-doc-configs make lint-all' ;;
-  lint) echo 'make lint' ;;
+  lint) echo 'SKIP=check-gateway-doc-configs make lint' ;;
   check) echo 'make check' ;;
   lint-md-links) echo 'make lint-md-links' ;;
   # make -i runs every suite even after one fails, so one failure cannot hide the rest.
@@ -229,6 +239,38 @@ expand() {
   done
 }
 
+# The host's default resolvers, in order. IPv4 only: loopback (systemd-resolved's
+# 127.0.0.53) never reaches the host from a container, and IPv6 resolvers
+# don't from a Podman machine or Docker Desktop VM.
+host_resolvers() {
+  if command -v scutil >/dev/null 2>&1; then
+    # macOS: resolver #1 of the first section is the default; the "scoped
+    # queries" section after it holds per-interface resolvers.
+    scutil --dns | awk '/scoped queries/{exit} /^resolver #/{f=($2=="#1")} f && /nameserver\[/{print $3}'
+  else
+    local f=/run/systemd/resolve/resolv.conf
+    [ -r "$f" ] || f=/etc/resolv.conf
+    awk '$1=="nameserver"{print $2}' "$f" 2>/dev/null
+  fi | grep -E '^[0-9]+(\.[0-9]+){3}$' | grep -v '^127\.' || true
+}
+
+# DNS: the container resolves through the host's own resolvers, so lookups go
+# where they go on the host. An engine's default forwards through its VM or
+# network helper and can land on a different resolver (e.g. the router rather
+# than a VPN's). Per-domain (split) resolvers are not carried over.
+dns_args() {
+  local servers s
+  if [ -n "${CI_LOCAL_DNS+set}" ]; then servers=$CI_LOCAL_DNS; else servers=$(host_resolvers); fi
+  [ -n "$servers" ] || return 0
+  for s in $servers; do printf '%s\n' --dns "$s"; done
+  # Docker Desktop's "kernel networking for UDP" sends UDP straight from its
+  # VM, bypassing host routes such as a VPN's; TCP goes through the host.
+  if [ "$(basename "$ENGINE")" != podman ] &&
+    "$ENGINE" info --format '{{.OperatingSystem}}' 2>/dev/null | grep -q 'Docker Desktop'; then
+    printf '%s\n' --dns-option use-vc
+  fi
+}
+
 run_in() {
   # -i so `... | ci-local shell` works; -t only on a real terminal.
   local tty=(-i)
@@ -244,26 +286,49 @@ run_in() {
     "$ENGINE" run --rm --user 0 ${PLATFORM:+--platform "$PLATFORM"} "${mounts[@]}" "$IMAGE" \
       sh -c 'chmod 1777 /home/runner/go /home/runner/.cache/* /home/runner/.npm /src/node_modules /src/internal/dispatch/cf/workersrc/node_modules' >/dev/null
   fi
-  # DNS: internal/fetch tests need example.com, which some networks' resolvers
-  # refuse (seen on a home/office router; podman and docker both forward to
-  # the host's). A public resolver sees every lookup and can't resolve
-  # internal names, so CI_LOCAL_DNS= (empty) keeps the engine's own resolver.
-  local dns=${CI_LOCAL_DNS-1.1.1.1}
   # safe.directory: the mounts show a host owner; trust only those two repos.
   "$ENGINE" run --rm "${tty[@]}" ${PLATFORM:+--platform "$PLATFORM"} \
-    "${users[@]}" ${noproxy[@]+"${noproxy[@]}"} ${dns:+--dns "$dns"} -e HOME=/home/runner "${mounts[@]}" "$IMAGE" \
+    "${users[@]}" ${noproxy[@]+"${noproxy[@]}"} ${DNS[@]+"${DNS[@]}"} -e HOME=/home/runner "${mounts[@]}" "$IMAGE" \
     bash -c 'git config --global --add safe.directory /src; git config --global --add safe.directory /gitcommon; git config --global commit.gpgsign false; '"$1"
 }
 
+# clean: remove this platform's ci-local images except the current one, and
+# the node_modules volumes from before they were per checkout. Only images
+# carrying the fullsend-ci-local label and only those two exact volume names
+# are candidates. Never forced: the engine refuses to remove anything a
+# running container (e.g. a ci-local run in another worktree) still uses,
+# and that is reported as kept.
+clean() {
+  local id ref name v
+  while read -r id ref; do
+    name=${ref##*/} # podman prefixes localhost/
+    if [ "$ref" = '<none>:<none>' ]; then name=$id
+    elif [ "${name%%:*}" != "${IMAGE%%:*}" ] || [ "$name" = "$IMAGE" ]; then continue
+    fi
+    if "$ENGINE" rmi "$name" >/dev/null 2>&1; then echo "removed image $name"
+    else echo "kept image $name (in use, or the engine refused)"; fi
+  done < <("$ENGINE" images --filter label=fullsend-ci-local=1 --format '{{.ID}} {{.Repository}}:{{.Tag}}')
+  for v in nm-root nm-workersrc; do
+    v=fullsend-ci-local${ARCH_TAG}-$v
+    "$ENGINE" volume ls -q | grep -qx "$v" || continue
+    if "$ENGINE" volume rm "$v" >/dev/null 2>&1; then echo "removed volume $v"
+    else echo "kept volume $v (in use, or the engine refused)"; fi
+  done
+  echo "current image: $IMAGE (kept)"
+}
+
 targets=()
-if [ "$1" != build-image ] && [ "$1" != shell ]; then
+if [ "$1" != build-image ] && [ "$1" != shell ] && [ "$1" != clean ]; then
   while IFS= read -r t; do targets+=("$t"); done < <(expand "$@")
   for t in "${targets[@]}"; do target_cmd "$t" >/dev/null || exit 2; done
 fi
 
 resolve_versions
 if [ "$1" = build-image ]; then build_image --no-cache; exit; fi
+if [ "$1" = clean ]; then clean; exit; fi
 "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1 || build_image
+DNS=()
+while IFS= read -r d; do DNS+=("$d"); done < <(dns_args)
 if [ "$1" = shell ]; then run_in 'exec bash'; exit; fi
 
 results=()

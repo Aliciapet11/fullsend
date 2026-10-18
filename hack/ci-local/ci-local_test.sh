@@ -41,6 +41,13 @@ write_engine() {
 { echo CALL; printf 'ARG %s\n' "$@"; } >> "${ENGINE_LOG}"
 case "$1" in
   image) exit "${STUB_IMAGE_RC:-0}" ;;
+  info) echo "${STUB_OS:-}"; exit 0 ;;
+  # clean: STUB_IMAGES/STUB_VOLUMES are the listings; STUB_BUSY is refused as in use.
+  images) printf '%s\n' "${STUB_IMAGES:-}"; exit 0 ;;
+  rmi) [ "$2" != "${STUB_BUSY:-}" ]; exit ;;
+  volume)
+    [ "$2" = ls ] && printf '%s\n' "${STUB_VOLUMES:-}"
+    [ "$2" != rm ] || [ "$3" != "${STUB_BUSY:-}" ]; exit ;;
   build) exit 0 ;;
   run)
     for a in "$@"; do [ "$a" = 0 ] && [ "${prev:-}" = --user ] && exit 0; prev=$a; done
@@ -58,6 +65,17 @@ DOCKER=$(write_engine docker)
 # Shims for tools the container command calls when STUB_EXEC=1.
 SHIMS="${WORK}/shims"
 mkdir -p "${SHIMS}"
+
+# Stub scutil: prints STUB_SCUTIL_OUT (empty = no resolvers), so DNS argv
+# never depends on the machine running the suite. On PATH everywhere, so
+# Linux runs take the macOS parsing path too.
+mkdir -p "${WORK}/bin-scutil"
+cat > "${WORK}/bin-scutil/scutil" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${STUB_SCUTIL_OUT:-}"
+STUB
+chmod +x "${WORK}/bin-scutil/scutil"
+export PATH="${WORK}/bin-scutil:${PATH}"
 
 # Args of the last `run` call that is not Docker's root volume chmod.
 last_run_args() {
@@ -382,6 +400,26 @@ if grep -qx -- '--http-proxy=false' <<< "${PB}" && ! grep -q -- '--http-proxy' <
 else
   fail "build proxy flag: podman=[$(tr '\n' ' ' <<< "${PB}")] docker=[$(tr '\n' ' ' <<< "${DB}")]"
 fi
+# Both lint targets skip the hook lint.yml skips (it starts its own container).
+LINT_SKIP=$(sed -n 's/^ *SKIP: *//p' "${ROOT}/.github/workflows/lint.yml" | head -1)
+run_ci_local "${PODMAN}" lint
+LINT_CMD=$(last_run_args | tail -1)
+run_ci_local "${PODMAN}" lint-all
+LINT_ALL_CMD=$(last_run_args | tail -1)
+if [ -n "${LINT_SKIP}" ] && [[ "${LINT_CMD}" == *"; SKIP=${LINT_SKIP} make lint" ]] &&
+  [[ "${LINT_ALL_CMD}" == *"; SKIP=${LINT_SKIP} make lint-all" ]]; then
+  pass "lint and lint-all both skip ${LINT_SKIP}, as lint.yml does"
+else
+  fail "lint skip: lint.yml=[${LINT_SKIP}] lint=[${LINT_CMD##*; }] lint-all=[${LINT_ALL_CMD##*; }]"
+fi
+
+# Docker builds runner with the host uid:gid it later runs as; podman (keep-id) passes neither.
+if grep -qx "RUNNER_UID=$(id -u)" <<< "${DB}" && grep -qx "RUNNER_GID=$(id -g)" <<< "${DB}" &&
+  ! grep -q 'RUNNER_' <<< "${PB}"; then
+  pass "docker builds pass RUNNER_UID/RUNNER_GID = host uid:gid; podman builds don't"
+else
+  fail "runner ids: docker=[$(grep RUNNER_ <<< "${DB}" | tr '\n' ' ')] podman=[$(grep RUNNER_ <<< "${PB}" | tr '\n' ' ')]"
+fi
 
 # --- engine argv: user mapping and SELinux ---
 if grep -qx -- '--userns=keep-id' <<< "${ARGS}" && ! grep -qx -- '--user' <<< "${ARGS}"; then
@@ -451,6 +489,97 @@ if grep -qx "${COMMON}:/gitcommon" <<< "${ARGS}" && grep -qx "${PTR}:/src/.git:r
   pass "worktree: git common dir at /gitcommon and .git overlaid with a pointer"
 else
   fail "worktree mounts: ${ARGS}"
+fi
+
+# --- DNS: host resolvers in order; CI_LOCAL_DNS overrides; Docker Desktop adds use-vc ---
+SCUTIL_SAMPLE='DNS configuration
+
+resolver #1
+  search domain[0] : corp.example
+  nameserver[0] : 192.0.2.1
+  nameserver[1] : 2001:db8::53
+  nameserver[2] : 203.0.113.1
+  nameserver[3] : 127.0.0.1
+
+resolver #2
+  domain   : corp.example
+  nameserver[0] : 198.51.100.9
+
+DNS configuration (for scoped queries)
+
+resolver #1
+  nameserver[0] : 198.51.100.1'
+dns_of() { last_run_args | awk 'p=="--dns"{printf "dns=%s ", $0} p=="--dns-option"{printf "opt=%s ", $0} {p=$0}'; }
+
+STUB_SCUTIL_OUT="${SCUTIL_SAMPLE}" run_ci_local "${PODMAN}" go-vet
+if [ "$(dns_of)" = "dns=192.0.2.1 dns=203.0.113.1 " ]; then
+  pass "podman: host's default resolvers in order (no IPv6, loopback, per-domain or scoped)"
+else
+  fail "podman host resolvers: [$(dns_of)]"
+fi
+STUB_SCUTIL_OUT="${SCUTIL_SAMPLE}" STUB_OS="Docker Desktop" run_ci_local "${DOCKER}" go-vet
+if [ "$(dns_of)" = "dns=192.0.2.1 dns=203.0.113.1 opt=use-vc " ]; then
+  pass "Docker Desktop: host resolvers plus --dns-option use-vc (DNS over TCP)"
+else
+  fail "Docker Desktop DNS: [$(dns_of)]"
+fi
+STUB_SCUTIL_OUT="${SCUTIL_SAMPLE}" STUB_OS="Ubuntu 24.04.1 LTS" run_ci_local "${DOCKER}" go-vet
+if [ "$(dns_of)" = "dns=192.0.2.1 dns=203.0.113.1 " ]; then
+  pass "Docker Engine (not Desktop): host resolvers, no use-vc"
+else
+  fail "Docker Engine DNS: [$(dns_of)]"
+fi
+STUB_SCUTIL_OUT="${SCUTIL_SAMPLE}" CI_LOCAL_DNS="198.51.100.7 198.51.100.8" run_ci_local "${PODMAN}" go-vet
+if [ "$(dns_of)" = "dns=198.51.100.7 dns=198.51.100.8 " ]; then
+  pass "CI_LOCAL_DNS list overrides the host's resolvers, in order"
+else
+  fail "CI_LOCAL_DNS override: [$(dns_of)]"
+fi
+STUB_SCUTIL_OUT="${SCUTIL_SAMPLE}" CI_LOCAL_DNS='' STUB_OS="Docker Desktop" run_ci_local "${DOCKER}" go-vet
+if [ -z "$(dns_of)" ]; then
+  pass "empty CI_LOCAL_DNS keeps the engine's own DNS (no --dns, no use-vc)"
+else
+  fail "empty CI_LOCAL_DNS: [$(dns_of)]"
+fi
+run_ci_local "${PODMAN}" go-vet
+if [ -z "$(dns_of)" ]; then
+  pass "no usable host resolver: no --dns"
+else
+  fail "no host resolver: [$(dns_of)]"
+fi
+
+# --- clean: old labelled images and unsuffixed node_modules volumes only, never forced ---
+run_ci_local "${PODMAN}" go-vet
+CUR=$(last_run_args | grep -m1 -E '^fullsend-ci-local:')
+removed() { awk '/^CALL$/{n++} {a[n]=a[n] $0 " "} END{for(i=1;i<=n;i++) if (a[i] ~ /^CALL ARG (rmi|volume ARG rm) /) print a[i]}' "${ENGINE_LOG}" |
+  sed -E 's/^CALL ARG (rmi|volume ARG rm) ARG //; s/ $//' | sort | tr '\n' ' '; }
+STUB_IMAGES="aaa111 localhost/${CUR}
+bbb222 localhost/fullsend-ci-local:0ldtag000000
+ccc333 <none>:<none>
+ddd444 localhost/fullsend-ci-local-amd64:0ldtag000000
+eee555 localhost/fullsend-ci-local:busytag00000" \
+STUB_VOLUMES="fullsend-ci-local-nm-root
+fullsend-ci-local-nm-root-0123456789ab
+fullsend-ci-local-nm-workersrc
+fullsend-ci-local-go
+fullsend-ci-local-amd64-nm-root" \
+STUB_BUSY="fullsend-ci-local:busytag00000" run_ci_local "${PODMAN}" clean
+if [ "${RC}" -eq 0 ] && [ -n "${CUR}" ] &&
+  [ "$(removed)" = "ccc333 fullsend-ci-local-nm-root fullsend-ci-local-nm-workersrc fullsend-ci-local:0ldtag000000 fullsend-ci-local:busytag00000 " ] &&
+  grep -q "kept image fullsend-ci-local:busytag00000 (in use" <<< "${OUT}" &&
+  ! grep -qE 'ARG (-f|--force)$' "${ENGINE_LOG}" && ! grep -qxE 'ARG (run|build)' "${ENGINE_LOG}"; then
+  pass "clean: removes old/untagged images and unsuffixed node_modules volumes; keeps current, amd64, per-checkout, caches; never forced"
+else
+  fail "clean: rc=${RC} current=[${CUR}] removed=[$(removed)] out=[${OUT}]"
+fi
+STUB_IMAGES="ddd444 localhost/fullsend-ci-local-amd64:0ldtag000000
+bbb222 localhost/fullsend-ci-local:0ldtag000000" \
+STUB_VOLUMES="fullsend-ci-local-nm-root
+fullsend-ci-local-amd64-nm-root" run_ci_local "${PODMAN}" --amd64 clean
+if [ "$(removed)" = "fullsend-ci-local-amd64-nm-root fullsend-ci-local-amd64:0ldtag000000 " ]; then
+  pass "clean --amd64: only the amd64 images and volumes"
+else
+  fail "clean --amd64: removed=[$(removed)]"
 fi
 
 if [ "${FAILURES}" -ne 0 ]; then
