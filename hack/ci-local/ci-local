@@ -177,7 +177,8 @@ mount_args() {
     echo "gitdir: /gitcommon/worktrees/$wt" > "$ptr"
     args+=(-v "$common:/gitcommon$Z" -v "$ptr:/src/.git:ro${Z:+,z}")
   fi
-  printf '%s\n' "${args[@]}"
+  # NUL-separated: host paths may contain newlines (read with read -d '').
+  printf '%s\0' "${args[@]}"
   volume_args
 }
 
@@ -195,7 +196,7 @@ volume_args() {
   for v in nm-root:/src/node_modules nm-workersrc:/src/internal/dispatch/cf/workersrc/node_modules; do
     args+=(-v "fullsend-ci-local${ARCH_TAG}-${v%%:*}-${REPO_ID}:${v#*:}")
   done
-  printf '%s\n' "${args[@]}"
+  printf '%s\0' "${args[@]}"
 }
 
 target_cmd() {
@@ -303,7 +304,7 @@ run_in() {
   local tty=(-i)
   [ -t 0 ] && [ -t 1 ] && tty=(-it)
   local mounts=() users=() noproxy=()
-  while IFS= read -r m; do mounts+=("$m"); done < <(mount_args)
+  while IFS= read -r -d '' m; do mounts+=("$m"); done < <(mount_args)
   while IFS= read -r u; do users+=("$u"); done < <(user_args)
   while IFS= read -r a; do noproxy+=("$a"); done < <(noproxy_args -e)
   if [ "$(basename "$ENGINE")" != podman ]; then
@@ -313,7 +314,7 @@ run_in() {
     # can't point chmod at host files), and sh/chmod are absolute with a fixed
     # PATH (the image PATH includes /home/runner/go/bin, a shared volume).
     local vols=()
-    while IFS= read -r m; do vols+=("$m"); done < <(volume_args)
+    while IFS= read -r -d '' m; do vols+=("$m"); done < <(volume_args)
     "$ENGINE" run --rm --user 0 --network none -e PATH=/usr/sbin:/usr/bin:/sbin:/bin \
       ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "${vols[@]}" "$IMAGE" \
       /bin/sh -c '/bin/chmod 1777 /home/runner/go /home/runner/.cache/* /home/runner/.npm /src/node_modules /src/internal/dispatch/cf/workersrc/node_modules' >/dev/null ||

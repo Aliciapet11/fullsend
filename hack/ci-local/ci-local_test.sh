@@ -558,6 +558,20 @@ else
   fail "worktree mounts: ${ARGS}"
 fi
 
+# A newline in the checkout path stays inside one -v argument, not a new engine option.
+NL_REPO="${WORK}/new"$'\n'"line"
+mkdir -p "${NL_REPO}/.git"
+add_ci_config "${NL_REPO}"
+SAVED_REPO="${REPO}"; REPO="${NL_REPO}"
+run_ci_local "${PODMAN}" go-vet
+REPO="${SAVED_REPO}"
+# The stub logs one "ARG <value>" per argument, so a split argument would log "ARG line:/src".
+if [ "${RC}" -eq 0 ] && grep -qx 'line:/src' "${ENGINE_LOG}" && ! grep -qx 'ARG line:/src' "${ENGINE_LOG}"; then
+  pass "a newline in the checkout path stays inside its -v argument"
+else
+  fail "newline in checkout path split into engine arguments: rc=${RC}"
+fi
+
 # --- DNS: host resolvers in order; CI_LOCAL_DNS overrides; Docker Desktop adds use-vc ---
 SCUTIL_SAMPLE='DNS configuration
 

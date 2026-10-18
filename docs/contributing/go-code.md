@@ -74,6 +74,13 @@ from [`.codecov.yml`](../../.codecov.yml). You must approximate this check
 yourself before committing. Skipping this step is the most common cause
 of `codecov/patch` failures on first push.
 
+On macOS or a Linux distribution other than Ubuntu,
+`hack/ci-local/ci-local coverage` runs `make go-test` in a container that
+matches the CI runner, then prints the coverage of each Go file you changed
+against `origin/main` (see [`hack/ci-local`](../../hack/ci-local/README.md)).
+It doesn't apply the Codecov thresholds, so compare the numbers against the
+targets above yourself.
+
 ### Step-by-step
 
 1. **Identify changed Go files** (excluding tests and generated code).

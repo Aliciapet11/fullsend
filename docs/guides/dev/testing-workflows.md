@@ -71,3 +71,36 @@ jobs:
 Push the change and trigger a Fullsend action on the test repository:
 `/fs-triage`, `/fs-code`, or another agent command. Revert the references to
 the desired release or branch before deleting or rewriting the test ref.
+
+## Running CI checks locally
+
+On macOS, or a Linux distribution other than Ubuntu, `ci-local` runs the PR
+CI checks in a container that matches the `ubuntu-24.04` runner, so local
+results predict CI.
+
+**Prerequisites:** Podman or Docker, set up as described in
+[`hack/ci-local/README.md`](../../../hack/ci-local/README.md#setup).
+
+1. Run everything PR CI runs:
+
+   ```bash
+   make ci-local
+   ```
+
+2. Run selected targets while iterating:
+
+   ```bash
+   make ci-local T="go-test lint-all"
+   ```
+
+3. List all targets and options:
+
+   ```bash
+   hack/ci-local/ci-local help
+   ```
+
+The first run builds the image, which takes a few minutes. Set
+`CI_LOCAL_ENGINE=docker` to use Docker when Podman is also installed.
+`CI_LOCAL_DNS` overrides the resolvers the container uses; see
+[DNS](../../../hack/ci-local/README.md#dns). The README also covers
+isolation, how tool versions follow CI, and `ci-local clean`.
