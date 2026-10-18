@@ -145,6 +145,17 @@ else
   fail "maintenance targets not alone:${bad_alone}"
 fi
 
+# -C without a directory is a usage error (exit 2), not bash's unbound-variable abort.
+set +e
+OUT=$(CI_LOCAL_ENGINE="${PODMAN}" "${CI_LOCAL}" -C 2>&1)
+RC=$?
+set -e
+if [ "${RC}" -eq 2 ] && grep -q -- '-C needs a directory' <<< "${OUT}" && ! grep -q 'unbound variable' <<< "${OUT}"; then
+  pass "-C without a directory exits 2 with a usage error"
+else
+  fail "-C without a directory: rc=${RC} out=${OUT}"
+fi
+
 # Targets that look like echo options must still be rejected, not swallowed.
 bad_dash=""
 for a in -n -e -E; do
@@ -358,6 +369,74 @@ else
   fail "coverage without origin/main must FAIL: rc=${RC} out=${OUT}"
 fi
 rm -f "${SHIMS}/git" "${SHIMS}/make" "${SHIMS}/gofmt"
+
+# Tests below run the target command (STUB_EXEC=1) in a real git repo, from its directory.
+new_git_repo() { # dir: a repo with one commit, which origin/main points at
+  mkdir -p "$1"
+  git -C "$1" init -q
+  git -C "$1" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+  git -C "$1" update-ref refs/remotes/origin/main HEAD
+  add_ci_config "$1"
+}
+run_in_repo() { # dir, engine, ci-local args: run_ci_local from inside dir
+  local dir=$1 saved_repo="${REPO}"
+  shift
+  REPO="${dir}"
+  pushd "${dir}" > /dev/null
+  PATH="${SHIMS}:${PATH}" STUB_EXEC=1 run_ci_local "$@"
+  popd > /dev/null
+  REPO="${saved_repo}"
+}
+
+# coverage reports committed, staged, unstaged and new (untracked) Go files, not tests.
+COV="${WORK}/cov-repo"
+new_git_repo "${COV}"
+for f in committed staged unstaged; do echo "package p" > "${COV}/${f}.go"; done
+git -C "${COV}" add committed.go unstaged.go
+git -C "${COV}" -c user.name=t -c user.email=t@t commit -q -m change
+echo "// edit" >> "${COV}/unstaged.go"
+git -C "${COV}" add staged.go
+echo "package p" > "${COV}/untracked.go"
+echo "package p" > "${COV}/untracked_test.go"
+cat > "${SHIMS}/make" <<'SHIM'
+#!/usr/bin/env bash
+for f in committed staged unstaged untracked untracked_test; do
+  echo "github.com/fullsend-ai/fullsend/${f}.go:1.1,2.2 1 1"
+done > coverage.out
+SHIM
+chmod +x "${SHIMS}/make"
+run_in_repo "${COV}" "${PODMAN}" coverage
+reported=$(grep -oE '[a-z_]+\.go \(' <<< "${OUT}" | tr -d ' (' | sort | tr '\n' ' ')
+if [ "${RC}" -eq 0 ] && [ "${reported}" = "committed.go staged.go unstaged.go untracked.go " ]; then
+  pass "coverage reports committed, staged, unstaged and new Go files (not tests)"
+else
+  fail "coverage files: rc=${RC} reported=[${reported}] out=[${OUT}]"
+fi
+rm -f "${SHIMS}/make"
+
+# lint installs node_modules only when staged docs/.vitepress files need lint-staged and it is missing.
+printf '#!/usr/bin/env bash\necho "NPM-CALLED $*"\n' > "${SHIMS}/npm"
+printf '#!/usr/bin/env bash\necho "MAKE $*"\n' > "${SHIMS}/make"
+chmod +x "${SHIMS}/npm" "${SHIMS}/make"
+LNT="${WORK}/lint-repo"
+new_git_repo "${LNT}"
+mkdir -p "${LNT}/docs/.vitepress" && echo x > "${LNT}/docs/.vitepress/a.ts"
+echo x > "${LNT}/other.md"
+git -C "${LNT}" add other.md
+run_in_repo "${LNT}" "${PODMAN}" lint; LINT_OTHER="${OUT}"
+git -C "${LNT}" add docs/.vitepress/a.ts
+run_in_repo "${LNT}" "${PODMAN}" lint; LINT_VP="${OUT}"
+mkdir -p "${LNT}/node_modules/.bin" && printf '#!/bin/sh\n' > "${LNT}/node_modules/.bin/lint-staged"
+chmod +x "${LNT}/node_modules/.bin/lint-staged"
+run_in_repo "${LNT}" "${PODMAN}" lint; LINT_HAVE="${OUT}"
+if grep -q 'NPM-CALLED ci' <<< "${LINT_VP}" && grep -q 'MAKE lint' <<< "${LINT_VP}" &&
+  ! grep -q 'NPM-CALLED' <<< "${LINT_OTHER}" && grep -q 'MAKE lint' <<< "${LINT_OTHER}" &&
+  ! grep -q 'NPM-CALLED' <<< "${LINT_HAVE}"; then
+  pass "lint runs npm ci only for staged docs/.vitepress files without lint-staged installed"
+else
+  fail "lint npm ci: vitepress=[${LINT_VP}] other=[${LINT_OTHER}] installed=[${LINT_HAVE}]"
+fi
+rm -f "${SHIMS}/npm" "${SHIMS}/make"
 
 # --- engine argv: isolation ---
 run_ci_local "${PODMAN}" go-vet

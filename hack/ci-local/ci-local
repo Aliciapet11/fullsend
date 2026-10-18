@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run fullsend's CI tests and linters in a container that mirrors the
-# GitHub Actions ubuntu-24.04 runner. See `ci-local help`.
+# ci-local — Run fullsend's CI tests and linters in a container that mirrors
+# the GitHub Actions ubuntu-24.04 runner. See `ci-local help`.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +20,8 @@ Targets (each maps to the command CI or the Makefile runs):
   go-vet         make go-vet
   go-fmt         gofmt -l . (fails if anything is unformatted; does not rewrite)
   go-build       make go-build
-  coverage       make go-test, then total + per-file coverage of .go files changed vs origin/main
+  coverage       make go-test, then per-file coverage of .go files changed vs origin/main,
+                 including uncommitted and new files
   lint-all       make lint-all with SKIP=check-gateway-doc-configs (as lint.yml)
   lint           make lint with SKIP=check-gateway-doc-configs (pre-commit on staged files)
   check          make check (ruff + ty on hack/)
@@ -62,7 +63,9 @@ EOF
 
 while [ $# -gt 0 ]; do
   case $1 in
-  -C) REPO=$(cd "$2" && pwd); shift 2 ;;
+  -C)
+    [ $# -ge 2 ] || { echo "ci-local: -C needs a directory (see ci-local help)" >&2; exit 2; }
+    REPO=$(cd "$2" && pwd); shift 2 ;;
   --amd64) PLATFORM=linux/amd64; shift ;;
   -h|--help|help) usage; exit 0 ;;
   *) break ;;
@@ -211,9 +214,14 @@ target_cmd() {
   coverage) cat <<'EOF'
 set -e
 make go-test
-echo "==> coverage of .go files changed vs origin/main"
-# Assigned first so a failed diff (e.g. no origin/main) aborts, not passes.
-files=$(git diff --name-only origin/main...HEAD -- '*.go' ':!*_test.go')
+echo "==> coverage of .go files changed vs origin/main (committed, staged, unstaged, new)"
+# Each assigned separately so a failure (e.g. no origin/main) aborts, not passes.
+# Diffing the working tree against the merge base covers uncommitted edits;
+# ls-files adds new files git doesn't track yet.
+base=$(git merge-base origin/main HEAD)
+changed=$(git diff --name-only "$base" -- '*.go' ':!*_test.go')
+untracked=$(git ls-files --others --exclude-standard -- '*.go' ':!*_test.go')
+files=$(printf '%s\n' $changed $untracked | sort -u)
 for f in $files; do
   # coverage.out lines: <pkg>/<file>:<range> <statements> <hit-count>
   awk -v f="github.com/fullsend-ai/fullsend/$f:" 'index($0,f)==1 {s+=$2; if ($3>0) c+=$2}
@@ -222,7 +230,9 @@ done
 EOF
     ;;
   lint-all) echo 'SKIP=check-gateway-doc-configs make lint-all' ;;
-  lint) echo 'SKIP=check-gateway-doc-configs make lint' ;;
+  # The lint-staged hook (staged docs/.vitepress/ files) needs prettier and
+  # stylelint from node_modules, whose volume is empty until `web` runs.
+  lint) echo 'if git diff --cached --name-only | grep -q "^docs/\.vitepress/" && [ ! -x node_modules/.bin/lint-staged ]; then npm ci --no-audit --no-fund || exit 1; fi; SKIP=check-gateway-doc-configs make lint' ;;
   check) echo 'make check' ;;
   lint-md-links) echo 'make lint-md-links' ;;
   # make -i runs every suite even after one fails, so one failure cannot hide the rest.
