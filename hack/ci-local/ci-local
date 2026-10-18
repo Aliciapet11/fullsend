@@ -50,9 +50,9 @@ Environment:
                    (default: the host's own; empty = the engine's own; see README)
 
 Isolation: no host environment variables, SSH agent or credential files from
-outside the checkout enter the container. Podman builds and runs with
---http-proxy=false; Docker still applies proxies from ~/.docker/config.json
-(see README). Only the checkout (including gitignored files), its .git
+outside the checkout enter the container, and no host proxy settings: Podman
+builds and runs with --http-proxy=false, and Docker's ~/.docker/config.json
+proxies are overridden with empty values. Only the checkout (including gitignored files), its .git
 directory and cache volumes are mounted, read-write. GH_TOKEN/GITHUB_TOKEN
 are empty, as on CI. This keeps host secrets out; it is not a sandbox
 against the code under test.
@@ -120,14 +120,27 @@ resolve_versions() {
   IMAGE=fullsend-ci-local${ARCH_TAG}:$sum
 }
 
+# No host proxy settings reach builds or containers: proxy URLs can carry
+# credentials, and CI uses none. Podman copies the host's HTTP(S)_PROXY unless
+# told --http-proxy=false. Docker's CLI injects ~/.docker/config.json proxies
+# only into variables not already set, so each one is set empty.
+# $1: -e for runs, --build-arg for builds.
+noproxy_args() {
+  if [ "$(basename "$ENGINE")" = podman ]; then echo --http-proxy=false; return; fi
+  local v
+  for v in HTTP_PROXY http_proxy HTTPS_PROXY https_proxy FTP_PROXY ftp_proxy \
+    NO_PROXY no_proxy ALL_PROXY all_proxy; do
+    printf '%s\n' "$1" "$v="
+  done
+}
+
 # build-image passes --no-cache so floating versions (Node 22.x, Python 3.x,
 # uv) are re-resolved to their latest releases, as CI's setup actions do.
-# podman copies host HTTP(S)_PROXY into build RUN steps too, as it does for
-# runs (see run_in); CI builds without a proxy, so turn that off here as well.
+# The proxy build args are not in BUILD_ARGS, so they never change the tag.
 build_image() {
-  local noproxy=()
-  [ "$(basename "$ENGINE")" = podman ] && noproxy=(--http-proxy=false)
-  "$ENGINE" build ${PLATFORM:+--platform "$PLATFORM"} ${noproxy[@]+"${noproxy[@]}"} "$@" "${BUILD_ARGS[@]}" \
+  local noproxy=() a
+  while IFS= read -r a; do noproxy+=("$a"); done < <(noproxy_args --build-arg)
+  "$ENGINE" build ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "$@" "${BUILD_ARGS[@]}" \
     -f "$SCRIPT_DIR/Containerfile" -t "$IMAGE" "$SCRIPT_DIR"
 }
 
@@ -278,17 +291,15 @@ run_in() {
   local mounts=() users=() noproxy=()
   while IFS= read -r m; do mounts+=("$m"); done < <(mount_args)
   while IFS= read -r u; do users+=("$u"); done < <(user_args)
-  # podman copies the host's HTTP(S)_PROXY into containers by default, and
-  # proxy URLs can carry credentials. (Docker's equivalent is config.json.)
-  [ "$(basename "$ENGINE")" = podman ] && noproxy=(--http-proxy=false)
+  while IFS= read -r a; do noproxy+=("$a"); done < <(noproxy_args -e)
   if [ "$(basename "$ENGINE")" != podman ]; then
     # Docker creates named volumes root-owned; open them up for the host uid.
-    "$ENGINE" run --rm --user 0 ${PLATFORM:+--platform "$PLATFORM"} "${mounts[@]}" "$IMAGE" \
+    "$ENGINE" run --rm --user 0 ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "${mounts[@]}" "$IMAGE" \
       sh -c 'chmod 1777 /home/runner/go /home/runner/.cache/* /home/runner/.npm /src/node_modules /src/internal/dispatch/cf/workersrc/node_modules' >/dev/null
   fi
   # safe.directory: the mounts show a host owner; trust only those two repos.
   "$ENGINE" run --rm "${tty[@]}" ${PLATFORM:+--platform "$PLATFORM"} \
-    "${users[@]}" ${noproxy[@]+"${noproxy[@]}"} ${DNS[@]+"${DNS[@]}"} -e HOME=/home/runner "${mounts[@]}" "$IMAGE" \
+    "${users[@]}" "${noproxy[@]}" ${DNS[@]+"${DNS[@]}"} -e HOME=/home/runner "${mounts[@]}" "$IMAGE" \
     bash -c 'git config --global --add safe.directory /src; git config --global --add safe.directory /gitcommon; git config --global commit.gpgsign false; '"$1"
 }
 
@@ -297,9 +308,13 @@ run_in() {
 # carrying the fullsend-ci-local label and only those two exact volume names
 # are candidates. Never forced: the engine refuses to remove anything a
 # running container (e.g. a ci-local run in another worktree) still uses,
-# and that is reported as kept.
+# and that is reported as kept. Both listings are taken before anything is
+# removed, so a stopped engine fails here instead of reporting success.
 clean() {
-  local id ref name v
+  local id ref name v imgs vols
+  imgs=$("$ENGINE" images --filter label=fullsend-ci-local=1 --format '{{.ID}} {{.Repository}}:{{.Tag}}') ||
+    die "cannot list images; is $ENGINE running?"
+  vols=$("$ENGINE" volume ls -q) || die "cannot list volumes; is $ENGINE running?"
   while read -r id ref; do
     name=${ref##*/} # podman prefixes localhost/
     if [ "$ref" = '<none>:<none>' ]; then name=$id
@@ -307,10 +322,10 @@ clean() {
     fi
     if "$ENGINE" rmi "$name" >/dev/null 2>&1; then echo "removed image $name"
     else echo "kept image $name (in use, or the engine refused)"; fi
-  done < <("$ENGINE" images --filter label=fullsend-ci-local=1 --format '{{.ID}} {{.Repository}}:{{.Tag}}')
+  done <<< "$imgs"
   for v in nm-root nm-workersrc; do
     v=fullsend-ci-local${ARCH_TAG}-$v
-    "$ENGINE" volume ls -q | grep -qx "$v" || continue
+    grep -qx "$v" <<< "$vols" || continue
     if "$ENGINE" volume rm "$v" >/dev/null 2>&1; then echo "removed volume $v"
     else echo "kept volume $v (in use, or the engine refused)"; fi
   done

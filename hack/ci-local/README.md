@@ -43,12 +43,14 @@ the host.
 
 - No host environment variables, SSH agent or credential files from outside
   the checkout enter the container. `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on
-  CI. Podman builds and runs with `--http-proxy=false`, so host
-  `HTTP(S)_PROXY` values (which can carry credentials) are not copied in.
-  Docker has no such switch: it passes any `proxies` set in
-  `~/.docker/config.json` into every build step and container. As on CI, there
-  is no proxy support: a network that requires one to reach the internet
-  can't build the image.
+  CI. No host proxy settings, which can carry credentials, reach builds or
+  containers either. Podman builds and runs with `--http-proxy=false`, so host
+  `HTTP(S)_PROXY` values are not copied in. Docker would inject any `proxies`
+  set in `~/.docker/config.json`, so `ci-local` sets every proxy variable
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `FTP_PROXY`, `NO_PROXY`, `ALL_PROXY`, upper
+  and lower case) to empty for Docker builds and runs. As on CI, there is no
+  proxy support: a network that requires one to reach the internet can't
+  build the image.
 - The whole checkout is mounted, **including untracked and gitignored files**
   such as `.env.local`, so tested code can read them, as it can on the host.
 - The checkout and its `.git` directory are mounted read-write (`lint`

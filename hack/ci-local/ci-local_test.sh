@@ -43,10 +43,11 @@ case "$1" in
   image) exit "${STUB_IMAGE_RC:-0}" ;;
   info) echo "${STUB_OS:-}"; exit 0 ;;
   # clean: STUB_IMAGES/STUB_VOLUMES are the listings; STUB_BUSY is refused as in use.
-  images) printf '%s\n' "${STUB_IMAGES:-}"; exit 0 ;;
+  # STUB_LIST_RC fails both listings, as a stopped engine does.
+  images) printf '%s\n' "${STUB_IMAGES:-}"; exit "${STUB_LIST_RC:-0}" ;;
   rmi) [ "$2" != "${STUB_BUSY:-}" ]; exit ;;
   volume)
-    [ "$2" = ls ] && printf '%s\n' "${STUB_VOLUMES:-}"
+    [ "$2" = ls ] && { printf '%s\n' "${STUB_VOLUMES:-}"; exit "${STUB_LIST_RC:-0}"; }
     [ "$2" != rm ] || [ "$3" != "${STUB_BUSY:-}" ]; exit ;;
   build) exit 0 ;;
   run)
@@ -400,6 +401,22 @@ if grep -qx -- '--http-proxy=false' <<< "${PB}" && ! grep -q -- '--http-proxy' <
 else
   fail "build proxy flag: podman=[$(tr '\n' ' ' <<< "${PB}")] docker=[$(tr '\n' ' ' <<< "${DB}")]"
 fi
+# Docker: every proxy variable is set empty on the build, the volume chmod run
+# and the main run, so ~/.docker/config.json proxies never apply. Podman
+# (--http-proxy=false) gets none of them.
+PROXY_VARS="HTTP_PROXY= http_proxy= HTTPS_PROXY= https_proxy= FTP_PROXY= ftp_proxy= NO_PROXY= no_proxy= ALL_PROXY= all_proxy="
+proxy_vals() { grep -A1 -x -- "$1" | grep -vx -- "$1" | grep -vx -- '--' | grep -i proxy | tr '\n' ' ' | sed 's/ $//' || true; }
+run_ci_local "${DOCKER}" go-vet
+RUN_PROXY=$(last_run_args | proxy_vals -e)
+PER_RUN=$(sed -n 's/^ARG //p' "${ENGINE_LOG}" | { grep -ix '[a-z_]*proxy=' || true; } | sort | uniq -c | awk '{print $1}' | sort -u)
+if [ "$(proxy_vals --build-arg <<< "${DB}")" = "${PROXY_VARS}" ] && [ "${RUN_PROXY}" = "${PROXY_VARS}" ] &&
+  [ "${PER_RUN}" = 2 ] && [ -z "$(proxy_vals --build-arg <<< "${PB}")" ] &&
+  ! grep -qiE 'ARG [a-z_]*proxy=.' "${ENGINE_LOG}"; then
+  pass "docker: all proxy variables empty on build and both runs; podman builds get none"
+else
+  fail "docker proxies: build=[$(proxy_vals --build-arg <<< "${DB}")] run=[${RUN_PROXY}] per-run=[${PER_RUN}]"
+fi
+
 # Both lint targets skip the hook lint.yml skips (it starts its own container).
 LINT_SKIP=$(sed -n 's/^ *SKIP: *//p' "${ROOT}/.github/workflows/lint.yml" | head -1)
 run_ci_local "${PODMAN}" lint
@@ -580,6 +597,14 @@ if [ "$(removed)" = "fullsend-ci-local-amd64-nm-root fullsend-ci-local-amd64:0ld
   pass "clean --amd64: only the amd64 images and volumes"
 else
   fail "clean --amd64: removed=[$(removed)]"
+fi
+STUB_IMAGES="bbb222 localhost/fullsend-ci-local:0ldtag000000" STUB_VOLUMES="fullsend-ci-local-nm-root" \
+STUB_LIST_RC=125 run_ci_local "${PODMAN}" clean
+if [ "${RC}" -ne 0 ] && [ -z "$(removed)" ] && grep -q 'cannot list images; is .*podman running?' <<< "${OUT}" &&
+  ! grep -q 'kept)' <<< "${OUT}"; then
+  pass "clean: a failed listing (engine stopped) exits non-zero and removes nothing"
+else
+  fail "clean with failed listing: rc=${RC} removed=[$(removed)] out=[${OUT}]"
 fi
 
 if [ "${FAILURES}" -ne 0 ]; then
