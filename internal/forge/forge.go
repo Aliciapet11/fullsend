@@ -186,9 +186,10 @@ const (
 
 	// SecretGitLabTriggerAccountToken is the pipeline trigger token owned by
 	// the trigger-only service account. It is stored as a masked, protected
-	// CI/CD variable that no pipeline reads until the dispatch route of #8438
-	// is activated; the existing polling path and FULLSEND_TRIGGER_TOKEN are
-	// unaffected. Never logged and never written to the ledger.
+	// CI/CD variable. While the dispatch route of #8438 is activated, the
+	// managed webhook embeds it in its trigger URL in place of
+	// FULLSEND_TRIGGER_TOKEN (#8509). Never logged and never written to the
+	// ledger.
 	SecretGitLabTriggerAccountToken = "FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN"
 )
 

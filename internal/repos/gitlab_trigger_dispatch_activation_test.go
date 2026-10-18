@@ -32,23 +32,23 @@ func (e *trigEnv) rawLedger() string {
 	return e.state.VariableValues[trigOwner+"/"+trigRepo+"/"+forge.VarGitLabTriggerAccount]
 }
 
-// pre8438LedgerFields is the exact field set the ledger decoder of CLIs that
-// predate the dispatch activation knows. Released decoders reject any other
-// key before they read the version (DisallowUnknownFields), so the ledger must
-// never carry an activation field (#8438).
-var pre8438LedgerFields = map[string]bool{
+// currentLedgerFields lists the non-secret ledger fields accepted by this
+// version. The trigger digest is new and older strict decoders reject it;
+// that compatibility break is called out in the PR's breaking-change note.
+var currentLedgerFields = map[string]bool{
 	"version": true, "phase": true, "branch": true, "nonce": true, "account_id": true,
 	"elevated": true, "pat_id": true, "pat_pending": true, "deploy_key_fingerprint": true,
 	"deploy_key_id": true, "grant_entry_id": true, "trigger_token_id": true,
 	"trigger_published": true, "publish_started": true, "retired": true,
+	"trigger_token_digest": true,
 }
 
-func assertOlderDecoderCompatible(t *testing.T, raw string) {
+func assertCurrentLedgerSchema(t *testing.T, raw string) {
 	t.Helper()
 	var doc map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal([]byte(raw), &doc))
 	for key := range doc {
-		assert.Truef(t, pre8438LedgerFields[key], "ledger key %q is unknown to older decoders, which reject unknown fields before the version check", key)
+		assert.Truef(t, currentLedgerFields[key], "ledger key %q is unexpected", key)
 	}
 	// And a strict decode (the older decoder's behavior) accepts it.
 	dec := json.NewDecoder(bytes.NewReader([]byte(raw)))
@@ -85,7 +85,7 @@ func TestGitLabTriggerDispatchActive_RecordedOnlyExplicitlyAndWithdrawnByLifecyc
 	}, a, "the activation binds to the exact ledger generation")
 	assert.Equal(t, gitLabTriggerPhaseReady, st.Phase)
 	assert.Equal(t, ledgerBefore, e.rawLedger(), "activating must not rewrite the ledger an older CLI reads")
-	assertOlderDecoderCompatible(t, e.rawLedger())
+	assertCurrentLedgerSchema(t, e.rawLedger())
 	protected := false
 	for _, rec := range e.state.UpdatedVariables {
 		if rec.Name == forge.VarGitLabDispatchActivation {
@@ -138,7 +138,7 @@ func TestGitLabTriggerDispatchActive_RotationWithdrawsAndNewGenerationDoesNotMat
 	assert.False(t, active, "rotation must withdraw the activation")
 	st, _ := e.ledger(t)
 	assert.NotEqual(t, old.Nonce, st.Nonce, "the rotated generation has a new nonce, so an older record can never bind to it")
-	assertOlderDecoderCompatible(t, e.rawLedger())
+	assertCurrentLedgerSchema(t, e.rawLedger())
 }
 
 // A CLI that predates the activation does not know the variable: it

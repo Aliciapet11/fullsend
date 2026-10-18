@@ -47,6 +47,13 @@ type GitLabTriggerAccountUninstaller interface {
 // installed, reports why install would defer. branch is the protected default
 // branch the account must be granted on. It only reads.
 func DiagnoseGitLabTriggerAccount(ctx context.Context, client forge.Client, api GitLabTriggerAccountAPI, owner, repo, branch string) GitLabTriggerAccountStatus {
+	return diagnoseGitLabTriggerAccount(ctx, client, api, owner, repo, branch, false)
+}
+
+// diagnoseGitLabTriggerAccount permits the dispatch gate to check the ready
+// current generation during the intentional webhook cutover window. Status
+// still reports outstanding retirement as drift until cleanup completes.
+func diagnoseGitLabTriggerAccount(ctx context.Context, client forge.Client, api GitLabTriggerAccountAPI, owner, repo, branch string, allowPendingRetirement bool) GitLabTriggerAccountStatus {
 	raw, exists, err := client.GetRepoVariable(ctx, owner, repo, forge.VarGitLabTriggerAccount)
 	if err != nil {
 		return GitLabTriggerAccountStatus{State: GitLabTriggerStateUnreadable, Reasons: []string{"could not read " + forge.VarGitLabTriggerAccount}}
@@ -108,9 +115,20 @@ func DiagnoseGitLabTriggerAccount(ctx context.Context, client forge.Client, api 
 		for _, p := range problems {
 			reasons = append(reasons, p+"; run repos install to revoke the trigger and publish a replacement")
 		}
+		if len(problems) == 0 {
+			if st.TriggerTokenDigest == "" {
+				reasons = append(reasons, "the published trigger token predates value binding; run repos install to rotate it to a fingerprinted generation")
+			} else if vars, valueErr := client.ListRepoVariables(ctx, owner, repo); valueErr != nil {
+				reasons = append(reasons, "could not verify the published trigger token value against its recorded fingerprint")
+			} else if value := vars[forge.SecretGitLabTriggerAccountToken]; value == "" || triggerTokenDigest(value) != st.TriggerTokenDigest {
+				reasons = append(reasons, "the published trigger token value does not match its recorded fingerprint; run repos install to contain it and publish a replacement")
+			}
+		}
 	}
-	for _, old := range st.Retired {
-		reasons = append(reasons, fmt.Sprintf("retirement of the previous trigger account generation (account %d) is unfinished; re-run repos install or repos uninstall to finish it", old.AccountID))
+	if !allowPendingRetirement {
+		for _, old := range st.Retired {
+			reasons = append(reasons, fmt.Sprintf("retirement of the previous trigger account generation (account %d) is unfinished; re-run repos install or repos uninstall to finish it", old.AccountID))
+		}
 	}
 	if api != nil {
 		// A live credential is only safe while pipeline-variable overrides are

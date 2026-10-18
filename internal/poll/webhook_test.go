@@ -386,8 +386,8 @@ func TestBuildWebhookEvents_IssueLifecycle(t *testing.T) {
 		if !ne.Actor.IsEntityAuthor {
 			t.Error("expected issue author to be entity author")
 		}
-		if len(got[0].Stages) != 0 {
-			t.Errorf("issue open must not route, got %v", got[0].Stages)
+		if len(got[0].Stages) != 1 || got[0].Stages[0] != "triage" {
+			t.Errorf("issue open must route to triage, got %v", got[0].Stages)
 		}
 	})
 	t.Run("close", func(t *testing.T) {

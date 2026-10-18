@@ -61,7 +61,15 @@ func TestDiagnoseGitLabTriggerAccount_ReadyAndDrift(t *testing.T) {
 		mutate func(e *trigEnv, res GitLabTriggerAccountResult)
 		want   string
 	}{
-		"sink missing":    {func(e *trigEnv, _ GitLabTriggerAccountResult) { e.setSink(false) }, forge.SecretGitLabTriggerAccountToken + " is missing"},
+		"sink missing": {func(e *trigEnv, _ GitLabTriggerAccountResult) { e.setSink(false) }, forge.SecretGitLabTriggerAccountToken + " is missing"},
+		"sink value copied": {func(e *trigEnv, _ GitLabTriggerAccountResult) {
+			e.state.VariableValues[trigOwner+"/"+trigRepo+"/"+forge.SecretGitLabTriggerAccountToken] = "another-trigger-bearer"
+		}, "does not match its recorded fingerprint"},
+		"legacy digest missing": {func(e *trigEnv, _ GitLabTriggerAccountResult) {
+			st, _ := e.ledger(t)
+			st.TriggerTokenDigest = ""
+			e.setLedger(t, st)
+		}, "predates value binding"},
 		"key missing":     {func(e *trigEnv, res GitLabTriggerAccountResult) { delete(e.f.keys, res.DeployKeyID) }, "deploy key"},
 		"trigger missing": {func(e *trigEnv, res GitLabTriggerAccountResult) { delete(e.f.triggers, res.TriggerTokenID) }, "trigger token"},
 		"account elevated": {func(e *trigEnv, res GitLabTriggerAccountResult) {
