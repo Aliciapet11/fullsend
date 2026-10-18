@@ -414,28 +414,31 @@ else
 fi
 rm -f "${SHIMS}/make"
 
-# lint installs node_modules only when staged docs/.vitepress files need lint-staged and it is missing.
+# lint and lint-all install node_modules only when staged docs/.vitepress files need
+# lint-staged (which lints staged files, even under --all-files) and it is missing.
 printf '#!/usr/bin/env bash\necho "NPM-CALLED $*"\n' > "${SHIMS}/npm"
 printf '#!/usr/bin/env bash\necho "MAKE $*"\n' > "${SHIMS}/make"
 chmod +x "${SHIMS}/npm" "${SHIMS}/make"
-LNT="${WORK}/lint-repo"
-new_git_repo "${LNT}"
-mkdir -p "${LNT}/docs/.vitepress" && echo x > "${LNT}/docs/.vitepress/a.ts"
-echo x > "${LNT}/other.md"
-git -C "${LNT}" add other.md
-run_in_repo "${LNT}" "${PODMAN}" lint; LINT_OTHER="${OUT}"
-git -C "${LNT}" add docs/.vitepress/a.ts
-run_in_repo "${LNT}" "${PODMAN}" lint; LINT_VP="${OUT}"
-mkdir -p "${LNT}/node_modules/.bin" && printf '#!/bin/sh\n' > "${LNT}/node_modules/.bin/lint-staged"
-chmod +x "${LNT}/node_modules/.bin/lint-staged"
-run_in_repo "${LNT}" "${PODMAN}" lint; LINT_HAVE="${OUT}"
-if grep -q 'NPM-CALLED ci' <<< "${LINT_VP}" && grep -q 'MAKE lint' <<< "${LINT_VP}" &&
-  ! grep -q 'NPM-CALLED' <<< "${LINT_OTHER}" && grep -q 'MAKE lint' <<< "${LINT_OTHER}" &&
-  ! grep -q 'NPM-CALLED' <<< "${LINT_HAVE}"; then
-  pass "lint runs npm ci only for staged docs/.vitepress files without lint-staged installed"
-else
-  fail "lint npm ci: vitepress=[${LINT_VP}] other=[${LINT_OTHER}] installed=[${LINT_HAVE}]"
-fi
+for t in lint lint-all; do
+  LNT="${WORK}/${t}-repo"
+  new_git_repo "${LNT}"
+  mkdir -p "${LNT}/docs/.vitepress" && echo x > "${LNT}/docs/.vitepress/a.ts"
+  echo x > "${LNT}/other.md"
+  git -C "${LNT}" add other.md
+  run_in_repo "${LNT}" "${PODMAN}" "${t}"; LINT_OTHER="${OUT}"
+  git -C "${LNT}" add docs/.vitepress/a.ts
+  run_in_repo "${LNT}" "${PODMAN}" "${t}"; LINT_VP="${OUT}"
+  mkdir -p "${LNT}/node_modules/.bin" && printf '#!/bin/sh\n' > "${LNT}/node_modules/.bin/lint-staged"
+  chmod +x "${LNT}/node_modules/.bin/lint-staged"
+  run_in_repo "${LNT}" "${PODMAN}" "${t}"; LINT_HAVE="${OUT}"
+  if grep -q 'NPM-CALLED ci' <<< "${LINT_VP}" && grep -qx "MAKE ${t}" <<< "${LINT_VP}" &&
+    ! grep -q 'NPM-CALLED' <<< "${LINT_OTHER}" && grep -qx "MAKE ${t}" <<< "${LINT_OTHER}" &&
+    ! grep -q 'NPM-CALLED' <<< "${LINT_HAVE}"; then
+    pass "${t} runs npm ci only for staged docs/.vitepress files without lint-staged installed"
+  else
+    fail "${t} npm ci: vitepress=[${LINT_VP}] other=[${LINT_OTHER}] installed=[${LINT_HAVE}]"
+  fi
+done
 rm -f "${SHIMS}/npm" "${SHIMS}/make"
 
 # --- engine argv: isolation ---

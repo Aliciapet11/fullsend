@@ -229,10 +229,10 @@ for f in $files; do
 done
 EOF
     ;;
-  lint-all) echo 'SKIP=check-gateway-doc-configs make lint-all' ;;
-  # The lint-staged hook (staged docs/.vitepress/ files) needs prettier and
+  # Both lint targets run the lint-staged hook, which lints the *staged*
+  # docs/.vitepress/ files (even under --all-files) with prettier and
   # stylelint from node_modules, whose volume is empty until `web` runs.
-  lint) echo 'if git diff --cached --name-only | grep -q "^docs/\.vitepress/" && [ ! -x node_modules/.bin/lint-staged ]; then npm ci --no-audit --no-fund || exit 1; fi; SKIP=check-gateway-doc-configs make lint' ;;
+  lint-all|lint) echo 'if git diff --cached --name-only | grep -q "^docs/\.vitepress/" && [ ! -x node_modules/.bin/lint-staged ]; then npm ci --no-audit --no-fund || exit 1; fi; SKIP=check-gateway-doc-configs make '"$1" ;;
   check) echo 'make check' ;;
   lint-md-links) echo 'make lint-md-links' ;;
   # make -i runs every suite even after one fails, so one failure cannot hide the rest.
