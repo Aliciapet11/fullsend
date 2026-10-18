@@ -56,6 +56,16 @@ the host.
 - The checkout and its `.git` directory are mounted read-write (`lint`
   writes the git index), so tested code could change git config or hooks that
   a later host-side git command runs. Again, the same as on the host.
+- The download caches (Go modules and `go/bin`, Go build, pre-commit, uv,
+  npm) are **shared by every checkout and persist between runs**, and they
+  hold programs that later runs execute. `/home/runner/go/bin` also comes
+  before the system directories on `PATH`, as on CI. So code tested in one
+  checkout can leave programs that a later run in any checkout executes,
+  with that checkout's access. Per-checkout caches would close this but cost
+  a full re-download in every new worktree, so `ci-local` keeps them shared.
+  Before and after running code you don't trust, remove the volumes (see
+  [Tool versions follow CI](#tool-versions-follow-ci)), or run it with a
+  separate engine or Podman machine.
 - The host checkout changes only as it would on the host: lint hooks apply
   their autofixes (gofmt, ruff, whitespace), and builds leave gitignored
   output. `CI=true` skips git hook installation, `docs` builds from a
