@@ -37,6 +37,13 @@ func mintHTTP(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("HTTP not registered; call RegisterHTTP first")
 	}
 
+	// The host fetch bridge cannot disable redirects, so refuse requests
+	// that require it (OTLP export) rather than risk forwarding custom
+	// credential headers and the payload to another origin.
+	if req.Context().Value(noRedirectKey{}) != nil {
+		return nil, fmt.Errorf("host fetch cannot disable redirects")
+	}
+
 	// Serialize headers to JSON.
 	headerMap := make(map[string]string, len(req.Header))
 	for k, v := range req.Header {

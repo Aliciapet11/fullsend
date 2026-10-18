@@ -83,7 +83,7 @@ Executes outbound HTTP requests (GitHub API calls).
 
 `mintHTTP(req)` is called at **request time** inside handler and
 verifier files (`github.go`, `jwks_verifier.go`, `sts_verifier.go`,
-`gcp_pem.go`). It is never called during construction.
+`gcp_pem.go`, `tracing.go`). It is never called during construction.
 
 ### Registration on WASM
 
@@ -229,6 +229,7 @@ call `mintHTTP` include:
 - `jwks_verifier.go` — JWKS key fetching
 - `sts_verifier.go` — GCP STS token exchange
 - `gcp_pem.go` — GCP Secret Manager access
+- `tracing.go` — OTLP span export (end of request, bounded timeout)
 
 This is intentional: on WASM, the JS event loop must be free for
 Promises to settle. Constructor-time HTTP would deadlock.
@@ -280,6 +281,48 @@ type PEMAccessor interface {
     AccessPEM(ctx context.Context, role string) ([]byte, error)
 }
 ```
+
+## Tracing
+
+`tracing.go` implements mint request tracing without the OpenTelemetry Go
+SDK, whose dependency graph would inflate the WASM binary. It provides
+W3C trace-context extraction, span recording, and OTLP/HTTP JSON export
+through `mintHTTP`, so it works unchanged on every target.
+
+- **Load-site wiring:** load sites build a `*Tracer` with
+  `NewTracer(TracingConfig{...})` (plain data only) and call
+  `handler.SetTracer(t)` before serving. A load site that routes some
+  requests outside `Handler` (the standalone fallback proxy) instead wraps
+  its whole handler chain with `t.Wrap(next)`, which starts the server
+  span; `Handler` reuses it. Code outside `mintcore` forwards the trace
+  with `TraceHeaders(ctx)` and records failures with
+  `RecordSpanError(ctx, stage, err)`. `NewTracer` returns `nil` when
+  the endpoint is empty, and a nil tracer is a no-op. `cmd/mint` reads
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`
+  (resolved with `ResolveOTLPTracesEndpoint`) and collector headers from
+  `MINT_OTLP_HEADERS_FILE` (parsed with `ParseOTLPHeaders`). The GCF and
+  Worker load sites do not configure a tracer yet.
+- **Adding spans:** call `startSpan(ctx, name, stage)` and use the
+  returned context for downstream calls. Call `recordError(err)` and then
+  `end()`. Spans are nil-safe, so call sites need no enabled checks. The
+  `stage` becomes `fullsend.mint.failure_stage` on the server span when
+  that span is the first to record an error.
+- **Never record secrets:** do not put tokens, JWTs, PEM bytes, collector
+  headers, or raw upstream response bodies in span attributes. Error text
+  passes through `safeErrorMessage`, which bounds and redacts it, but do
+  not rely on that redaction as the primary control.
+- **Fail-open:** export has a bounded timeout
+  (`TracingConfig.ExportTimeout`, default 2s). By default it runs
+  synchronously at the end of `ServeHTTP`, so serverless runtimes do not
+  drop spans after the response; the net/http server holds the buffered
+  response until it finishes. Long-lived load sites (the standalone mint)
+  set `TracingConfig.AsyncExport` so export runs in a background goroutine
+  that does not delay the response, and call `Tracer.Shutdown(ctx)` after
+  the server stops to drain it. Never let an export error affect the
+  response.
+- **No redirects:** export marks its request with `withNoRedirect`. The
+  native `mintHTTP` honors it; the `js` `mintHTTP` refuses such requests
+  because the host fetch bridge cannot disable redirects.
 
 ## Embed sync and `make wasm-build`
 
