@@ -51,7 +51,8 @@ case "$1" in
     [ "$2" != rm ] || [ "$3" != "${STUB_BUSY:-}" ]; exit ;;
   build) exit 0 ;;
   run)
-    for a in "$@"; do [ "$a" = 0 ] && [ "${prev:-}" = --user ] && exit 0; prev=$a; done
+    # Docker's root volume helper (--user 0) exits STUB_HELPER_RC.
+    for a in "$@"; do [ "$a" = 0 ] && [ "${prev:-}" = --user ] && exit "${STUB_HELPER_RC:-0}"; prev=$a; done
     [ "${STUB_EXEC:-0}" = 1 ] && exec bash -c "${*: -1}"
     exit "${STUB_RC:-0}" ;;
 esac
@@ -486,6 +487,15 @@ if grep -qx 'ARG 0' "${ENGINE_LOG}" && grep -q 'chmod 1777' "${ENGINE_LOG}"; the
 else
   fail "docker volume chmod missing"
 fi
+# A failed root helper fails the target before the main container starts.
+STUB_HELPER_RC=1 run_ci_local "${DOCKER}" go-vet
+if [ "${RC}" -ne 0 ] && grep -q 'go-vet *FAIL' <<< "${OUT}" &&
+  grep -q 'could not open up the Docker volumes' <<< "${OUT}" && [ -z "$(last_run_args)" ]; then
+  pass "docker: a failed volume helper fails the target without starting the main container"
+else
+  fail "failed volume helper: rc=${RC} main-run=[$(last_run_args | tr '\n' ' ')] out=[${OUT}]"
+fi
+run_ci_local "${DOCKER}" go-vet
 # The root helper must not reach the checkout or run anything from a volume.
 HELPER=$(awk '/^CALL$/{n++} {a[n]=a[n] $0 "\n"} END{for(i=1;i<=n;i++) if (a[i] ~ /\nARG --user\nARG 0\n/) {printf "%s", a[i]; exit}}' "${ENGINE_LOG}" |
   sed -n 's/^ARG //p')

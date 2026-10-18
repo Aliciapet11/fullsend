@@ -316,7 +316,8 @@ run_in() {
     while IFS= read -r m; do vols+=("$m"); done < <(volume_args)
     "$ENGINE" run --rm --user 0 --network none -e PATH=/usr/sbin:/usr/bin:/sbin:/bin \
       ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "${vols[@]}" "$IMAGE" \
-      /bin/sh -c '/bin/chmod 1777 /home/runner/go /home/runner/.cache/* /home/runner/.npm /src/node_modules /src/internal/dispatch/cf/workersrc/node_modules' >/dev/null
+      /bin/sh -c '/bin/chmod 1777 /home/runner/go /home/runner/.cache/* /home/runner/.npm /src/node_modules /src/internal/dispatch/cf/workersrc/node_modules' >/dev/null ||
+      { echo "ci-local: could not open up the Docker volumes for uid $(id -u)" >&2; return 1; }
   fi
   # safe.directory: the mounts show a host owner; trust only those two repos.
   "$ENGINE" run --rm "${tty[@]}" ${PLATFORM:+--platform "$PLATFORM"} \
