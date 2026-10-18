@@ -224,8 +224,8 @@ func GitLabScheduleReactivationDeferral(ctx context.Context, client forge.Client
 func gitlabDispatchRouteScaffoldProblem(ctx context.Context, client forge.Client, owner, repo string, manifest *Manifest) string {
 	for _, path := range []string{
 		gitlabPinCIJobIdentityScriptPath, gitlabPollJobScriptPath, gitlabAgentJobScriptPath,
-		gitlabInstallCLIScriptPath, ".gitlab/ci/scripts/trust-ci-server-ca.sh",
-		".gitlab/ci/scripts/select-gitlab-role-token.sh", gitlabDispatcherJobScriptPath,
+		gitlabInstallCLIScriptPath, gitlabTrustScriptPath,
+		gitlabRoleTokenScriptPath, gitlabDispatcherJobScriptPath,
 	} {
 		committed, err := client.GetFileContent(ctx, owner, repo, path)
 		switch {
@@ -473,6 +473,8 @@ func gitlabSameYAMLNode(a, b *yaml.Node) bool {
 	return a.Decode(&av) == nil && b.Decode(&bv) == nil && reflect.DeepEqual(av, bv)
 }
 
+// gitlabSafePinnedVersion matches a rendered FULLSEND_VERSION value that
+// cannot add shell syntax to the install script.
 var gitlabSafePinnedVersion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 
 // The installer renders only FULLSEND_VERSION in this script. Compare every
@@ -671,7 +673,7 @@ func gitlabDispatchVariableOverrideProblem(ctx context.Context, client forge.Cli
 		return "could not verify that no inherited variable overrides a dispatch value: " + err.Error(), nil
 	}
 	if problem != "" {
-		return strings.TrimPrefix(problem, "webhook fast-path deferred: ") + suffix, nil
+		return problem + suffix, nil
 	}
 	return "", unverified
 }

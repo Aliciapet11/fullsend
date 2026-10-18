@@ -133,7 +133,9 @@ func namesLocalInclude(item *yaml.Node, path string) bool {
 // toolchain flags (e.g. -toolexec), toolchain root (GOROOT), cache program
 // (GOCACHEPROG, which go build executes), or modules (a
 // committed sitecustomize.py) that install-fullsend-cli.sh and
-// run-agent-job.sh execute.
+// run-agent-job.sh execute. The GitLab Runner checkout controls
+// (GIT_STRATEGY, GIT_CHECKOUT, GIT_CLEAN_FLAGS) can leave a stale or modified
+// workspace in place, so the scripts that run would not be the committed ones.
 var gitlabPreauthProtectedVariables = []string{
 	"CI_API_V4_URL", "CI_PROJECT_DIR", "CI_JOB_TOKEN",
 	"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "TAR_OPTIONS",
@@ -141,6 +143,7 @@ var gitlabPreauthProtectedVariables = []string{
 	"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy",
 	"CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
 	"GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR",
+	"GIT_STRATEGY", "GIT_CHECKOUT", "GIT_CLEAN_FLAGS",
 	"GOFLAGS", "GOENV", "GOTOOLCHAIN", "GOROOT", "GOCACHEPROG",
 	"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
 }

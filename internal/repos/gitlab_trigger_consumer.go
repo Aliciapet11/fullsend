@@ -16,6 +16,7 @@ import (
 // otherwise miss an actual configured custom agent.
 const customAgentChildStage = "fullsend-custom-stage"
 
+// stageCondition matches a rules condition that compares the $STAGE value.
 var stageCondition = regexp.MustCompile(`\$STAGE\s*\)*\s*(?:==|!=|=~|!~)|(?:==|!=|=~|!~)\s*\(*\s*\$STAGE|!\s*\(*\s*\$STAGE`)
 
 // gitlabAgentChildStages are the STAGE values the consumer checks evaluate:

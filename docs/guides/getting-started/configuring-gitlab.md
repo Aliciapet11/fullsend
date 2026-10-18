@@ -290,7 +290,8 @@ For the full list of install flags, see the
 > `FULLSEND_POLL_MODE`, or the agent input bridge's `STAGE`. It also trusts
 > them not to override the execution-controlling variables the scheduled poll
 > job's bootstrap runs under, such as `PATH`, `LD_PRELOAD`, `BASH_ENV`,
-> `GIT_TEMPLATE_DIR`, `GOROOT`, `GOFLAGS`, `GOCACHEPROG`, or `PYTHONPATH`. An inherited
+> `GIT_TEMPLATE_DIR`, `GIT_STRATEGY`, `GIT_CHECKOUT`, `GOROOT`, `GOFLAGS`,
+> `GOCACHEPROG`, or `PYTHONPATH`. An inherited
 > override of one of those runs code of the overrider's choosing in the poll
 > job's `before_script`, **before** the job verifies its creator or HMAC, and
 > with the trigger account's credentials and `CI_JOB_TOKEN` present. Fullsend
@@ -821,7 +822,15 @@ reason and resource IDs.
   account-owned schedules as foreign and refuse to proceed. Use a current CLI
   to hand schedules back to the installer while upgrading. Keep the generated agent job name: renaming it prevents the
   activation gate from proving that the dispatched pipeline runs the guarded
-  job, so restore the shipped name in the scaffold repair.
+  job, so restore the shipped name in the scaffold repair. A scaffold that
+  bridges the agent inputs under a custom or renamed agent job needs that
+  repair first; until then the gate refuses the child-pipeline route.
+  When the pinned `fullsend_ref` is an untagged SHA, `install-fullsend-cli.sh`
+  builds the CLI from source and clears the Git and Go environment variables
+  that would change the build (`GIT_CONFIG_*`, `GIT_TEMPLATE_DIR`, `GOFLAGS`,
+  `GOENV`, `GOTOOLCHAIN`, `GOROOT`, `GOCACHEPROG`). Runners that rely on one of
+  them, such as `GOTOOLCHAIN=local` on an air-gapped runner, should pin a release
+  version instead, which downloads the release binary and leaves them untouched.
   A managed schedule left by a previous installer credential remains eligible
   for adoption or hand-back when its reported owner still has project
   Maintainer access. An unknown or lower-privilege owner requires manual

@@ -25,12 +25,16 @@ import (
 // overrides could not be checked at all.
 func gitlabInheritedVariableOverrideProblem(ctx context.Context, client forge.Client, owner, repo string, env map[string]*string) (string, error) {
 	problem, _, err := gitlabInheritedVariableScan(ctx, client, owner, repo, env)
+	if problem != "" {
+		problem = "webhook fast-path deferred: " + problem
+	}
 	return problem, err
 }
 
 // gitlabInheritedVariableScan is gitlabInheritedVariableOverrideProblem plus
 // the inherited scopes it could not read ("instance" and group paths), so a
-// caller that acts on the result can report what stayed unverified.
+// caller that acts on the result can report what stayed unverified. The
+// returned problem carries no consumer-specific prefix.
 func gitlabInheritedVariableScan(ctx context.Context, client forge.Client, owner, repo string, env map[string]*string) (string, []string, error) {
 	var unverified []string
 	// Instance-level variables (self-managed GitLab) are inherited by every
@@ -44,7 +48,7 @@ func gitlabInheritedVariableScan(ctx context.Context, client forge.Client, owner
 	}
 	for _, variable := range instanceVars {
 		if _, reserved := env[variable.Name]; reserved {
-			return "webhook fast-path deferred: instance variable override: " + variable.Name, nil, nil
+			return "instance variable override: " + variable.Name, nil, nil
 		}
 	}
 	// owner may contain only the first path component for nested projects.
@@ -71,7 +75,7 @@ func gitlabInheritedVariableScan(ctx context.Context, client forge.Client, owner
 		}
 		for _, variable := range inherited {
 			if _, reserved := env[variable.Name]; reserved {
-				return "webhook fast-path deferred: group variable override: " + variable.Name, nil, nil
+				return "group variable override: " + variable.Name, nil, nil
 			}
 		}
 	}
