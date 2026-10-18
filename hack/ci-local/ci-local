@@ -241,7 +241,10 @@ EOF
   lint-md-links) echo 'make lint-md-links' ;;
   # make -i runs every suite even after one fails, so one failure cannot hide the rest.
   # pipefail: if make itself cannot run, fail instead of counting zero failures.
-  script-test) echo 'set -o pipefail; make -i script-test 2>&1 | tee "${TMPDIR:-/tmp}/st.log" || { echo "script-test: make did not run"; exit 1; }; n=$(grep -cE "^make(\[[0-9]+\])?: .*Error [0-9]+ \(ignored\)$" "${TMPDIR:-/tmp}/st.log" || true); echo "script-test: ${n} suite(s) failed"; [ "$n" -eq 0 ]' ;;
+  # Each failed suite is one "make: [<file>:<line>: <target>] ... (ignored)" line:
+  # "Error N" when the recipe fails, or the signal (Killed, Terminated, ...) when
+  # its shell is killed.
+  script-test) echo 'set -o pipefail; make -i script-test 2>&1 | tee "${TMPDIR:-/tmp}/st.log" || { echo "script-test: make did not run"; exit 1; }; n=$(grep -cE "^make(\[[0-9]+\])?: \[[^]]+\] .+ \(ignored\)$" "${TMPDIR:-/tmp}/st.log" || true); echo "script-test: ${n} suite(s) failed"; [ "$n" -eq 0 ]' ;;
   web) echo 'npm ci --no-audit --no-fund && npm test' ;;
   mint-cf) echo 'make mint-cf-worker-test' ;;
   # mvb runs `git fetch --tags --force` in the source repo, so build from a

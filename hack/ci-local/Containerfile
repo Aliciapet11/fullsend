@@ -46,7 +46,7 @@ RUN chmod 0755 /usr/local/bin/fetch /usr/local/bin/sumof
 # Go (actions/setup-go, go-version-file: go.mod): the newest stable release
 # matching go.mod's `go` line ("1.26.5" exactly, or "1.26" -> newest 1.26.x).
 RUN set -e; \
-    line=$(curl -sSfL "https://go.dev/dl/?mode=json&include=all" | jq -r --arg v "go${GO_VERSION}" --arg a "${TARGETARCH}" \
+    line=$(curl -sSfL --proto '=https' --proto-redir '=https' "https://go.dev/dl/?mode=json&include=all" | jq -r --arg v "go${GO_VERSION}" --arg a "${TARGETARCH}" \
       '[.[] | select(.stable) | select(.version == $v or (.version | startswith($v + "."))) | .files[] | select(.os == "linux" and .arch == $a and .kind == "archive")][0] // empty | "\(.filename) \(.sha256)"'); \
     [ -n "$line" ] || { echo "no Go release matches go ${GO_VERSION}" >&2; exit 1; }; \
     fetch "https://go.dev/dl/${line% *}" "${line#* }"; \
@@ -57,7 +57,7 @@ RUN set -e; \
 RUN set -e; \
     case "$TARGETARCH" in amd64) a=x64 ;; *) a=$TARGETARCH ;; esac; \
     case "$NODE_VERSION" in *.*.*) base="https://nodejs.org/dist/v${NODE_VERSION}" ;; *) base="https://nodejs.org/dist/latest-v${NODE_VERSION%%.*}.x" ;; esac; \
-    name=$(curl -sSfL "$base/SHASUMS256.txt" | awk -v a="-linux-$a.tar.xz" 'index($2, a) && $2 ~ /^node-v/ {print $2; exit}'); \
+    name=$(curl -sSfL --proto '=https' --proto-redir '=https' "$base/SHASUMS256.txt" | awk -v a="-linux-$a.tar.xz" 'index($2, a) && $2 ~ /^node-v/ {print $2; exit}'); \
     [ -n "$name" ] || { echo "no Node $NODE_VERSION tarball for linux-$a" >&2; exit 1; }; \
     fetch "$base/$name" "$(sumof "$base/SHASUMS256.txt" "$name")"; \
     tar -xJf /tmp/dl -C /usr/local --strip-components=1; rm /tmp/dl

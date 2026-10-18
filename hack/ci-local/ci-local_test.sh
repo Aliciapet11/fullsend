@@ -291,6 +291,36 @@ else
   fail "sumof must fail: missing-name rc=${rc_missing}, usage rc=${rc_usage}"
 fi
 
+# sumof: a malformed checksum in the file, and a failed download, each fail with their own error.
+printf 'zz%s  tool-linux.tar.gz\n' "$(printf 'a%.0s' {1..62})" > "${SUMS}/bad-hex.txt"
+set +e
+bad_out=$("${SCRIPT_DIR}/sumof" "file://${SUMS}/bad-hex.txt" tool-linux.tar.gz 2>&1); rc_bad=$?
+dl_out=$("${SCRIPT_DIR}/sumof" "file://${SUMS}/does-not-exist.txt" tool-linux.tar.gz 2>&1); rc_dl=$?
+set -e
+if [ "${rc_bad}" -ne 0 ] && grep -q 'malformed checksum' <<< "${bad_out}" &&
+  [ "${rc_dl}" -ne 0 ] && grep -q '^curl: ' <<< "${dl_out}" && ! grep -q 'no checksum' <<< "${dl_out}"; then
+  pass "sumof rejects a malformed checksum and reports a failed download as such"
+else
+  fail "sumof malformed/download: bad rc=${rc_bad} [${bad_out}] download rc=${rc_dl} [${dl_out}]"
+fi
+
+# fetch: a checksum that isn't 64 lowercase hex characters is rejected before any download.
+bad_fetch=""
+hex64=$(printf 'a%.0s' {1..64})
+for d in "" "${hex64:0:63}" "$(printf 'A%.0s' {1..64})" "${hex64}"'\040\040/dev/null' "${hex64}"$'\n'"${hex64}"; do
+  set +e
+  out=$("${SCRIPT_DIR}/fetch" "file://${SUMS}/does-not-exist" "${d}" 2>&1); rc=$?
+  set -e
+  if [ "${rc}" -ne 2 ] || ! grep -q 'not a SHA-256 digest' <<< "${out}" || grep -q '^curl: ' <<< "${out}"; then
+    bad_fetch="${bad_fetch} [$(printf '%q' "${d}"): rc=${rc}]"
+  fi
+done
+if [ -z "${bad_fetch}" ]; then
+  pass "fetch rejects malformed checksums (short, uppercase, escape payload, newline) before downloading"
+else
+  fail "fetch malformed checksums:${bad_fetch}"
+fi
+
 # --- fail-closed targets (command executed on the host via the stub) ---
 cat > "${SHIMS}/git" <<'SHIM'
 #!/usr/bin/env bash
@@ -316,13 +346,15 @@ echo "suite b: 2 cases (ignored) by filter"
 echo "suite c ok"
 echo "make: [Makefile:3: script-test] Error 1 (ignored)"
 echo "make[1]: [sub.mk:9: inner] Error 2 (ignored)"
+# GNU make 4.3's line when a recipe's own shell is killed by a signal.
+echo "make: [Makefile:5: script-test] Killed (ignored)"
 exit 0
 SHIM
 chmod +x "${SHIMS}/make"
 PATH="${SHIMS}:${PATH}" STUB_EXEC=1 run_ci_local "${PODMAN}" script-test
 if [ "${RC}" -ne 0 ] && grep -q 'suite c ok' <<< "${OUT}" &&
-  grep -q 'script-test: 3 suite(s) failed' <<< "${OUT}"; then
-  pass "script-test runs every suite and counts only make's (ignored) error lines"
+  grep -q 'script-test: 4 suite(s) failed' <<< "${OUT}"; then
+  pass "script-test runs every suite and counts make's (ignored) error and signal lines"
 else
   fail "script-test failure reporting: rc=${RC} out=${OUT}"
 fi
