@@ -2680,10 +2680,21 @@ func (f *FakeClient) CreatePipelineWithInputs(_ context.Context, owner, repo, re
 	return &p, nil
 }
 
-func (f *FakeClient) CreatePipelineSchedule(_ context.Context, owner, repo, ref, description, cron string, variables map[string]string) (int64, error) {
+func (f *FakeClient) CreatePipelineSchedule(ctx context.Context, owner, repo, ref, description, cron string, variables map[string]string) (int64, error) {
+	return f.CreatePipelineScheduleWithActive(ctx, owner, repo, ref, description, cron, variables, true)
+}
+
+// CreatePipelineScheduleWithActive shares CreatePipelineSchedule's error
+// injection ("CreatePipelineSchedule", CreatePipelineScheduleErrSeq), also
+// honors its own "CreatePipelineScheduleWithActive" error key, and records the
+// schedule with the requested active state.
+func (f *FakeClient) CreatePipelineScheduleWithActive(_ context.Context, owner, repo, ref, description, cron string, variables map[string]string, active bool) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if e := f.err("CreatePipelineScheduleWithActive"); e != nil {
+		return 0, e
+	}
 	if len(f.CreatePipelineScheduleErrSeq) > 0 {
 		e := f.CreatePipelineScheduleErrSeq[0]
 		f.CreatePipelineScheduleErrSeq = f.CreatePipelineScheduleErrSeq[1:]
@@ -2695,12 +2706,13 @@ func (f *FakeClient) CreatePipelineSchedule(_ context.Context, owner, repo, ref,
 	}
 
 	s := PipelineSchedule{
-		ID:          int64(len(f.CreatedSchedules) + 1),
-		Description: description,
-		Ref:         ref,
-		Cron:        cron,
-		Active:      true,
-		Variables:   maps.Clone(variables), // DeletePipelineScheduleVariable edits the stored map in place
+		ID:           int64(len(f.CreatedSchedules) + 1),
+		Description:  description,
+		Ref:          ref,
+		Cron:         cron,
+		CronTimezone: "UTC",
+		Active:       active,
+		Variables:    maps.Clone(variables), // DeletePipelineScheduleVariable edits the stored map in place
 	}
 	rec := s
 	rec.Variables = maps.Clone(variables) // separate copy so the log keeps what the caller sent

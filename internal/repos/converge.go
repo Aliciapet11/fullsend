@@ -2558,6 +2558,34 @@ func convergeSchedules(ctx context.Context,
 	return actions
 }
 
+// recordedTriggerScheduleOwner reports whether the schedule belongs to an
+// account generation in the validated trigger-account ledger.
+// A forbidden update is delegated only when GitLab reports that the owner is
+// one of the recorded trigger-account generations. Unknown or human owners
+// retain the update error.
+func recordedTriggerScheduleOwner(ctx context.Context, client forge.Client, owner, repo string, scheduleOwnerID int64) bool {
+	if scheduleOwnerID <= 0 {
+		return false
+	}
+	raw, exists, err := client.GetRepoVariable(ctx, owner, repo, forge.VarGitLabTriggerAccount)
+	if err != nil || !exists {
+		return false
+	}
+	state, err := decodeGitLabTriggerAccountState(raw)
+	if err != nil {
+		return false
+	}
+	if int64(state.AccountID) == scheduleOwnerID {
+		return true
+	}
+	for _, retired := range state.Retired {
+		if int64(retired.AccountID) == scheduleOwnerID {
+			return true
+		}
+	}
+	return false
+}
+
 // activatePipelineSchedules reactivates existing GitLab pipeline schedules
 // that match the given component names but are currently disabled.
 func activatePipelineSchedules(ctx context.Context, client forge.Client,
@@ -2590,15 +2618,32 @@ func activatePipelineSchedules(ctx context.Context, client forge.Client,
 
 		foundInactive := false
 		var activateErr error
+		forbidden := false
 		for _, s := range schedules {
 			if s.Description != spec.Description || s.Active {
 				continue
 			}
 			foundInactive = true
 			if err := client.UpdatePipelineSchedule(ctx, owner, repo, s.ID, true); err != nil {
+				if forge.IsForbidden(err) {
+					if recordedTriggerScheduleOwner(ctx, client, owner, repo, s.OwnerID) {
+						// The following trigger-account stage reactivates this
+						// recorded account generation's schedule.
+						forbidden = true
+						continue
+					}
+				}
 				activateErr = err
 				break
 			}
+		}
+		if activateErr == nil && forbidden {
+			actions = append(actions, ComponentAction{
+				Component: name,
+				Action:    "none",
+				Detail:    fmt.Sprintf("%s is owned by the recorded GitLab trigger account and will be reactivated by the trigger-account stage", DriftFieldName(name)),
+			})
+			continue
 		}
 		if !foundInactive {
 			actions = append(actions, ComponentAction{

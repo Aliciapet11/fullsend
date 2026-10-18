@@ -240,7 +240,7 @@ if [ "${PIPELINE_SOURCE}" = "api" ] || [ "${PIPELINE_SOURCE}" = "pipeline" ]; th
       exit 1
     fi
     HMAC_MESSAGE=$(printf 'ACTOR_ID=%s\nEVENT_PAYLOAD_B64=%s\nEVENT_TYPE=%s\nFULLSEND_POLL_JOB_URL=%s\nIS_FORK=%s\nMR_AUTHOR_ID=%s\nORIGINATING_URL=%s\nREPO_FULL_NAME=%s\nRESOURCE_KEY=%s\nSTAGE=%s\nSTATUS_IID=%s' "${ACTOR_ID:-}" "${EVENT_PAYLOAD_B64:-}" "${EVENT_TYPE:-}" "${FULLSEND_POLL_JOB_URL:-}" "${IS_FORK:-}" "${MR_AUTHOR_ID:-}" "${ORIGINATING_URL:-}" "${REPO_FULL_NAME:-}" "${RESOURCE_KEY:-}" "${STAGE:-}" "${STATUS_IID:-}")
-    if printf '%s' "${HMAC_MESSAGE}" | HMAC_SECRET="${FULLSEND_DISPATCH_SECRET}" python3 -c 'import hmac,hashlib,os,sys; expected=hmac.new(os.environ["HMAC_SECRET"].encode(),sys.stdin.read().encode(),hashlib.sha256).hexdigest(); sys.exit(0 if hmac.compare_digest(sys.argv[1],expected) else 1)' "${FULLSEND_DISPATCH_HMAC}"; then
+    if printf '%s' "${HMAC_MESSAGE}" | HMAC_SECRET="${FULLSEND_DISPATCH_SECRET}" python3 -I -c 'import hmac,hashlib,os,sys; expected=hmac.new(os.environ["HMAC_SECRET"].encode(),sys.stdin.read().encode(),hashlib.sha256).hexdigest(); sys.exit(0 if hmac.compare_digest(sys.argv[1],expected) else 1)' "${FULLSEND_DISPATCH_HMAC}"; then
       DISPATCH_VERIFIED=true
     else
       echo "ERROR: HMAC verification failed — dispatch variables may be forged (fail-closed)" >&2
