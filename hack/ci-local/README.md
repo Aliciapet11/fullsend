@@ -120,6 +120,15 @@ The image is tagged with a hash of those versions and the `Containerfile`, so
 a bump (by Renovate or by hand) rebuilds it on the next run. If a version
 can't be read, `ci-local` stops with an error rather than guessing.
 
+`resolve_versions` in `ci-local` reads the `lint.yml` lines in the table above
+with simple patterns. Changing how those lines are written can stop
+`ci-local` from reading them, and CI catches that in the same PR:
+`make script-test` runs `ci-local_test.sh`, which reads every version from
+the real `lint.yml` and `go.mod` and fails if one is missing. If it fails,
+update `resolve_versions` in that PR. This replaces the "comment in each
+place" suggested in #8479: CI enforces the link, so `lint.yml` doesn't need a
+note that could go stale.
+
 Floating versions (`"3.14"` → newest 3.14.x, `"22"` → newest 22.x, uv) resolve
 to the newest release when the image is built, as CI's setup actions do.
 `hack/ci-local/ci-local build-image` rebuilds without cache to pick up new

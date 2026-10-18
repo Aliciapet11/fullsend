@@ -128,6 +128,34 @@ else
   fail "mixed valid/unknown targets: rc=${RC}"
 fi
 
+# build-image, shell and clean must run alone: extra targets were silently dropped.
+bad_alone=""
+for args in "build-image go-test" "build-image no-such-target" "go-test clean" "shell lint" "clean clean"; do
+  # shellcheck disable=SC2086 # split the case into arguments
+  STUB_IMAGE_RC=1 run_ci_local "${PODMAN}" ${args}
+  if [ "${RC}" -ne 2 ] || grep -qxE 'ARG (run|build|images|volume)' "${ENGINE_LOG}" ||
+    ! grep -q 'must be the only target' <<< "${OUT}"; then
+    bad_alone="${bad_alone} [${args}: rc=${RC}]"
+  fi
+done
+if [ -z "${bad_alone}" ]; then
+  pass "build-image/shell/clean with other targets exit 2 before touching the engine"
+else
+  fail "maintenance targets not alone:${bad_alone}"
+fi
+
+# Targets that look like echo options must still be rejected, not swallowed.
+bad_dash=""
+for a in -n -e -E; do
+  STUB_IMAGE_RC=1 run_ci_local "${PODMAN}" "${a}"
+  if [ "${RC}" -ne 2 ] || grep -qxE 'ARG (run|build)' "${ENGINE_LOG}"; then bad_dash="${bad_dash} [${a}: rc=${RC}]"; fi
+done
+if [ -z "${bad_dash}" ]; then
+  pass "-n/-e/-E are rejected as unknown targets (exit 2, no build or run)"
+else
+  fail "echo-option-shaped targets:${bad_dash}"
+fi
+
 # --- versions come from the checkout's CI config ---
 STUB_IMAGE_RC=1 run_ci_local "${PODMAN}" go-vet
 BUILD=$(last_build_args)
@@ -457,6 +485,18 @@ if grep -qx 'ARG 0' "${ENGINE_LOG}" && grep -q 'chmod 1777' "${ENGINE_LOG}"; the
   pass "docker opens up its named volumes before the run"
 else
   fail "docker volume chmod missing"
+fi
+# The root helper must not reach the checkout or run anything from a volume.
+HELPER=$(awk '/^CALL$/{n++} {a[n]=a[n] $0 "\n"} END{for(i=1;i<=n;i++) if (a[i] ~ /\nARG --user\nARG 0\n/) {printf "%s", a[i]; exit}}' "${ENGINE_LOG}" |
+  sed -n 's/^ARG //p')
+helper_mounts=$(grep -A1 -x -- '-v' <<< "${HELPER}" | grep -vx -- '-v' | grep -vx -- '--' || true)
+if [ -n "${helper_mounts}" ] && ! grep -q '^/' <<< "${helper_mounts}" &&
+  grep -A1 -x -- '-e' <<< "${HELPER}" | grep -qx 'PATH=/usr/sbin:/usr/bin:/sbin:/bin' &&
+  grep -A1 -x -- '--network' <<< "${HELPER}" | grep -qx 'none' &&
+  [ "$(tail -3 <<< "${HELPER}" | head -2 | tr '\n' ' ')" = "/bin/sh -c " ] && [[ "$(tail -1 <<< "${HELPER}")" == "/bin/chmod 1777 "* ]]; then
+  pass "docker root helper: named volumes only, fixed PATH, no network, absolute /bin/sh and /bin/chmod"
+else
+  fail "docker root helper: $(tr '\n' ' ' <<< "${HELPER}")"
 fi
 
 if ! grep -q ':/src:z' <<< "${ARGS}"; then

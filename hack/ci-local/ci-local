@@ -11,6 +11,7 @@ REPO=$PWD
 usage() {
   cat <<'EOF'
 Usage: ci-local [-C REPO] [--amd64] TARGET [TARGET...]
+       ci-local [-C REPO] [--amd64] build-image|shell|clean   (these run alone)
 
 Targets (each maps to the command CI or the Makefile runs):
   go-test        make go-test: go test -race ./... + internal/mintcore -tags github, merged coverage.out
@@ -68,6 +69,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -gt 0 ] || { usage; exit 2; }
+for t in "$@"; do
+  case $t in
+  build-image|shell|clean) [ $# -eq 1 ] || { echo "ci-local: $t must be the only target" >&2; exit 2; } ;;
+  esac
+done
 
 ARCH_TAG=${PLATFORM:+-amd64}
 # Always name the platform: the base image is a multi-arch digest, and podman
@@ -171,7 +177,14 @@ mount_args() {
     echo "gitdir: /gitcommon/worktrees/$wt" > "$ptr"
     args+=(-v "$common:/gitcommon$Z" -v "$ptr:/src/.git:ro${Z:+,z}")
   fi
-  local v
+  printf '%s\n' "${args[@]}"
+  volume_args
+}
+
+# Named volumes only (no host paths), so Docker's root volume helper in
+# run_in never sees the checkout.
+volume_args() {
+  local args=() v
   # Download caches are shared by every checkout; node_modules is per
   # checkout, since npm ci rewrites it from that checkout's lockfile and
   # concurrent runs in two worktrees would otherwise race on one volume.
@@ -247,7 +260,8 @@ expand() {
     case $t in
     ci) expand lint-all go-test-ci script-test web mint-cf docs commit-lint ;;
     all) expand ci go-test go-modules go-fmt check ;;
-    *) echo "$t" ;;
+    # printf, not echo: echo would swallow targets such as -n or -e.
+    *) printf '%s\n' "$t" ;;
     esac
   done
 }
@@ -294,8 +308,15 @@ run_in() {
   while IFS= read -r a; do noproxy+=("$a"); done < <(noproxy_args -e)
   if [ "$(basename "$ENGINE")" != podman ]; then
     # Docker creates named volumes root-owned; open them up for the host uid.
-    "$ENGINE" run --rm --user 0 ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "${mounts[@]}" "$IMAGE" \
-      sh -c 'chmod 1777 /home/runner/go /home/runner/.cache/* /home/runner/.npm /src/node_modules /src/internal/dispatch/cf/workersrc/node_modules' >/dev/null
+    # This runs as root, so nothing tested code can write may reach it: only
+    # the named volumes are mounted (no checkout or .git, so a planted symlink
+    # can't point chmod at host files), and sh/chmod are absolute with a fixed
+    # PATH (the image PATH includes /home/runner/go/bin, a shared volume).
+    local vols=()
+    while IFS= read -r m; do vols+=("$m"); done < <(volume_args)
+    "$ENGINE" run --rm --user 0 --network none -e PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+      ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "${vols[@]}" "$IMAGE" \
+      /bin/sh -c '/bin/chmod 1777 /home/runner/go /home/runner/.cache/* /home/runner/.npm /src/node_modules /src/internal/dispatch/cf/workersrc/node_modules' >/dev/null
   fi
   # safe.directory: the mounts show a host owner; trust only those two repos.
   "$ENGINE" run --rm "${tty[@]}" ${PLATFORM:+--platform "$PLATFORM"} \
