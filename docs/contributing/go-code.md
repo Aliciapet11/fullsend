@@ -78,8 +78,10 @@ On macOS or a Linux distribution other than Ubuntu,
 `hack/ci-local/ci-local coverage` runs `make go-test` in a container that
 matches the CI runner, then prints the coverage of each Go file you changed
 against `origin/main` (see [`hack/ci-local`](../../hack/ci-local/README.md)).
-It doesn't apply the Codecov thresholds, so compare the numbers against the
-targets above yourself.
+These are **whole-file** statement percentages, not coverage of the lines you
+changed: a well-covered file can hide poorly covered new code. Treat them as
+a rough signal only, and use the step-by-step check below to verify patch
+coverage.
 
 ### Step-by-step
 

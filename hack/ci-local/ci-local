@@ -54,10 +54,14 @@ Environment:
 Isolation: no host environment variables, SSH agent or credential files from
 outside the checkout enter the container, and no host proxy settings: Podman
 builds and runs with --http-proxy=false, and Docker's ~/.docker/config.json
-proxies are overridden with empty values. Only the checkout (including gitignored files), its .git
-directory and cache volumes are mounted, read-write. GH_TOKEN/GITHUB_TOKEN
-are empty, as on CI. This keeps host secrets out; it is not a sandbox
-against the code under test.
+proxies are overridden with empty values. Only the checkout (including
+gitignored files), its .git directory and cache volumes are mounted,
+read-write. GH_TOKEN/GITHUB_TOKEN are empty, as on CI. This keeps host
+secrets out; it is not a sandbox against the code under test. The download
+caches (Go modules and go/bin, Go build, pre-commit, uv, npm) are shared by
+every checkout and persist, so code tested in one checkout can leave
+programs a later run in another executes; see the README's Isolation
+section before running code you don't trust.
 EOF
 }
 
