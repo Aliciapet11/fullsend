@@ -646,11 +646,13 @@ published trigger token instead of the Poller-owned one. Details are in
   installer, then moved to the new account once its activation is recorded.
 - **Uninstall:** `repos uninstall` deletes the managed polling schedules the
   account owns, along with the account.
-- **Breaking change:** the ledger now records the trigger token digest, so
-  older CLIs cannot decode it and fail `repos install`, `repos status`, and
-  `repos uninstall` regardless of schedule ownership. Once the account owns the
-  managed polling schedules, older CLIs also treat them as foreign and refuse
-  cleanup. Upgrade the CLI first and do not delete the schedules by hand; see the
+- **Breaking change:** the ledger now records `trigger_token_digest` (the
+  trigger token digest) and `publication_pending` (the replacement-publication
+  marker). Older strict CLIs reject either key before they read the ledger
+  version, so they cannot decode it and fail `repos install`, `repos status`,
+  and `repos uninstall` regardless of schedule ownership. Once the account
+  owns the managed polling schedules, older CLIs also treat them as foreign
+  and refuse cleanup. Upgrade the CLI first and do not delete the schedules by hand; see the
   [CLI reference](../../cli/repos.md#trigger-only-service-account).
 - **Branch change:** run `repos uninstall`, then `repos install`.
 

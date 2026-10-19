@@ -159,7 +159,7 @@ references, never secret values.
 | `FULLSEND_GITLAB_ROLE_<NAME>_TOKEN` | masked secret | Custom role PAT when `credential` is `own`. Provisioned when the role is registered. |
 | `FULLSEND_GITLAB_ROLE_REGISTRY` | unmasked variable | Administrator registry JSON. Absent or empty = built-ins only. |
 | `FULLSEND_GITLAB_ROLE_ROTATION` | unmasked variable | Per-role rotation state (lock, token IDs, expiry dates, phase). Never stores token values. |
-| `FULLSEND_GITLAB_TRIGGER_ACCOUNT` | unmasked variable | Version 1 ledger for the trigger-only service account (phase, nonce, branch, and the account, bootstrap PAT, deploy key, branch-grant entry, and trigger token IDs, plus the SHA-256 digest of the trigger token). Never stores token values or private keys. Written by `repos install` and removed by `repos uninstall` only after every resource it records is gone, so it is the durable cleanup obligation until then. See [Trigger-only service account](#trigger-only-service-account). |
+| `FULLSEND_GITLAB_TRIGGER_ACCOUNT` | unmasked variable | Version 1 ledger for the trigger-only service account (phase, nonce, branch, and the account, bootstrap PAT, deploy key, branch-grant entry, and trigger token IDs, plus the SHA-256 digest of the trigger token and a `publication_pending` marker for an unfinished token replacement). Never stores token values or private keys. Written by `repos install` and removed by `repos uninstall` only after every resource it records is gone, so it is the durable cleanup obligation until then. See [Trigger-only service account](#trigger-only-service-account). |
 | `FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN` | masked, protected variable | The pipeline trigger token owned by the trigger-only service account. Written only after GitLab reports the variable masked, protected, and not file-typed; deleted before its token is revoked. Scheduled polling uses the account's job token, not this variable; while the dispatch activation is recorded, the managed webhook embeds this token ([#8509](https://github.com/fullsend-ai/fullsend/issues/8509)). See [Trigger-only service account](#trigger-only-service-account). |
 | `FULLSEND_GITLAB_DISPATCH_ACTIVATION` | protected, unmasked variable | Activation record for the trigger-account dispatch route: the ledger generation it was recorded for, no secrets. Written by `repos install` only after the dispatch activation gate passes; deleted first by every install, repair, rotation, containment pass and uninstall. A record that no longer matches the ledger is ignored. See the dispatch activation gate under [Trigger-only service account](#trigger-only-service-account). |
 | `FULLSEND_GITLAB_POLLER_GENERATIONS` | unmasked variable | Version 1 Poller identity-generation state (current, pending, and retiring Poller account IDs and the pending generation's handoff phase). Never stores token values. Written by `repos install` when it creates or rotates the webhook trigger. Absent = empty state; present but blank fails closed. See [Poller identity generations](#poller-identity-generations). |
@@ -991,10 +991,12 @@ The route is implemented and selected per job:
   ledger generation. Before the trigger-token digest was added, an older CLI
   could change that generation; the activation then became stale and the
   scaffold selected the Poller route. This version records a digest of the
-  trigger bearer in the ledger to bind the published variable to the recorded
-  trigger ID. Older strict decoders reject that new field before they read
+  trigger bearer in the ledger (`trigger_token_digest`) to bind the published
+  variable to the recorded trigger ID, and a `publication_pending` marker
+  while a replacement bearer is being published. The ledger stays at
+  version 1. Older strict decoders reject either new field before they read
   `version`. Use this version or newer for
-  install, status, rotate, and uninstall after it writes the digest, even if
+  install, status, rotate, and uninstall after it writes either field, even if
   schedules remain installer-owned. Older CLIs also
   treat account-owned schedules as foreign and refuse their cleanup; upgrade
   before retrying rather than deleting the schedules by hand.

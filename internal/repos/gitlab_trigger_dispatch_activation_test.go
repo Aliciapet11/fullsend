@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,14 +35,42 @@ func (e *trigEnv) rawLedger() string {
 }
 
 // currentLedgerFields lists the non-secret ledger fields accepted by this
-// version. The trigger digest is new and older strict decoders reject it;
-// that compatibility break is called out in the PR's breaking-change note.
+// version. The trigger digest and publication-pending marker are new and
+// older strict decoders reject either one before they read the version;
+// that compatibility break is called out in the GitLab upgrade guidance.
 var currentLedgerFields = map[string]bool{
 	"version": true, "phase": true, "branch": true, "nonce": true, "account_id": true,
 	"elevated": true, "pat_id": true, "pat_pending": true, "deploy_key_fingerprint": true,
 	"deploy_key_id": true, "grant_entry_id": true, "trigger_token_id": true,
 	"trigger_published": true, "publish_started": true, "retired": true,
-	"trigger_token_digest": true,
+	"trigger_token_digest": true, "publication_pending": true,
+}
+
+// TestCurrentLedgerFields_MatchStateSchema keeps currentLedgerFields in sync
+// with the ledger struct, so a new ledger key cannot ship without being
+// listed (and named in the compatibility guidance).
+func TestCurrentLedgerFields_MatchStateSchema(t *testing.T) {
+	tags := map[string]bool{}
+	for field := range reflect.TypeFor[gitLabTriggerAccountState]().Fields() {
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		tags[name] = true
+	}
+	assert.Equal(t, currentLedgerFields, tags)
+
+	// A ledger carrying both new keys serializes only listed keys and
+	// passes a strict decode.
+	raw, err := json.Marshal(gitLabTriggerAccountState{
+		Version: gitLabTriggerAccountStateVersion, Phase: "ready", Branch: "main",
+		Nonce: "abc", TriggerTokenID: 9, TriggerTokenDigest: "digest",
+		TriggerPublished: true, PublicationPending: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"trigger_token_digest"`)
+	assert.Contains(t, string(raw), `"publication_pending"`)
+	assertCurrentLedgerSchema(t, string(raw))
 }
 
 func assertCurrentLedgerSchema(t *testing.T, raw string) {

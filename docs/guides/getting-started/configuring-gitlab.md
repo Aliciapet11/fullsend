@@ -229,7 +229,10 @@ Install then converges the project:
   `FULLSEND_TRIGGER_TOKEN` variable, a generated `FULLSEND_WEBHOOK_SECRET`,
   and a project webhook (issues, merge requests, comments) that triggers a
   pipeline on the protected default branch. Opening an issue dispatches
-  triage when the webhook fast path is active. Existing credential variables
+  triage when the webhook fast path is active. The agent job runs triage
+  only when the issue author has Developer access or higher; for a
+  Reporter, Guest, or non-member author it exits successfully without
+  running triage. Existing credential variables
   are reused only when masked, protected, and wildcard-scoped; otherwise they
   are regenerated. Only webhooks Fullsend owns are updated or deleted. This
   step is deferred until the dispatcher and its scripts are on the default
@@ -744,12 +747,20 @@ record. It will not republish the token until those checks pass.
 If `ci_push_repository_for_job_token_allowed` becomes enabled or cannot be
 verified, install removes the published account token and revokes its trigger;
 withdrawing dispatch activation alone does not contain a copied bearer.
-The token fingerprint added by #8509 changes the strict ledger schema. Use
+#8509 adds two keys to the strict ledger schema: `trigger_token_digest` (the
+token fingerprint) and `publication_pending` (the replacement-publication
+marker). The ledger stays at version 1, and older strict decoders reject
+either key before they read the version. Use
 the first CLI release or source commit containing #8509 (or newer) for
 `repos install`, `repos status`, rotation, and `repos uninstall` after it writes
 the ledger. There is no in-place downgrade path for an installed account:
 uninstall it with a compatible CLI before using an older installer. Older
 CLIs may report an unknown ledger field instead of an unsupported version.
+#8509 also starts automatic triage for newly opened GitLab issues. After
+upgrading, a project with a `triage` agent and an active webhook fast path
+triages each issue opened by a Developer-or-higher member. Before #8509,
+triage started only from a `/fs-triage` comment. Issues opened by Reporter,
+Guest, or non-member authors are not triaged automatically.
 
 Install defers, creates nothing, and reports the reason (polling stays in
 place) when the default branch is covered only by a wildcard protected-branch
@@ -820,8 +831,9 @@ reason and resource IDs.
   containment pass or uninstall deletes it first, so the child-pipeline
   dispatch route is never selected or admitted on a ready account alone. The
   dispatch activation stays outside the `FULLSEND_GITLAB_TRIGGER_ACCOUNT`
-  ledger. This version adds a token digest to that ledger, however, so older
-  strict CLI decoders reject it; use this version or newer for later install,
+  ledger. This version adds the `trigger_token_digest` and
+  `publication_pending` keys to that ledger, however, so older strict CLI
+  decoders reject it; use this version or newer for later install,
   status, repair, rotation, or uninstall, even if schedules remain
   installer-owned. The gate also defers when a committed CI
   job, other than Fullsend's own, would run in a trigger, agent child
@@ -907,7 +919,8 @@ reason and resource IDs.
   dispatching with the Poller credential until an install completes. Re-run
   install. Use this release or newer for subsequent `repos install`,
   `repos status`, and `repos uninstall` runs: older strict CLIs reject the
-  trigger-token digest in the ledger even while schedules are installer-owned.
+  `trigger_token_digest` and `publication_pending` ledger keys even while
+  schedules are installer-owned.
   Older CLIs also treat account-owned managed schedules as foreign and refuse
   their cleanup. Upgrade the CLI before retrying.
 - **Deferral and unsafe token variable:** a branch-change, override-role, or
