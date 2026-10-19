@@ -177,6 +177,18 @@ func TestEnvDataLoad_ControlLinesWithoutFiles(t *testing.T) {
 	assert.Equal(t, os.Getenv("PATH")+":"+os.Getenv("PATH"), env["PATH"])
 }
 
+// CR and CRLF bytes stay as sourcing would keep them: newline="" turns off
+// Python's universal-newline translation.
+func TestEnvDataLoad_KeepsCarriageReturns(t *testing.T) {
+	f := newEnvDataFixture(t)
+	f.write(t, ".env", "export A='a\rb'\nexport B=\"c\r\nd\"\nexport C=e\r\nexport KEEP=1\n")
+	env, stderr := f.envOf(t)
+	assert.Equal(t, "a\rb", env["A"], stderr)
+	assert.Equal(t, "c\r\nd", env["B"], stderr)
+	assert.Equal(t, "e\r", env["C"], "a CRLF line ending keeps its CR, as sh does")
+	assert.Equal(t, "1", env["KEEP"])
+}
+
 func TestEnvDataLoad_ValueGrammar(t *testing.T) {
 	f := newEnvDataFixture(t)
 	f.write(t, ".env", strings.Join([]string{

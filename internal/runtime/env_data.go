@@ -256,7 +256,7 @@ def statement(path, line, s, i, eol):
 	return eol
 def read_file(path, control):
 	try:
-		with open(path, encoding=sys.getfilesystemencoding(), errors="surrogateescape") as f:
+		with open(path, encoding=sys.getfilesystemencoding(), errors="surrogateescape", newline="") as f:
 			s = f.read()
 	except OSError as e:
 		return e
