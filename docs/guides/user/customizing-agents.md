@@ -427,10 +427,13 @@ When you need a directory outside `/sandbox/workspace/bin` on the `PATH`
        dest: /sandbox/workspace/.env.d/extra-path.env
    ```
 
-3. At startup the sandbox sources every `*.env` file under
-   `/sandbox/workspace/.env.d/`, picking up your PATH addition.
+3. At startup the sandbox reads every `*.env` file under
+   `/sandbox/workspace/.env.d/`, picking up your PATH addition. Claude, codex
+   and pi launches read these files as data, not shell: write plain
+   `export NAME=value` lines (see
+   [`.env.d` host files](../../reference/harness-reference.md)).
 
-On Claude and pi runs, after the `.env.d` files are sourced, the runner puts
+On Claude and pi runs, after the `.env.d` files are read, the runner puts
 its own `PATH` back in front, so your directory ends up after the runner's
 entries: a command found only in `/opt/my-toolchain/bin` is picked up from
 there, and a command the image also provides, such as `git` or `go`, is

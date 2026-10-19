@@ -192,6 +192,7 @@ How the shared PostToolUse chain reaches each runtime — the three sanitizer ro
 |---------|---------------|-------------|-----------------|----|-------|---------------------------|
 | **Sandbox tool hooks wiring** | `SandboxHooksBootstrap` type assert in `Bootstrap` | ✓ scripts at `claude-config/hooks/`, wiring at `claude-config/hooks.json` via `--settings` (#6358); both digest-checked before every launch, fail-closed on a missing or altered file (exit 97, #8259) | ✗ — **not wired**; the runner-owned, sha256-gated plugin adapter is owned by unbound-force#515. Until it lands, OpenCode installs no sandbox tool hooks and is limited to read-only agents | ✓ see [pi: hook adapter contract](#hook-adapter-contract) — scripts under `/sandbox/pi-config/hooks/`, `HookPlan` in `fullsend-manifest.json`, embedded `fullsend-hooks.js` loaded with `-e` under `--no-extensions`; fail-closed on a missing/altered adapter (exit 97) or a manifest without a hook plan (exit -1) | ✓ see [codex: hook adapter contract](#codex-hook-adapter-contract) — scripts under `/sandbox/codex-config/hooks/`, wiring in `$CODEX_HOME/hooks.json` rendered from `HookPlan`, embedded `fullsend-codex-hook.py` loaded with `--dangerously-bypass-hook-trust`; fail-closed on a missing or altered adapter, auth script or wiring (exit 97), on a tampered `config.toml` (exit 98) and on a manifest without a hook plan (exit -1) | Hook scripts and wiring plan are runtime-neutral (see [Sandbox hook contract](#sandbox-hook-contract)); a runtime that ignores `SandboxHooksBootstrap` installs **no** sandbox tool hooks — say so explicitly here |
 | **Transcript / debug artifacts** | `TranscriptHandler` (+ optional `DebugLogNamer`) | ✓ (stream-json, `claude-debug.log`) | ✓ interim `output.jsonl` tee (`ExtractTranscripts`), `opencode-debug.log` (`DebugLogNamer`; OpenCode's stderr when `--debug` is set). `ParseTranscriptFile` replays the tee'd `--format json` stream through `parseOpenCodeStream`; full-fidelity redesign is deferred to unbound-force#513 | ✓ session JSONL under `PI_CODING_AGENT_SESSION_DIR` (`ExtractTranscripts`), `pi-debug.log` (`DebugLogNamer`; pi's stderr when `--debug` is set), `ParseTranscriptFile` judges the tee'd `--mode json` stream and session files | ✓ rollout session JSONL under `$CODEX_HOME/sessions/` (`ExtractTranscripts`; plain `.jsonl` only, each validated as a rollout envelope and redacted before it is kept), `codex-debug.log` (`DebugLogNamer`; codex has no debug flag, so Run exports `RUST_LOG` and captures stderr — redacted too), `ParseTranscriptFile` judges the tee'd `exec --json` stream | Format-specific; not shared across runtimes. Debug-log filename defaults to `agent-debug.log` unless the runtime implements `DebugLogNamer` |
+| **Agent-writable `.env` at launch** | `envDataLoad` (`internal/runtime/env_data.go`) in the run command | ✓ read as data (#8498) | ✗ — still sourced as shell; the run prelude re-pins its exports and re-checks the agent file after it | ✓ read as data (#8498) | ✓ read as data (#8498) | Never `. .env` in the launch shell: code there runs before the launch checks finish and can `exec` the CLI itself. `envDataLoad` runs a `python3` pinned before `.env` with `-I -S`, takes only `[export ]NAME=value` lines (quoted values, `$NAME`/`${NAME}`, a leading `~`) plus the runner's own control lines (`EnvDataControlLines`: PATH capture and restore, the `.env.d` files, `iteration.env`), and prints single-quoted exports the launch `eval`s. Other lines are ignored and reported by file and line, never by content. `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, every `PYTHON*` variable, `BASH_ENV`, `ENV`, `IFS` and the launch's read-only pins are never taken from it. The post-`.env` unsets and the second guard passes stay as a second layer |
 
 ### Fail modes
 
@@ -485,7 +486,7 @@ The sandbox has two key directories that map to Claude Code's config levels (plu
 │   └── hooks.json                      Hook wiring (loaded via --settings in buildRunCommand)
 │
 └── workspace/                       ← SandboxWorkspace
-    ├── .env                            Environment variables (sourced before claude)
+    ├── .env                            Environment variables (read as data before claude)
     ├── .env.d/                         Additional env files (host_files expand)
     │
     │   claude is resolved on PATH before .env and launched by that path
@@ -600,6 +601,25 @@ treated as companion files:
   made.
 - All other files are placed relative to the sandbox workspace root.
 
+### Review results
+
+For a review result, the runtime fills in `head_sha`, `pr_number` and `repo`
+from the run's environment. A later review round must also answer the prior
+review's open findings, but their ids are minted at random when the prior
+review is posted, so a fixture cannot name them. Instead it uses the
+placeholder id `f_PRIOR`:
+
+```json
+"dispositions": [
+  {"id": "f_PRIOR", "status": "resolved_by_change", "rationale": "…", "evidence": "…"}
+]
+```
+
+The runtime copies each placeholder entry once per open id in the prior
+review projection (`PRIOR_REVIEW_FILE`). With no projection or no open ids,
+as on a first review, it drops the placeholder entries. Dispositions with a
+real id are kept as they are.
+
 ### Playback comment tracking
 
 When a `.fullsend/playback-comment-url` file exists, the runtime reads the
@@ -649,7 +669,7 @@ flowchart TB
   B["Bootstrap (once per run)\nagent .md → APPEND_SYSTEM.md + --tools\nhook scripts + manifest + adapter\npi --version preflight"]
   G{"shell guard, before .env (command -p):\nadapter present and SHA-256 = embedded copy?\nAgent extension SHA-256 = embedded copy?\nmanifest present and SHA-256 = the one Bootstrap wrote?"}
   X["exit 97 (adapter)\nexit 94 (Agent extension)\nexit 95 (manifest)\npi never starts unhooked\n(Run refuses earlier, exit -1,\nif the manifest has no hook plan)"]
-  E["source .env\nunset ANTHROPIC_*\npin GOOGLE_CLOUD_PROJECT\nre-check manifest SHA-256"]
+  E["read .env as data\nunset ANTHROPIC_*\npin GOOGLE_CLOUD_PROJECT\nre-check manifest SHA-256"]
   P["pi --print --mode json --no-approve\n--no-extensions [-e vertex, on Vertex] -e hooks [-e agent]\n--tools ... --model ... #lt;/dev/null"]
   C["child pi per Agent call\nprompt on stdin · own session dir\nSIGTERM then SIGKILL\nusage.jsonl folded into metrics"]
   S["parsePiStream\nexactly one ResultEvent\nexit 0 + stream error ⇒ run fails"]
@@ -1077,7 +1097,7 @@ flowchart TB
   G{"shell guards, before .env (command -p):\nadapter + auth script SHA-256 = embedded copy?\nconfig.toml still pins base_url + auth.command,\nproject trust pinned untrusted?"}
   X["exit 97 / 98\ncodex never starts unhooked\nor pointed at another endpoint"]
   T["seed $CODEX_HOME/openai-token\nplaceholder shape or exit 1"]
-  E["source .env\nre-pin CODEX_HOME\nunset OPENAI_* CODEX_API_KEY NODE_*\nre-run both guards"]
+  E["read .env as data\nre-pin CODEX_HOME\nunset OPENAI_* CODEX_API_KEY NODE_*\nre-run both guards"]
   P["codex exec --json --skip-git-repo-check\n--dangerously-bypass-approvals-and-sandbox\n[--dangerously-bypass-hook-trust]\n-c model_provider/approval_policy/sandbox_mode\nprompt on stdin"]
   S["parseCodexStream\nexactly one ResultEvent\nno terminal event ⇒ incomplete ⇒ run fails"]
   A["artifacts\noutput.jsonl · transcripts/ (rollouts)\nmetrics.json (runtime: codex)"]

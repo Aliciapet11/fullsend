@@ -352,7 +352,7 @@ func TestBuildPiRunCommand_Extensions(t *testing.T) {
 	require.NotEmpty(t, guard)
 	guardIdx := strings.Index(cmd, guard)
 	hooksIdx := strings.Index(cmd, piHooksGuard("/sandbox/pi-config/fullsend-hooks.js", "/sandbox/pi-config/fullsend-manifest.json"))
-	envIdx := strings.Index(cmd, ". '/sandbox/workspace/.env'")
+	envIdx := strings.Index(cmd, piEnvLoad)
 	require.True(t, guardIdx > 0 && hooksIdx > 0 && envIdx > 0, cmd)
 	assert.True(t, hooksIdx < guardIdx && guardIdx < envIdx, "hook guard, then extension guard, then .env: %s", cmd)
 	assert.Contains(t, guard, strings.Repeat("a", 64))
@@ -586,7 +586,7 @@ func TestPiRuntimeEnvExports_DisablesJitiCache(t *testing.T) {
 	// EnvExports() after sourcing it, so the agent cannot turn the cache
 	// back on for the next iteration.
 	cmd := buildPiRunCommand(RunParams{RepoDir: "/sandbox/workspace/repo"}, &piManifest{}, nil, "")
-	env := strings.Index(cmd, ". '/sandbox/workspace/.env'")
+	env := strings.Index(cmd, piEnvLoad)
 	jiti := strings.Index(cmd, "export JITI_FS_CACHE=false")
 	require.GreaterOrEqual(t, env, 0)
 	require.GreaterOrEqual(t, jiti, 0)

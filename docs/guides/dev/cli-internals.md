@@ -483,7 +483,8 @@ Vendoring commit messages use title + body (upload and stale delete). `admin ins
 │  │  { readonly FULLSEND_CLAUDE_BIN=         │                   │
 │  │    "$(command -v claude)" (absolute,     │                   │
 │  │    else exit 127); } &&                  │                   │
-│  │  . {envFile} &&                          │                   │
+│  │  envDataLoad {envFile} (pinned python3   │                   │
+│  │    reads .env as data; eval its exports)&&│                  │
 │  │  unset -f claude &&                      │                   │
 │  │  unset LD_* PYTHON* NODE_* BUN_OPTIONS &&│                   │
 │  │  "$FULLSEND_CLAUDE_BIN" --print          │                   │

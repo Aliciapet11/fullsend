@@ -25,7 +25,7 @@ func TestBuildRunCommand_PinsClaudeBinary(t *testing.T) {
 	pin := `{ readonly FULLSEND_CLAUDE_BIN="$(command -v claude)" && case "$FULLSEND_CLAUDE_BIN" in /*) ;; *) false ;; esac || { echo 'fullsend: claude not found on PATH' >&2; exit 127; }; }`
 	require.Equal(t, pin, claudeBinaryPin())
 	pinAt := strings.Index(cmd, pin)
-	envAt := strings.Index(cmd, ". /sandbox/workspace/.env")
+	envAt := strings.Index(cmd, envDataLoad(sandbox.SandboxWorkspace+"/.env", claudeBinaryVar, claudeGatewayPlaceholderVar))
 	unsetAt := strings.Index(cmd, "unset -f claude")
 	loaderAt := strings.Index(cmd, "unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE NODE_OPTIONS NODE_PATH BUN_OPTIONS")
 	launchAt := strings.Index(cmd, `"$FULLSEND_CLAUDE_BIN" --print`)
