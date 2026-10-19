@@ -2,6 +2,7 @@ package install
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,10 +18,6 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	gh "github.com/fullsend-ai/fullsend/internal/forge/github"
 )
-
-func singleSlotLayout(slots int) PoolLayout {
-	return PoolLayout{FirstOrgIndex: 0, OrgCount: 1, SlotsPerOrg: slots}
-}
 
 func TestPoolLayoutForEnvironment_HonoursPoolSize(t *testing.T) {
 	t.Setenv("BEHAVIOUR_POOL_SIZE", "5")
@@ -43,7 +40,7 @@ func TestPoolLayoutForEnvironment_HonoursPoolSize(t *testing.T) {
 }
 
 func TestSlotAllocator_AdoptsOwnRepoAfterLostCreateResponse(t *testing.T) {
-	layout := singleSlotLayout(2)
+	layout := StagePoolLayout(2)
 	p := newFakePool(layout)
 	a := newTestAllocator(t, layout, p)
 	a.shuffle = func([]Slot) {}
@@ -66,7 +63,7 @@ func TestSlotAllocator_AdoptsOwnRepoAfterLostCreateResponse(t *testing.T) {
 }
 
 func TestSlotAllocator_ForeignRepoOnAlreadyExistsIsNotAdopted(t *testing.T) {
-	layout := singleSlotLayout(1)
+	layout := StagePoolLayout(1)
 	p := newFakePool(layout)
 	// Not visible to the listing hint, so the create is what finds it.
 	p.fc.CreatedRepos = append(p.fc.CreatedRepos, forge.Repository{
@@ -83,7 +80,7 @@ func TestSlotAllocator_ForeignRepoOnAlreadyExistsIsNotAdopted(t *testing.T) {
 }
 
 func TestSlotAllocator_ReleaseNeverDeletesRecreatedRepo(t *testing.T) {
-	layout := singleSlotLayout(1)
+	layout := StagePoolLayout(1)
 	p := newFakePool(layout)
 	a := newTestAllocator(t, layout, p)
 	ctx := context.Background()
@@ -102,7 +99,7 @@ func TestSlotAllocator_ReleaseNeverDeletesRecreatedRepo(t *testing.T) {
 }
 
 func TestSlotAllocator_ReleaseAfterLostDeleteResponse(t *testing.T) {
-	layout := singleSlotLayout(1)
+	layout := StagePoolLayout(1)
 	p := newFakePool(layout)
 	a := newTestAllocator(t, layout, p)
 	ctx := context.Background()
@@ -117,7 +114,7 @@ func TestSlotAllocator_ReleaseAfterLostDeleteResponse(t *testing.T) {
 }
 
 func TestSlotAllocator_ReleaseVerifyFailureDeletesNothing(t *testing.T) {
-	layout := singleSlotLayout(1)
+	layout := StagePoolLayout(1)
 	p := newFakePool(layout)
 	a := newTestAllocator(t, layout, p)
 	ctx := context.Background()
@@ -144,7 +141,7 @@ func (expiredTokenClient) DeleteRepo(context.Context, string, string) error {
 }
 
 func TestSlotAllocator_ReleaseReResolvesClient(t *testing.T) {
-	layout := singleSlotLayout(1)
+	layout := StagePoolLayout(1)
 	p := newFakePool(layout)
 	calls := 0
 	a, err := newSlotAllocator(layout, func(_ context.Context, org string) (forge.Client, error) {
@@ -164,7 +161,7 @@ func TestSlotAllocator_ReleaseReResolvesClient(t *testing.T) {
 }
 
 func TestSlotAllocator_ReleaseFallsBackToClaimClient(t *testing.T) {
-	layout := singleSlotLayout(1)
+	layout := StagePoolLayout(1)
 	p := newFakePool(layout)
 	calls := 0
 	a, err := newSlotAllocator(layout, func(_ context.Context, org string) (forge.Client, error) {
@@ -183,7 +180,7 @@ func TestSlotAllocator_ReleaseFallsBackToClaimClient(t *testing.T) {
 }
 
 func TestSlotAllocator_ListingAvoidsCreateProbes(t *testing.T) {
-	layout := singleSlotLayout(4)
+	layout := StagePoolLayout(4)
 	p := newFakePool(layout)
 	for _, s := range layout.Slots()[:3] {
 		p.fc.Repos = append(p.fc.Repos, forge.Repository{Name: s.Repo, FullName: s.String()})
@@ -204,7 +201,7 @@ func TestSlotAllocator_ListingAvoidsCreateProbes(t *testing.T) {
 }
 
 func TestSlotAllocator_ListingFailureFallsBackToProbing(t *testing.T) {
-	layout := singleSlotLayout(2)
+	layout := StagePoolLayout(2)
 	p := newFakePool(layout)
 	p.fc.Repos = append(p.fc.Repos, forge.Repository{Name: "test-repo-01", FullName: "halfsend/test-repo-01"})
 	p.fc.Errors["ListOrgRepos"] = errors.New("listing unavailable")
@@ -262,7 +259,7 @@ func TestSlotAllocator_CreateTimeoutBacksOffOrg(t *testing.T) {
 
 func TestSlotAllocator_CreateTimeoutAdoptsLandedRepo(t *testing.T) {
 	shortCreateTimeout(t, 20*time.Millisecond)
-	layout := singleSlotLayout(1)
+	layout := StagePoolLayout(1)
 	p := newFakePool(layout)
 	a := newTestAllocator(t, layout, p)
 	p.clients["halfsend"].createLandsThenBlocks = true
@@ -295,7 +292,7 @@ func TestSlotAllocator_LiveClientRateLimitDoesNotPinClaim(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	layout := singleSlotLayout(3)
+	layout := StagePoolLayout(3)
 	client := gh.New("test-token").WithBaseURL(srv.URL)
 	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 	require.NoError(t, err)
@@ -309,4 +306,123 @@ func TestSlotAllocator_LiveClientRateLimitDoesNotPinClaim(t *testing.T) {
 	assert.Contains(t, capErr.RateLimited, "halfsend")
 	assert.Less(t, elapsed, 10*time.Second, "the claim must not wait out the client's retry backoff")
 	assert.Equal(t, int32(1), posts.Load(), "the limited org is not hit again after the first create")
+}
+
+// TestSlotAllocator_LiveClientTimeoutKeepsRetryAfter checks that cutting a
+// create off during the client's rate-limit backoff still blocks the org
+// for the Retry-After wait the client was honouring, not the default
+// window.
+func TestSlotAllocator_LiveClientTimeoutKeepsRetryAfter(t *testing.T) {
+	shortCreateTimeout(t, 100*time.Millisecond)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/orgs/halfsend/repos":
+			_, _ = w.Write([]byte("[]"))
+		case r.Method == http.MethodPost && r.URL.Path == "/orgs/halfsend/repos":
+			w.Header().Set("Retry-After", "300")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.New("test-token").WithBaseURL(srv.URL)
+	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
+	require.NoError(t, err)
+
+	start := time.Now()
+	_, _, err = a.Claim(context.Background())
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	until, ok := capErr.RateLimited["halfsend"]
+	require.True(t, ok)
+	assert.Greater(t, until.Sub(start), 4*time.Minute, "the org stays closed for the Retry-After wait, not the one-minute default")
+}
+
+// TestSlotAllocator_LiveClientThrottledListingMovesToNextOrg checks that a
+// throttled org listing is bounded and does not pin the claim before
+// another org with capacity is tried.
+func TestSlotAllocator_LiveClientThrottledListingMovesToNextOrg(t *testing.T) {
+	shortCreateTimeout(t, 100*time.Millisecond)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/orgs/halfsend-01/repos":
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/orgs/halfsend-02/repos":
+			_, _ = w.Write([]byte("[]"))
+		case r.Method == http.MethodPost && r.URL.Path == "/orgs/halfsend-02/repos":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":7,"name":"test-repo-01","full_name":"halfsend-02/test-repo-01"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	layout := PoolLayout{FirstOrgIndex: 1, OrgCount: 2, SlotsPerOrg: 1}
+	client := gh.New("test-token").WithBaseURL(srv.URL)
+	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
+	require.NoError(t, err)
+	a.shuffle = func([]Slot) {}
+
+	start := time.Now()
+	s, _, err := a.Claim(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "halfsend-02", s.Org)
+	assert.Less(t, time.Since(start), 10*time.Second, "the throttled listing must not wait out the client's backoff")
+	until, blocked := a.orgBlockedUntil("halfsend-01")
+	require.True(t, blocked)
+	assert.Greater(t, time.Until(until), time.Minute, "the throttled org stays closed for its Retry-After wait")
+}
+
+// TestSlotAllocator_LiveClientDeleteNotReplayedAfterServerError checks
+// that Release does not let the live client replay a DELETE after an
+// ambiguous 5xx: the first attempt landed and the name was recreated by
+// another allocator, so a replay would delete the new lease's repository.
+func TestSlotAllocator_LiveClientDeleteNotReplayedAfterServerError(t *testing.T) {
+	var deletes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/orgs/halfsend/repos":
+			_, _ = w.Write([]byte("[]"))
+		case r.Method == http.MethodPost && r.URL.Path == "/orgs/halfsend/repos":
+			var body struct {
+				Description string `json:"description"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": 1, "name": "test-repo-01", "full_name": "halfsend/test-repo-01", "description": body.Description,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/halfsend/test-repo-01":
+			id, desc := 1, ""
+			if deletes.Load() > 0 {
+				// The first DELETE landed and another allocator
+				// recreated the name.
+				id, desc = 2, "someone else's lease"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": id, "name": "test-repo-01", "full_name": "halfsend/test-repo-01", "description": desc,
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/repos/halfsend/test-repo-01":
+			deletes.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.New("test-token").WithBaseURL(srv.URL)
+	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
+	require.NoError(t, err)
+
+	s, _, err := a.Claim(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, a.Release(context.Background(), s))
+	assert.Equal(t, int32(1), deletes.Load(), "the ambiguous DELETE must not be replayed")
 }
