@@ -2540,6 +2540,7 @@ func TestOIDCDenyKeys_Completeness(t *testing.T) {
 		"FULLSEND_INFERENCE_GATEWAY_API_KEY",
 		// The GitLab webhook fast-path credentials must stay runner-only.
 		"FULLSEND_TRIGGER_TOKEN",
+		"FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN",
 		"FULLSEND_WEBHOOK_SECRET",
 		// The runner secrets bundle must never be expandable as a whole (ADR 0136).
 		"FULLSEND_GITHUB_RUNNER_SECRETS",
@@ -2558,7 +2559,7 @@ func TestOIDCDenyKeys_Completeness(t *testing.T) {
 // commands, harness ${VAR} expansion, or sandbox injection, even if GitLab
 // injected the protected variable into the runner process.
 func TestGitLabWebhookCredentials_RunnerOnly(t *testing.T) {
-	for _, key := range []string{forge.SecretTriggerToken, forge.SecretWebhookSecret} {
+	for _, key := range []string{forge.SecretTriggerToken, forge.SecretGitLabTriggerAccountToken, forge.SecretWebhookSecret} {
 		t.Run(key, func(t *testing.T) {
 			const value = "webhook-credential-value"
 			t.Setenv(key, value)

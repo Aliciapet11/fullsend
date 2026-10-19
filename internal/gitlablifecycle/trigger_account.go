@@ -235,7 +235,8 @@ func (o *TriggerOwner) ContainmentOptions(owner, repo string, lease *repos.GitLa
 			}
 			return nil
 		},
-		State: o.Admin,
+		State:                o.Admin,
+		EnforceWebhookSafety: true,
 	}
 }
 
@@ -245,7 +246,8 @@ func (o *TriggerOwner) ContainmentOptions(owner, repo string, lease *repos.GitLa
 //
 // The sink is the masked, protected CI/CD variable
 // FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN. Scheduled polling uses the account's
-// job token, not this variable; webhook use is tracked in #8509. A value is accepted only after GitLab reports
+// job token, not this variable; the managed webhook embeds it while the
+// dispatch activation is recorded (#8509). A value is accepted only after GitLab reports
 // the variable masked, protected, not file-typed and not environment-scoped; otherwise it is deleted
 // and publication fails, so the ledger keeps the obligation and a re-run
 // revokes the token and publishes a replacement. The name is reserved to this
@@ -283,7 +285,8 @@ func (o *TriggerOwner) triggerAccountOptions(owner, repo, branch string, pollers
 			}
 			return nil
 		},
-		State: o.Admin,
+		State:                o.Admin,
+		EnforceWebhookSafety: true,
 	}
 }
 
