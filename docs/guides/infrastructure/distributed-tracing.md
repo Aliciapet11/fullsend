@@ -138,7 +138,11 @@ recorded: a file body, an edit, a prompt, a notebook source, a todo list,
 any member whose value is an object or an array, and the whole input of
 a tool not listed here (every `mcp__` tool among them) are dropped —
 scanned first, so a secret in them still counts, but neither charged nor
-marked, since the list is the policy and the markers mean loss. A `Bash`
+marked, since the list is the policy and the markers mean loss. A Claude
+call's `summary` is cut from its input separately — a `Bash` command or an
+`Agent` prompt collapsed to one line and cut at 120 characters, a `Read`,
+`Write` or `Edit` path at 200, a `Grep` or `Glob` pattern at 50 — so the
+start of a prompt `arguments` drops can still appear there. A `Bash`
 `command` is recorded whole, up to 8 KiB, so a heredoc or an inline
 script records what it writes. A URL anywhere in the record — a
 member, text, a result, a summary, the input message, a name — has
