@@ -45,7 +45,7 @@ cat > "${SHIM_DIR}/curl" <<CURL
 for a in "\$@"; do url="\$a"; done
 case "\${url}" in
   https://ghcr.io/token*) echo '{"token":"anonymous-pull-token"}' ;;
-  https://ghcr.io/v2/fullsend-ai/fullsend-runner/manifests/*) printf 'HTTP/2 200\r\ndocker-content-digest: ${DIGEST}\r\n\r\n' ;;
+  https://ghcr.io/v2/fullsend-ai/fullsend-runner/manifests/*) printf 'HTTP/2 200\r\ndocker-content-digest: ${DIGEST}\r\n\r\n\n200' ;;
   https://api.github.com/repos/fullsend-ai/fullsend/compare/main...*) echo '{"status": "behind"}' ;;
   https://raw.githubusercontent.com/fullsend-ai/fullsend/*/.github/scripts/openshell-version.sh)
     printf 'OPENSHELL_VERSION=0.1.1\nOPENSHELL_SHA=%s\n' "$(printf 'b%.0s' $(seq 1 40))" ;;
