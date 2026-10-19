@@ -78,11 +78,15 @@ var orgPool = []string{
 	"halfsend-12",
 }
 
-// poolTokenFn and poolClientFn resolve the token and client acquireOrg
-// uses for each pool org. Tests replace them to drive acquireOrg without
-// minting tokens or calling the GitHub API.
 var (
-	poolTokenFn  = tokenForOrg
+	// poolTokenFn returns the token used for an org in the pool. It defaults
+	// to tokenForOrg. Override in tests to drive acquireOrg without minting
+	// tokens.
+	poolTokenFn = tokenForOrg
+
+	// poolClientFn builds the forge.Client used for an org in the pool. It
+	// defaults to newLiveClient. Override in tests to drive acquireOrg
+	// without calling GitHub.
 	poolClientFn = func(token string) forge.Client { return newLiveClient(token) }
 )
 
