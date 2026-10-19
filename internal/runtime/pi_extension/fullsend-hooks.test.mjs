@@ -147,7 +147,7 @@ test("tool_call: runs PreToolUse groups in plan order with Claude names and stop
   assert.deepEqual(verdict, { block: true, reason: "canary in input" });
   assert.deepEqual(calls.map((c) => c.script), ["tirith_check.py", "canary_pretool.py"]);
   assert.equal(calls[0].cmd, "python3");
-  assert.equal(calls[0].args[0], "-E", "hook interpreter ignores PYTHON* variables");
+  assert.deepEqual(calls[0].args.slice(0, 3), ["-E", "-s", "-B"], "hook interpreter ignores PYTHON* variables and the user site");
   assert.deepEqual(calls[0].payload, { tool_name: "Bash", tool_input: { command: "gh issue list" } });
 });
 

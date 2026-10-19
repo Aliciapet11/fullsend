@@ -184,9 +184,11 @@ function parseJSON(text) {
 // the normalized verdict. `spawn` is injectable for tests.
 export function runScript(manifest, script, payload, spawn = spawnSync) {
   const path = `${manifest.hooks.dir}/${script}`;
-  // -E: ignore PYTHON* variables, so a PYTHONPATH or PYTHONWARNINGS in the
-  // environment cannot run code before the hook script's own checks.
-  const res = spawn("python3", ["-E", path], {
+  // -E -s -B, as the Claude hook launcher uses: ignore PYTHON* variables and
+  // the user site directory (an agent-chosen HOME can carry a
+  // usercustomize.py), and write no bytecode, so nothing the agent placed
+  // runs before the hook script's own checks.
+  const res = spawn("python3", ["-E", "-s", "-B", path], {
     input: JSON.stringify(payload),
     encoding: "utf8",
     env: process.env,
