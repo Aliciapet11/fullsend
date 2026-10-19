@@ -99,6 +99,16 @@ results predict CI.
    hack/ci-local/ci-local help
    ```
 
+   Common targets are `go-test`, `lint-all`, `script-test` and `docs`. Add
+   `-C <path>` to test another checkout or worktree, and `--amd64` to match
+   GitHub's x86_64 runners exactly. On Apple silicon, `--amd64` is emulated
+   and slow, and needs Docker Desktop's Rosetta emulation (see
+   [Setup](../../../hack/ci-local/README.md#setup)):
+
+   ```bash
+   CI_LOCAL_ENGINE=docker hack/ci-local/ci-local -C ../my-worktree --amd64 go-test
+   ```
+
 The first run builds the image, which takes a few minutes. Set
 `CI_LOCAL_ENGINE=docker` to use Docker when Podman is also installed.
 `CI_LOCAL_DNS` overrides the resolvers the container uses; see
