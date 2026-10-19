@@ -431,7 +431,7 @@ func TestEnvDataLoad_RejectedMultiLineStatementSkippedWhole(t *testing.T) {
 	f.write(t, ".env", strings.Join([]string{
 		`export X="${UNSET:-a`,
 		`export INSIDE_DQ=1`,
-		`"`,
+		`}"`,
 		`Y=$(printf '%s' 'b`,
 		`export INSIDE_SQ=1`,
 		`')`,
@@ -439,22 +439,25 @@ func TestEnvDataLoad_RejectedMultiLineStatementSkippedWhole(t *testing.T) {
 		`export AFTER_COMMENT=1`,
 		`export W=${UNSET:-"\"`,
 		`export INSIDE_ESCAPED=1"}`,
+		`export V="${UNSET:-"a`,
+		`export INSIDE_NESTED=1`,
+		`"}"`,
 		`export U=${UNSET:-'never closed}`,
 		`export AFTER_UNTERMINATED=1`,
 		`export KEEP=1`,
 	}, "\n")+"\n")
 	env, stderr := f.envOf(t)
-	for _, name := range []string{"X", "INSIDE_DQ", "Y", "INSIDE_SQ", "Z", "W", "INSIDE_ESCAPED", "U"} {
+	for _, name := range []string{"X", "INSIDE_DQ", "Y", "INSIDE_SQ", "Z", "W", "INSIDE_ESCAPED", "V", "INSIDE_NESTED", "U"} {
 		_, ok := env[name]
 		assert.False(t, ok, "%s was taken from .env", name)
 	}
 	assert.Equal(t, "1", env["AFTER_COMMENT"])
 	assert.Equal(t, "1", env["AFTER_UNTERMINATED"], "an unterminated quote falls back to the line end")
 	assert.Equal(t, "1", env["KEEP"])
-	for _, line := range []string{"line 1:", "line 4:", "line 7:", "line 9:", "line 11:"} {
+	for _, line := range []string{"line 1:", "line 4:", "line 7:", "line 9:", "line 11:", "line 14:"} {
 		assert.Contains(t, stderr, line)
 	}
-	for _, line := range []string{"line 2:", "line 3:", "line 5:", "line 6:", "line 8:", "line 10:", "line 12:"} {
+	for _, line := range []string{"line 2:", "line 3:", "line 5:", "line 6:", "line 8:", "line 10:", "line 12:", "line 13:", "line 15:", "line 16:"} {
 		assert.NotContains(t, stderr, line)
 	}
 }

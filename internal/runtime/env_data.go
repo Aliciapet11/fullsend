@@ -236,28 +236,35 @@ def end_of_statement(s, i):
 		raise ValueError("trailing text after the assignment")
 	return i
 def skip_statement(s, i, eol):
-	q = None
+	stack = []
 	while i < len(s):
 		c = s[i]
-		if q == "'":
+		top = stack[-1] if stack else None
+		if top == "'":
 			if c == "'":
-				q = None
-		elif q:
-			if c == "\\":
-				i += 1
-			elif c == "\"":
-				q = None
-		elif c == "\n":
-			return i
-		elif c in "'\"":
-			q = c
+				stack.pop()
 		elif c == "\\":
 			i += 1
-		elif c == "#" and s[i - 1] in " \t;&|()":
-			i = s.find("\n", i)
-			return len(s) if i < 0 else i
+		elif c == "$" and s.startswith(("{", "("), i + 1):
+			stack.append("}" if s[i + 1] == "{" else ")")
+			i += 1
+		elif top == "\"":
+			if c == "\"":
+				stack.pop()
+		elif c in "'\"":
+			stack.append(c)
+		elif c == top:
+			stack.pop()
+		elif top == ")" and c == "(":
+			stack.append(")")
+		elif not stack:
+			if c == "\n":
+				return i
+			if c == "#" and s[i - 1] in " \t;&|()":
+				i = s.find("\n", i)
+				return len(s) if i < 0 else i
 		i += 1
-	return eol if q else len(s)
+	return eol if stack else len(s)
 def statement(path, line, s, i, eol):
 	j = i
 	export = False
