@@ -234,8 +234,10 @@ Use the gateway route above. For Claude models, the default Vertex route is the 
 
 ## Environment the launch clears
 
-The launch sources the sandbox `.env` and then clears variables before it starts Claude Code.
-`.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
+The launch reads the sandbox `.env` as data and then clears variables before it starts Claude Code.
+No line of `.env` runs as shell: a `python3` resolved before anything the agent wrote parses its
+`NAME=value` assignments and ignores everything else, and `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+`LD_AUDIT` and `IFS` are never taken from it (#8498). `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
 the agent wrote there between iterations. The rest of the environment, including provider
 credentials, comes from the sandbox.
 
@@ -290,8 +292,7 @@ the offending tool and the expected vocabulary.
 exactly what `Bootstrap` installed. A file that was changed, deleted or added, usually by an earlier
 iteration, fails the run instead of loading altered hooks. On the inference gateway route the settings
 document is passed inline, so only the hook scripts are checked. The launch also starts the `claude`
-binary it found before sourcing `.env`, so a `claude` function or a `PATH` entry from `.env` cannot
-stand in for it.
+binary it found before reading `.env`, so a `PATH` entry from `.env` cannot stand in for it.
 
 **A harness plugin did not load.** When Claude Code reports a plugin in the `plugin_errors` of its
 startup `system`/`init` event, the run output prints one `Plugin <name> failed to load …` warning per

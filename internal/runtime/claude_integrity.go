@@ -118,8 +118,10 @@ func claudeHooksGuard(d claudeHookDigests, settingsFile bool) string {
 	return hooksJSON + " && " + scripts
 }
 
-// claudeGuardedEnv renders the part of the launch that sources the
-// agent-writable .env and then undoes what .env could do to the launch:
+// claudeGuardedEnv renders the part of the launch that reads the
+// agent-writable .env as data (envDataLoad: no line of it runs as shell,
+// #8498) and then, as a second layer from when .env was sourced, undoes what
+// .env could do to the launch:
 // `unset -f` (a special builtin a .env-defined function cannot shadow) drops
 // any function standing in for claude or the guard's utilities, and
 // claudeLoaderEnvUnset clears the loader variables. claude itself is started
@@ -146,7 +148,9 @@ func claudeHooksGuard(d claudeHookDigests, settingsFile bool) string {
 // fails closed rather than launching unguarded; the scripts-only gateway guard
 // relies on Run's digest check instead, which refuses a run without digests.
 func claudeGuardedEnv(envFile string, hooksEnabled, settingsFile bool, d claudeHookDigests) string {
-	source := ". " + envFile
+	// .env is read as data, never sourced (envDataLoad, #8498); the unsets
+	// and the second guard pass below stay as a second layer.
+	source := envDataLoad(envFile, claudeBinaryVar, claudeGatewayPlaceholderVar)
 	if !hooksEnabled {
 		return strings.Join([]string{source, "unset -f claude", claudeLoaderEnvUnset}, " && ")
 	}
@@ -154,7 +158,9 @@ func claudeGuardedEnv(envFile string, hooksEnabled, settingsFile bool, d claudeH
 	return strings.Join([]string{
 		guard,
 		source,
-		"unset -f claude test command cut wc sha256sum find echo",
+		// `[` is listed because the guard compares with it; dash rejects it
+		// as a function name, but another launch shell may not.
+		"unset -f claude test [ command cut wc sha256sum find echo",
 		claudeLoaderEnvUnset,
 		guard,
 	}, " && ")

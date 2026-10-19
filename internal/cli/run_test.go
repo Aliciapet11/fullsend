@@ -4723,6 +4723,21 @@ func TestIterationEnvSourceLine(t *testing.T) {
 		iterationEnvSourceLine())
 }
 
+// TestEnvDataControlLinesMatchRunner keeps the .env lines bootstrapEnv writes
+// as shell in step with the lines the launch-time loader reads as data
+// (runtime.EnvDataControlLines, #8498): a line the loader does not recognize
+// is dropped, which would lose the .env.d files, the PATH restore or
+// iteration.env at launch.
+func TestEnvDataControlLinesMatchRunner(t *testing.T) {
+	t.Parallel()
+	lines := append(runnerPathLines(), harnessEnvLines(&harness.Harness{})...)
+	want := agentruntime.EnvDataControlLines()
+	assert.Equal(t, []string{runnerPathCaptureLine(), lines[2], runnerPathRestoreLine(), iterationEnvSourceLine()}, want)
+	for _, line := range want {
+		assert.Contains(t, lines, line)
+	}
+}
+
 // TestIterationEnvCommand pins the shell the runner executes before every
 // iteration: it rewrites (not appends to) the runner-owned file with the
 // budget, the kill time as Unix seconds (#7042), and TRACEPARENT (#7593).
