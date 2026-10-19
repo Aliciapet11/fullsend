@@ -17,8 +17,9 @@ import (
 // the same `command -v` pin the CLIs use) runs isolated (-I: no PYTHON*
 // variables, no user site, no script directory on sys.path; -S: no site
 // module, so no .pth file runs), parses .env and the files it names, and
-// prints one single-quoted `export NAME='value'` line per variable. The
-// launch shell evals only that output, so no construct from .env executes.
+// prints one single-quoted `NAME='value'` line per variable, with `export `
+// in front for the exported ones. The launch shell evals only that output, so
+// no construct from .env executes.
 //
 // The grammar, per statement (a statement ends at a newline; a quoted value
 // may span lines):
@@ -39,7 +40,9 @@ import (
 // since a dropped line can carry a credential.
 //
 // A name is exported when it was in the launch environment or is marked by
-// `export`, as in a POSIX shell. Assignments to envDataDropNames and to the
+// `export`, as in a POSIX shell. Any other assignment is still set as a shell
+// variable in the launch shell, so later launch lines that expand it see it,
+// as they did when .env was sourced. Assignments to envDataDropNames and to the
 // caller's extra names are dropped for every runtime: the dynamic-loader
 // variables would load code into the CLI and every dynamically linked tool
 // it starts, and the launch's own pins are read-only, so an assignment to
@@ -117,7 +120,7 @@ func envDataLoadWith(envFile string, control []string, extraDrop []string) strin
 
 // envDataLoaderScript is the python3 program envDataLoad runs. argv: the .env
 // path, the four control lines, then the space-separated drop names. It
-// prints `export NAME='value'` lines on stdout and exits non-zero, printing
+// prints `[export ]NAME='value'` lines on stdout and exits non-zero, printing
 // nothing, when .env or a file it names (an .env.d file or iteration.env)
 // exists but cannot be read. Indented with tabs: the launch command is
 // checked for double spaces.
@@ -303,6 +306,6 @@ for path, e in failed:
 if failed:
 	sys.exit(1)
 for n in order:
-	if n in exported and n in values and "\0" not in values[n]:
-		sys.stdout.buffer.write(os.fsencode("export %s='%s'\n" % (n, values[n].replace("'", "'\\''"))))
+	if n in values and "\0" not in values[n]:
+		sys.stdout.buffer.write(os.fsencode("%s%s='%s'\n" % ("export " if n in exported else "", n, values[n].replace("'", "'\\''"))))
 `

@@ -249,6 +249,23 @@ func TestEnvDataLoad_ExportMarksNames(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// A plain NAME=value stays a shell variable of the launch shell, so a later
+// launch line that expands it sees it (as it did when .env was sourced), but
+// it does not reach the CLI's environment.
+func TestEnvDataLoad_NonExportedIsShellVariable(t *testing.T) {
+	f := newEnvDataFixture(t)
+	f.write(t, ".env", "PLAIN_ONLY='it'\\''s here'\nexport MARKED=1\nREADY=$PLAIN_ONLY\n")
+	out, stderr, err := f.load(t, `printf '%s|%s' "${PLAIN_ONLY:-unset}" "${READY:-unset}"`)
+	require.NoError(t, err, stderr)
+	assert.Equal(t, "it's here|it's here", out)
+	env, _ := f.envOf(t)
+	assert.Equal(t, "1", env["MARKED"])
+	for _, name := range []string{"PLAIN_ONLY", "READY"} {
+		_, ok := env[name]
+		assert.False(t, ok, "%s is not exported", name)
+	}
+}
+
 // A missing .env fails the launch, as sourcing a missing file did.
 func TestEnvDataLoad_MissingEnvFails(t *testing.T) {
 	f := newEnvDataFixture(t)
