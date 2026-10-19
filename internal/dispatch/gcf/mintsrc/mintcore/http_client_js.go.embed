@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"syscall/js"
+	"time"
 )
 
 var registeredFetchFn js.Value
@@ -16,7 +17,17 @@ var registeredFetchFn js.Value
 // RegisterHTTP stores a JS fetch callback as the package-level HTTP
 // implementation. The callback signature is:
 //
-//	callback(method, url, headersJSON, body) => Promise<{status, headers, body}>
+//	callback(method, url, headersJSON, body, noRedirect, timeoutMs) => Promise<{status, headers, body}>
+//
+// noRedirect is true for requests whose redirects must not be followed
+// (OTLP export). The callback must then fetch with redirect: "manual" and
+// return the 3xx response as is, so custom credential headers and the
+// payload are never forwarded to another origin. It may also discard the
+// response body, which the exporter does not use.
+//
+// timeoutMs is the remaining request deadline in milliseconds for
+// noRedirect requests (0 when there is none). The callback must abort the
+// underlying fetch by then.
 //
 // It must be called once from initMint before NewHandler is constructed.
 func RegisterHTTP(fetchFn js.Value) error {
@@ -37,11 +48,23 @@ func mintHTTP(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("HTTP not registered; call RegisterHTTP first")
 	}
 
-	// The host fetch bridge cannot disable redirects, so refuse requests
-	// that require it (OTLP export) rather than risk forwarding custom
-	// credential headers and the payload to another origin.
-	if req.Context().Value(noRedirectKey{}) != nil {
-		return nil, fmt.Errorf("host fetch cannot disable redirects")
+	// OTLP export must not follow redirects; the host fetch bridge
+	// honors this with redirect: "manual".
+	noRedirect := req.Context().Value(noRedirectKey{}) != nil
+
+	// Hand the remaining request deadline to the host fetch for OTLP
+	// export, so the bridge aborts the underlying fetch when the Go-side
+	// wait gives up instead of leaving it running (and its payload held)
+	// after the exporter releases its concurrency slot. Zero means no
+	// deadline: the bridge applies its default budget.
+	timeoutMs := 0
+	if noRedirect {
+		if deadline, ok := req.Context().Deadline(); ok {
+			timeoutMs = int(time.Until(deadline).Milliseconds())
+			if timeoutMs < 1 {
+				timeoutMs = 1
+			}
+		}
 	}
 
 	// Serialize headers to JSON.
@@ -80,6 +103,8 @@ func mintHTTP(req *http.Request) (*http.Response, error) {
 		req.URL.String(),
 		string(headersJSON),
 		bodyStr,
+		noRedirect,
+		timeoutMs,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("host fetch failed: %w", err)
