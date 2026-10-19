@@ -41,9 +41,9 @@ const manifest = {
 function fakeSpawn(answers) {
   const calls = [];
   const spawn = (cmd, args, opts) => {
-    const script = args[0].split("/").pop();
+    const script = args[args.length - 1].split("/").pop();
     const payload = JSON.parse(opts.input);
-    calls.push({ cmd, script, payload });
+    calls.push({ cmd, args, script, payload });
     const a = answers[script] ?? {};
     if (typeof a === "function") return a(payload);
     return { status: a.status ?? 0, stdout: a.stdout ?? "", error: a.error, signal: a.signal };
@@ -147,6 +147,7 @@ test("tool_call: runs PreToolUse groups in plan order with Claude names and stop
   assert.deepEqual(verdict, { block: true, reason: "canary in input" });
   assert.deepEqual(calls.map((c) => c.script), ["tirith_check.py", "canary_pretool.py"]);
   assert.equal(calls[0].cmd, "python3");
+  assert.deepEqual(calls[0].args.slice(0, 3), ["-E", "-s", "-B"], "hook interpreter ignores PYTHON* variables and the user site");
   assert.deepEqual(calls[0].payload, { tool_name: "Bash", tool_input: { command: "gh issue list" } });
 });
 

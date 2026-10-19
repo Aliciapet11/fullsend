@@ -701,7 +701,7 @@ func TestCodexBootstrap_PinsTheHarnessHookEnv(t *testing.T) {
 		RepoDir:           sandbox.SandboxWorkspace + "/repo",
 		HooksSettingsPath: r.codexHooksPath(),
 	}, codexModel{ID: "gpt-5-mini"}, "", true, held)
-	envAt := strings.Index(cmd, ". '"+sandbox.SandboxWorkspace+"/.env'")
+	envAt := strings.Index(cmd, codexEnvLoad)
 	require.Positive(t, envAt)
 	for key, value := range got {
 		at := strings.Index(cmd, "export "+key+"="+shellQuote(value))

@@ -85,7 +85,7 @@ func TestClaudeHookDigestsFor(t *testing.T) {
 func TestBuildRunCommand_HooksGuardPlacement(t *testing.T) {
 	t.Parallel()
 
-	envSource := ". " + sandbox.SandboxWorkspace + "/.env"
+	envSource := envDataLoad(sandbox.SandboxWorkspace+"/.env", claudeBinaryVar, claudeGatewayPlaceholderVar)
 
 	t.Run("hooks disabled leaves the launch unchanged", func(t *testing.T) {
 		cmd := buildRunCommand(RunParams{AgentBaseName: "agent", RepoDir: "/repo"})
@@ -102,7 +102,7 @@ func TestBuildRunCommand_HooksGuardPlacement(t *testing.T) {
 		}, d)
 		guard := claudeHooksGuard(d, true)
 		want := "cd '/repo' && " + claudeBinaryPin() + " && " + guard + " && " + envSource +
-			" && unset -f claude test command cut wc sha256sum find echo && " + claudeLoaderEnvUnset +
+			" && unset -f claude test [ command cut wc sha256sum find echo && " + claudeLoaderEnvUnset +
 			" && " + guard + " && \"$" + claudeBinaryVar + "\" --print"
 		assert.True(t, strings.HasPrefix(cmd, want), cmd)
 		assert.Greater(t, strings.Index(cmd, "unset LD_PRELOAD"), strings.Index(cmd, envSource),
@@ -252,25 +252,46 @@ func TestClaudeLaunch_RefusesHooksChangedBetweenIterations(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Join(f.hooksDir, "json"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(f.hooksDir, "json", "__init__.py"), []byte("pass\n"), 0o644))
 		}, scriptsMsg},
-		// .env runs in the launch shell after the first pass, so it could
-		// rewrite a script there; the second pass is what catches it.
-		".env rewrites a script after the first pass": {func(t *testing.T) {
-			require.NoError(t, os.WriteFile(f.envFile,
-				[]byte("printf 'import sys\\nsys.exit(0)\\n' > '"+tirith+"'\n"), 0o644))
-		}, scriptsMsg},
-		// A function or PATH entry from .env cannot stand in for the hashing
-		// tools: `unset -f` clears the one, `command -p` ignores the other.
-		".env shadows sha256sum after rewriting hooks.json": {func(t *testing.T) {
+		// A PATH entry from .env cannot stand in for the hashing tools:
+		// `command -p` ignores it.
+		"PATH from .env shadows sha256sum": {func(t *testing.T) {
 			fake := filepath.Join(filepath.Dir(f.envFile), "fakebin")
 			require.NoError(t, os.MkdirAll(fake, 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(fake, "sha256sum"),
 				[]byte("#!/bin/sh\necho '"+f.digests.HooksJSON+"  x'\n"), 0o755))
-			env := "echo '{}' > '" + hooksJSONPath + "'\n" +
-				"sha256sum() { echo '" + f.digests.HooksJSON + "  x'; }\n" +
-				"export PATH='" + fake + "':\"$PATH\"\n"
-			require.NoError(t, os.WriteFile(f.envFile, []byte(env), 0o644))
+			require.NoError(t, os.WriteFile(hooksJSONPath, []byte(`{"hooks":{}}`), 0o600))
+			require.NoError(t, os.WriteFile(f.envFile, []byte("export PATH='"+fake+"':\"$PATH\"\n"), 0o644))
 		}, hooksJSONMsg},
 	}
+
+	// .env is read as data (#8498): commands and functions in it never run,
+	// so it can neither rewrite a hook between the guard passes nor shadow
+	// the hashing tools, and the untouched hooks still launch.
+	t.Run(".env shell never runs at launch", func(t *testing.T) {
+		fake := filepath.Join(filepath.Dir(f.envFile), "fakebin")
+		require.NoError(t, os.MkdirAll(fake, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(fake, "sha256sum"),
+			[]byte("#!/bin/sh\necho '"+f.digests.HooksJSON+"  x'\n"), 0o755))
+		for name, env := range map[string]string{
+			"rewrites a script": "printf 'import sys\\nsys.exit(0)\\n' > '" + tirith + "'\n",
+			"rewrites hooks.json and shadows sha256sum": "echo '{}' > '" + hooksJSONPath + "'\n" +
+				"sha256sum() { echo '" + f.digests.HooksJSON + "  x'; }\n" +
+				"export PATH='" + fake + "':\"$PATH\"\n",
+			"execs claude itself": "exec claude\n",
+		} {
+			t.Run(name, func(t *testing.T) {
+				f.install(t)
+				require.NoError(t, os.WriteFile(f.envFile, []byte(env), 0o644))
+				f.assertRuns(t)
+				got, err := os.ReadFile(tirith)
+				require.NoError(t, err)
+				assert.Equal(t, f.files["tirith_check.py"], got, "the hook script is untouched")
+				gotJSON, err := os.ReadFile(hooksJSONPath)
+				require.NoError(t, err)
+				assert.Equal(t, f.hooksJSON, gotJSON, "hooks.json is untouched")
+			})
+		}
+	})
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -235,7 +235,7 @@ func TestBuildRunCommand_GatewayOIDC(t *testing.T) {
 	})
 
 	seedAt := strings.Index(cmd, gatewayTokenSeed(sandbox.SandboxClaudeConfig))
-	envAt := strings.Index(cmd, ". /sandbox/workspace/.env")
+	envAt := strings.Index(cmd, envDataExportsVar+"=")
 	loaderAt := strings.Index(cmd, claudeLoaderEnvUnset)
 	unsetAt := strings.Index(cmd, "unset "+strings.Join(claudeGatewayEnvUnset, " "))
 	baseAt := strings.Index(cmd, "export ANTHROPIC_BASE_URL='https://gw.example.com'")
@@ -282,7 +282,7 @@ func TestBuildRunCommand_GatewayAPIKey(t *testing.T) {
 	cmd := buildRunCommand(RunParams{SandboxName: sb, AgentBaseName: "agent", RepoDir: "/r", Model: "gateway/claude-haiku-5-5"})
 
 	captureAt := strings.Index(cmd, `FULLSEND_GATEWAY_PLACEHOLDER="$INFERENCE_GATEWAY_API_KEY" && readonly FULLSEND_GATEWAY_PLACEHOLDER`)
-	envAt := strings.Index(cmd, ". /sandbox/workspace/.env")
+	envAt := strings.Index(cmd, envDataExportsVar+"=")
 	exportAt := strings.Index(cmd, `export ANTHROPIC_AUTH_TOKEN="$FULLSEND_GATEWAY_PLACEHOLDER"`)
 	require.NotEqual(t, -1, captureAt, cmd)
 	require.NotEqual(t, -1, exportAt, cmd)
@@ -390,21 +390,25 @@ func TestBuildRunCommand_GatewayEnvOwnership_APIKey(t *testing.T) {
 	assert.NotContains(t, out, "CLAUDE_CODE_USE_VERTEX=")
 	assert.NotContains(t, out, "FULLSEND_GATEWAY_PLACEHOLDER", "the captured placeholder is never exported")
 
-	// .env cannot replace the captured value: the assignment aborts the shell.
+	// .env cannot replace the captured value: the loader drops the
+	// assignment, so the placeholder read before .env is the one exported.
 	out, _, err = gatewayLaunch(t, sb, "FULLSEND_GATEWAY_PLACEHOLDER=planted\n")
-	require.Error(t, err)
-	assert.NotContains(t, out, "REAL-CLAUDE")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "ANTHROPIC_AUTH_TOKEN="+gatewayTestPlaceholder+"\n")
+	assert.NotContains(t, out, "planted")
 }
 
-// A variable .env makes readonly cannot be cleared, so the launch stops
-// instead of starting Claude Code with it.
-func TestBuildRunCommand_GatewayReadonlyFailsClosed(t *testing.T) {
+// .env cannot make a route variable readonly: `readonly` is not part of the
+// .env grammar, so the line is ignored and the runner's values are exported.
+func TestBuildRunCommand_GatewayReadonlyIgnored(t *testing.T) {
 	const sb = "fs-claude-gw-shell-ro"
 	registerClaudeGateway(t, sb, false)
 	for _, name := range []string{"ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
 		out, _, err := gatewayLaunch(t, sb, "readonly "+name+"=planted\n")
-		require.Error(t, err, name)
-		assert.NotContains(t, out, "REAL-CLAUDE", name)
+		require.NoError(t, err, name)
+		assert.Contains(t, out, "REAL-CLAUDE", name)
+		assert.NotContains(t, out, "planted", name)
+		assert.Contains(t, out, "ANTHROPIC_BASE_URL=https://gw.example.com\n", name)
 	}
 }
 
