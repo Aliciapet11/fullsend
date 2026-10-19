@@ -448,6 +448,21 @@ func TestBuildWebhookEvents_IssueLifecycle(t *testing.T) {
 	})
 }
 
+func TestBuildWebhookEvents_ServiceAccountIssueOpenFiltered(t *testing.T) {
+	mc := newMockClient()
+	author := UserRef{ID: 205, Username: "release-automation"}
+	mc.issue[9] = &Issue{IID: 9, State: "opened", Author: author, CreatedAt: recent}
+	mc.userBot[author.ID] = true
+
+	got, err := newWebhookPoller(mc).BuildWebhookEvents(context.Background(), issuePayload(t, "open", author.ID, 9, nil))
+	if err != nil {
+		t.Fatalf("BuildWebhookEvents: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("events = %+v, want no bot-authored issue opens", got)
+	}
+}
+
 func TestBuildWebhookEvents_MergeRequest(t *testing.T) {
 	t.Run("open", func(t *testing.T) {
 		mc := newMockClient()

@@ -385,7 +385,13 @@ fail that cycle). A missing branch or file is **not** tampering: the
 poller starts from a fresh baseline (watermark defaults to ~1 hour ago)
 and the next save recreates the branch. Losing a state branch therefore
 causes a one-time re-scan and at-least-once re-dispatch of recent items,
-not a stall.
+not a stall. A fresh or recreated events branch also resets the issue-open
+recovery cutoff, so issues opened before it are not recovered if their webhook
+delivery was missed. An events branch seeded by install or converge sets the
+cutoff at install time; a branch recreated at runtime takes the start of the
+cycle that recreates it. When no watermark is persisted but a cutoff is older
+than one hour, the first discovery starts at the cutoff rather than one hour
+back.
 
 **Retired poll-state CI/CD variables (#7343 phase 3b / #7380):** the
 following seven variables are no longer seeded at install. `repos
