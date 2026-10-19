@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -29,7 +30,7 @@ import (
 const (
 	// poolOrgPrefix is the base name of every pool org. Index 0 is the
 	// unsuffixed org (STAGE); indices >= 1 are halfsend-NN (DEV).
-	poolOrgPrefix = "halfsend"
+	poolOrgPrefix = StageOrg
 
 	// DevPoolOrgCount is the number of numbered DEV pool orgs
 	// (halfsend-01 … halfsend-12).
@@ -291,6 +292,16 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			clients[slot.Org] = client
 		}
 
+		// Fold in quota the client has used since the last observation
+		// (before its first claim, or by scenario operations) so an
+		// exhausted org is skipped without a create call that would run
+		// through the client's backoff retries.
+		a.observeQuota(slot.Org, client)
+		if until, limited := a.orgBlockedUntil(slot.Org); limited {
+			capErr.RateLimited[slot.Org] = until
+			continue
+		}
+
 		_, err := client.CreateRepo(ctx, slot.Org, slot.Repo, SlotRepoDescription, false)
 		a.observeQuota(slot.Org, client)
 		if err == nil {
@@ -309,10 +320,10 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			// looks occupied to everyone and is left for GC.
 			return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
 		case gh.IsRateLimitError(err):
-			until := a.blockOrg(slot.Org, client)
+			until := a.blockOrg(slot.Org, client, err)
 			a.logf("[slots] %s rate-limited until %s: %v", slot.Org, until.UTC().Format(time.RFC3339), err)
 			capErr.RateLimited[slot.Org] = until
-		case forge.IsForbidden(err) || isHTTPStatus(err, 401, 403):
+		case forge.IsForbidden(err) || isHTTPStatus(err, http.StatusUnauthorized, http.StatusForbidden):
 			a.logf("[slots] creating %s denied, skipping org: %v", slot, err)
 			capErr.Denied[slot.Org] = err
 		default:
@@ -436,13 +447,17 @@ func (a *slotAllocator) observeQuota(org string, client forge.Client) {
 	}
 }
 
-// blockOrg closes org to claims after a rate-limit error: until the
-// reported reset when it is in the future, else for
-// defaultRateLimitWindow. Returns the end of the window.
-func (a *slotAllocator) blockOrg(org string, client forge.Client) time.Time {
+// blockOrg closes org to claims after a rate-limit error. The window
+// ends at the error's Retry-After deadline when it carries one, else
+// after defaultRateLimitWindow; an exhausted primary quota with a later
+// reset extends it to that reset. Returns the end of the window.
+func (a *slotAllocator) blockOrg(org string, client forge.Client, cause error) time.Time {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	until := a.now().Add(defaultRateLimitWindow)
+	if ra, ok := gh.RetryAfterFromError(cause); ok {
+		until = a.now().Add(ra)
+	}
 	if r, ok := client.(forge.RateLimitReporter); ok {
 		if rl, seen := r.RateLimit(); seen && rl.Remaining <= rateLimitReserve && rl.Reset.After(until) {
 			until = rl.Reset

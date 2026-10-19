@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -2193,6 +2194,39 @@ func TestSecondaryRateLimit_RetriedWithoutRetryAfterHeader(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "test-repo", repo.Name)
 	assert.Equal(t, 3, attempts, "should have retried twice before succeeding")
+}
+
+func TestRateLimitError_CarriesUncappedRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"message": "You have exceeded a secondary rate limit"})
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{
+		token:     "test-token",
+		baseURL:   srv.URL,
+		http:      srv.Client(),
+		afterFunc: noWaitAfter,
+	}
+
+	_, err := client.CreateRepo(context.Background(), "org", "test-repo", "desc", false)
+	require.Error(t, err)
+	assert.True(t, IsRateLimitError(err))
+	d, ok := RetryAfterFromError(err)
+	require.True(t, ok)
+	assert.Equal(t, 600*time.Second, d, "Retry-After beyond the client's wait cap is still reported")
+}
+
+func TestRetryAfterFromError_Absent(t *testing.T) {
+	_, ok := RetryAfterFromError(&APIError{StatusCode: http.StatusForbidden, Message: "rate limit"})
+	assert.False(t, ok)
+	_, ok = RetryAfterFromError(errors.New("other"))
+	assert.False(t, ok)
+	d, ok := RetryAfterFromError(fmt.Errorf("wrapped: %w", &APIError{StatusCode: http.StatusTooManyRequests, RetryAfter: 90 * time.Second}))
+	assert.True(t, ok)
+	assert.Equal(t, 90*time.Second, d)
 }
 
 func TestCreateFileOnBranch(t *testing.T) {
