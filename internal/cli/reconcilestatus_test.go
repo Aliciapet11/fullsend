@@ -313,7 +313,7 @@ func TestNewReconcileStatusCmd_ReviewRunDoesNotEnableGitHubGuidanceOnGitLab(t *t
 		capturedGuidance = options.CancellationGuidance
 		return nil
 	}
-	defer func() { reconcileOrphaned = origReconcile }()
+	t.Cleanup(func() { reconcileOrphaned = origReconcile })
 
 	t.Setenv("GITLAB_TOKEN", "glpat-test-token")
 	t.Setenv("CI_SERVER_URL", srv.URL)
@@ -340,13 +340,13 @@ func TestNewReconcileStatusCmd_ReviewRunEnablesGitHubGuidance(t *testing.T) {
 	reconcileMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
 		return &mintclient.MintResult{Token: "ghs_minted_token"}, nil
 	}
-	defer func() { reconcileMintToken = origMint }()
+	t.Cleanup(func() { reconcileMintToken = origMint })
 
 	fc := forge.NewFakeClient()
 	fc.PullRequestHeadSHA = reviewedSHA
 	origForge := reconcileNewForgeClient
 	reconcileNewForgeClient = func(string) forge.Client { return fc }
-	defer func() { reconcileNewForgeClient = origForge }()
+	t.Cleanup(func() { reconcileNewForgeClient = origForge })
 
 	origReconcile := reconcileOrphaned
 	var capturedGuidance string
@@ -354,7 +354,7 @@ func TestNewReconcileStatusCmd_ReviewRunEnablesGitHubGuidance(t *testing.T) {
 		capturedGuidance = options.CancellationGuidance
 		return nil
 	}
-	defer func() { reconcileOrphaned = origReconcile }()
+	t.Cleanup(func() { reconcileOrphaned = origReconcile })
 
 	cmd := newReconcileStatusCmd()
 	cmd.SetArgs([]string{
@@ -380,13 +380,13 @@ func TestNewReconcileStatusCmd_ReviewRunSupersededOmitsRetry(t *testing.T) {
 	reconcileMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
 		return &mintclient.MintResult{Token: "ghs_minted_token"}, nil
 	}
-	defer func() { reconcileMintToken = origMint }()
+	t.Cleanup(func() { reconcileMintToken = origMint })
 
 	fc := forge.NewFakeClient()
 	fc.PullRequestHeadSHA = "def4567890abcdef1234567890abcdef12345678"
 	origForge := reconcileNewForgeClient
 	reconcileNewForgeClient = func(string) forge.Client { return fc }
-	defer func() { reconcileNewForgeClient = origForge }()
+	t.Cleanup(func() { reconcileNewForgeClient = origForge })
 
 	origReconcile := reconcileOrphaned
 	var capturedGuidance string
@@ -394,7 +394,7 @@ func TestNewReconcileStatusCmd_ReviewRunSupersededOmitsRetry(t *testing.T) {
 		capturedGuidance = options.CancellationGuidance
 		return nil
 	}
-	defer func() { reconcileOrphaned = origReconcile }()
+	t.Cleanup(func() { reconcileOrphaned = origReconcile })
 
 	cmd := newReconcileStatusCmd()
 	cmd.SetArgs([]string{
@@ -421,13 +421,13 @@ func TestNewReconcileStatusCmd_ReviewRunHeadLookupFailureOmitsGuidance(t *testin
 	reconcileMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
 		return &mintclient.MintResult{Token: "ghs_minted_token"}, nil
 	}
-	defer func() { reconcileMintToken = origMint }()
+	t.Cleanup(func() { reconcileMintToken = origMint })
 
 	fc := forge.NewFakeClient()
 	fc.Errors["GetPullRequestHeadSHA"] = fmt.Errorf("lookup failed")
 	origForge := reconcileNewForgeClient
 	reconcileNewForgeClient = func(string) forge.Client { return fc }
-	defer func() { reconcileNewForgeClient = origForge }()
+	t.Cleanup(func() { reconcileNewForgeClient = origForge })
 
 	origReconcile := reconcileOrphaned
 	var capturedGuidance string
@@ -435,7 +435,7 @@ func TestNewReconcileStatusCmd_ReviewRunHeadLookupFailureOmitsGuidance(t *testin
 		capturedGuidance = options.CancellationGuidance
 		return nil
 	}
-	defer func() { reconcileOrphaned = origReconcile }()
+	t.Cleanup(func() { reconcileOrphaned = origReconcile })
 
 	cmd := newReconcileStatusCmd()
 	cmd.SetArgs([]string{

@@ -759,7 +759,7 @@ openshell:
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "config.yaml"),
-		[]byte(fmt.Sprintf("allowed_remote_resources:\n  - \"%s/\"\n", srv.URL)),
+		[]byte(fmt.Sprintf("agents:\n  - harness/code.yaml\nallowed_remote_resources:\n  - \"%s/\"\n", srv.URL)),
 		0o644,
 	))
 
@@ -8184,6 +8184,93 @@ func TestRunAgent_CancelledReviewUsesCurrentHeadGuidance(t *testing.T) {
 	body := comments[len(comments)-1].Body
 	assert.Contains(t, body, "superseded by a newer commit")
 	assert.NotContains(t, body, "/fs-review")
+}
+
+type runStatusEventWriter func(string)
+
+func (w runStatusEventWriter) Write(p []byte) (int, error) {
+	w(string(p))
+	return len(p), nil
+}
+
+func TestRunAgent_CancelledReviewFinalizesBeforeSandboxTeardown(t *testing.T) {
+	useFakeOpenshellProviders(t)
+	dir := t.TempDir()
+	for path, content := range map[string]string{
+		"agents/review.md":                "You are a review agent.",
+		"harness/review.yaml":             "agent: agents/review.md\nrole: review\npolicy: policies/base.yaml\n",
+		"policies/base.yaml":              "version: 1\n",
+		"config.yaml":                     "agents:\n  - harness/review.yaml\n",
+		"behaviour/current-scenario.yaml": "ops:\n  - op: read_file\n    args: agent-run-marker\n  - op: wait\n    args: '1200'\n",
+	} {
+		file := filepath.Join(dir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+		require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+	}
+
+	origMint, origNewClient := statusMintToken, statusNewForgeClientFn
+	t.Cleanup(func() {
+		statusMintToken, statusNewForgeClientFn = origMint, origNewClient
+	})
+	statusMintToken = func(context.Context, mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return &mintclient.MintResult{Token: "ghs_test_token"}, nil
+	}
+	fc := forge.NewFakeClient()
+	fc.PullRequestHeadSHA = "new-head"
+	statusNewForgeClientFn = func(string) forge.Client { return fc }
+
+	t.Setenv("FULLSEND_RUNTIME", "dummy")
+	t.Setenv("GITHUB_RUN_ID", "run-42")
+	t.Setenv("PR_HEAD_SHA", "cancelled-head")
+	t.Setenv("PUSH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN_SOURCE", "")
+	agentExecMarker := filepath.Join(t.TempDir(), "agent-exec")
+	t.Setenv("FULLSEND_TEST_AGENT_EXEC_MARKER", agentExecMarker)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	completedBeforeTeardown := false
+	printer := ui.New(runStatusEventWriter(func(line string) {
+		if strings.Contains(line, "Cleaning up sandbox") {
+			comments, _ := fc.ListIssueComments(context.Background(), "org", "my-repo", 42)
+			for _, comment := range comments {
+				completedBeforeTeardown = completedBeforeTeardown || strings.Contains(comment.Body, "fullsend:status:terminal")
+			}
+		}
+	}))
+	done := make(chan error, 1)
+	repoDir := t.TempDir()
+	go func() {
+		done <- runAgent(ctx, "review", dir, "", repoDir, "", nil, false, "", "github", "", resolveFlags{maxDepth: 10, maxResources: 50}, statusOpts{
+			statusRepo:    "org/my-repo",
+			statusNum:     42,
+			mintURL:       "https://mint.example.com",
+			trackerSource: "github",
+		}, printer, false, runOverrideFlags{})
+	}()
+	deadline := time.After(15 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(agentExecMarker); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("run stopped before agent execution: %v", err)
+		case <-deadline:
+			cancel()
+			t.Fatal("agent did not reach its first behavior operation")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("cancelled agent did not exit")
+	}
+	assert.True(t, completedBeforeTeardown, "cancelled status must be terminal before sandbox cleanup starts")
+	assert.Len(t, fc.UpdatedComments, 1, "cancelled status must be finalized exactly once")
 }
 
 func TestBackendFromConfigFile_MissingUsesDefault(t *testing.T) {
