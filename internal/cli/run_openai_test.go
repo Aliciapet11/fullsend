@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -991,6 +992,251 @@ func TestRunOpenAIRefresh_KeepsRetryingAfterRetriesExhausted(t *testing.T) {
 	}
 }
 
+func TestOpenAIRefreshRoundDelay(t *testing.T) {
+	assert.Equal(t, 30*time.Second, openAIRefreshRoundDelay(1), "the first failed round waits the minimum delay")
+	assert.Equal(t, time.Minute, openAIRefreshRoundDelay(2))
+	assert.Equal(t, 2*time.Minute, openAIRefreshRoundDelay(3))
+	assert.Equal(t, 4*time.Minute, openAIRefreshRoundDelay(4))
+	assert.Equal(t, 5*time.Minute, openAIRefreshRoundDelay(5), "capped")
+	assert.Equal(t, 5*time.Minute, openAIRefreshRoundDelay(1000), "stays capped without overflowing")
+}
+
+// setOpenAIWIFTestEnv configures a complete WIF trio and a GitHub OIDC
+// endpoint so resolveOpenAICredential takes the exchange path.
+func setOpenAIWIFTestEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("FULLSEND_OPENAI_AUDIENCE", "aud")
+	t.Setenv("FULLSEND_OPENAI_IDENTITY_PROVIDER_ID", "idp")
+	t.Setenv("FULLSEND_OPENAI_SERVICE_ACCOUNT_ID", "sa")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://oidc.example/token")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "runner-token")
+	t.Setenv("GITHUB_ACTIONS", "")
+}
+
+// A refresh failure that no retry can fix stops the refresher on the first
+// attempt, with one log line, instead of looping until the run ends.
+func TestRunOpenAIRefresh_PermanentErrorStops(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T)
+		want  string
+	}{
+		{
+			name: "credential source changed",
+			setup: func(t *testing.T) {
+				for _, k := range []string{"FULLSEND_OPENAI_AUDIENCE", "FULLSEND_OPENAI_IDENTITY_PROVIDER_ID", "FULLSEND_OPENAI_SERVICE_ACCOUNT_ID"} {
+					t.Setenv(k, "")
+				}
+				t.Setenv("OPENAI_API_KEY", "static-key-for-the-source-change-test")
+				t.Setenv("GITHUB_ACTIONS", "")
+				stubOpenAIExchange(t, func(context.Context, openaiwif.Config) (*openaiwif.Token, error) {
+					t.Error("no exchange without a WIF trio")
+					return nil, errors.New("unexpected exchange")
+				})
+			},
+			want: "credential source changed to static during the run",
+		},
+		{
+			name: "refreshed credential too short to redact",
+			setup: func(t *testing.T) {
+				setOpenAIWIFTestEnv(t)
+				var calls atomic.Int32
+				stubOpenAIExchange(t, func(context.Context, openaiwif.Config) (*openaiwif.Token, error) {
+					calls.Add(1)
+					return &openaiwif.Token{Value: "short", ExpiresAt: time.Now().Add(time.Hour), Scope: "api.model.request"}, nil
+				})
+				t.Cleanup(func() { assert.Equal(t, int32(1), calls.Load(), "one exchange, no retry") })
+			},
+			want: "too short to redact reliably",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shrinkOpenAIRefreshSchedule(t)
+			argsLog, _ := fakeOpenshellRecorder(t)
+			tc.setup(t)
+			var expiries []time.Time
+			origExpiry := setProviderCredentialExpiryFn
+			setProviderCredentialExpiryFn = func(_ context.Context, _, _ string, at time.Time) error {
+				expiries = append(expiries, at)
+				return nil
+			}
+			t.Cleanup(func() { setProviderCredentialExpiryFn = origExpiry })
+			var buf syncBuffer
+			held := time.Now().Truncate(time.Second)
+			h := openAIProviderHandle{name: "openai-abc", keys: []string{"OPENAI_API_KEY"}, source: "wif", expiresAt: held}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				runOpenAIRefresh(context.Background(), h, ui.New(&buf))
+			}()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("refresher did not stop on an error that cannot recover")
+			}
+			out := buf.String()
+			assert.Equal(t, 1, strings.Count(out, tc.want), "logged once: %s", out)
+			assert.Contains(t, out, "stopped")
+			assert.NotContains(t, out, "attempt 1/", "not reported as a retryable attempt")
+			assert.NotContains(t, out, "retrying in")
+			_, statErr := os.Stat(argsLog)
+			assert.True(t, os.IsNotExist(statErr), "the provider is never rotated")
+			assert.Equal(t, []time.Time{held}, expiries, "the route fails closed at the held expiry")
+		})
+	}
+}
+
+// Consecutive exhausted rounds wait longer each time, up to the cap; a
+// success resets the backoff and schedules the next refresh against the
+// renewed expiry.
+func TestRunOpenAIRefresh_BacksOffBetweenRoundsAndResetsAfterSuccess(t *testing.T) {
+	shrinkOpenAIRefreshSchedule(t)
+	fakeOpenshellRecorder(t)
+	setOpenAIWIFTestEnv(t)
+	const lifetime = 500 * time.Millisecond
+	type call struct {
+		at time.Time
+		ok bool
+	}
+	var (
+		fail  atomic.Bool
+		mu    sync.Mutex
+		calls []call
+	)
+	fail.Store(true)
+	stubOpenAIExchange(t, func(context.Context, openaiwif.Config) (*openaiwif.Token, error) {
+		now := time.Now()
+		ok := !fail.Load()
+		mu.Lock()
+		calls = append(calls, call{at: now, ok: ok})
+		mu.Unlock()
+		if !ok {
+			return nil, errors.New("exchange unavailable")
+		}
+		return &openaiwif.Token{Value: "tok-refreshed-backoff-abcdef", ExpiresAt: now.Add(lifetime), Scope: "api.model.request"}, nil
+	})
+	var buf syncBuffer
+	h := openAIProviderHandle{name: "openai-abc", keys: []string{"OPENAI_API_KEY"}, source: "wif", expiresAt: time.Now()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runOpenAIRefresh(ctx, h, ui.New(&buf))
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	waitRe := regexp.MustCompile(`retrying in (\S+) \(`)
+	waits := func() []string {
+		var out []string
+		for _, m := range waitRe.FindAllStringSubmatch(buf.String(), -1) {
+			out = append(out, m[1])
+		}
+		return out
+	}
+	require.Eventually(t, func() bool { return len(waits()) >= 4 }, 10*time.Second, 5*time.Millisecond)
+	assert.Equal(t, []string{"20ms", "40ms", "80ms", "80ms"}, waits()[:4], "doubling per failed round, capped")
+
+	fail.Store(false)
+	require.Eventually(t, func() bool {
+		return strings.Contains(buf.String(), "OpenAI credential refreshed for openai-abc")
+	}, 10*time.Second, 5*time.Millisecond)
+	fail.Store(true)
+
+	require.Eventually(t, func() bool { return len(waits()) >= 5 }, 10*time.Second, 5*time.Millisecond)
+	assert.Equal(t, "20ms", waits()[4], "the backoff starts over after a success")
+
+	mu.Lock()
+	defer mu.Unlock()
+	okAt := -1
+	for i, c := range calls {
+		if c.ok {
+			okAt = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, okAt, 0, "one exchange succeeded")
+	require.Greater(t, len(calls), okAt+1, "a refresh followed the success")
+	assert.GreaterOrEqual(t, calls[okAt+1].at.Sub(calls[okAt].at), lifetime-50*time.Millisecond,
+		"the next refresh is scheduled against the renewed expiry, not the retry backoff")
+}
+
+// With every re-seed failing, each attempt adds the generation it saw to
+// the unrecorded set, which every later re-seed retires. The set stops at
+// its cap: the refresher fails closed instead of rotating again, so the
+// re-seed command stays bounded.
+func TestRunOpenAIRefresh_UnrecordedStaysWithinItsCap(t *testing.T) {
+	shrinkOpenAIRefreshSchedule(t)
+	oldMax := openAIUnrecordedMax
+	openAIUnrecordedMax = 4
+	t.Cleanup(func() { openAIUnrecordedMax = oldMax })
+	oldPoll := openAIPlaceholderPoll
+	openAIPlaceholderPoll = time.Millisecond
+	t.Cleanup(func() { openAIPlaceholderPoll = oldPoll })
+
+	binDir := t.TempDir()
+	argsLog := filepath.Join(binDir, "args")
+	seedLog := filepath.Join(binDir, "seeds")
+	counter := filepath.Join(binDir, "count")
+	// Each provider update is a new generation v<n>; the sandbox hands out
+	// the latest at once. Every seed fails.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuoteForTest(argsLog) + "\n" +
+		"n=$(cat " + shellQuoteForTest(counter) + " 2>/dev/null || echo 0)\n" +
+		"case \"$1 $2\" in 'provider update') echo $((n+1)) > " + shellQuoteForTest(counter) + "; exit 0 ;; esac\n" +
+		"case \"$*\" in *'printf %s'*) printf '%s%s_OPENAI_API_KEY' " + shellQuoteForTest(ph("v")) + " \"$n\"; exit 0 ;;" +
+		" *'seed auth.json'*) printf '%s\\n' \"$*\" >> " + shellQuoteForTest(seedLog) + "; echo boom >&2; exit 1 ;; esac; exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var expiries []time.Time
+	origExpiry := setProviderCredentialExpiryFn
+	setProviderCredentialExpiryFn = func(_ context.Context, _, _ string, at time.Time) error {
+		expiries = append(expiries, at)
+		return nil
+	}
+	t.Cleanup(func() { setProviderCredentialExpiryFn = origExpiry })
+
+	held := time.Now().Truncate(time.Second)
+	up := &atomic.Bool{}
+	up.Store(true)
+	h := openAIProviderHandle{name: "openai-abc", keys: []string{"OPENAI_API_KEY"}, source: "static", expiresAt: held,
+		sandbox: "fs-x", authSeed: "seed auth.json", authFile: "/sandbox/pi-config/auth.json", sandboxUp: up,
+		unrecorded: &seedGenerations{}}
+	var buf syncBuffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runOpenAIRefresh(context.Background(), h, ui.New(&buf))
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("refresher did not stop at the unrecorded cap")
+	}
+
+	assert.Equal(t, 4, h.unrecorded.len(), "the set stops at its cap")
+	var rotations int
+	for _, l := range readArgLines(t, argsLog) {
+		if strings.HasPrefix(l, "provider update openai-abc") {
+			rotations++
+		}
+	}
+	assert.Equal(t, 4, rotations, "no rotation once the set is full")
+	seeds := readArgLines(t, seedLog)
+	require.Len(t, seeds, 4)
+	retiredRe := regexp.MustCompile(`FULLSEND_SEED_PREVIOUS='([^']*)'`)
+	for _, s := range seeds {
+		m := retiredRe.FindStringSubmatch(s)
+		require.NotNil(t, m, s)
+		assert.LessOrEqual(t, len(strings.Fields(m[1])), openAIUnrecordedMax, "the held generation plus fewer than the cap: %s", s)
+	}
+	assert.Contains(t, seeds[3], "FULLSEND_SEED_PREVIOUS='"+strings.Join([]string{ph("v0_OPENAI_API_KEY"), ph("v1_OPENAI_API_KEY"), ph("v2_OPENAI_API_KEY"), ph("v3_OPENAI_API_KEY")}, " ")+"'",
+		"the last re-seed retires the held generation and the three unrecorded ones")
+	assert.Equal(t, []time.Time{held}, expiries, "the route fails closed at the held generation's expiry")
+	assert.Contains(t, buf.String(), "never handed off")
+}
+
 // simulateOpenAIHostSleep shrinks the wall-clock watchdog interval and
 // replaces the refresher's wall clock with one that runs ahead of the real
 // (monotonic) clock by the returned offset, the way it does after the host
@@ -1173,10 +1419,10 @@ func TestStartOpenAIRefreshers_LaunchesOnePerHandleAndStopsIndependently(t *test
 // milliseconds for tests and restores the production values afterwards.
 func shrinkOpenAIRefreshSchedule(t *testing.T) {
 	t.Helper()
-	margin, jitter, minDelay, backoff := openAIRefreshMargin, openAIRefreshJitter, openAIRefreshMinDelay, openAIRefreshBackoff
-	openAIRefreshMargin, openAIRefreshJitter, openAIRefreshMinDelay, openAIRefreshBackoff = 0, 0, 20*time.Millisecond, 10*time.Millisecond
+	margin, jitter, minDelay, backoff, maxRound := openAIRefreshMargin, openAIRefreshJitter, openAIRefreshMinDelay, openAIRefreshBackoff, openAIRefreshMaxRoundDelay
+	openAIRefreshMargin, openAIRefreshJitter, openAIRefreshMinDelay, openAIRefreshBackoff, openAIRefreshMaxRoundDelay = 0, 0, 20*time.Millisecond, 10*time.Millisecond, 80*time.Millisecond
 	t.Cleanup(func() {
-		openAIRefreshMargin, openAIRefreshJitter, openAIRefreshMinDelay, openAIRefreshBackoff = margin, jitter, minDelay, backoff
+		openAIRefreshMargin, openAIRefreshJitter, openAIRefreshMinDelay, openAIRefreshBackoff, openAIRefreshMaxRoundDelay = margin, jitter, minDelay, backoff, maxRound
 	})
 }
 
