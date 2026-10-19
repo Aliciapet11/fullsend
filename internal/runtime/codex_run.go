@@ -36,8 +36,8 @@ const codexBinaryVar = "FULLSEND_CODEX_BIN"
 const codexRuntimeEnv = "FULLSEND_RUNTIME"
 
 // codexPathVar holds the PATH captured before the agent-writable .env is
-// sourced, so it can be restored before codex — and therefore every hook — is
-// launched.
+// sourced, so it can be restored before codex is launched. The hook adapter's
+// children take envDataTrustedPathVar instead (see buildCodexRunCommand).
 const codexPathVar = "FULLSEND_CODEX_PATH"
 
 // codexHookDigestsEnv carries the hook scripts' expected digests to the
@@ -403,10 +403,13 @@ func buildCodexRunCommand(params RunParams, model codexModel, effort string, hoo
 		// after it so a rewritten .env cannot move codex's home out from
 		// under the guards.
 		"&& "+strings.Join(r.EnvExports(), " && "),
-		// Restored for codex itself, and exported so the hook adapter can set
-		// it for its children from a value that never passed through .env —
-		// rather than trusting whatever PATH it happens to inherit.
-		"&& export PATH=\"$"+codexPathVar+"\" && export "+codexPathVar,
+		// Restored for codex itself. The hook adapter sets its children's
+		// PATH from envDataTrustedPathVar instead: the same launch PATH,
+		// recorded read-only before .env by envDataLoad, without the
+		// directories the agent can write. Both are exported from values that
+		// never passed through .env, rather than trusting whatever PATH the
+		// adapter happens to inherit.
+		"&& export PATH=\"$"+codexPathVar+"\" && export "+codexPathVar+" "+envDataTrustedPathVar,
 		"&& export "+codexRuntimeEnv+"=codex",
 		// NODE_* would load code into npm's codex launcher; PYTHON* would do
 		// the same to the hook adapter's interpreter, which `-I` in hooks.json

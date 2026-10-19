@@ -91,8 +91,9 @@ HOOK_DIGESTS_ENV = "FULLSEND_CODEX_HOOK_DIGESTS"
 # registry; the guard re-checks the values before every spawn.
 SPAWN_DIGESTS_ENV = "FULLSEND_CODEX_SPAWN_DIGESTS"
 
-# The PATH captured before the agent-writable .env was sourced. See _child_env.
-PINNED_PATH_ENV = "FULLSEND_CODEX_PATH"
+# The launch PATH recorded before the agent-writable .env was read, without the
+# directories the agent can write. See _child_env.
+PINNED_PATH_ENV = "FULLSEND_TRUSTED_PATH"
 
 # Bound one script run, so a wedged stage cannot consume the budget of the
 # ones after it.
@@ -189,9 +190,10 @@ def _child_env() -> dict[str, str]:
     codex spawns the hook after the agent-writable .env has been sourced.
 
     LD_* goes the same way: it would load code into any dynamically linked
-    program a hook script runs — tirith, git — before its main. PATH is
-    inherited unchanged and is already the value the run command pinned before
-    sourcing .env, which is what makes `tirith` resolve to the real one.
+    program a hook script runs — tirith, git — before its main. PATH is set
+    from the value the run command recorded before reading .env, without the
+    directories the agent can write, which is what makes `tirith` resolve to
+    the image's own.
     """
     env = {
         k: v
@@ -201,8 +203,9 @@ def _child_env() -> dict[str, str]:
     # Inert under `-I`, which already ignores the user site directory. Kept as
     # a second latch so dropping the flag does not silently re-enable it.
     env["PYTHONNOUSERSITE"] = "1"
-    # PATH from the value the run command captured before .env was sourced,
-    # when it is available. The hook scripts resolve their tools by name —
+    # PATH from the value the run command recorded before .env was read, with
+    # the directories the agent can write left out, when it is available.
+    # Codex's own PATH keeps those directories. The hook scripts resolve their tools by name —
     # tirith_check.py runs a bare `tirith` — so a PATH with a planted entry
     # ahead of the real one neuters the chain with every digest still green.
     # Taking it from here rather than from the inherited PATH means the

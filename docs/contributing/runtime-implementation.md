@@ -226,7 +226,7 @@ The hook scripts in `internal/security/hooks/*.py` are plain programs with no Cl
 ### Files and wiring
 
 - **Files:** `security.HookFiles(cfg)` returns `filename → script bytes` for the enabled hooks; `runtime.installHookScripts(sandbox, dir, cfg)` creates `dir` in the sandbox and uploads them there (executable) — any directory works. Claude uses `/sandbox/claude-config/hooks/` (`security.SandboxHooksDir`), with the wiring at `/sandbox/claude-config/hooks.json` (`security.SandboxHooksSettings`) loaded via `--settings`.
-- **Claude integrity (#8259):** both files are written once at `Bootstrap` and stay agent-writable, so `ClaudeRuntime.Run` checks them before every launch (`internal/runtime/claude_integrity.go`). The scripts are checked against the embedded copies' digests and the directory must hold exactly those files (the codex `codexHookScriptsGuard`). `hooks.json` is checked against the digest `Bootstrap` recorded on the runner side. The check runs before the agent-writable `.env` and again after it behind `unset -f`, using `command -p` utilities, and exits 97 on a mismatch; `Run` refuses outright (exit -1) when no digests were recorded for the sandbox. The hook commands run `PATH='<sandbox PATH>' '<absolute python3>' -E -s -B <script>`: `Bootstrap` resolves the interpreter (with the codex 3.11 floor) and the `PATH` on a sandbox shell the agent has not touched and renders them into `hooks.json`, so the digest covers them and a fake `python3` or `tirith` placed on a `PATH` set by `.env` is not resolved by a hook; `-E` ignores `PYTHONPATH`, `PYTHONHOME` and `PYTHONSTARTUP`, `-s` drops the user site, and the hooks directory the interpreter imports from is the digest-checked one, so it cannot hold a `sitecustomize.py`. `-I` is not used because it would drop the script directory from `sys.path` and the scripts import `hook_io` from it. `-B` keeps `__pycache__/` out of the checked directory. The launch also unsets `PYTHON*` after `.env`; it does not restore `PATH`, because `.env` prepends the workspace `bin` directory the agent needs. Not covered: a `python3` or `tirith` the agent replaces at its own pinned location, if the image makes it writable. Also not covered: Claude Code's own `claude-config/settings.json` (plugin state), the target repo's `<repo>/.claude/settings.json`, and rewrites during an iteration (after the check, or by a process an earlier iteration left running).
+- **Claude integrity (#8259):** both files are written once at `Bootstrap` and stay agent-writable, so `ClaudeRuntime.Run` checks them before every launch (`internal/runtime/claude_integrity.go`). The scripts are checked against the embedded copies' digests and the directory must hold exactly those files (the codex `codexHookScriptsGuard`). `hooks.json` is checked against the digest `Bootstrap` recorded on the runner side. The check runs before the agent-writable `.env` and again after it behind `unset -f`, using `command -p` utilities, and exits 97 on a mismatch; `Run` refuses outright (exit -1) when no digests were recorded for the sandbox. The hook commands run `PATH='<trusted PATH>' '<absolute python3>' -E -s -B <script>`: `Bootstrap` resolves both from directories the agent cannot write (`hookPreflightInterpreter`, on a sandbox shell the agent has not touched, running the launch's own `envDataPin` lookup): the `PATH` is the sandbox `PATH` without the directories the agent user can write (or that have a writable ancestor) and without relative entries, and the interpreter is the first `python3` on it whose resolved file and parent directories the agent cannot write either, with the codex 3.11 floor. Both are rendered into `hooks.json`, so the digest covers them and a fake `python3` or `tirith` placed on a `PATH` set by `.env` is not resolved by a hook; `-E` ignores `PYTHONPATH`, `PYTHONHOME` and `PYTHONSTARTUP`, `-s` drops the user site, and the hooks directory the interpreter imports from is the digest-checked one, so it cannot hold a `sitecustomize.py`. `-I` is not used because it would drop the script directory from `sys.path` and the scripts import `hook_io` from it. `-B` keeps `__pycache__/` out of the checked directory. The launch also unsets `PYTHON*` after `.env`; it does not restore `PATH`, because `.env` prepends the workspace `bin` directory the agent needs. Not covered: a tool file such as `tirith` that the image makes agent-writable inside a directory the agent cannot write (only the interpreter's own file is checked). Also not covered: Claude Code's own `claude-config/settings.json` (plugin state), the target repo's `<repo>/.claude/settings.json`, and rewrites during an iteration (after the check, or by a process an earlier iteration left running).
 - **Plan:** `security.HookPlan(cfg)` returns ordered `HookGroup{Phase, Tools, Scripts}` entries. `GenerateHooksConfig` is rendered from `HookPlan`, so the two cannot diverge.
 - **Phases:** `PreToolUse`, `PostToolUse`, `PostToolUseFailure`. The last carries Claude Code's failed-call payload (`hook_event_name`, `tool_name`, `tool_input`, a string `error`) and allows no output rewrite, so the chain halts there on a canary and otherwise only detects — logging credential-shaped and control content and returning an `additionalContext` warning. Adapters whose post-tool event already fires for failed calls (pi) map it onto nothing.
 - **Tools:** `HookGroup.Tools` are Claude Code tool names (`Bash`, `Read`, `WebFetch`, `*` = all); runtimes with other names translate before matching (see [Tool-name vocabulary](#tool-name-vocabulary-608)).
@@ -492,7 +492,8 @@ The sandbox has two key directories that map to Claude Code's config levels (plu
     │   claude is resolved on PATH before .env and launched by that path
     │   (FULLSEND_CLAUDE_BIN), like codex and pi. .env puts workspace/bin
     │   last on PATH and restores the runner's PATH in front after .env.d
-    │   (what claude and pi run under; codex restores its pre-.env PATH);
+    │   (what claude and pi run under; codex restores its pre-.env PATH;
+    │   the Claude Code and codex hooks run under the trusted PATH);
     │   host_files may only target /sandbox/ or /tmp/ and not the runner's
     │   paths (harness.ValidateHostFileDest).
     │
@@ -1341,7 +1342,11 @@ the hook timeout at which codex kills a handler and lets the call through. No ro
 their tools by name — `tirith_check.py` runs a bare `tirith` — so a `.env` that prepends a directory
 holding a fake `tirith` that exits 0 neuters the entire PreToolUse chain while every digest stays
 green. Reproduced before the pin existed. `Run` captures `PATH` into a readonly variable before
-sourcing `.env` and restores it afterwards, and unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and
+sourcing `.env` and restores it afterwards for codex itself. The hook adapter's children get a
+narrower one: `FULLSEND_TRUSTED_PATH`, which `envDataLoad` records read-only before `.env` (the
+launch `PATH` without the directories the agent user can write, or that have a writable ancestor,
+and without relative entries) and `Run` exports after it; the adapter sets the children's `PATH`
+from it. `Run` also unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and
 `LD_AUDIT`, which would otherwise load code into any dynamically linked program the run starts —
 codex's own binary, `tirith`, `git` — before its `main`. The adapter strips `LD_*` and `PYTHON*`
 from the children's environment too, while passing the scripts' own configuration through.
@@ -1368,7 +1373,10 @@ manifest.
 **The hook interpreter is pinned twice.** codex spawns a hook through the shell it inherits,
 *after* the agent-writable `.env` has been sourced, so a bare `python3` in `hooks.json` would be
 resolved through a PATH the agent controls — a poisoned interpreter running under the hash-pinned
-adapter. Bootstrap resolves the absolute path in its preflight and renders it with `-I`, which also
+adapter. Bootstrap resolves the absolute path in its preflight (`hookPreflightInterpreter`: the
+launch's own `envDataPin` lookup, so the first `python3` on the `PATH` without the directories the
+agent user can write, whose resolved file and parent directories the agent cannot write either)
+and renders it with `-I`, which also
 ignores `PYTHONPATH` and the user site directory; `Run` unsets `PYTHONPATH`, `PYTHONHOME` and
 `PYTHONSTARTUP` after `.env` for good measure.
 

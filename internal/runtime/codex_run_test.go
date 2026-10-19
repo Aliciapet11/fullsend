@@ -249,6 +249,19 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 	assert.Less(t, pinAt, envAt, "PATH is captured before .env")
 	assert.Greater(t, restoreAt, envAt, "and restored after it")
 
+	// The hook adapter's children take the trusted PATH, which envDataLoad
+	// records read-only before .env (inside codexEnvLoad); it is exported
+	// after .env and before codex starts, and nothing unsets it.
+	trustedAt := strings.Index(cmd, codexEnvLoad)
+	exportAt := strings.Index(cmd, "export "+codexPathVar+" "+envDataTrustedPathVar)
+	execAt := strings.Index(cmd, `| "$FULLSEND_CODEX_BIN"`)
+	require.Positive(t, trustedAt)
+	require.Positive(t, exportAt)
+	assert.Contains(t, codexEnvLoad, "readonly "+envDataTrustedPathVar+"=")
+	assert.Greater(t, exportAt, envAt, "exported after .env")
+	assert.Less(t, exportAt, execAt, "and before codex starts")
+	assert.NotRegexp(t, `unset [^&]*\b`+envDataTrustedPathVar+`\b`, cmd)
+
 	// Loader variables would inject code into any dynamically linked program
 	// the run starts, before its main.
 	assert.Contains(t, cmd, "LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT")
