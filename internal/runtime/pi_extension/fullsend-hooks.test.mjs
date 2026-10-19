@@ -12,12 +12,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import defaultExport, {
+  HOOK_PATH_ENV,
   HOOK_PYTHON_ENV,
   MANIFEST_SHA256_ENV,
   bashAllowlistViolation,
   claudeToolInput,
   claudeToolName,
   createHooks,
+  hookPath,
   hookPython,
   manifestDigestError,
   runScript,
@@ -45,7 +47,7 @@ function fakeSpawn(answers) {
   const spawn = (cmd, args, opts) => {
     const script = args[args.length - 1].split("/").pop();
     const payload = JSON.parse(opts.input);
-    calls.push({ cmd, args, script, payload });
+    calls.push({ cmd, args, script, payload, env: opts.env });
     const a = answers[script] ?? {};
     if (typeof a === "function") return a(payload);
     return { status: a.status ?? 0, stdout: a.stdout ?? "", error: a.error, signal: a.signal };
@@ -59,6 +61,9 @@ const quiet = { log: () => {} };
 // the tests that do not exercise it run with a pinned value in place.
 const PINNED_PYTHON = "/usr/bin/python3";
 process.env[HOOK_PYTHON_ENV] = PINNED_PYTHON;
+// Likewise the trusted hook PATH (piHookPathEnv in pi_run.go).
+const TRUSTED_PATH = "/usr/local/bin:/usr/bin:/bin";
+process.env[HOOK_PATH_ENV] = TRUSTED_PATH;
 
 test("bash allowlist: first token of every simple command must be allowed", () => {
   const allow = ["gh", "jq"];
@@ -293,7 +298,7 @@ test("runScript with a real python3 script (skipped without python3)", (t) => {
     t.skip("python3 not available");
     return;
   }
-  const env = { ...process.env, [HOOK_PYTHON_ENV]: python };
+  const env = { ...process.env, [HOOK_PYTHON_ENV]: python, [HOOK_PATH_ENV]: TRUSTED_PATH };
   const dir = mkdtempSync(join(tmpdir(), "fullsend-hooks-"));
   writeFileSync(join(dir, "echo_block.py"), ECHO_BLOCK_PY);
   const m = { ...manifest, hooks: { ...manifest.hooks, dir } };
@@ -319,7 +324,7 @@ test("runScript: a python3 stub earlier on PATH is never used for hooks (skipped
   chmodSync(join(stubDir, "python3"), 0o755);
   writeFileSync(join(dir, "echo_block.py"), ECHO_BLOCK_PY);
   const m = { ...manifest, hooks: { ...manifest.hooks, dir } };
-  const env = { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}`, [HOOK_PYTHON_ENV]: python };
+  const env = { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}`, [HOOK_PYTHON_ENV]: python, [HOOK_PATH_ENV]: TRUSTED_PATH };
 
   const { onToolCall } = createHooks(
     { ...m, hooks: { ...m.hooks, groups: [{ phase: "PreToolUse", tools: ["Bash"], scripts: ["echo_block.py"] }] } },
@@ -333,14 +338,14 @@ test("runScript: a python3 stub earlier on PATH is never used for hooks (skipped
 test("runScript: spawns the pinned interpreter and fails closed without a usable one", () => {
   const payload = { tool_name: "Bash", tool_input: { command: "gh x" } };
   const { spawn, calls } = fakeSpawn({});
-  assert.equal(runScript(manifest, "tirith_check.py", payload, spawn, { [HOOK_PYTHON_ENV]: "/opt/py/bin/python3" }).block, false);
+  assert.equal(runScript(manifest, "tirith_check.py", payload, spawn, { [HOOK_PYTHON_ENV]: "/opt/py/bin/python3", [HOOK_PATH_ENV]: TRUSTED_PATH }).block, false);
   assert.equal(calls[0].cmd, "/opt/py/bin/python3");
 
   for (const [label, env] of [
-    ["unset", {}],
-    ["empty", { [HOOK_PYTHON_ENV]: "" }],
-    ["relative", { [HOOK_PYTHON_ENV]: "python3" }],
-    ["relative path", { [HOOK_PYTHON_ENV]: "bin/python3" }],
+    ["unset", { [HOOK_PATH_ENV]: TRUSTED_PATH }],
+    ["empty", { [HOOK_PYTHON_ENV]: "", [HOOK_PATH_ENV]: TRUSTED_PATH }],
+    ["relative", { [HOOK_PYTHON_ENV]: "python3", [HOOK_PATH_ENV]: TRUSTED_PATH }],
+    ["relative path", { [HOOK_PYTHON_ENV]: "bin/python3", [HOOK_PATH_ENV]: TRUSTED_PATH }],
   ]) {
     const before = calls.length;
     const verdict = runScript(manifest, "tirith_check.py", payload, spawn, env);
@@ -349,6 +354,56 @@ test("runScript: spawns the pinned interpreter and fails closed without a usable
     assert.equal(calls.length, before, `${label}: nothing is spawned`);
   }
   assert.equal(hookPython(undefined), null);
+});
+
+// The hook scripts run with the trusted PATH, not the PATH .env left behind,
+// and a missing or malformed one blocks without spawning.
+test("runScript: hook scripts get the trusted PATH and fail closed without one", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "gh x" } };
+  const { spawn, calls } = fakeSpawn({});
+  const env = { PATH: "/sandbox/x/bin:/usr/bin", [HOOK_PYTHON_ENV]: PINNED_PYTHON, [HOOK_PATH_ENV]: TRUSTED_PATH };
+  assert.equal(runScript(manifest, "tirith_check.py", payload, spawn, env).block, false);
+  assert.equal(calls[0].env.PATH, TRUSTED_PATH, "the inherited PATH is replaced");
+  assert.equal(calls[0].env[HOOK_PYTHON_ENV], PINNED_PYTHON, "the rest of the environment is kept");
+
+  for (const [label, value] of [
+    ["unset", undefined],
+    ["empty", ""],
+    ["empty entry", "/usr/bin::/bin"],
+    ["trailing colon", "/usr/bin:"],
+    ["relative entry", "bin:/usr/bin"],
+  ]) {
+    const before = calls.length;
+    const e = { [HOOK_PYTHON_ENV]: PINNED_PYTHON };
+    if (value !== undefined) e[HOOK_PATH_ENV] = value;
+    const verdict = runScript(manifest, "tirith_check.py", payload, spawn, e);
+    assert.equal(verdict.block, true, `${label}: blocks`);
+    assert.match(verdict.reason, new RegExp(`fail closed.*${HOOK_PATH_ENV}`), `${label}: names the missing PATH`);
+    assert.equal(calls.length, before, `${label}: nothing is spawned`);
+    assert.equal(hookPath(e), null, label);
+  }
+});
+
+// A tool stub earlier on the inherited PATH is not what a hook script runs.
+test("runScript: a hook's tools resolve on the trusted PATH, not the inherited one (skipped without python3)", (t) => {
+  const python = realPython();
+  if (python === null || !existsSync("/bin/sh")) {
+    t.skip("python3 or /bin/sh not available");
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "fullsend-hooks-"));
+  const stubDir = join(dir, "bin");
+  mkdirSync(stubDir);
+  const marker = join(dir, "stub-ran");
+  writeFileSync(join(stubDir, "scanner"), `#!/bin/sh\n: > '${marker}'\nexit 0\n`);
+  chmodSync(join(stubDir, "scanner"), 0o755);
+  writeFileSync(join(dir, "calls_scanner.py"),
+    'import shutil,sys\nsys.exit(0 if shutil.which("scanner") is None else 3)\n');
+  const m = { ...manifest, hooks: { ...manifest.hooks, dir } };
+  const env = { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}`, [HOOK_PYTHON_ENV]: python, [HOOK_PATH_ENV]: "/usr/bin:/bin" };
+  const verdict = runScript(m, "calls_scanner.py", { tool_name: "Bash", tool_input: { command: "x" } }, spawnSync, env);
+  assert.equal(verdict.block, false, "the script found no scanner on its PATH");
+  assert.equal(existsSync(marker), false);
 });
 
 test("tool_call and tool_result: no pinned interpreter blocks the call and withholds the result", () => {

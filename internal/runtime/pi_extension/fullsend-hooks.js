@@ -38,6 +38,10 @@ export const MANIFEST_SHA256_ENV = "FULLSEND_PI_MANIFEST_SHA256";
 // "python3" would be resolved through the PATH .env left behind, where a
 // stub that exits 0 would make every hook read as allowed.
 export const HOOK_PYTHON_ENV = "FULLSEND_PI_HOOK_PYTHON";
+// HOOK_PATH_ENV carries the PATH the hook scripts run with: the launch PATH
+// recorded before .env was read, without directories the agent user can
+// write (piHookPathEnv in pi_run.go). Hook scripts start tools by name.
+export const HOOK_PATH_ENV = "FULLSEND_PI_HOOK_PATH";
 const SCRIPT_TIMEOUT_MS = 60_000;
 const SCRIPT_MAX_BUFFER = 64 * 1024 * 1024;
 const LOG_PREFIX = "[fullsend-hooks]";
@@ -192,22 +196,35 @@ export function hookPython(env) {
   return typeof value === "string" && value.startsWith("/") ? value : null;
 }
 
+// hookPath returns the trusted hook PATH from env, or null when it is
+// missing, empty, or has an entry that is not an absolute directory (an
+// empty or relative entry would search the working directory).
+export function hookPath(env) {
+  const value = env?.[HOOK_PATH_ENV];
+  if (typeof value !== "string" || value === "") return null;
+  return value.split(":").every((d) => d.startsWith("/")) ? value : null;
+}
+
 // runScript executes one hook script with the payload on stdin and returns
 // the normalized verdict. `spawn` and `env` are injectable for tests.
 export function runScript(manifest, script, payload, spawn = spawnSync, env = process.env) {
-  const path = `${manifest.hooks.dir}/${script}`;
+  const scriptPath = `${manifest.hooks.dir}/${script}`;
   const python = hookPython(env);
   if (python === null) {
     return { block: true, reason: `hook ${script} not run (fail closed): ${HOOK_PYTHON_ENV} is not an absolute interpreter path` };
+  }
+  const path = hookPath(env);
+  if (path === null) {
+    return { block: true, reason: `hook ${script} not run (fail closed): ${HOOK_PATH_ENV} is not a list of absolute directories` };
   }
   // -E -s -B, as the Claude hook launcher uses: ignore PYTHON* variables and
   // the user site directory (an agent-chosen HOME can carry a
   // usercustomize.py), and write no bytecode, so nothing the agent placed
   // runs before the hook script's own checks.
-  const res = spawn(python, ["-E", "-s", "-B", path], {
+  const res = spawn(python, ["-E", "-s", "-B", scriptPath], {
     input: JSON.stringify(payload),
     encoding: "utf8",
-    env,
+    env: { ...env, PATH: path },
     timeout: SCRIPT_TIMEOUT_MS,
     maxBuffer: SCRIPT_MAX_BUFFER,
   });
