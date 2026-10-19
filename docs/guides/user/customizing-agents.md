@@ -525,8 +525,11 @@ general migration path for blocked proxy or certificate settings.
 Coordinate these changes with the operator of your OpenShell gateway:
 
 - **Corporate proxies:** use the operator-managed outbound-network settings
-  for the OpenShell version and compute driver you deploy. The
-  [OpenShell v0.1.2 gateway configuration reference](https://github.com/NVIDIA/OpenShell/blob/v0.1.2/docs/how-it-works/gateways/configuration.mdx)
+  for the OpenShell version and compute driver you deploy; fullsend records
+  the version it pins in
+  [`.github/scripts/openshell-version.sh`](https://github.com/fullsend-ai/fullsend/blob/main/.github/scripts/openshell-version.sh)
+  at your release tag.
+  The [OpenShell gateway configuration reference](https://github.com/NVIDIA/OpenShell/blob/main/docs/how-it-works/gateways/configuration.mdx)
   describes proxy chaining for policy-approved TLS connections using the HTTP
   CONNECT method to establish a tunnel. Plain-HTTP destination traffic remains
   direct. These are not fullsend harness fields or a general replacement for
@@ -541,11 +544,14 @@ Coordinate these changes with the operator of your OpenShell gateway:
 - **Additional certificate authorities (CAs):** preserve the active sandbox's
   OpenShell CA certificate and other required roots in application trust.
   OpenShell's supervisor also verifies upstream TLS separately. Follow the
-  selected driver's certificate-provisioning instructions, including
-  `proxy_ca_bundle` where supported and applicable. Do not assume that replacing
-  a generated bundle with a custom-only file, or changing only the agent image's
-  trust store, configures both trust paths. Have the gateway operator validate
-  the required application and supervisor connections before deployment.
+  selected driver's certificate-provisioning instructions in that reference,
+  which documents `proxy_ca_bundle` for a corporate proxy. It requires
+  `https_proxy`, and on Kubernetes it is a path in the gateway Pod mounted
+  from a ConfigMap, not a host path. Do not assume that replacing a
+  generated bundle with a custom-only file, or changing only the agent
+  image's trust store, configures both trust paths. Have the gateway operator
+  validate the required application and supervisor connections before
+  deployment.
 
 ### Adding a skill
 
