@@ -577,7 +577,20 @@ case "\${url}" in
   https://ghcr.io/token*)
     f="${NET_DIR}/ghcr-token" ;;
   https://ghcr.io/v2/fullsend-ai/fullsend-runner/manifests/*)
-    f="${NET_DIR}/ghcr-\${url##*/}" ;;
+    # Like curl -sSI -w '\\n%{http_code}': a transport failure exits non-zero,
+    # a missing manifest answers HTTP 404, and a file holds the response
+    # headers (HTTP 200). ghcr-status-<digest> forces another HTTP status.
+    [ ! -f "${NET_DIR}/ghcr-net-error" ] || exit 6
+    d="\${url##*/}"
+    if [ -f "${NET_DIR}/ghcr-status-\${d}" ]; then
+      printf 'HTTP/2 %s\r\n\r\n\n%s' "\$(cat "${NET_DIR}/ghcr-status-\${d}")" "\$(cat "${NET_DIR}/ghcr-status-\${d}")"
+    elif [ -f "${NET_DIR}/ghcr-\${d}" ]; then
+      cat "${NET_DIR}/ghcr-\${d}"
+      printf '\n200'
+    else
+      printf 'HTTP/2 404\r\n\r\n\n404'
+    fi
+    exit 0 ;;
   *) exit 22 ;;
 esac
 [ -f "\${f}" ] || exit 22
@@ -876,7 +889,43 @@ refused "image with no recorded digest"
 rm -f "${NET_DIR}/ghcr-$(digest_of "${REV_NEW}")"
 run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
 refused "image whose digest Fullsend's registry does not hold"
+if [[ "${JOB_ERR}" == *"is not an image Fullsend published for commit ${REV_NEW}"* ]]; then
+  pass "HEAD 404 from the registry is reported as an unpublished image"
+else
+  fail "HEAD 404: err=${JOB_ERR}"
+fi
 publish_image "${REV_NEW}"
+# A failed lookup is not evidence the image is unpublished: it is refused, but
+# reported as unverifiable so the operator retries instead of replacing it.
+touch "${NET_DIR}/ghcr-net-error"
+run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
+rm -f "${NET_DIR}/ghcr-net-error"
+refused "registry network failure"
+if [[ "${JOB_ERR}" == *"could not verify that job image"* ]] \
+  && [[ "${JOB_ERR}" != *"is not an image Fullsend published"* ]]; then
+  pass "registry network failure is reported as unverifiable, not as an unpublished image"
+else
+  fail "registry network failure: err=${JOB_ERR}"
+fi
+printf '503' > "${NET_DIR}/ghcr-status-$(digest_of "${REV_NEW}")"
+run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
+rm -f "${NET_DIR}/ghcr-status-$(digest_of "${REV_NEW}")"
+refused "registry HTTP 503"
+if [[ "${JOB_ERR}" == *"could not verify that job image"* ]]; then
+  pass "registry HTTP error is reported as unverifiable"
+else
+  fail "registry HTTP 503: err=${JOB_ERR}"
+fi
+# A failed lookup of one digest does not stop the remaining digests being tried.
+printf '503' > "${NET_DIR}/ghcr-status-sha256:$(printf 'e%.0s' $(seq 1 64))"
+IMAGE_DIGESTS_OVERRIDE="sha256:$(printf 'e%.0s' $(seq 1 64)) registry.example.com/mirror/runner@$(digest_of "${REV_NEW}")" \
+  run_job "registry.example.com/mirror/runner:dev" "${REV_NEW}" 7.0.2 7.0.2
+rm -f "${NET_DIR}/ghcr-status-sha256:$(printf 'e%.0s' $(seq 1 64))"
+if [ "${JOB_RC}" -eq 0 ]; then
+  pass "a failed lookup of one digest still accepts another published digest"
+else
+  fail "failed-then-published digests: ${JOB_ERR}"
+fi
 mv "${NET_DIR}/ghcr-token" "${NET_DIR}/ghcr-token.off"
 run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
 mv "${NET_DIR}/ghcr-token.off" "${NET_DIR}/ghcr-token"

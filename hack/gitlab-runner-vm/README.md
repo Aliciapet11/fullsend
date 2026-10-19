@@ -366,8 +366,9 @@ served after a host has moved to 0.1: the executor migrates forward only.
   `main`. Use the release-tagged image, or an image built from `main`
   (a `:latest` image tagged from a commit outside `main` fails here too;
   use its `X.Y.Z` tag).
-- `could not resolve`, `could not compare`, `could not fetch`, or `pull
-  token`/`no digest`: the VM could not reach `api.github.com`,
+- `could not resolve`, `could not compare`, `could not fetch`, `could not get
+  a GHCR pull token`, `GHCR returned no pull token`, or `could not verify
+  that job image`: the VM could not reach `api.github.com`,
   `raw.githubusercontent.com`, or `ghcr.io`
   (outage, rate limit, or egress policy). Retry the job; no VM change is
   needed. Commits on `main` that were verified once are cached under

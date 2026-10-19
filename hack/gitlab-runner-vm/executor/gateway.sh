@@ -322,20 +322,32 @@ fullsend_ghcr_pull_token() {
   printf '%s' "${token}"
 }
 
-# Succeed only when Fullsend's runner image repository holds a manifest with
-# digest $2, read with pull token $1. The manifest is requested by digest, so
-# the answer cannot change when a tag moves, and the registry must echo the
-# requested digest back.
+# Look up digest $2 in Fullsend's runner image repository, read with pull
+# token $1. The manifest is requested by digest, so the answer cannot change
+# when a tag moves, and the registry must echo the requested digest back.
+# Returns 0 when the repository holds the manifest, 1 when it does not (HTTP
+# 404, or a response that does not name the requested digest), and 2 when the
+# lookup itself failed (network or TLS error, timeout, or any other HTTP
+# status), so the caller can tell "not published" from "could not check".
 fullsend_registry_has_digest() {
-  local token="$1" digest="$2" headers served
-  if ! headers="$(curl -fsSI --retry 3 --retry-delay 2 --max-time 30 \
+  local token="$1" digest="$2" out code headers served
+  if ! out="$(curl -sSI --retry 3 --retry-delay 2 --max-time 30 \
+    -w '\n%{http_code}' \
     -H "Authorization: Bearer ${token}" \
     -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
     "https://ghcr.io/v2/${FULLSEND_RUNNER_IMAGE_REPO}/manifests/${digest}" 2>/dev/null)"; then
-    return 1
+    return 2
   fi
+  out="$(tr -d '\r' <<< "${out}")"
+  code="$(tail -n 1 <<< "${out}")"
+  headers="$(sed '$d' <<< "${out}")"
+  case "${code}" in
+    200) ;;
+    404) return 1 ;;
+    *) return 2 ;;
+  esac
   served="$(grep -iE '^docker-content-digest:' <<< "${headers}" | grep -oE 'sha256:[0-9a-f]{64}' | head -1)" || true
-  [ "${served}" = "${digest}" ]
+  [ "${served}" = "${digest}" ] || return 1
 }
 
 # Succeed only when the already-pulled image $1 is byte-for-byte an image
@@ -350,18 +362,28 @@ fullsend_registry_has_digest() {
 # tag, and `dev` moves on every main build), so a tag lookup would start
 # refusing an official image once a later build moved the tag. Any one of the
 # image's digests (manifest or multi-arch index) held by the repository is
-# proof Fullsend published it; none refuses it.
+# proof Fullsend published it; none refuses it. A registry lookup that failed
+# (rather than answering "not found") is reported as unverifiable, not as an
+# unpublished image, so the operator retries instead of replacing the image.
 verify_image_published_by_fullsend() {
-  local image="$1" rev="$2" local_digests digest token
+  local image="$1" rev="$2" local_digests digest token rc lookup_failed=0
   local_digests="$(job_image_digests "${image}")" || return 1
   if [ -n "${local_digests}" ]; then
     token="$(fullsend_ghcr_pull_token)" || return 1
     while IFS= read -r digest; do
       [ -n "${digest}" ] || continue
-      if fullsend_registry_has_digest "${token}" "${digest}"; then
-        return 0
-      fi
+      rc=0
+      fullsend_registry_has_digest "${token}" "${digest}" || rc=$?
+      case "${rc}" in
+        0) return 0 ;;
+        1) ;;
+        *) lookup_failed=1 ;;
+      esac
     done <<< "${local_digests}"
+    if [ "${lookup_failed}" -eq 1 ]; then
+      echo "ERROR: could not verify that job image ${image} was published by Fullsend: a lookup in ${FULLSEND_RUNNER_IMAGE_REPO} on ghcr.io failed (network error or unexpected HTTP status); retry the job" >&2
+      return 1
+    fi
   fi
   echo "ERROR: job image ${image} is not an image Fullsend published for commit ${rev} (no digest of the pulled image is held by ${FULLSEND_RUNNER_IMAGE_REPO}); refusing to trust its OpenShell pin" >&2
   return 1
