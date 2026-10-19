@@ -286,7 +286,7 @@ func parseErrorResponse(resp *http.Response) error {
 
 func isRetryable(resp *http.Response, method, path string) bool {
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return isIdempotent(method, path)
+		return true
 	}
 	if resp.StatusCode >= 500 && resp.StatusCode <= 504 && isIdempotent(method, path) {
 		return true
@@ -452,8 +452,9 @@ func issueTypeRef(issueType string) map[string]string {
 }
 
 // CreateIssue creates a new issue (POST /rest/api/3/issue) and returns
-// its ID and key. The request is not retried on transient responses, since
-// a create is not idempotent and a retry could create a duplicate issue.
+// its ID and key. Rate limits are retried because Jira rejected the request.
+// Server and transport errors are not retried because a create is not
+// idempotent and a retry could create a duplicate issue.
 func (c *LiveClient) CreateIssue(ctx context.Context, in CreateIssueInput) (*CreatedIssue, error) {
 	fields := map[string]any{
 		"project":   map[string]string{"key": in.ProjectKey},
