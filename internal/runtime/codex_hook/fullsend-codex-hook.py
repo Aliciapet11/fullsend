@@ -204,16 +204,29 @@ def _child_env() -> dict[str, str]:
     # a second latch so dropping the flag does not silently re-enable it.
     env["PYTHONNOUSERSITE"] = "1"
     # PATH from the value the run command recorded before .env was read, with
-    # the directories the agent can write left out, when it is available.
+    # the directories the agent user owns or can write left out (run_script
+    # blocks before spawning when it is missing).
     # Codex's own PATH keeps those directories. The hook scripts resolve their tools by name —
     # tirith_check.py runs a bare `tirith` — so a PATH with a planted entry
     # ahead of the real one neuters the chain with every digest still green.
     # Taking it from here rather than from the inherited PATH means the
     # defence does not rest on nothing having touched PATH in between.
-    pinned = os.environ.get(PINNED_PATH_ENV, "").strip()
-    if pinned:
+    pinned = trusted_path()
+    if pinned is not None:
         env["PATH"] = pinned
     return env
+
+
+def trusted_path() -> str | None:
+    """The PATH the run command recorded before .env was read, or None when it
+    is missing, empty, or has an entry that is not an absolute directory (an
+    empty or relative entry would search the working directory). The run
+    command always sets it before codex starts, so None means the launch was
+    not the one fullsend built; run_script then blocks."""
+    value = os.environ.get(PINNED_PATH_ENV, "")
+    if not value or not all(d.startswith("/") for d in value.split(":")):
+        return None
+    return value
 
 
 # How a hook script is executed. `-I` alone is not enough and a bare script
@@ -486,6 +499,13 @@ def run_script(script: str, payload: dict[str, Any]) -> dict[str, Any]:
         digest_error = verify_hooks_dir()
     if digest_error is not None:
         return {"block": True, "reason": digest_error, "output": None}
+    if trusted_path() is None:
+        return {
+            "block": True,
+            "reason": f"fullsend: {PINNED_PATH_ENV} is missing or malformed, so hook "
+            f"{script} has no trusted PATH to run with (fail closed)",
+            "output": None,
+        }
     timeout = script_timeout(time.monotonic() - _START)
     if timeout is None:
         return {
