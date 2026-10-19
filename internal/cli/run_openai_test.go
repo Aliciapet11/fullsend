@@ -955,26 +955,40 @@ func TestRunOpenAIRefresh_RefreshesThenStopsOnCancel(t *testing.T) {
 	assert.Contains(t, strings.Join(readArgLines(t, argsLog), "\n"), "--credential-expires-at")
 }
 
-func TestRunOpenAIRefresh_GivesUpAfterRetries(t *testing.T) {
+func TestRunOpenAIRefresh_KeepsRetryingAfterRetriesExhausted(t *testing.T) {
 	shrinkOpenAIRefreshSchedule(t)
 	argsLog, _ := fakeOpenshellRecorder(t, "--credential-expires-at")
-	var buf strings.Builder
+	var buf syncBuffer
 	h := openAIProviderHandle{name: "openai-abc", keys: []string{"OPENAI_API_KEY"}, source: "static", expiresAt: time.Now()}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runOpenAIRefresh(context.Background(), h, ui.New(&buf))
+		runOpenAIRefresh(ctx, h, ui.New(&buf))
 	}()
+	// A brief wake can use up a round of attempts before the gateway is
+	// reachable; the refresher must start another round, not return.
+	require.Eventually(t, func() bool {
+		// Not readArgLines: its require would Goexit this polling goroutine
+		// if the log does not exist yet.
+		data, err := os.ReadFile(argsLog)
+		return err == nil && strings.Count(string(data), "\n") >= 2*openAIRefreshRetries
+	}, 10*time.Second, 20*time.Millisecond, "a second round of attempts follows the first")
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("refresher did not give up")
+		t.Fatal("refresher returned after exhausting a round of retries")
+	default:
 	}
-	lines := readArgLines(t, argsLog)
-	assert.Len(t, lines, openAIRefreshRetries, "one attempt per retry: %q", lines)
-	assert.Contains(t, buf.String(), "gave up")
-	assert.Contains(t, buf.String(), "gave up")
+	assert.Contains(t, buf.String(), "retrying in")
+	assert.NotContains(t, buf.String(), "gave up")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresher did not stop on cancel")
+	}
 }
 
 // simulateOpenAIHostSleep shrinks the wall-clock watchdog interval and

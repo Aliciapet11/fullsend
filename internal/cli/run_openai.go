@@ -92,8 +92,8 @@ var (
 	openAIRefreshBackoff = 15 * time.Second
 	// openAIRefreshWatchdog is how often the refresher compares the wall
 	// clock with the refresh deadline (#7748). Short enough that a host
-	// that wakes only briefly (macOS maintenance wakes last 45-60 s) still
-	// gets a check in each wake.
+	// that wakes only briefly (a macOS maintenance wake) still gets a check
+	// in each wake; Apple does not document how long those wakes last.
 	openAIRefreshWatchdog = 30 * time.Second
 	// openAIWallNowFn is the refresher's wall clock: time.Now with the
 	// monotonic reading stripped, so comparisons count time the host spent
@@ -1069,10 +1069,11 @@ func refreshOpenAIProvider(ctx context.Context, h openAIProviderHandle, placehol
 
 // runOpenAIRefresh keeps a run-scoped provider's credential valid for the
 // life of the run. Each cycle waits until shortly before the current
-// expiry, then refreshes with bounded retries. When the retries are
-// exhausted it stops and says so: the provider's recorded expiry makes the
-// gateway fail closed at that instant, so the run fails visibly instead of
-// silently outliving its credential. Runs until ctx is cancelled.
+// expiry, then refreshes with bounded retries. When a round of retries is
+// exhausted it says so and tries again after the minimum delay, until a
+// refresh succeeds: the provider's recorded expiry makes the gateway fail
+// closed at that instant, so a persistent failure fails the run visibly
+// instead of silently outliving its credential. Runs until ctx is cancelled.
 //
 // The gateway enforces the expiry on the wall clock, so the expiry is held
 // without its monotonic reading and every comparison against it counts time
@@ -1095,43 +1096,54 @@ func runOpenAIRefresh(ctx context.Context, h openAIProviderHandle, printer *ui.P
 		}
 
 		var next time.Time
-		var err error
-		for attempt := 0; attempt < openAIRefreshRetries; attempt++ {
-			if attempt > 0 {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(openAIRefreshBackoff):
+		for {
+			var err error
+			for attempt := 0; attempt < openAIRefreshRetries; attempt++ {
+				if attempt > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(openAIRefreshBackoff):
+					}
 				}
+				// An attempt is bounded by what is left of the credential it is
+				// renewing — but an already-expired credential is exactly when a
+				// refresh is needed most (a suspended laptop), so keep a floor.
+				budget := expiresAt.Sub(openAIWallNowFn())
+				if budget < time.Minute {
+					budget = time.Minute
+				}
+				next, placeholder, err = refreshOpenAIProvider(ctx, h, placeholder, budget, printer)
+				if err == nil {
+					break
+				}
+				if ctx.Err() != nil {
+					return
+				}
+				// A new generation that was never observed in the sandbox: a
+				// later rotation could take it for its own (OpenShell's
+				// placeholder says nothing about the rotation it belongs to),
+				// so fail closed rather than rotating again (failOpenAIClosed).
+				var notObserved *generationNotObservedError
+				if errors.As(err, &notObserved) {
+					failOpenAIClosed(h, expiresAt, err, printer)
+					return
+				}
+				printer.StepWarn(fmt.Sprintf("OpenAI credential refresh attempt %d/%d failed: %v", attempt+1, openAIRefreshRetries, err))
 			}
-			// An attempt is bounded by what is left of the credential it is
-			// renewing — but an already-expired credential is exactly when a
-			// refresh is needed most (a suspended laptop), so keep a floor.
-			budget := expiresAt.Sub(openAIWallNowFn())
-			if budget < time.Minute {
-				budget = time.Minute
-			}
-			next, placeholder, err = refreshOpenAIProvider(ctx, h, placeholder, budget, printer)
 			if err == nil {
 				break
 			}
-			if ctx.Err() != nil {
+			// A refresh that starts in a brief wake can burn its attempts
+			// before the gateway is reachable, so do not give up: try
+			// again after the minimum delay until one succeeds or the run
+			// ends. The recorded expiry still makes the gateway fail
+			// closed, so a persistent failure fails the run visibly.
+			printer.StepWarn(fmt.Sprintf("OpenAI credential refresh for %s failed %d attempts; retrying in %s (recorded expiry %s)", h.name, openAIRefreshRetries, openAIRefreshMinDelay, expiresAt.UTC().Format(time.RFC3339)))
+			now := openAIWallNowFn()
+			if !waitOpenAIRefresh(ctx, openAIRefreshMinDelay, now.Add(openAIRefreshMinDelay)) {
 				return
 			}
-			// A new generation that was never observed in the sandbox: a
-			// later rotation could take it for its own (OpenShell's
-			// placeholder says nothing about the rotation it belongs to),
-			// so fail closed rather than rotating again (failOpenAIClosed).
-			var notObserved *generationNotObservedError
-			if errors.As(err, &notObserved) {
-				failOpenAIClosed(h, expiresAt, err, printer)
-				return
-			}
-			printer.StepWarn(fmt.Sprintf("OpenAI credential refresh attempt %d/%d failed: %v", attempt+1, openAIRefreshRetries, err))
-		}
-		if err != nil {
-			printer.StepWarn(fmt.Sprintf("OpenAI credential refresh for %s gave up; the running agent keeps the credential generation it holds, which stops resolving when that token expires (recorded expiry %s)", h.name, expiresAt.UTC().Format(time.RFC3339)))
-			return
 		}
 		expiresAt = next.Round(0)
 		printer.StepDone(fmt.Sprintf("OpenAI credential refreshed for %s (%s, next expiry in %s)", h.name, h.source, expiresAt.Sub(openAIWallNowFn()).Round(time.Minute)))
