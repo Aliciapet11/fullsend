@@ -90,6 +90,22 @@ var (
 	openAIDeleteRetries  = 20
 	openAIRefreshRetries = 3
 	openAIRefreshBackoff = 15 * time.Second
+	// openAIRefreshMaxRoundDelay caps the wait between rounds of retries:
+	// after an exhausted round the refresher waits openAIRefreshMinDelay,
+	// doubling per consecutive failed round up to this cap.
+	openAIRefreshMaxRoundDelay = 5 * time.Minute
+	// openAIUnrecordedMax bounds the generations whose hand-off failed
+	// that the refresher carries into the next re-seed (see
+	// openAIProviderHandle.unrecorded). Reaching it fails the route closed;
+	// see runOpenAIRefresh for why the older ones are not dropped instead.
+	// Each failed attempt adds at most one generation, so 16 is just over
+	// five rounds of openAIRefreshRetries (3) attempts: with every hand-off
+	// failing, the route fails closed in the sixth round. Under the default
+	// backoff that is roughly 15 minutes of waiting (in-round 15 s gaps plus
+	// round delays of 30 s, 1 m, 2 m, 4 m, 5 m), not counting the attempts
+	// themselves, so a transient outage has a few minutes to clear while the
+	// re-seed command stays bounded.
+	openAIUnrecordedMax = 16
 	// openAIRefreshWatchdog is how often the refresher compares the wall
 	// clock with the refresh deadline (#7748). Short enough that a host
 	// that wakes only briefly (a macOS maintenance wake) still gets a check
@@ -131,7 +147,8 @@ type openAIProviderHandle struct {
 	// unrecorded remembers generations the refresher saw in the sandbox
 	// whose hand-off failed before the seed recorded them; the next re-seed
 	// retires them too. Shared by every copy of the handle; nil in a handle
-	// that carries none.
+	// that carries none. runOpenAIRefresh keeps it within
+	// openAIUnrecordedMax.
 	unrecorded *seedGenerations
 }
 
@@ -152,6 +169,15 @@ func (g *seedGenerations) snapshot() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]string(nil), g.list...)
+}
+
+func (g *seedGenerations) len() int {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.list)
 }
 
 func (g *seedGenerations) has(p string) bool {
@@ -988,6 +1014,48 @@ func openAIRefreshDelay(expiresAt, now time.Time, jitter time.Duration) time.Dur
 	return d
 }
 
+// errOpenAISourceChanged and errOpenAIUnredactable are refresh failures a
+// retry cannot fix: the credential source is fixed for the run, and a token
+// too short to redact stays refused however often it is re-exchanged. Both
+// happen before the provider is updated. runOpenAIRefresh stops on them
+// (isPermanentOpenAIRefreshError).
+var (
+	errOpenAISourceChanged = errors.New("credential source changed")
+	errOpenAIUnredactable  = errors.New("refreshed credential is too short to redact reliably; refusing to use it")
+)
+
+// isPermanentOpenAIRefreshError reports whether err is a refresh failure
+// that cannot succeed on retry.
+func isPermanentOpenAIRefreshError(err error) bool {
+	return errors.Is(err, errOpenAISourceChanged) || errors.Is(err, errOpenAIUnredactable)
+}
+
+// openAIRefreshRoundWait is the wait before the next round after
+// failedRounds exhausted rounds, with the held expiry at expiresAt and the
+// wall clock at now. While the expiry is still ahead the wait is clamped so
+// it never passes the expiry: the credential is renewed at the latest as it
+// lapses, rather than a doubled delay sleeping well beyond it. Once the
+// expiry has passed the gateway already fails closed, so the delay doubles
+// as usual (openAIRefreshRoundDelay).
+func openAIRefreshRoundWait(failedRounds int, expiresAt, now time.Time) time.Duration {
+	wait := openAIRefreshRoundDelay(failedRounds)
+	if remaining := expiresAt.Sub(now); remaining > 0 && wait > remaining {
+		wait = remaining
+	}
+	return wait
+}
+
+// openAIRefreshRoundDelay is the wait after failedRounds (1 or more)
+// consecutive exhausted rounds of retries: openAIRefreshMinDelay, doubled
+// per further failed round, never more than openAIRefreshMaxRoundDelay.
+func openAIRefreshRoundDelay(failedRounds int) time.Duration {
+	d := openAIRefreshMinDelay
+	for i := 1; i < failedRounds && d < openAIRefreshMaxRoundDelay; i++ {
+		d *= 2
+	}
+	return min(d, openAIRefreshMaxRoundDelay)
+}
+
 // refreshOpenAIProvider renews one run-scoped provider — a WIF credential is
 // re-exchanged from a fresh GitHub assertion and hot-updated into the
 // provider, a static key has its provider expiry pushed out — and, once the
@@ -1023,10 +1091,10 @@ func refreshOpenAIProvider(ctx context.Context, h openAIProviderHandle, placehol
 			return time.Time{}, placeholder, err
 		}
 		if cred.source != "wif" {
-			return time.Time{}, placeholder, fmt.Errorf("credential source changed to %s during the run", cred.source)
+			return time.Time{}, placeholder, fmt.Errorf("%w to %s during the run", errOpenAISourceChanged, cred.source)
 		}
 		if !security.RegisterRuntimeSecret(cred.value) {
-			return time.Time{}, placeholder, fmt.Errorf("refreshed credential is too short to redact reliably; refusing to use it")
+			return time.Time{}, placeholder, errOpenAIUnredactable
 		}
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
 			fmt.Fprintf(os.Stderr, "::add-mask::%s\n", cred.value)
@@ -1070,10 +1138,16 @@ func refreshOpenAIProvider(ctx context.Context, h openAIProviderHandle, placehol
 // runOpenAIRefresh keeps a run-scoped provider's credential valid for the
 // life of the run. Each cycle waits until shortly before the current
 // expiry, then refreshes with bounded retries. When a round of retries is
-// exhausted it says so and tries again after the minimum delay, until a
-// refresh succeeds: the provider's recorded expiry makes the gateway fail
-// closed at that instant, so a persistent failure fails the run visibly
-// instead of silently outliving its credential. Runs until ctx is cancelled.
+// exhausted it says so and tries again after openAIRefreshRoundWait — the
+// minimum delay, doubling per consecutive failed round up to a cap (and,
+// while the held expiry is still ahead, never past it), and back to the
+// minimum after a success — until a refresh succeeds: the
+// provider's recorded expiry makes the gateway fail closed at that instant,
+// so a persistent failure fails the run visibly instead of silently
+// outliving its credential. A failure no retry can fix
+// (isPermanentOpenAIRefreshError), a generation that never reached the
+// sandbox, or too many unrecorded ones stop the refresher at once through
+// failOpenAIClosed. Otherwise it runs until ctx is cancelled.
 //
 // The gateway enforces the expiry on the wall clock, so the expiry is held
 // without its monotonic reading and every comparison against it counts time
@@ -1096,6 +1170,9 @@ func runOpenAIRefresh(ctx context.Context, h openAIProviderHandle, printer *ui.P
 		}
 
 		var next time.Time
+		// failedRounds counts consecutive exhausted rounds; it starts at zero
+		// each cycle, so a success resets the backoff.
+		failedRounds := 0
 		for {
 			var err error
 			for attempt := 0; attempt < openAIRefreshRetries; attempt++ {
@@ -1105,6 +1182,23 @@ func runOpenAIRefresh(ctx context.Context, h openAIProviderHandle, printer *ui.P
 						return
 					case <-time.After(openAIRefreshBackoff):
 					}
+				}
+				// Every failed hand-off adds the generation it saw to
+				// unrecorded, and every later re-seed retires the whole set,
+				// so with seeding failing on a long run the set and the
+				// re-seed command would grow without limit. Dropping the
+				// oldest entries is not safe: a dropped generation would no
+				// longer be excluded by the settle wait (a copy the sandbox
+				// still hands out could be taken for the new generation) nor
+				// be named in the re-seed's retired list (a stalled seed
+				// holding it may not have recorded it in the sandbox's
+				// generation history, so it could write it back over a newer
+				// one, fullsend#8311). So stop before a rotation that could
+				// add one more and fail closed, as for an unobserved
+				// generation.
+				if n := h.unrecorded.len(); n >= openAIUnrecordedMax {
+					failOpenAIClosed(h, expiresAt, fmt.Errorf("%d new generations were seen in the sandbox but never handed off (limit %d)", n, openAIUnrecordedMax), printer)
+					return
 				}
 				// An attempt is bounded by what is left of the credential it is
 				// renewing — but an already-expired credential is exactly when a
@@ -1129,6 +1223,14 @@ func runOpenAIRefresh(ctx context.Context, h openAIProviderHandle, printer *ui.P
 					failOpenAIClosed(h, expiresAt, err, printer)
 					return
 				}
+				// Retrying cannot fix these: stop. This attempt rotated
+				// nothing, but an earlier one in the round may have left a
+				// newer generation the agent does not hold, so fail closed
+				// at the held expiry the same way.
+				if isPermanentOpenAIRefreshError(err) {
+					failOpenAIClosed(h, expiresAt, err, printer)
+					return
+				}
 				printer.StepWarn(fmt.Sprintf("OpenAI credential refresh attempt %d/%d failed: %v", attempt+1, openAIRefreshRetries, err))
 			}
 			if err == nil {
@@ -1136,12 +1238,14 @@ func runOpenAIRefresh(ctx context.Context, h openAIProviderHandle, printer *ui.P
 			}
 			// A refresh that starts in a brief wake can burn its attempts
 			// before the gateway is reachable, so do not give up: try
-			// again after the minimum delay until one succeeds or the run
-			// ends. The recorded expiry still makes the gateway fail
-			// closed, so a persistent failure fails the run visibly.
-			printer.StepWarn(fmt.Sprintf("OpenAI credential refresh for %s failed %d attempts; retrying in %s (recorded expiry %s)", h.name, openAIRefreshRetries, openAIRefreshMinDelay, expiresAt.UTC().Format(time.RFC3339)))
+			// again after a backoff until one succeeds or the run ends.
+			// The recorded expiry still makes the gateway fail closed, so a
+			// persistent failure fails the run visibly.
+			failedRounds++
 			now := openAIWallNowFn()
-			if !waitOpenAIRefresh(ctx, openAIRefreshMinDelay, now.Add(openAIRefreshMinDelay)) {
+			wait := openAIRefreshRoundWait(failedRounds, expiresAt, now)
+			printer.StepWarn(fmt.Sprintf("OpenAI credential refresh for %s failed %d attempts; retrying in %s (recorded expiry %s)", h.name, openAIRefreshRetries, wait, expiresAt.UTC().Format(time.RFC3339)))
+			if !waitOpenAIRefresh(ctx, wait, now.Add(wait)) {
 				return
 			}
 		}
