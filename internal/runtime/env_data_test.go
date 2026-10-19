@@ -516,7 +516,52 @@ func TestEnvDataLoad_PinsPythonFromDefaultPath(t *testing.T) {
 	require.NoError(t, err, stderr)
 	assert.Equal(t, "1", out)
 	assert.NoFileExists(t, marker, "the launch-PATH python3 parsed .env")
-	assert.Contains(t, envDataPin(), `"$(command -p -v python3 || command -v python3)"`, "an image without a default-PATH python3 still resolves one")
+}
+
+// A python3 the agent can replace is never pinned: not one in a writable
+// directory early on PATH, and not a symlink in a protected directory whose
+// target the agent can write. The pin is the resolved file.
+func TestEnvDataPin_SkipsAgentWritableInterpreters(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("as root every directory is writable")
+	}
+	trusted, err := exec.Command("/bin/sh", "-c", envDataPin()+` && printf '%s' "$`+envDataPythonVar+`"`).Output()
+	if err != nil {
+		t.Skip("no python3 in a non-writable PATH directory on this host")
+	}
+	writable := t.TempDir()
+	marker := filepath.Join(writable, "ran")
+	require.NoError(t, os.WriteFile(filepath.Join(writable, "python3"), []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755))
+	for name, path := range map[string]string{
+		"writable dir first": writable + ":" + os.Getenv("PATH"),
+		"relative entry":     ".:" + os.Getenv("PATH"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command("/bin/sh", "-c", envDataPin()+` && printf '%s|%s' "$`+envDataPythonVar+`" "$`+envDataTrustedPathVar+`"`)
+			cmd.Dir = writable
+			cmd.Env = []string{"PATH=" + path}
+			out, err := cmd.Output()
+			require.NoError(t, err)
+			py, tp, _ := strings.Cut(string(out), "|")
+			assert.Equal(t, string(trusted), py)
+			assert.NotContains(t, ":"+tp+":", ":"+writable+":")
+			assert.NotContains(t, ":"+tp+":", ":.:")
+			assert.False(t, strings.HasSuffix(tp, ":") || strings.HasPrefix(tp, ":"), "an empty entry would mean the working directory: %q", tp)
+		})
+	}
+	assert.NoFileExists(t, marker)
+	resolved, err := filepath.EvalSymlinks(string(trusted))
+	require.NoError(t, err)
+	assert.Equal(t, resolved, string(trusted), "the pin is the resolved interpreter")
+
+	// Only an agent-writable interpreter on PATH: the launch stops.
+	cmd := exec.Command("/bin/sh", "-c", envDataPin())
+	cmd.Env = []string{"PATH=" + writable}
+	err = cmd.Run()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 127, exitErr.ExitCode())
+	assert.NoFileExists(t, marker)
 }
 
 // The fragment pins python3 before reading .env and runs it isolated.
@@ -525,7 +570,7 @@ func TestEnvDataLoad_Shape(t *testing.T) {
 	assert.True(t, strings.HasPrefix(frag, envDataPin()+" && "), frag)
 	assert.Contains(t, frag, `"$`+envDataPythonVar+`" -I -S -c `)
 	assert.Contains(t, frag, `eval "$`+envDataExportsVar+`" && unset `+envDataExportsVar)
-	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHON* BASH_ENV ENV IFS "+envDataPythonVar+" "+envDataExportsVar+" FULLSEND_X_BIN'")
+	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHON* BASH_ENV ENV IFS "+envDataPythonVar+" "+envDataExportsVar+" "+envDataTrustedPathVar+" FULLSEND_X_BIN'")
 	assert.NotContains(t, frag, ". /sandbox/workspace/.env")
 	assert.NotContains(t, frag, "  ", "the launch commands are checked for double spaces")
 	for _, line := range EnvDataControlLines() {

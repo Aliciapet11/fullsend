@@ -48,8 +48,9 @@ fullsend_have=$(command -p cat '/sandbox/codex-config/openai-token' 2>/dev/null)
 test "$fullsend_have" = "$fullsend_want" ;; *) command -p false ;; esac; }; then echo 'fullsend: OPENAI_API_KEY is an older generation than the credential file holds; leaving the file as it is' >&2; else echo 'fullsend: OPENAI_API_KEY is older than the newest generation in the history, but the credential file does not hold that one; not treating the skipped write as done' >&2; command -p false; fi; else { test "$fullsend_last" = "$OPENAI_API_KEY" || printf '%s\n' "$OPENAI_API_KEY" >> '/sandbox/codex-config/openai-token.generations'; } &&
 printf '%s' "$OPENAI_API_KEY" > '/sandbox/codex-config/openai-token.fullsend'.$$ &&
 command -p mv -f '/sandbox/codex-config/openai-token.fullsend'.$$ '/sandbox/codex-config/openai-token'; fi; } 9>>'/sandbox/codex-config/openai-token.fullsend-seed.lock' || { command -p rm -f '/sandbox/codex-config/openai-token.fullsend'.$$ '/sandbox/codex-config/openai-token.generations'.$$; echo 'fullsend: writing the codex token file failed' >&2; exit 1; }; } &&
-{ readonly FULLSEND_ENV_PYTHON="$(command -p -v python3 || command -v python3)" &&
-case "$FULLSEND_ENV_PYTHON" in /*) ;; *) false ;; esac || { echo 'fullsend: python3 not found on PATH' >&2; exit 127; }; } &&
+{ readonly FULLSEND_TRUSTED_PATH="$(if test -w /; then printf '%s' "$PATH"; else IFS=:; set -f; s=; for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; p=$d; while :; do if test -w "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done; if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done; fi)"; } &&
+{ readonly FULLSEND_ENV_PYTHON="$(IFS=:; set -f; for d in $FULLSEND_TRUSTED_PATH; do test -x "$d/python3" || continue; r="$(PATH="$FULLSEND_TRUSTED_PATH" readlink -f "$d/python3")" || continue; if ! test -w /; then p=$r; while :; do if test -w "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done; fi; printf '%s' "$r"; break; done)" &&
+case "$FULLSEND_ENV_PYTHON" in /*) ;; *) false ;; esac || { echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; } &&
 FULLSEND_ENV_EXPORTS="$("$FULLSEND_ENV_PYTHON" -I -S -c 'import os, re, stat, sys
 env_file, cap_line, envd_line, restore_line, iter_line, drop_arg = sys.argv[1:7]
 RUNNER_PATH = "FULLSEND_RUNNER_PATH"
@@ -282,7 +283,7 @@ for n in order:
 	if n in values and "\0" not in values[n]:
 		sys.stdout.buffer.write(os.fsencode("%s%s='\''%s'\''\n" % ("export " if n in exported else "", n, values[n].replace("'\''", "'\''\\'\'''\''"))))
 ' '/sandbox/workspace/.env' 'if ( FULLSEND_RUNNER_PATH= ) 2>/dev/null; then FULLSEND_RUNNER_PATH="$PATH"; readonly FULLSEND_RUNNER_PATH; fi' 'for f in /sandbox/workspace/.env.d/*.env; do [ -f "$f" ] &&
-. "$f"; done' 'export PATH="$FULLSEND_RUNNER_PATH${PATH:+:$PATH}"' 'if [ -f /sandbox/workspace/.fullsend/iteration.env ]; then . /sandbox/workspace/.fullsend/iteration.env; fi' 'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHON* BASH_ENV ENV IFS FULLSEND_ENV_PYTHON FULLSEND_ENV_EXPORTS FULLSEND_CODEX_BIN FULLSEND_CODEX_PATH')" &&
+. "$f"; done' 'export PATH="$FULLSEND_RUNNER_PATH${PATH:+:$PATH}"' 'if [ -f /sandbox/workspace/.fullsend/iteration.env ]; then . /sandbox/workspace/.fullsend/iteration.env; fi' 'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHON* BASH_ENV ENV IFS FULLSEND_ENV_PYTHON FULLSEND_ENV_EXPORTS FULLSEND_TRUSTED_PATH FULLSEND_CODEX_BIN FULLSEND_CODEX_PATH')" &&
 eval "$FULLSEND_ENV_EXPORTS" &&
 unset FULLSEND_ENV_EXPORTS &&
 export CODEX_HOME=/sandbox/codex-config &&

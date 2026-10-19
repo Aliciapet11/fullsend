@@ -54,6 +54,9 @@ import (
 const (
 	envDataPythonVar  = "FULLSEND_ENV_PYTHON"
 	envDataExportsVar = "FULLSEND_ENV_EXPORTS"
+	// envDataTrustedPathVar is the read-only launch PATH with every directory
+	// the agent user could write (or that has a writable ancestor) left out.
+	envDataTrustedPathVar = "FULLSEND_TRUSTED_PATH"
 	// envDataRunnerPathVar is the read-only variable the runner's PATH capture
 	// line sets. envDataLoaderScript takes the name from this constant.
 	envDataRunnerPathVar = "FULLSEND_RUNNER_PATH"
@@ -72,7 +75,7 @@ var envDataDropNames = []string{
 	"PYTHON*",
 	"BASH_ENV", "ENV",
 	"IFS",
-	envDataPythonVar, envDataExportsVar,
+	envDataPythonVar, envDataExportsVar, envDataTrustedPathVar,
 }
 
 // EnvDataControlLines are the runner-written .env lines the launch-time
@@ -95,14 +98,39 @@ func envDataControlLines(workspace string) []string {
 	}
 }
 
+// envDataWritableAncestor is the sh loop body shared by the trusted-PATH and
+// interpreter lookups: starting at $p, it walks up to / and moves on to the
+// next candidate (`continue 2`) when the agent user can write any directory
+// (case patterns carry a leading paren: bash 3.2 cannot parse a bare `)`
+// pattern inside `$( )`)
+// on the way, since a writable ancestor can rename the entry away and put
+// another in its place.
+const envDataWritableAncestor = `while :; do if test -w "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done`
+
+// envDataTrustedPath records the launch PATH without the directories the
+// agent user can write. It runs before anything the agent wrote is read, so
+// the PATH it filters is the runner's. A sandbox image can put an
+// agent-owned directory first (a virtualenv's bin, say), so a plain PATH
+// lookup there finds whatever the agent left. Under root every directory
+// is writable and nothing could be protected, so the PATH is kept as is.
+func envDataTrustedPath() string {
+	return `{ readonly ` + envDataTrustedPathVar + `="$(if test -w /; then printf '%s' "$PATH"; else IFS=:; set -f; s=; ` +
+		`for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; p=$d; ` + envDataWritableAncestor + `; ` +
+		`if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done; fi)"; }`
+}
+
 // envDataPin records where python3 is before anything the agent wrote can
-// influence the lookup; see binaryPin. It looks on the system default PATH
-// first (`command -p -v`), so a python3 in a directory early on the launch
-// PATH that the agent can write to is not the one that parses .env; an image
-// whose only python3 is off the default PATH still resolves it through the
-// launch PATH, as before.
+// influence the lookup; see binaryPin. It takes the first python3 on the
+// trusted PATH whose resolved file, and every directory above it, the agent
+// user cannot write: a root-owned bin directory can still hold a symlink to
+// an interpreter the agent owns. The resolved path is what gets pinned, and
+// with no such python3 the launch stops (exit 127).
 func envDataPin() string {
-	return binaryPinLookup(envDataPythonVar, "python3", "command -p -v python3 || command -v python3")
+	return envDataTrustedPath() + ` && { readonly ` + envDataPythonVar + `="$(IFS=:; set -f; for d in $` + envDataTrustedPathVar +
+		`; do test -x "$d/python3" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" readlink -f "$d/python3")" || continue; ` +
+		`if ! test -w /; then p=$r; ` + envDataWritableAncestor + `; fi; printf '%s' "$r"; break; done)" && ` +
+		`case "$` + envDataPythonVar + `" in /*) ;; *) false ;; esac || ` +
+		`{ echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
 }
 
 // envDataLoad is the POSIX sh fragment that replaces `. envFile`. The
