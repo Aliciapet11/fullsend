@@ -314,10 +314,11 @@ func TestEnvDataLoad_PathsAreEscapedInMessages(t *testing.T) {
 // PYTHONPATH cannot reach a python3 the CLI starts later.
 func TestEnvDataLoad_DropsPythonStartupVariables(t *testing.T) {
 	f := newEnvDataFixture(t)
-	f.write(t, ".env", "export PYTHONPATH=/sandbox/workspace/evil\nexport PYTHONHOME=/x\nexport PYTHONSTARTUP=/x.py\nexport PYTHONUSERBASE=/x\nexport KEEP=1\n")
+	f.write(t, ".env", "export PYTHONPATH=/sandbox/workspace/evil\nexport PYTHONHOME=/x\nexport PYTHONSTARTUP=/x.py\nexport PYTHONUSERBASE=/x\nexport PYTHONWARNINGS=ignore::antigravity.X\nPYTHONINSPECT=1\nexport PYTHONINSPECT\nexport PYTHON=/x\nexport KEEP=1\nexport NOTPYTHONX=1\n")
 	env, stderr := f.envOf(t)
 	assert.Equal(t, "1", env["KEEP"])
-	for _, name := range []string{"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE"} {
+	assert.Equal(t, "1", env["NOTPYTHONX"], "only the PYTHON prefix is dropped")
+	for _, name := range []string{"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONWARNINGS", "PYTHONINSPECT", "PYTHON"} {
 		_, ok := env[name]
 		assert.False(t, ok, "%s must not reach the CLI", name)
 		assert.Contains(t, stderr, name+" is not taken from .env")
@@ -358,7 +359,7 @@ func TestEnvDataLoad_Shape(t *testing.T) {
 	assert.True(t, strings.HasPrefix(frag, envDataPin()+" && "), frag)
 	assert.Contains(t, frag, `"$`+envDataPythonVar+`" -I -S -c `)
 	assert.Contains(t, frag, `eval "$`+envDataExportsVar+`" && unset `+envDataExportsVar)
-	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE BASH_ENV ENV IFS "+envDataPythonVar+" "+envDataExportsVar+" FULLSEND_X_BIN'")
+	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHON* BASH_ENV ENV IFS "+envDataPythonVar+" "+envDataExportsVar+" FULLSEND_X_BIN'")
 	assert.NotContains(t, frag, ". /sandbox/workspace/.env")
 	assert.NotContains(t, frag, "  ", "the launch commands are checked for double spaces")
 	for _, line := range EnvDataControlLines() {

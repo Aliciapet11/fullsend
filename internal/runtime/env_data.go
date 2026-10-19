@@ -57,15 +57,16 @@ const (
 )
 
 // envDataDropNames are never taken from .env, for any runtime: the dynamic
-// loader variables (#7580), the Python startup variables (a PYTHONPATH with a
-// sitecustomize.py would run in every python3 the CLI starts, such as pi's
-// hook adapter), the shell startup variables (an exported BASH_ENV runs a
+// loader variables (#7580), every PYTHON* variable (a PYTHONPATH with a
+// sitecustomize.py, or a PYTHONWARNINGS category that imports a module, would
+// run in every python3 the CLI starts, such as pi's hook adapter; a trailing
+// * drops the whole prefix), the shell startup variables (an exported BASH_ENV runs a
 // file in every non-interactive bash the CLI starts, ENV the same for an
 // interactive sh), IFS (it would change how the rest of the launch splits
 // words), and the loader's own variables.
 var envDataDropNames = []string{
 	"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
-	"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+	"PYTHON*",
 	"BASH_ENV", "ENV",
 	"IFS",
 	envDataPythonVar, envDataExportsVar,
@@ -130,6 +131,7 @@ func envDataLoadWith(envFile string, control []string, extraDrop []string) strin
 const envDataLoaderScript = `import os, re, sys
 env_file, cap_line, envd_line, restore_line, iter_line, drop_arg = sys.argv[1:7]
 drop = set(drop_arg.split())
+drop_prefixes = tuple(d[:-1] for d in drop if d.endswith("*"))
 envd_dir = os.path.dirname(envd_line.split()[3])
 iter_file = iter_line.split()[3]
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -141,7 +143,7 @@ failed = []
 def warn(path, line, why):
 	sys.stderr.write("fullsend: ignored %r line %d: %s\n" % (path, line, why))
 def taken(name):
-	return name not in drop and name not in readonly
+	return name not in drop and not (drop_prefixes and name.startswith(drop_prefixes)) and name not in readonly
 def assign(path, line, name, value):
 	if not taken(name):
 		warn(path, line, "%s is not taken from .env" % name)
