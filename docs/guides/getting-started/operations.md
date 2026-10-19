@@ -195,7 +195,7 @@ When using the split-responsibility workflow, each standalone command requires a
 | `roles/iam.workloadIdentityPoolViewer` | | | x† | | | | | | | |
 | `roles/secretmanager.viewer` | | | | | | § | | | | x‡ |
 
-\* `roles/resourcemanager.projectIamAdmin` and `roles/secretmanager.admin` are required for `mint deploy` only when using `--pem-dir` (first-time bootstrap). Standard deploys without `--pem-dir` do not need these roles.
+\* `roles/resourcemanager.projectIamAdmin` is required for `mint deploy` only when using `--pem-dir` (first-time bootstrap). `roles/secretmanager.admin` is required for `mint deploy` only when using `--pem-dir` or `--otlp-headers-file` (which creates a collector headers secret and grants access to it). Standard deploys without these flags do not need these roles.
 
 \*\* `roles/secretmanager.admin` is required for `mint add-role` when uploading a new PEM (`--pem` or browser mode). When using `--use-existing-pem-secret`, only `roles/secretmanager.viewer` is required (see §).
 

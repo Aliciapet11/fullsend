@@ -551,7 +551,7 @@ Cloudflare mode (--platform=cloudflare):
   Preview teardown abandons the alias without deleting the Worker script.
   Use --worker-name to target a specific Worker script name.
 
-Tracing (Cloudflare only for now):
+Tracing (GCP and Cloudflare):
   --otlp-traces-endpoint=URL   OTLP/HTTP traces URL, used verbatim
   --otlp-endpoint=URL          OTLP/HTTP base URL; /v1/traces is appended
                                (ignored when --otlp-traces-endpoint is set)
@@ -560,8 +560,17 @@ Tracing (Cloudflare only for now):
                                the file must be chmod 600
   --otlp-no-headers            the collector needs no auth headers
 
-  The endpoint is compiled into the Worker WASM binary, so changing it
-  rebuilds and redeploys the Worker. Header values are never compiled
+  GCP: the endpoint is stamped into the generated Cloud Function source,
+  so changing it redeploys the function. It cannot be combined with
+  --skip-deploy. An endpoint requires --otlp-headers-file or
+  --otlp-no-headers. Header values are never stamped: they are stored
+  in a new per-deploy Secret Manager secret
+  (fullsend-mint-otlp-headers-<random>), which the mint service account
+  can read. The function reads the headers at cold start; every deploy
+  with headers redeploys the function so new instances pick them up.
+
+  Cloudflare: the endpoint is compiled into the Worker WASM binary, so
+  changing it rebuilds and redeploys the Worker. Header values are never compiled
   in: they are stored as a Worker secret (MINT_OTLP_HEADERS, scoped to
   the version, for --preview).
 
@@ -637,10 +646,7 @@ Tracing (Cloudflare only for now):
 
 			switch platform {
 			case "gcp":
-				if tracing.enabled() {
-					return fmt.Errorf("--otlp-traces-endpoint, --otlp-endpoint, --otlp-headers-file and --otlp-no-headers are not yet supported for --platform=gcp")
-				}
-				return runMintDeployGCP(cmd.Context(), project, region, sourceDir, skipDeploy, dryRun, pemDir, appSet, roles, public, statusGitHub)
+				return runMintDeployGCP(cmd.Context(), project, region, sourceDir, skipDeploy, dryRun, pemDir, appSet, roles, public, statusGitHub, tracing)
 			case "cloudflare":
 				// Reject conflicting flags: --public widens auth to all repos,
 				// so combining it with an explicit --per-repo-wif-repos list
@@ -703,14 +709,15 @@ The zone ID is resolved automatically. Not supported for preview deploys.
 Example: --custom-domain=mint.fullsend.sh`)
 
 	// Tracing flags.
-	cmd.Flags().StringVar(&otlpTracesEndpoint, "otlp-traces-endpoint", "", `OTLP/HTTP traces URL stamped into the mint, used verbatim (Cloudflare only)
+	cmd.Flags().StringVar(&otlpTracesEndpoint, "otlp-traces-endpoint", "", `OTLP/HTTP traces URL stamped into the mint, used verbatim
 Example: --otlp-traces-endpoint=https://collector.example/v1/traces`)
-	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", "", `OTLP/HTTP base URL; /v1/traces is appended (Cloudflare only)
+	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", "", `OTLP/HTTP base URL; /v1/traces is appended
 Ignored when --otlp-traces-endpoint is set`)
-	cmd.Flags().StringVar(&otlpHeadersFile, "otlp-headers-file", "", `file with collector auth headers in OTEL_EXPORTER_OTLP_HEADERS syntax (Cloudflare only)
-Must be chmod 600. Stored as a Worker secret (MINT_OTLP_HEADERS for previews, MINT_OTLP_HEADERS_<random> for durable deploys)
-Required with an endpoint on durable deploys unless --otlp-no-headers is set`)
-	cmd.Flags().BoolVar(&otlpNoHeaders, "otlp-no-headers", false, `the collector needs no auth headers; no collector headers are bound to the new endpoint (Cloudflare only)
+	cmd.Flags().StringVar(&otlpHeadersFile, "otlp-headers-file", "", `file with collector auth headers in OTEL_EXPORTER_OTLP_HEADERS syntax
+Must be chmod 600. GCP: stored in Secret Manager (fullsend-mint-otlp-headers-<random>).
+Cloudflare: stored as a Worker secret (MINT_OTLP_HEADERS for previews, MINT_OTLP_HEADERS_<random> for durable deploys)
+Required with an endpoint on GCP and Cloudflare durable deploys unless --otlp-no-headers is set`)
+	cmd.Flags().BoolVar(&otlpNoHeaders, "otlp-no-headers", false, `the collector needs no auth headers; no collector headers are bound to the new endpoint
 Mutually exclusive with --otlp-headers-file`)
 
 	return cmd
@@ -745,12 +752,23 @@ func warnIrrelevantFlags(cmd *cobra.Command, platform string) {
 	}
 }
 
-func runMintDeployGCP(ctx context.Context, project, region, sourceDir string, skipDeploy, dryRun bool, pemDir, appSet string, roles []string, public bool, statusGitHub gcf.StatusGitHubAuth) error {
+func runMintDeployGCP(ctx context.Context, project, region, sourceDir string, skipDeploy, dryRun bool, pemDir, appSet string, roles []string, public bool, statusGitHub gcf.StatusGitHubAuth, tracing mintTracingConfig) error {
 	if appSet == "" {
 		appSet = appsetup.DefaultAppSet
 	}
 	if err := appsetup.ValidateAppSet(appSet); err != nil {
 		return fmt.Errorf("invalid --app-set: %w", err)
+	}
+	if tracing.enabled() {
+		if skipDeploy {
+			return fmt.Errorf("--skip-deploy cannot be combined with an OTLP endpoint: the endpoint is stamped into the function source, which --skip-deploy does not redeploy")
+		}
+		// As for Cloudflare durable deploys, the collector authentication
+		// choice must be explicit, so a new endpoint never silently runs
+		// with or without the headers of an earlier deploy.
+		if tracing.headers == nil && !tracing.noHeaders {
+			return fmt.Errorf("an OTLP endpoint requires --otlp-headers-file or --otlp-no-headers, so the collector authentication is stated explicitly")
+		}
 	}
 	if project == "" {
 		return fmt.Errorf("--project is required")
@@ -791,6 +809,12 @@ func runMintDeployGCP(ctx context.Context, project, region, sourceDir string, sk
 		if public {
 			printer.StepInfo("Would deploy public mint (PER_REPO_WIF_REPOS=*, permissive WIF)")
 		}
+		if tracing.enabled() {
+			printer.StepInfo(fmt.Sprintf("Would stamp OTLP traces endpoint %s into the function source (deployment %s)", tracing.endpointOrigin(), gcf.TraceDeploymentName(region)))
+			if tracing.headers != nil {
+				printer.StepInfo(fmt.Sprintf("Would store %d collector header(s) in a new Secret Manager secret %s<random>", tracing.headerCount, gcf.TraceHeadersSecretPrefix))
+			}
+		}
 		if pemDir != "" {
 			if _, err := validatePEMDir(pemDir, roles); err != nil {
 				return err
@@ -818,6 +842,7 @@ func runMintDeployGCP(ctx context.Context, project, region, sourceDir string, sk
 		Commit:            deployCommit,
 		PublicMint:        public,
 		StatusGitHub:      statusGitHub,
+		Tracing:           gcf.TracingConfig{Endpoint: tracing.endpoint, Headers: tracing.headers},
 	}
 
 	if pemDir != "" {
@@ -857,6 +882,16 @@ func runMintDeployGCP(ctx context.Context, project, region, sourceDir string, sk
 		fmt.Sprintf("URL: %s", mintURL),
 		fmt.Sprintf("Version: %s", version),
 		fmt.Sprintf("Commit: %s", deployCommit),
+	}
+	switch {
+	case skipDeploy:
+		// --skip-deploy reuses the existing function, so its stamped
+		// endpoint and headers secret are untouched; tracing may be on.
+		summaryLines = append(summaryLines, "Tracing: unchanged (--skip-deploy reuses the existing function)")
+	case tracing.enabled():
+		summaryLines = append(summaryLines, fmt.Sprintf("Tracing: exporting to %s", tracing.endpointOrigin()))
+	default:
+		summaryLines = append(summaryLines, "Tracing: disabled")
 	}
 	if pemDir != "" {
 		summaryLines = append(summaryLines, fmt.Sprintf("App set: %s (PEMs bootstrapped)", appSet))
