@@ -131,7 +131,7 @@ func TestCodexChildUsageReadCommand_Executes(t *testing.T) {
 	assert.Equal(t, codexChildUsage{
 		ID: codexChildSameModelID, Model: "gpt-5.6-luna", HasUsage: true,
 		Usage: codexUsage{InputTokens: 7381, CacheWriteInputTokens: 7378, OutputTokens: 8},
-	}, got[0], "the last cumulative token_count, not the sum of the two")
+	}, got[0], "the thread total of the record, not the sum of the two token_counts")
 	assert.Equal(t, codexChildUsage{
 		ID: codexChildOtherModelID, Model: "gpt-5.6-terra", HasUsage: true,
 		Usage: codexUsage{InputTokens: 4000, CachedInputTokens: 1000, CacheWriteInputTokens: 2000, OutputTokens: 300, ReasoningOutputTokens: 100},
@@ -140,35 +140,70 @@ func TestCodexChildUsageReadCommand_Executes(t *testing.T) {
 		"a child that errored before its first response has a model and no usage")
 }
 
+// The read takes the thread total of the last token_usage_record. The
+// token_count codex writes after a context-window overflow has its usage
+// counters at zero, and a rate-limit token_count before the first response
+// has no usage; neither is read.
+func TestCodexChildUsageReadCommand_ReadsTheThreadTotal(t *testing.T) {
+	t.Parallel()
+
+	usage := func(in, out, total int) string {
+		return fmt.Sprintf(`{"input_tokens":%d,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":%d,"reasoning_output_tokens":0,"total_tokens":%d}`, in, out, total)
+	}
+	count := func(info string) string {
+		return `{"type":"event_msg","payload":{"type":"token_count","info":` + info + `}}`
+	}
+	record := func(in, out int) string {
+		return `{"type":"token_usage_record","payload":{"thread_token_usage":` + usage(in, out, in+out) + `}}`
+	}
+	rollout := strings.Join([]string{
+		`{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}`,
+		count(`null`),
+		record(3000, 4),
+		count(`{"total_token_usage":` + usage(3000, 4, 3004) + `}`),
+		record(90000, 20),
+		count(`{"total_token_usage":` + usage(0, 0, 258400) + `,"last_token_usage":` + usage(0, 0, 168380) + `,"model_context_window":258400}`),
+	}, "\n") + "\n"
+	sessions := writeCodexChildRollouts(t)
+	require.NoError(t, os.WriteFile(filepath.Join(sessions, "2026", "09", "29", "rollout-2026-09-29T15-46-38-"+codexChildSameModelID+".jsonl"), []byte(rollout), 0o644))
+
+	got := runCodexChildUsageRead(t, sessions, []string{codexChildSameModelID})
+	require.Len(t, got, 1)
+	assert.Equal(t, codexChildUsage{
+		ID: codexChildSameModelID, Model: "gpt-5.6-luna", HasUsage: true,
+		Usage: codexUsage{InputTokens: 90000, OutputTokens: 20},
+	}, got[0], "the last record's thread total, not the zeroed token_count after it")
+}
+
 func TestParseCodexChildUsage(t *testing.T) {
 	t.Parallel()
 
 	turn := func(model string) string {
 		return `{"type":"turn_context","payload":{"model":"` + model + `"}}`
 	}
-	count := func(in, out int) string {
-		return fmt.Sprintf(`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":%d,"reasoning_output_tokens":0,"total_tokens":%d}}}}`, in, out, in+out)
+	record := func(in, out int) string {
+		return fmt.Sprintf(`{"type":"token_usage_record","payload":{"thread_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":%d,"reasoning_output_tokens":0,"total_tokens":%d}}}`, in, out, in+out)
 	}
 	data := strings.Join([]string{
-		count(999, 999), // before any marker: nobody's line
+		record(999, 999), // before any marker: nobody's line
 		codexChildUsageMarker + " " + codexChildSameModelID,
 		turn("gpt-5.6-terra"),
 		turn("gpt-5.6-sol"),
-		count(10, 1),
+		record(10, 1),
 		"not json",
-		count(20, 2),
+		record(20, 2),
 		"",
 		codexChildUsageMarker + " " + codexChildOtherModelID,
-		count(5, 5),
+		record(5, 5),
 		codexChildUsageMarker + " " + codexChildFailedID,
 		turn("gpt-5.6-terra"),
-		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":7,"cach`,
+		`{"type":"token_usage_record","payload":{"thread_token_usage":{"input_tokens":7,"cach`,
 	}, "\n")
 
 	got := parseCodexChildUsage([]byte(data))
 	require.Len(t, got, 3)
 	assert.Equal(t, codexChildUsage{ID: codexChildSameModelID, Model: "gpt-5.6-terra", HasUsage: true, Usage: codexUsage{InputTokens: 20, OutputTokens: 2}},
-		got[0], "first turn_context names the model, the last token_count wins, a malformed line is skipped")
+		got[0], "first turn_context names the model, the last record wins, a malformed line is skipped")
 	assert.Equal(t, codexChildUsage{ID: codexChildOtherModelID, HasUsage: true, Usage: codexUsage{InputTokens: 5, OutputTokens: 5}},
 		got[1], "no turn_context: the model stays empty and the fold buckets it")
 	assert.Equal(t, codexChildUsage{ID: codexChildFailedID, Model: "gpt-5.6-terra"},
@@ -364,12 +399,13 @@ func TestFoldCodexChildUsage(t *testing.T) {
 	}
 }
 
-// A planted rollout cannot lower the run's figures: counters() floors only
-// its two subtractions, so the fold floors the three raw fields.
+// A planted negative counter cannot lower the run's figures: counters()
+// floors only its two subtractions, so the fold floors the three raw fields
+// (a wrap is TestFoldCodexChildUsage_SkipsImplausibleCounters).
 func TestFoldCodexChildUsage_ClampsNegativeCounters(t *testing.T) {
 	sessions := writeCodexChildRollouts(t)
 	rollout := `{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}` + "\n" +
-		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":-5000,"cache_write_input_tokens":-7000,"output_tokens":20,"reasoning_output_tokens":-900,"total_tokens":30}}}}` + "\n"
+		`{"type":"token_usage_record","payload":{"thread_token_usage":{"input_tokens":10,"cached_input_tokens":-5000,"cache_write_input_tokens":-7000,"output_tokens":20,"reasoning_output_tokens":-900,"total_tokens":30}}}` + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(sessions, "2026", "09", "29", "rollout-2026-09-29T15-46-38-"+codexChildSameModelID+".jsonl"), []byte(rollout), 0o644))
 	fakeOpenshellCodexChildren(t, filepath.Join(t.TempDir(), "openshell.log"), t.TempDir(), "", sessions)
 
@@ -382,6 +418,45 @@ func TestFoldCodexChildUsage_ClampsNegativeCounters(t *testing.T) {
 	assert.Equal(t, codexTokenTotals{15 + 12010, 1140 + 920, 291, 13618, 40590}, codexTotalsOf(m))
 	assert.Equal(t, ModelUsage{Requests: 2, InputTokens: 15 + 12010, OutputTokens: 1140 + 920, CacheCreationInputTokens: 13618, CacheReadInputTokens: 40590},
 		m.PerModelUsage["gpt-5.6-luna"])
+	assertCodexUsageSumsToTotals(t, m)
+}
+
+// A read cut at the bound is a warning; the children before the cut stay
+// folded and the ones past it are not counted.
+func TestFoldCodexChildUsage_CutReadIsAWarning(t *testing.T) {
+	sessions := writeCodexChildRollouts(t, codexChildSameModelID)
+	day := filepath.Join(sessions, "2026", "09", "29")
+	planted := `{"type":"turn_context","payload":{"model":"` + strings.Repeat("x", codexChildUsageMaxBytes) + `"}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-2026-09-29T15-46-38-"+codexChildOtherModelID+".jsonl"), []byte(planted), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-2026-09-29T15-46-38-"+codexChildFailedID+".jsonl"), readCodexFixture(t, "child_usage_other_model.jsonl"), 0o644))
+	fakeOpenshellCodexChildren(t, filepath.Join(t.TempDir(), "openshell.log"), t.TempDir(), "", sessions)
+
+	m := codexParentMetrics("gpt-5.6-luna")
+	n, err := CodexRuntime{}.foldCodexChildUsage("sb", []string{codexChildSameModelID, codexChildOtherModelID, codexChildFailedID}, m)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cut at")
+	assert.Equal(t, 1, n, "the child before the cut")
+	assert.NotContains(t, m.PerModelUsage, "gpt-5.6-terra", "the child past the cut")
+	assert.Equal(t, 2, m.PerModelUsage["gpt-5.6-luna"].Requests)
+	assertCodexUsageSumsToTotals(t, m)
+}
+
+// A counter no real thread reaches is skipped: two planted rollouts whose
+// input sums past MaxInt would otherwise wrap the run's 15 down to 5.
+func TestFoldCodexChildUsage_SkipsImplausibleCounters(t *testing.T) {
+	sessions := writeCodexChildRollouts(t)
+	day := filepath.Join(sessions, "2026", "09", "29")
+	for name, input := range map[string]string{"a": "9223372036854775807", "b": "9223372036854775799"} {
+		rollout := `{"type":"token_usage_record","payload":{"thread_token_usage":{"input_tokens":` + input + `}}}` + "\n"
+		require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-"+name+"-"+codexChildSameModelID+".jsonl"), []byte(rollout), 0o644))
+	}
+	fakeOpenshellCodexChildren(t, filepath.Join(t.TempDir(), "openshell.log"), t.TempDir(), "", sessions)
+
+	m := codexParentMetrics("gpt-5.6-luna")
+	n, err := CodexRuntime{}.foldCodexChildUsage("sb", []string{codexChildSameModelID}, m)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	assert.Equal(t, codexTokenTotals{15, 1140, 291, 13618, 40590}, codexTotalsOf(m))
 	assertCodexUsageSumsToTotals(t, m)
 }
 

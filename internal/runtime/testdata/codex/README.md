@@ -35,15 +35,15 @@ Inputs for `foldCodexChildUsage` (`internal/runtime/codex_subagents.go`), not fo
 underscored envelope of `codex_redact.go`), not the `exec --json` stream. Line types and fields
 were copied from the rollouts of the 0.157.0 paid probe of 2026-09-29, trimmed, with
 synthetic ids. The fold reads two lines per rollout: the first `turn_context` (its
-`payload.model`) and the last `event_msg`/`token_count` (its `payload.info.total_token_usage`,
-cumulative for the thread).
+`payload.model`) and the last `token_usage_record` (its `payload.thread_token_usage`, cumulative for
+the thread and not reset when a request overflows the context window, unlike `token_count`).
 
 | Fixture | Covers |
 |---|---|
-| `child_usage_same_model.jsonl` | A child on the parent's model, `gpt-5.6-luna`, with two cumulative `token_count` lines (3000 then 7381 input): the last one is the child's whole usage. |
+| `child_usage_same_model.jsonl` | A child on the parent's model, `gpt-5.6-luna`, with two cumulative `token_count` lines (3000 then 7381 input) and the `token_usage_record` of its second response, whose thread total (7381) is the child's whole usage. |
 | `child_usage_other_model.jsonl` | A child on `gpt-5.6-terra`, every normalized counter non-zero. |
-| `child_usage_failed.jsonl` | A child whose model the provider rejected (404): `turn_context` names the model, `task_complete` carries `error`, and there is no `token_count`, so it contributes nothing. |
-| `child_usage_no_model.jsonl` | A child with a `token_count` and no `turn_context`: its usage is bucketed under `unknown`. |
+| `child_usage_failed.jsonl` | A child whose model the provider rejected (404): `turn_context` names the model, `task_complete` carries `error`, and there is no `token_usage_record`, so it contributes nothing. |
+| `child_usage_no_model.jsonl` | A child with a `token_usage_record` and no `turn_context`: its usage is bucketed under `unknown`. |
 
 The tests lay the rollouts out under a temporary sessions tree as
 `2026/09/29/rollout-2026-09-29T15-46-38-<thread id>.jsonl`, the name codex gives a rollout.

@@ -660,10 +660,10 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 	}
 
 	// Children are separate threads whose tokens never reached the stream
-	// just parsed; their rollouts are the only record. Read only after a
-	// clean exit: a killed, cancelled or timed-out iteration reports the
-	// parent's tokens only. A read failure costs the breakdown, not the
-	// iteration.
+	// just parsed; their rollouts are the only record. Read after any exit
+	// 0, even one the stream reports as an error below; a killed, cancelled
+	// or timed-out iteration exits non-zero and reports the parent's tokens
+	// only. A read failure costs the breakdown, not the iteration.
 	if exitCode == 0 && (digests.delegating() || len(childIDs.IDs) > 0) {
 		n, ferr := r.foldCodexChildUsage(params.SandboxName, childIDs.IDs, metrics)
 		if ferr != nil {
