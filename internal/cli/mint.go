@@ -564,10 +564,10 @@ Tracing (GCP and Cloudflare):
   so changing it redeploys the function. It cannot be combined with
   --skip-deploy. An endpoint requires --otlp-headers-file or
   --otlp-no-headers. Header values are never stamped: they are stored
-  as a new version of the Secret Manager secret
-  fullsend-mint-otlp-headers, which the mint service account can read.
-  The function reads the headers at cold start; when they change, the
-  function is redeployed so new instances pick them up.
+  in a new per-deploy Secret Manager secret
+  (fullsend-mint-otlp-headers-<random>), which the mint service account
+  can read. The function reads the headers at cold start; every deploy
+  with headers redeploys the function so new instances pick them up.
 
   Cloudflare: the endpoint is compiled into the Worker WASM binary, so
   changing it rebuilds and redeploys the Worker. Header values are never compiled
@@ -714,7 +714,7 @@ Example: --otlp-traces-endpoint=https://collector.example/v1/traces`)
 	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", "", `OTLP/HTTP base URL; /v1/traces is appended
 Ignored when --otlp-traces-endpoint is set`)
 	cmd.Flags().StringVar(&otlpHeadersFile, "otlp-headers-file", "", `file with collector auth headers in OTEL_EXPORTER_OTLP_HEADERS syntax
-Must be chmod 600. GCP: stored in Secret Manager (fullsend-mint-otlp-headers).
+Must be chmod 600. GCP: stored in Secret Manager (fullsend-mint-otlp-headers-<random>).
 Cloudflare: stored as a Worker secret (MINT_OTLP_HEADERS for previews, MINT_OTLP_HEADERS_<random> for durable deploys)
 Required with an endpoint on GCP and Cloudflare durable deploys unless --otlp-no-headers is set`)
 	cmd.Flags().BoolVar(&otlpNoHeaders, "otlp-no-headers", false, `the collector needs no auth headers; no collector headers are bound to the new endpoint
@@ -812,7 +812,7 @@ func runMintDeployGCP(ctx context.Context, project, region, sourceDir string, sk
 		if tracing.enabled() {
 			printer.StepInfo(fmt.Sprintf("Would stamp OTLP traces endpoint %s into the function source (deployment %s)", tracing.endpointOrigin(), gcf.TraceDeploymentName(region)))
 			if tracing.headers != nil {
-				printer.StepInfo(fmt.Sprintf("Would store %d collector header(s) in Secret Manager secret %s", tracing.headerCount, gcf.TraceHeadersSecretID))
+				printer.StepInfo(fmt.Sprintf("Would store %d collector header(s) in a new Secret Manager secret %s<random>", tracing.headerCount, gcf.TraceHeadersSecretPrefix))
 			}
 		}
 		if pemDir != "" {

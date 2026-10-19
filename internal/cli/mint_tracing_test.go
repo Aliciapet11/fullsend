@@ -493,7 +493,7 @@ func TestMintDeployCmd_GCPDryRunWithTracing(t *testing.T) {
 		require.NoError(t, cmd.Execute())
 	})
 	assert.Contains(t, out, "https://collector.example into the function source (deployment fullsend-mint/europe-west4)")
-	assert.Contains(t, out, "1 collector header(s) in Secret Manager secret "+gcf.TraceHeadersSecretID)
+	assert.Contains(t, out, "1 collector header(s) in a new Secret Manager secret "+gcf.TraceHeadersSecretPrefix)
 	assert.NotContains(t, out, testCollectorHeaderValue)
 	assert.Empty(t, gcf.RecordedCalls(fake))
 }
@@ -520,6 +520,10 @@ func TestRunMintDeployGCP_TracingStoresHeadersSecret(t *testing.T) {
 	assert.Contains(t, deployErr.Error(), "upload stopped by test")
 	assert.NotContains(t, deployErr.Error(), testCollectorHeaderValue)
 	assert.NotContains(t, out, testCollectorHeaderValue)
-	assert.Equal(t, "Authorization="+testCollectorHeaderValue, string(secretData[gcf.TraceHeadersSecretID]))
+	require.Len(t, secretData, 1)
+	for sid, data := range secretData {
+		assert.True(t, strings.HasPrefix(sid, gcf.TraceHeadersSecretPrefix), "unexpected secret ID %q", sid)
+		assert.Equal(t, "Authorization="+testCollectorHeaderValue, string(data))
+	}
 	assert.Contains(t, gcf.RecordedCalls(fake), "SetSecretIAMBinding")
 }

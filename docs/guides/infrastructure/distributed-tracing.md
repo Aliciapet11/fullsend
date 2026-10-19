@@ -619,9 +619,10 @@ mints, and for Cloudflare Worker mints, durable and preview, through
 (see [`mint deploy` tracing for GCP](../../cli/mint.md#tracing-gcp) and
 [for Cloudflare](../../cli/mint.md#tracing)). On GCP the endpoint is
 stamped into the generated function source and collector headers are
-stored in the Secret Manager secret `fullsend-mint-otlp-headers`, which
-the function reads at cold start; rotating the headers adds a secret
-version and redeploys the function. On Cloudflare the endpoint is
+stored in a per-deploy Secret Manager secret
+(`fullsend-mint-otlp-headers-<random>`) whose ID is stamped next to the
+endpoint; the function reads it at cold start, and rotating the headers
+stores a new secret and redeploys the function. On Cloudflare the endpoint is
 compiled into the Worker WASM binary; collector headers are stored as
 a Worker secret (`MINT_OTLP_HEADERS`, scoped to the version, for previews; a
 per-deploy `MINT_OTLP_HEADERS_<random>` name for durable deploys). The

@@ -315,7 +315,9 @@ through `mintHTTP`, so it works unchanged on every target.
   stamped into `trace_consts.go` (`writeTraceConstsGoToZip` in
   `internal/dispatch/gcf`). When `otlpHeadersSecret` is stamped, it reads
   the collector headers once in `init()` from that Secret Manager secret
-  (`fullsend-mint-otlp-headers`) through `AccessGCPSecret`, with a 5s
+  (`fullsend-mint-otlp-headers-<random>`, a new ID per deploy so a
+  revision's endpoint and headers can never be mismatched) through
+  `AccessGCPSecret`, with a 5s
   timeout. An unreadable secret or a bad configuration is logged and
   leaves tracing off; it never fails `init()`.
 - **Adding spans:** call `startSpan(ctx, name, stage)` and use the

@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,7 +62,7 @@ func activeFunction(hash string) *FunctionInfo {
 }
 
 func TestBundleEmbeddedMintSource_StampsTracing(t *testing.T) {
-	stamp := TracingStamp{Endpoint: testTraceEndpoint, Deployment: "fullsend-mint/us-central1", HeadersSecret: TraceHeadersSecretID}
+	stamp := TracingStamp{Endpoint: testTraceEndpoint, Deployment: "fullsend-mint/us-central1", HeadersSecret: TraceHeadersSecretPrefix + "0123456789abcdef"}
 	data, err := bundleEmbeddedMintSource("1.0.0", "abc", StatusGitHubAuth{}, stamp)
 	require.NoError(t, err)
 
@@ -69,7 +71,26 @@ func TestBundleEmbeddedMintSource_StampsTracing(t *testing.T) {
 	assert.Contains(t, src, "package function")
 	assert.Contains(t, src, `otlpTracesEndpoint = "https://collector.example/v1/traces"`)
 	assert.Contains(t, src, `traceDeployment    = "fullsend-mint/us-central1"`)
-	assert.Contains(t, src, `otlpHeadersSecret  = "fullsend-mint-otlp-headers"`)
+	assert.Contains(t, src, `otlpHeadersSecret  = "fullsend-mint-otlp-headers-0123456789abcdef"`)
+}
+
+func TestNewTraceHeadersSecretID(t *testing.T) {
+	a, err := NewTraceHeadersSecretID()
+	require.NoError(t, err)
+	b, err := NewTraceHeadersSecretID()
+	require.NoError(t, err)
+	assert.NotEqual(t, a, b, "each deploy needs its own secret ID")
+	assert.Regexp(t, `^fullsend-mint-otlp-headers-[0-9a-f]{16}$`, a)
+}
+
+// stampedHeadersSecret returns the headers secret ID stamped into the
+// uploaded function source.
+func stampedHeadersSecret(t *testing.T, fake *fakeGCFClient) string {
+	t.Helper()
+	src := zipFiles(t, fake.lastUploadedSource)["trace_consts.go"]
+	m := regexp.MustCompile(`otlpHeadersSecret\s+= "([^"]*)"`).FindStringSubmatch(src)
+	require.NotNil(t, m, "otlpHeadersSecret not stamped")
+	return m[1]
 }
 
 func TestBundleEmbeddedMintSource_TracingDisabledByDefault(t *testing.T) {
@@ -133,14 +154,15 @@ func TestProvisioner_Provision_TracingNewMint(t *testing.T) {
 	_, err := p.Provision(context.Background())
 	require.NoError(t, err)
 
-	assert.True(t, fake.secrets[TraceHeadersSecretID], "headers secret not created")
-	assert.Equal(t, string(testTraceHeaders()), string(fake.secretData[TraceHeadersSecretID]))
+	sid := stampedHeadersSecret(t, fake)
+	assert.True(t, strings.HasPrefix(sid, TraceHeadersSecretPrefix), "unexpected secret ID %q", sid)
+	assert.True(t, fake.secrets[sid], "headers secret not created")
+	assert.Equal(t, string(testTraceHeaders()), string(fake.secretData[sid]))
 	assert.Contains(t, fake.calls, "CreateFunction")
 
 	files := zipFiles(t, fake.lastUploadedSource)
 	assert.Contains(t, files["trace_consts.go"], testTraceEndpoint)
 	assert.Contains(t, files["trace_consts.go"], `"fullsend-mint/europe-west4"`)
-	assert.Contains(t, files["trace_consts.go"], `"`+TraceHeadersSecretID+`"`)
 	for name, content := range files {
 		assert.NotContains(t, content, "header-value-never-in-source", "collector header value leaked into %s", name)
 	}
@@ -164,24 +186,28 @@ func TestProvisioner_Provision_TracingNoHeaders(t *testing.T) {
 	_, err := p.Provision(context.Background())
 	require.NoError(t, err)
 
-	assert.False(t, fake.secrets[TraceHeadersSecretID], "no headers secret expected")
+	for sid := range fake.secrets {
+		assert.False(t, strings.HasPrefix(sid, TraceHeadersSecretPrefix), "no headers secret expected, got %s", sid)
+	}
 	src := zipFiles(t, fake.lastUploadedSource)["trace_consts.go"]
 	assert.Contains(t, src, testTraceEndpoint)
 	assert.Contains(t, src, `otlpHeadersSecret  = ""`)
 }
 
-// Rotating headers adds a secret version and redeploys even though the
-// generated source is unchanged, so new instances read the new headers.
+// Rotating headers stores them in a new secret, leaves the previous
+// deploy's secret untouched, and redeploys with the new secret ID stamped,
+// so a still-running old revision keeps reading its own headers.
 func TestProvisioner_Provision_TracingHeaderRotationRedeploys(t *testing.T) {
 	srcDir := fakeFunctionSourceDir(t)
-	stamp := TracingStamp{Endpoint: testTraceEndpoint, Deployment: TraceDeploymentName(""), HeadersSecret: TraceHeadersSecretID}
+	oldSecret := TraceHeadersSecretPrefix + "0000000000000000"
+	stamp := TracingStamp{Endpoint: testTraceEndpoint, Deployment: TraceDeploymentName(""), HeadersSecret: oldSecret}
 	sourceZip, err := bundleFunctionSource(srcDir, "", "", StatusGitHubAuth{}, stamp)
 	require.NoError(t, err)
 
 	fake := newFakeGCFClient()
 	fake.functionInfo = activeFunction(sha256Hex(sourceZip))
-	fake.secrets = map[string]bool{TraceHeadersSecretID: true, "fullsend-coder-app-pem": true}
-	fake.secretData = map[string][]byte{TraceHeadersSecretID: []byte("authorization=old")}
+	fake.secrets = map[string]bool{oldSecret: true, "fullsend-coder-app-pem": true}
+	fake.secretData = map[string][]byte{oldSecret: []byte("authorization=old")}
 
 	p := newTestProvisioner(Config{
 		ProjectID:         "my-project",
@@ -194,38 +220,109 @@ func TestProvisioner_Provision_TracingHeaderRotationRedeploys(t *testing.T) {
 	_, err = p.Provision(context.Background())
 	require.NoError(t, err)
 
-	assert.Equal(t, string(testTraceHeaders()), string(fake.secretData[TraceHeadersSecretID]))
 	assert.Contains(t, fake.calls, "UpdateFunction")
+	newSecret := stampedHeadersSecret(t, fake)
+	assert.NotEqual(t, oldSecret, newSecret)
+	assert.Equal(t, string(testTraceHeaders()), string(fake.secretData[newSecret]))
+	assert.Equal(t, "authorization=old", string(fake.secretData[oldSecret]), "previous deploy's headers must not be modified")
 }
 
-// Re-running with the same headers and source writes no secret version
-// and does not redeploy.
-func TestProvisioner_Provision_TracingUnchangedSkipsRedeploy(t *testing.T) {
+// A deploy that fails after the headers were stored must not make the
+// retry look unchanged: the retry stamps a new secret ID, so it redeploys.
+func TestProvisioner_Provision_TracingRetryAfterFailedDeployRedeploys(t *testing.T) {
 	srcDir := fakeFunctionSourceDir(t)
-	stamp := TracingStamp{Endpoint: testTraceEndpoint, Deployment: TraceDeploymentName(""), HeadersSecret: TraceHeadersSecretID}
+	oldSecret := TraceHeadersSecretPrefix + "0000000000000000"
+	stamp := TracingStamp{Endpoint: testTraceEndpoint, Deployment: TraceDeploymentName(""), HeadersSecret: oldSecret}
 	sourceZip, err := bundleFunctionSource(srcDir, "", "", StatusGitHubAuth{}, stamp)
 	require.NoError(t, err)
 
 	fake := newFakeGCFClient()
 	fake.functionInfo = activeFunction(sha256Hex(sourceZip))
-	fake.secrets = map[string]bool{TraceHeadersSecretID: true, "fullsend-coder-app-pem": true}
-	fake.secretData = map[string][]byte{TraceHeadersSecretID: testTraceHeaders()}
+	fake.secrets = map[string]bool{oldSecret: true, "fullsend-coder-app-pem": true}
+	fake.secretData = map[string][]byte{oldSecret: []byte("authorization=old")}
+	fake.errs["UpdateFunction"] = errors.New("boom")
 
-	p := newTestProvisioner(Config{
-		ProjectID:         "my-project",
-		GitHubOrgs:        []string{PlaceholderOrg},
-		AgentAppIDs:       singleRoleAppIDs(),
-		FunctionSourceDir: srcDir,
-		Tracing:           TracingConfig{Endpoint: testTraceEndpoint, Headers: testTraceHeaders()},
-	}, fake)
+	cfg := func() Config {
+		return Config{
+			ProjectID:         "my-project",
+			GitHubOrgs:        []string{PlaceholderOrg},
+			AgentAppIDs:       singleRoleAppIDs(),
+			FunctionSourceDir: srcDir,
+			Tracing:           TracingConfig{Endpoint: testTraceEndpoint, Headers: testTraceHeaders()},
+		}
+	}
 
-	_, err = p.Provision(context.Background())
+	_, err = newTestProvisioner(cfg(), fake).Provision(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, fake.calls, "AddSecretVersion", "headers stored before the failed deploy")
+
+	delete(fake.errs, "UpdateFunction")
+	fake.calls = nil
+	_, err = newTestProvisioner(cfg(), fake).Provision(context.Background())
 	require.NoError(t, err)
+	assert.Contains(t, fake.calls, "UpdateFunction", "retry must redeploy")
+	assert.Equal(t, "authorization=old", string(fake.secretData[oldSecret]))
+}
 
-	assert.NotContains(t, fake.calls, "AddSecretVersion")
-	assert.Contains(t, fake.calls, "SetSecretIAMBinding")
-	assert.NotContains(t, fake.calls, "UpdateFunction")
-	assert.NotContains(t, fake.calls, "UploadFunctionSource")
+// A deploy to another region with other collector headers must not change
+// the headers an earlier deploy's revision reads at cold start.
+func TestProvisioner_Provision_TracingMultiRegionSecretsIsolated(t *testing.T) {
+	fake := newFakeGCFClient()
+	fake.secrets = map[string]bool{"fullsend-coder-app-pem": true}
+	fake.secretData = map[string][]byte{}
+	fake.functionInfoAfterCreate = &FunctionInfo{URI: "https://mint.run.app"}
+	srcDir := fakeFunctionSourceDir(t)
+
+	deploy := func(region, endpoint, headers string) string {
+		t.Helper()
+		p := newTestProvisioner(Config{
+			ProjectID:         "my-project",
+			Region:            region,
+			GitHubOrgs:        []string{PlaceholderOrg},
+			AgentAppIDs:       singleRoleAppIDs(),
+			FunctionSourceDir: srcDir,
+			Tracing:           TracingConfig{Endpoint: endpoint, Headers: []byte(headers)},
+		}, fake)
+		_, err := p.Provision(context.Background())
+		require.NoError(t, err)
+		return stampedHeadersSecret(t, fake)
+	}
+
+	secretA := deploy("us-central1", "https://collector-a.example/v1/traces", "authorization=a")
+	secretB := deploy("europe-west4", "https://collector-b.example/v1/traces", "authorization=b")
+
+	assert.NotEqual(t, secretA, secretB)
+	assert.Equal(t, "authorization=a", string(fake.secretData[secretA]))
+	assert.Equal(t, "authorization=b", string(fake.secretData[secretB]))
+}
+
+// With no function source directory, an existing active function is only
+// left alone when tracing is not configured: a tracing deploy compares and
+// deploys the embedded source stamped with the tracing settings.
+func TestProvisioner_Provision_TracingEmptySourceDirRedeploys(t *testing.T) {
+	newFake := func() *fakeGCFClient {
+		fake := newFakeGCFClient()
+		fake.functionInfo = activeFunction("stale-hash")
+		fake.secrets = map[string]bool{"fullsend-coder-app-pem": true}
+		return fake
+	}
+	cfg := Config{
+		ProjectID:   "my-project",
+		GitHubOrgs:  []string{PlaceholderOrg},
+		AgentAppIDs: singleRoleAppIDs(),
+	}
+
+	fake := newFake()
+	_, err := newTestProvisioner(cfg, fake).Provision(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, fake.calls, "UpdateFunction", "untraced deploy keeps the no-source-dir shortcut")
+
+	cfg.Tracing = TracingConfig{Endpoint: testTraceEndpoint}
+	fake = newFake()
+	_, err = newTestProvisioner(cfg, fake).Provision(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, fake.calls, "UpdateFunction")
+	assert.Contains(t, zipFiles(t, fake.lastUploadedSource)["trace_consts.go"], testTraceEndpoint)
 }
 
 // Enabling tracing on an existing untraced mint changes the generated
@@ -282,18 +379,15 @@ func TestProvisioner_Provision_TracingErrors(t *testing.T) {
 			c.Tracing.Endpoint = testTraceEndpoint
 			c.MintURL = "https://mint.run.app"
 		}, nil, "existing MintURL"},
-		{"secret check fails", func(c *Config) {
-			c.Tracing = TracingConfig{Endpoint: testTraceEndpoint, Headers: testTraceHeaders()}
-		}, map[string]error{"GetSecret": errors.New("boom")}, "checking secret fullsend-mint-otlp-headers"},
 		{"secret create fails", func(c *Config) {
 			c.Tracing = TracingConfig{Endpoint: testTraceEndpoint, Headers: testTraceHeaders()}
-		}, map[string]error{"CreateSecret": errors.New("boom")}, "creating secret fullsend-mint-otlp-headers"},
+		}, map[string]error{"CreateSecret": errors.New("boom")}, "creating secret fullsend-mint-otlp-headers-"},
 		{"add version fails", func(c *Config) {
 			c.Tracing = TracingConfig{Endpoint: testTraceEndpoint, Headers: testTraceHeaders()}
-		}, map[string]error{"AddSecretVersion": errors.New("boom")}, "adding secret version for fullsend-mint-otlp-headers"},
+		}, map[string]error{"AddSecretVersion": errors.New("boom")}, "adding secret version for fullsend-mint-otlp-headers-"},
 		{"IAM binding fails", func(c *Config) {
 			c.Tracing = TracingConfig{Endpoint: testTraceEndpoint, Headers: testTraceHeaders()}
-		}, map[string]error{"SetSecretIAMBinding": errors.New("boom")}, "granting secret access for fullsend-mint-otlp-headers"},
+		}, map[string]error{"SetSecretIAMBinding": errors.New("boom")}, "granting secret access for fullsend-mint-otlp-headers-"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

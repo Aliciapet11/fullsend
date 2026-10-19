@@ -8,6 +8,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -162,15 +163,31 @@ type TracingConfig struct {
 	// Endpoint is the full OTLP/HTTP traces URL. Empty disables tracing.
 	Endpoint string
 	// Headers is the collector authentication header content
-	// (OTEL_EXPORTER_OTLP_HEADERS syntax), stored as a new version of the
-	// TraceHeadersSecretID secret. Nil deploys without collector
+	// (OTEL_EXPORTER_OTLP_HEADERS syntax), stored in a new per-deploy
+	// secret (see NewTraceHeadersSecretID). Nil deploys without collector
 	// headers. Zeroed after Provision.
 	Headers []byte
 }
 
-// TraceHeadersSecretID is the Secret Manager secret holding OTLP
-// collector authentication headers for the mint function.
-const TraceHeadersSecretID = "fullsend-mint-otlp-headers"
+// TraceHeadersSecretPrefix is the prefix of the per-deploy Secret Manager
+// secrets holding OTLP collector authentication headers for the mint
+// function.
+const TraceHeadersSecretPrefix = "fullsend-mint-otlp-headers-"
+
+// NewTraceHeadersSecretID returns a unique Secret Manager secret ID for the
+// collector headers of one deploy. Each deploy stamps its own ID into the
+// function source, so a deployed revision always reads the headers that
+// were stored for its endpoint: a later deploy for another collector, or
+// for another region, cannot change what an earlier revision reads at
+// cold start, and a retry after a partial failure stamps a new ID and so
+// always redeploys.
+func NewTraceHeadersSecretID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generating collector headers secret ID: %w", err)
+	}
+	return TraceHeadersSecretPrefix + hex.EncodeToString(b[:]), nil
+}
 
 // TracingStamp is the nonsecret tracing configuration generated into the
 // function source (trace_consts.go). An empty Endpoint disables tracing.
@@ -195,18 +212,17 @@ func TraceDeploymentName(region string) string {
 }
 
 // tracingStamp derives the stamp for this deploy from the config.
-func (p *Provisioner) tracingStamp() TracingStamp {
+// headersSecret is the per-deploy secret ID for the collector headers, or
+// empty when the deploy has none.
+func (p *Provisioner) tracingStamp(headersSecret string) TracingStamp {
 	if p.cfg.Tracing.Endpoint == "" {
 		return TracingStamp{}
 	}
-	stamp := TracingStamp{
-		Endpoint:   p.cfg.Tracing.Endpoint,
-		Deployment: TraceDeploymentName(p.cfg.Region),
+	return TracingStamp{
+		Endpoint:      p.cfg.Tracing.Endpoint,
+		Deployment:    TraceDeploymentName(p.cfg.Region),
+		HeadersSecret: headersSecret,
 	}
-	if p.cfg.Tracing.Headers != nil {
-		stamp.HeadersSecret = TraceHeadersSecretID
-	}
-	return stamp
 }
 
 // validateTracing checks the tracing config before anything is deployed.
@@ -234,38 +250,25 @@ func (p *Provisioner) validateTracing() error {
 	return nil
 }
 
-// storeTraceHeaders stores the collector headers as a new version of the
-// TraceHeadersSecretID secret and grants the mint service account access,
-// following the agent PEM precedent. It reports whether a new version was
-// added: when the latest version already holds the same headers, nothing
-// is written.
-func (p *Provisioner) storeTraceHeaders(ctx context.Context) (bool, error) {
-	sid := TraceHeadersSecretID
-	headers := p.cfg.Tracing.Headers
-	changed := true
-	if err := p.gcpAPI.GetSecret(ctx, p.cfg.ProjectID, sid); err != nil {
-		if !errors.Is(err, ErrSecretNotFound) {
-			return false, fmt.Errorf("checking secret %s: %w", sid, err)
-		}
-		if err := p.gcpAPI.CreateSecret(ctx, p.cfg.ProjectID, sid); err != nil {
-			return false, fmt.Errorf("creating secret %s: %w", sid, err)
-		}
-	} else if current, err := p.gcpAPI.AccessSecretVersion(ctx, p.cfg.ProjectID, sid); err == nil {
-		// An unreadable or empty secret is simply overwritten below.
-		changed = !bytes.Equal(current, headers)
+// storeTraceHeaders stores the collector headers in the new per-deploy
+// secret sid and grants the mint service account access, following the
+// agent PEM precedent. The secret is created for this deploy only and is
+// never updated afterwards, so the stamped ID binds the deployed endpoint
+// to these exact headers.
+func (p *Provisioner) storeTraceHeaders(ctx context.Context, sid string) error {
+	if err := p.gcpAPI.CreateSecret(ctx, p.cfg.ProjectID, sid); err != nil {
+		return fmt.Errorf("creating secret %s: %w", sid, err)
 	}
-	if changed {
-		if err := p.gcpAPI.AddSecretVersion(ctx, p.cfg.ProjectID, sid, headers); err != nil {
-			return false, fmt.Errorf("adding secret version for %s: %w", sid, err)
-		}
+	if err := p.gcpAPI.AddSecretVersion(ctx, p.cfg.ProjectID, sid, p.cfg.Tracing.Headers); err != nil {
+		return fmt.Errorf("adding secret version for %s: %w", sid, err)
 	}
 	saEmail := MintServiceAccountEmail(p.cfg.ProjectID)
 	secretResource := fmt.Sprintf("projects/%s/secrets/%s", p.cfg.ProjectID, sid)
 	if err := p.gcpAPI.SetSecretIAMBinding(ctx, secretResource,
 		"serviceAccount:"+saEmail, "roles/secretmanager.secretAccessor"); err != nil {
-		return false, fmt.Errorf("granting secret access for %s: %w", sid, err)
+		return fmt.Errorf("granting secret access for %s: %w", sid, err)
 	}
-	return changed, nil
+	return nil
 }
 
 // StatusGitHubAuth bundles the GitHub status auth configuration
@@ -840,7 +843,18 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 	if p.cfg.Tracing.Endpoint != "" && p.cfg.DeployMode == DeploySkip {
 		return nil, fmt.Errorf("tracing cannot be configured with --skip-mint-deploy: the endpoint is stamped into the function source")
 	}
-	stamp := p.tracingStamp()
+	// Each deploy with collector headers gets its own secret ID, stamped
+	// into the source. The ID changes the source hash, so a retry after a
+	// partial failure always redeploys.
+	headersSecret := ""
+	if p.cfg.Tracing.Headers != nil {
+		id, idErr := NewTraceHeadersSecretID()
+		if idErr != nil {
+			return nil, idErr
+		}
+		headersSecret = id
+	}
+	stamp := p.tracingStamp(headersSecret)
 
 	// Check existing function state before infrastructure setup.
 	existing, err := p.gcpAPI.GetFunction(ctx, p.cfg.ProjectID, p.cfg.Region, functionName)
@@ -875,14 +889,12 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 	}
 	projectNumber := wifResult.projectNumber
 
-	// Store collector headers before any code deploy so new instances
-	// find them at cold start. Instances read the headers once, so a new
-	// secret version (rotation) forces a redeploy below even when the
-	// source is unchanged.
-	headersChanged := false
-	if p.cfg.Tracing.Headers != nil {
-		headersChanged, err = p.storeTraceHeaders(ctx)
-		if err != nil {
+	// Store collector headers in this deploy's own secret before any code
+	// deploy so new instances find them at cold start. The stamped secret
+	// ID is part of the source hash, so the function is always redeployed
+	// to pick them up.
+	if headersSecret != "" {
+		if err := p.storeTraceHeaders(ctx, headersSecret); err != nil {
 			return nil, err
 		}
 	}
@@ -904,14 +916,17 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 			switch {
 			case p.cfg.DeployMode == DeploySkip:
 				needsDeploy = false
-			case p.cfg.FunctionSourceDir == "":
+			case p.cfg.FunctionSourceDir == "" && p.cfg.Tracing.Endpoint == "":
+				// No source to compare. A tracing deploy must still
+				// compare the stamped source, so it falls through to
+				// the default case (embedded source).
 				needsDeploy = false
 			default: // DeployAuto
 				earlySourceZip, err = bundleFunctionSource(p.cfg.FunctionSourceDir, p.cfg.Version, p.cfg.Commit, p.cfg.StatusGitHub, stamp)
 				if err != nil {
 					return nil, fmt.Errorf("validating function source: %w", err)
 				}
-				needsDeploy = headersChanged || existing.EnvVars["FULLSEND_SOURCE_HASH"] != sha256Hex(earlySourceZip)
+				needsDeploy = existing.EnvVars["FULLSEND_SOURCE_HASH"] != sha256Hex(earlySourceZip)
 			}
 
 			if !needsDeploy {
@@ -1012,7 +1027,7 @@ func (p *Provisioner) provisionSelfManaged(ctx context.Context) (map[string]stri
 		if existing == nil || existing.URI == "" {
 			return nil, fmt.Errorf("function %s deployed but not found or has no URI", functionName)
 		}
-	} else if p.needsCodeDeploy(existing, sourceHash) || (headersChanged && p.cfg.DeployMode != DeploySkip) {
+	} else if p.needsCodeDeploy(existing, sourceHash) {
 		// Code changed: start from existing env vars (preserves
 		// PER_REPO_WIF_REPOS, ROLE_APP_IDS, etc.), then override
 		// infrastructure keys with current config values.
