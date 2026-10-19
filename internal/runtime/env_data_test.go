@@ -557,12 +557,27 @@ func TestEnvDataPin_SkipsAgentWritableInterpreters(t *testing.T) {
 		})
 	}
 	assert.NoFileExists(t, marker)
+
+	// Ownership alone keeps a directory off the trusted PATH. Every test
+	// directory sits under a writable parent, so a `test` function makes -w
+	// report the fixture and its ancestors as not writable: only -O can then
+	// keep the owned interpreter from being pinned.
+	ownedReal, err := filepath.EvalSymlinks(owned)
+	require.NoError(t, err)
+	shadow := `test() { if [ "$1" = -w ]; then case "` + ownedReal + `/" in "$2"/*) return 1 ;; esac; fi; command test "$@"; }; `
+	cmd := exec.Command("/bin/sh", "-c", shadow+envDataPin()+` && printf '%s' "$`+envDataPythonVar+`"`)
+	cmd.Env = []string{"PATH=" + ownedReal + ":" + os.Getenv("PATH")}
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	assert.Equal(t, string(trusted), string(out), "an interpreter the agent user owns is not pinned")
+	assert.NoFileExists(t, marker)
+
 	resolved, err := filepath.EvalSymlinks(string(trusted))
 	require.NoError(t, err)
 	assert.Equal(t, resolved, string(trusted), "the pin is the resolved interpreter")
 
 	// Only an agent-writable interpreter on PATH: the launch stops.
-	cmd := exec.Command("/bin/sh", "-c", envDataPin())
+	cmd = exec.Command("/bin/sh", "-c", envDataPin())
 	cmd.Env = []string{"PATH=" + writable}
 	err = cmd.Run()
 	var exitErr *exec.ExitError

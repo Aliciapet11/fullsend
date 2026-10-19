@@ -236,7 +236,8 @@ What a local pi run needs, beyond the guide:
   bakes `PI_VERSION`). A stale image fails preflight with `pi preflight: pi --version exited 127`;
   `podman pull ghcr.io/fullsend-ai/fullsend-sandbox:latest` fixes it.
 - **`python3` in the sandbox image** — the launch reads `.env` as data with a pinned `python3`
-  (`-I -S`); without one it fails with `python3 not found on PATH` (exit 127). The fullsend sandbox
+  (`-I -S`), taken from a `PATH` directory the sandbox user neither owns nor can write; without
+  one it fails with `python3 not found in a PATH directory the agent cannot write` (exit 127). The fullsend sandbox
   image ships it.
 - **Platforms** — verified end to end on macOS Apple Silicon (podman machine, Homebrew `openshell`)
   and Fedora with rootless Podman; the guide's platform notes apply unchanged.

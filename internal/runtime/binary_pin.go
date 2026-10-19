@@ -16,13 +16,7 @@ package runtime
 //     a failed cd ends the chain with cd's own error instead of reaching the
 //     "not found on PATH" branch.
 func binaryPin(varName, binary string) string {
-	return binaryPinLookup(varName, binary, "command -v "+binary)
-}
-
-// binaryPinLookup is binaryPin with the lookup command given; its output
-// must still be an absolute path.
-func binaryPinLookup(varName, binary, lookup string) string {
-	return `{ readonly ` + varName + `="$(` + lookup + `)" && case "$` + varName +
+	return `{ readonly ` + varName + `="$(command -v ` + binary + `)" && case "$` + varName +
 		`" in /*) ;; *) false ;; esac || { echo 'fullsend: ` + binary +
 		` not found on PATH' >&2; exit 127; }; }`
 }

@@ -131,10 +131,11 @@ func envDataTrustedPath() string {
 // with no such python3 the launch stops (exit 127).
 func envDataPin() string {
 	return envDataTrustedPath() + ` && { readonly ` + envDataPythonVar + `="$(IFS=:; set -f; for d in $` + envDataTrustedPathVar +
-		`; do test -x "$d/python3" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" readlink -f "$d/python3")" || continue; ` +
+		`; do test -x "$d/python3" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" readlink -f "$d/python3" 2>/dev/null)" || continue; ` +
 		`if ! test -O /; then p=$r; ` + envDataWritableAncestor + `; fi; printf '%s' "$r"; break; done)" && ` +
 		`case "$` + envDataPythonVar + `" in /*) ;; *) false ;; esac || ` +
-		`{ echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
+		`{ PATH="$` + envDataTrustedPathVar + `" command -v readlink >/dev/null || echo 'fullsend: readlink not found in a PATH directory the agent cannot write' >&2; ` +
+		`echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
 }
 
 // envDataLoad is the POSIX sh fragment that replaces `. envFile`. The

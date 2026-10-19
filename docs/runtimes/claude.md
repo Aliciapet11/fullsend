@@ -239,7 +239,9 @@ No line of `.env` runs as shell: a `python3` resolved before anything the agent 
 `NAME=value` assignments and ignores everything else, and `LD_PRELOAD`, `LD_LIBRARY_PATH`,
 `LD_AUDIT`, every `PYTHON*` variable, `BASH_ENV`, `ENV` and `IFS` are never taken from it (#8498).
 The sandbox image therefore needs `python3` on every Claude run, including runs without sandbox
-hooks; without one the launch fails with `python3 not found on PATH` (exit 127). The fullsend
+hooks, in a `PATH` directory the sandbox user neither owns nor can write (a virtualenv or a
+`$HOME`-managed interpreter does not count); without one the launch fails with
+`python3 not found in a PATH directory the agent cannot write` (exit 127). The fullsend
 sandbox image ships it. `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
 the agent wrote there between iterations. The rest of the environment, including provider
 credentials, comes from the sandbox.
