@@ -429,7 +429,8 @@ The existing design principle is that [the repo is the coordinator](problems/age
   includes the mandatory action-indicating superset. CEL then evaluates a
   fully materialized `entity` with no provider reads, and harness validation
   rejects predicates that access fields outside the profile. Fullsend tracks
-  acquisition coverage outside CEL and denies any candidate whose accessible
+  acquisition coverage outside CEL and denies any candidate whose mandatory
+  action-indicating enumeration floor is incomplete, or whose accessible
   profile components are incomplete
   ([ADR 0143](ADRs/0143-pre-read-fixed-entity-profiles-for-scheduled-discovery.md)).
 

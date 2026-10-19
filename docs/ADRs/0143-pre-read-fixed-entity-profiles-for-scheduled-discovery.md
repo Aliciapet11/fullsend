@@ -81,9 +81,11 @@ evaluation for that harness is then denied, as ADR 0098 requires for
 malformed sources.
 
 Fullsend records acquisition coverage outside the CEL value, and checks it
-before evaluation. A candidate is evaluated only when every profile component
-the predicate can access was acquired completely. Otherwise the candidate is
-denied, so error-absorbing operators cannot mask a failed or incomplete read.
+before evaluation. A candidate is evaluated only when the mandatory
+action-indicating enumeration floor was acquired completely, whatever fields the
+predicate uses (ADR 0098), and every profile component the predicate can access
+was also acquired completely. Otherwise the candidate is denied, so
+error-absorbing operators cannot mask a failed or incomplete read.
 Whether partial states are visible to CEL remains with normalized entity v1
 ([#8420](https://github.com/fullsend-ai/fullsend/issues/8420)).
 
