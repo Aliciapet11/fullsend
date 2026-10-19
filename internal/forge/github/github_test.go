@@ -2278,6 +2278,33 @@ func TestRateLimitBackoffInterrupted_KeepsRetryAfterAndContextError(t *testing.T
 	assert.Equal(t, 600*time.Second, d)
 }
 
+func TestRateLimitBackoffInterrupted_HeaderlessLeavesRetryAfterUnset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"message": "API rate limit exceeded"})
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{
+		token:   "test-token",
+		baseURL: srv.URL,
+		http:    srv.Client(),
+		// A wait that never fires, so only the context ends the backoff.
+		afterFunc: func(time.Duration) <-chan time.Time { return nil },
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := client.CreateRepo(ctx, "org", "test-repo", "desc", false)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded))
+	assert.True(t, IsRateLimitError(err))
+	// The client's own backoff delay is not a server deadline, so callers
+	// must see no Retry-After and apply their own default window.
+	_, ok := RetryAfterFromError(err)
+	assert.False(t, ok)
+}
+
 func TestWithoutAmbiguousRetry_DoesNotRetryServerError(t *testing.T) {
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

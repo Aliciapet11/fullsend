@@ -481,17 +481,22 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 		case <-c.afterFunc(delay):
 		case <-ctx.Done():
 			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
-				// Keep the rate-limit deadline the client was waiting
-				// out so the caller can honour it after cutting the
-				// wait short.
+				// Keep the server-provided Retry-After deadline the
+				// client was waiting out so the caller can honour it
+				// after cutting the wait short. The client's own
+				// backoff delay is not a server deadline, so it goes
+				// in the message only and RetryAfter stays zero when
+				// the header was absent.
 				wait := delay
+				var serverWait time.Duration
 				if secs, convErr := strconv.Atoi(retryAfter); convErr == nil && secs > 0 {
-					wait = time.Duration(secs) * time.Second
+					serverWait = time.Duration(secs) * time.Second
+					wait = serverWait
 				}
 				return nil, &APIError{
 					StatusCode: resp.StatusCode,
 					Message:    fmt.Sprintf("rate limit: interrupted while waiting %s to retry %s %s: %v", wait, method, path, ctx.Err()),
-					RetryAfter: wait,
+					RetryAfter: serverWait,
 					cause:      ctx.Err(),
 				}
 			}
