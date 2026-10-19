@@ -182,6 +182,20 @@ type APIError struct {
 	StatusCode int
 	Message    string
 	Errors     []APIErrorDetail
+	// RetryAfter is the wait the final response's Retry-After header
+	// asked for, uncapped. Zero when the header was absent or not a
+	// positive number of seconds.
+	RetryAfter time.Duration
+}
+
+// RetryAfterFromError returns the Retry-After wait carried by an
+// APIError in err's chain. ok is false when err carries none.
+func RetryAfterFromError(err error) (d time.Duration, ok bool) {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.RetryAfter <= 0 {
+		return 0, false
+	}
+	return apiErr.RetryAfter, true
 }
 
 // APIErrorDetail is one validation error entry returned by GitHub.
@@ -420,7 +434,11 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 					msg += " [rate-limit headers absent; no prior observation]"
 				}
 			}
-			return nil, &APIError{StatusCode: resp.StatusCode, Message: msg}
+			apiErr := &APIError{StatusCode: resp.StatusCode, Message: msg}
+			if secs, convErr := strconv.Atoi(retryAfter); convErr == nil && secs > 0 {
+				apiErr.RetryAfter = time.Duration(secs) * time.Second
+			}
+			return nil, apiErr
 		}
 		select {
 		case <-c.afterFunc(delay):

@@ -105,7 +105,7 @@ func newTestAllocator(t *testing.T, layout PoolLayout, p *fakePool) *slotAllocat
 }
 
 func TestPoolNames(t *testing.T) {
-	assert.Equal(t, "halfsend", PoolOrgName(0))
+	assert.Equal(t, StageOrg, PoolOrgName(0))
 	assert.Equal(t, "halfsend-01", PoolOrgName(1))
 	assert.Equal(t, "halfsend-12", PoolOrgName(12))
 	assert.Equal(t, "test-repo-01", PoolSlotName(1))
@@ -292,15 +292,16 @@ func TestSlotAllocator_RateLimitHeadersSwitchOrgs(t *testing.T) {
 
 	limited := p.clients["halfsend-01"]
 	reset := now.Add(10 * time.Minute)
-	limited.setRateLimit(forge.RateLimit{Limit: 5000, Remaining: 0, Reset: reset, Resource: "core"})
 	// Make halfsend-01 slots come first so its headers are observed.
 	a.shuffle = func([]Slot) {}
 
+	// The client has seen no headers yet, so the first claim lands on it.
 	s, _, err := a.Claim(context.Background())
 	require.NoError(t, err)
-	// The first create on halfsend-01 succeeded but its headers show the
-	// budget is spent, so the org is closed for the next claims.
 	assert.Equal(t, "halfsend-01", s.Org)
+	// The scenario then spends the budget; the next claim observes it
+	// before creating, so the org is closed without another create call.
+	limited.setRateLimit(forge.RateLimit{Limit: 5000, Remaining: 0, Reset: reset, Resource: "core"})
 	for range 8 {
 		s, _, err = a.Claim(context.Background())
 		require.NoError(t, err)
@@ -321,6 +322,58 @@ func TestSlotAllocator_RateLimitHeadersSwitchOrgs(t *testing.T) {
 	s, _, err = a.Claim(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "halfsend-01", s.Org)
+}
+
+func TestSlotAllocator_QuotaBelowReserveBeforeFirstClaim(t *testing.T) {
+	layout := PoolLayout{FirstOrgIndex: 1, OrgCount: 2, SlotsPerOrg: 2}
+	p := newFakePool(layout)
+	a := newTestAllocator(t, layout, p)
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return now }
+	a.shuffle = func([]Slot) {}
+
+	// Low but non-zero remaining, below the reserve, before any claim.
+	reset := now.Add(20 * time.Minute)
+	p.clients["halfsend-01"].setRateLimit(forge.RateLimit{Limit: 5000, Remaining: rateLimitReserve, Reset: reset, Resource: "core"})
+
+	s, _, err := a.Claim(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "halfsend-02", s.Org)
+	assert.Zero(t, p.clients["halfsend-01"].createCalls(), "an org already below the reserve gets no create call")
+
+	// Once the reset passes the org is eligible again.
+	now = reset
+	s, _, err = a.Claim(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "halfsend-01", s.Org)
+}
+
+func TestSlotAllocator_RetryAfterBeyondDefaultWindow(t *testing.T) {
+	layout := PoolLayout{FirstOrgIndex: 1, OrgCount: 2, SlotsPerOrg: 1}
+	p := newFakePool(layout)
+	a := newTestAllocator(t, layout, p)
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return now }
+	a.shuffle = func([]Slot) {}
+
+	// Secondary limit with healthy primary quota and a 5 minute Retry-After.
+	p.clients["halfsend-01"].setRateLimit(forge.RateLimit{Limit: 5000, Remaining: 4000, Reset: now.Add(time.Hour)})
+	p.clients["halfsend-01"].createErr = &gh.APIError{
+		StatusCode: http.StatusForbidden,
+		Message:    "rate limit: secondary",
+		RetryAfter: 5 * time.Minute,
+	}
+	s, _, err := a.Claim(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "halfsend-02", s.Org)
+
+	// Past the default window but inside Retry-After the org stays closed.
+	now = now.Add(defaultRateLimitWindow + time.Second)
+	_, _, err = a.Claim(context.Background())
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	assert.Equal(t, time.Date(2026, 10, 19, 12, 5, 0, 0, time.UTC), capErr.RateLimited["halfsend-01"])
+	assert.Equal(t, 1, p.clients["halfsend-01"].createCalls())
 }
 
 func TestSlotAllocator_RateLimitErrorRetryWindow(t *testing.T) {
@@ -463,7 +516,7 @@ func TestSlotAllocator_AcquireCancelAndHardError(t *testing.T) {
 	_, _, err := a.Acquire(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 	require.ErrorIs(t, err, ErrPoolCapacityExhausted)
-	assert.True(t, strings.Contains(err.Error(), "occupied"))
+	assert.Contains(t, err.Error(), "occupied")
 
 	cctx, ccancel := context.WithCancel(context.Background())
 	ccancel()
