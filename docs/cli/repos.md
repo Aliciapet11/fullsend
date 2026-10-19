@@ -758,10 +758,10 @@ if recording the activation fails. Install then recreates the managed polling
 schedules (`fullsend slash poll`, `fullsend event poll`) under the trigger
 account, so scheduled polls run as the account and use that route. After this
 ownership move, use this release or newer for `repos install`,
-`repos status`, and `repos uninstall`. Once this release writes the account
-token digest, older strict CLI decoders reject the ledger even if schedules
-remain installer-owned. Older CLIs also treat account-owned schedules as
-foreign and refuse cleanup. Upgrade the CLI before retrying; do not delete those
+`repos status`, and `repos uninstall`. Once this release writes the
+`trigger_token_digest` or `publication_pending` ledger key, older strict CLI
+decoders reject the ledger even if schedules remain installer-owned. Older
+CLIs also treat account-owned schedules as foreign and refuse cleanup. Upgrade the CLI before retrying; do not delete those
 schedules by hand. The account creates them with a short-lived token while it
 stays at Developer. Each uses the managed spec's UTC cron and recorded branch,
 and keeps the enabled or disabled state of the schedule it replaces,
@@ -787,8 +787,9 @@ A deferral leaves the activation cleared and hands any account-owned managed
 schedule back to the installer, so polling stays the dispatch path through the
 Poller credential. Rotation and repair hand a retired account's schedules back
 before deleting it, and uninstall deletes them. The ledger carries no
-activation field. This version adds a trigger-token digest field, so older
-strict CLI decoders reject a ledger written by this version; see the
+activation field. This version adds the `trigger_token_digest` and
+`publication_pending` fields, so older strict CLI decoders reject a ledger
+written by this version before they read its version; see the
 [older-CLI behavior and rollback](../contributing/gitlab-role-credentials.md#trigger-only-service-account)
 note.
 

@@ -596,7 +596,10 @@ only. This triage-level access applies to **GitHub webhook dispatch** (slash
 commands, label-triggered dispatch, and event-triggered dispatch). The Go
 poll path used for GitLab and Jira currently requires `write` for all
 non-exception transitions — it does not yet distinguish observation from
-mutation thresholds.
+mutation thresholds. On GitLab, the agent job also requires the event actor
+to hold Developer access or higher for every stage except retro and
+prioritize, so automatic triage of a newly opened issue runs only when its
+author is a Developer, Maintainer, or Owner.
 See the
 [Authorization Contract](../../normative/authorization/v1/README.md) for the
 full role hierarchy, exception rules, and implementation notes.

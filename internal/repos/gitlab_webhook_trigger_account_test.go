@@ -841,7 +841,7 @@ func TestGitLabWebhookTriggerRouteStale_ActiveHookDrift(t *testing.T) {
 // repos install contains the trigger account only for failures that say the
 // published trigger's owner is outside the Developer ceiling or unverifiable.
 func TestGitLabWebhookTriggerOwnerUnsafe(t *testing.T) {
-	for _, err := range []error{errGitLabTriggerOwnerElevated, errGitLabTriggerOwnerBelowDeveloper, errGitLabTriggerOwnerUnverified, errGitLabAccountTokenUnsafe} {
+	for _, err := range []error{errGitLabAccountTriggerUnsafe, errGitLabTriggerOwnerElevated, errGitLabTriggerOwnerBelowDeveloper, errGitLabTriggerOwnerUnverified, errGitLabAccountTokenUnsafe} {
 		assert.True(t, GitLabWebhookTriggerOwnerUnsafe(err))
 		assert.True(t, GitLabWebhookTriggerOwnerUnsafe(errors.Join(errors.New("tearing down"), err)))
 	}
