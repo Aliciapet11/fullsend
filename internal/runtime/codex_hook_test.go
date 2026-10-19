@@ -97,7 +97,7 @@ func (h *codexAdapterHarness) run(phase string, input map[string]any, scripts ..
 
 	args := append([]string{h.adapter, phase}, scripts...)
 	cmd := exec.Command(h.python, args...)
-	cmd.Env = append(os.Environ(), codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests))
+	cmd.Env = append(codexAdapterBaseEnv(), codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests))
 	cmd.Stdin = strings.NewReader(string(payload))
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -111,6 +111,49 @@ func (h *codexAdapterHarness) run(phase string, input map[string]any, scripts ..
 		exitCode = exitErr.ExitCode()
 	}
 	return codexAdapterResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+// codexAdapterBaseEnv is the test process environment plus the trusted PATH
+// the run command exports before codex starts (the adapter blocks without
+// it); here it is the test's own PATH, so hook scripts find their tools.
+func codexAdapterBaseEnv() []string {
+	return append(os.Environ(), envDataTrustedPathVar+"="+os.Getenv("PATH"))
+}
+
+// The adapter blocks rather than inherit PATH when the trusted PATH is
+// missing or has an entry that is not absolute.
+func TestCodexAdapter_BlocksWithoutTrustedPath(t *testing.T) {
+	h := newCodexAdapterHarness(t)
+	marker := filepath.Join(h.dir, "ran")
+	h.script("record.py", `open(`+pyStr(marker)+`, "w").close()
+sys.exit(0)`)
+	payload, err := json.Marshal(codexBashInput("ls"))
+	require.NoError(t, err)
+	for name, value := range map[string]string{"unset": "", "empty entry": "/usr/bin::/bin", "relative entry": "bin:/usr/bin"} {
+		t.Run(name, func(t *testing.T) {
+			env := []string{}
+			for _, kv := range os.Environ() {
+				if !strings.HasPrefix(kv, envDataTrustedPathVar+"=") {
+					env = append(env, kv)
+				}
+			}
+			env = append(env, codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests))
+			if value != "" {
+				env = append(env, envDataTrustedPathVar+"="+value)
+			}
+			cmd := exec.Command(h.python, h.adapter, "PreToolUse", "record.py")
+			cmd.Env = env
+			cmd.Stdin = strings.NewReader(string(payload))
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr)
+			assert.Equal(t, 2, exitErr.ExitCode(), stderr.String())
+			assert.Contains(t, stderr.String(), envDataTrustedPathVar+" is missing or malformed")
+			assert.NoFileExists(t, marker, "nothing is spawned")
+		})
+	}
 }
 
 func codexBashInput(command string) map[string]any {
@@ -630,7 +673,7 @@ func TestCodexAdapter_MisconfigurationFailsClosed(t *testing.T) {
 	// be scanned rather than that there is nothing to scan.
 	t.Run("empty stdin blocks on PreToolUse", func(t *testing.T) {
 		cmd := exec.Command(h.python, h.adapter, "PreToolUse", "allow.py")
-		cmd.Env = append(os.Environ(), codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests))
+		cmd.Env = append(codexAdapterBaseEnv(), codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests))
 		cmd.Stdin = strings.NewReader("   ")
 		out, err := cmd.CombinedOutput()
 		require.Error(t, err)
@@ -642,7 +685,7 @@ func TestCodexAdapter_MisconfigurationFailsClosed(t *testing.T) {
 	// prevent, so the no-op stands.
 	t.Run("empty stdin is a no-op on PostToolUse", func(t *testing.T) {
 		cmd := exec.Command(h.python, h.adapter, "PostToolUse", "allow.py")
-		cmd.Env = append(os.Environ(), codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests))
+		cmd.Env = append(codexAdapterBaseEnv(), codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests))
 		cmd.Stdin = strings.NewReader("   ")
 		require.NoError(t, cmd.Run())
 	})
@@ -939,7 +982,7 @@ func TestCodexAdapter_RefusesWithoutTheDigestEnv(t *testing.T) {
 	} {
 		t.Run("refuses when the digest map is "+name, func(t *testing.T) {
 			cmd := exec.Command(h.python, h.adapter, "PreToolUse", "allow.py")
-			cmd.Env = append(os.Environ(), env...)
+			cmd.Env = append(codexAdapterBaseEnv(), env...)
 			if env == nil {
 				// Strip it entirely rather than pass an empty value.
 				cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool {
@@ -968,7 +1011,7 @@ sys.exit(0)`)
 	cmd := exec.Command(h.python, h.adapter, "PreToolUse", "record.py")
 	payload, err := json.Marshal(codexBashInput("ls"))
 	require.NoError(t, err)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(codexAdapterBaseEnv(),
 		codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests),
 		"LD_PRELOAD=/tmp/evil.so",
 		"LD_LIBRARY_PATH=/tmp/evil",
@@ -988,7 +1031,7 @@ sys.exit(0)`)
 	assert.NotContains(t, env, "PYTHONPATH")
 	assert.Equal(t, "keep-me", env["FULLSEND_CANARY_TOKEN"],
 		"the scripts' own configuration must still reach them")
-	assert.NotEmpty(t, env["PATH"], "PATH is inherited — the run command pinned it before .env")
+	assert.Equal(t, os.Getenv("PATH"), env["PATH"], "PATH is the trusted value the run command recorded before .env")
 }
 
 // TestCodexAdapter_UsesThePinnedPathForChildren is the adapter half of the
@@ -1008,7 +1051,7 @@ sys.exit(0)`)
 	payload, err := json.Marshal(codexBashInput("ls"))
 	require.NoError(t, err)
 	cmd := exec.Command(h.python, h.adapter, "PreToolUse", "record.py")
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(codexAdapterBaseEnv(),
 		codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests),
 		// What a .env prepending a planted directory would leave behind.
 		"PATH=/planted/bin:"+os.Getenv("PATH"),
@@ -1291,7 +1334,7 @@ func (h *codexAdapterHarness) spawnDigests(roles ...string) string {
 
 // spawnEnv is the environment codex gives a hook: both digest variables.
 func (h *codexAdapterHarness) spawnEnv(digests string) []string {
-	return append(os.Environ(),
+	return append(codexAdapterBaseEnv(),
 		codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests),
 		codexSpawnDigestsEnv+"="+digests)
 }
