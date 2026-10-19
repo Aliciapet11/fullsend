@@ -37,6 +37,12 @@ import (
 // misattribute that child's own lines.
 const codexChildUsageMarker = "fullsend-child"
 
+// codexChildUnreadableMarker starts the line the read command prints for a
+// child whose rollout it could not read, or that a failed search of the
+// sessions directory did not find. A rollout line that imitates it can only
+// add a warning and misattribute that child's own lines.
+const codexChildUnreadableMarker = "fullsend-unreadable"
+
 // codexChildUsageMaxBytes bounds the read. The sessions directory is
 // agent-writable, so an unbounded read is an unbounded allocation in the
 // runner (the reason piSubagentUsageMaxBytes exists). The command selects at
@@ -68,6 +74,10 @@ type codexChildUsage struct {
 	// before its first response (the provider rejected its model in the
 	// 2026-09-29 paid probe) and contributes nothing, not even a request.
 	HasUsage bool
+	// Unreadable is set when the read could not read the child's rollout, or
+	// a failed search of the sessions directory did not find it; the fold
+	// reports it.
+	Unreadable bool
 }
 
 // codexChildUsageReadCommand renders the one in-sandbox command that reads
@@ -77,10 +87,14 @@ type codexChildUsage struct {
 // the last token_count: codex writes a token_count whose usage counters are
 // zero when a request overflows the context window, and writes it only after
 // the response's tools finish, so a child cancelled in between can lack one
-// for its last response. Two greps rather than a cat: a review child's
-// rollout is megabytes and the two lines are all the fold needs, so the
-// head -c bound is a safety net, not the usual limit. `command -p` bypasses
-// shell functions and uses the system PATH, as the launch guards do.
+// for its last response. A rollout it cannot read, or one a failed search of
+// the sessions directory did not find (a missing directory included), prints
+// codexChildUnreadableMarker in its place; a rollout missing from a
+// directory searched without error prints nothing. Two greps rather than a
+// cat: a review child's rollout is megabytes and the two lines are all the
+// fold needs, so the head -c bound is a safety net, not the usual limit.
+// `command -p` bypasses shell functions and uses the system PATH, as the
+// launch guards do.
 func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error) {
 	ids = slices.Clone(ids)
 	slices.Sort(ids)
@@ -93,18 +107,19 @@ func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error
 		quoted = append(quoted, shellQuote(id))
 	}
 	return fmt.Sprintf(
-		`for id in %s; do command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null | while IFS= read -r f; do printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p head -n 1; command -p grep -a -e '"type":"token_usage_record"' -- "$f" 2>/dev/null | command -p tail -n 1; done; done | command -p head -c %d`,
-		strings.Join(quoted, " "), shellQuote(sessionsDir), shellQuote(codexChildUsageMarker), codexChildUsageMaxBytes), nil
+		`for id in %s; do files=$(command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null) || [ -n "$files" ] || printf '%%s %%s\n' %s "$id"; printf '%%s\n' "$files" | while IFS= read -r f; do [ -n "$f" ] || continue; if [ ! -r "$f" ]; then printf '%%s %%s\n' %s "$id"; continue; fi; printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p head -n 1; command -p grep -a -e '"type":"token_usage_record"' -- "$f" 2>/dev/null | command -p tail -n 1; done; done | command -p head -c %d`,
+		strings.Join(quoted, " "), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(codexChildUnreadableMarker), shellQuote(codexChildUsageMarker), codexChildUsageMaxBytes), nil
 }
 
 // parseCodexChildUsage decodes the read command's output: a marker line per
-// child, then that child's turn_context and token_usage_record lines. A line
-// before the first marker belongs to nobody; a line that is not JSON (the
-// head -c cut, or something planted in the agent-writable directory) is
-// skipped.
+// child, then that child's turn_context and token_usage_record lines, or an
+// unreadable marker line for a child it could not read. A line before the
+// first marker belongs to nobody; a line that is not JSON (the head -c cut,
+// or something planted in the agent-writable directory) is skipped.
 func parseCodexChildUsage(data []byte) []codexChildUsage {
 	var out []codexChildUsage
 	marker := []byte(codexChildUsageMarker + " ")
+	unreadable := []byte(codexChildUnreadableMarker + " ")
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLineSize)
 	for scanner.Scan() {
@@ -114,6 +129,10 @@ func parseCodexChildUsage(data []byte) []codexChildUsage {
 		}
 		if id, ok := bytes.CutPrefix(line, marker); ok {
 			out = append(out, codexChildUsage{ID: string(id)})
+			continue
+		}
+		if id, ok := bytes.CutPrefix(line, unreadable); ok {
+			out = append(out, codexChildUsage{ID: string(id), Unreadable: true})
 			continue
 		}
 		if len(out) == 0 {
@@ -209,10 +228,11 @@ func (c *codexChildIDs) scan(line []byte) {
 // when the parent spawned children, reads their rollouts with one bounded
 // sandbox command and folds each child's cumulative usage into the totals
 // and the breakdown. It returns how many child threads it folded. An error
-// is a read that did not happen or did not finish (a read cut at the bound
-// keeps the children before the cut); the caller reports it and keeps the
-// run, because losing the breakdown must not fail an iteration that
-// succeeded. No sandbox command runs when childIDs is empty.
+// is a read that did not happen or did not finish (a read cut at the bound,
+// or a rollout it could not read, keeps the children it did read); the
+// caller reports it and keeps the run, because losing the breakdown must not
+// fail an iteration that succeeded. No sandbox command runs when childIDs is
+// empty.
 //
 // The parent's entry is added first and always. Iterations are summed
 // (internal/cli aggregateRunMetrics), so an iteration that dispatched
@@ -266,7 +286,11 @@ func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string,
 	if exitCode != 0 {
 		return 0, fmt.Errorf("reading the child rollouts: exited %d: %s", exitCode, strings.TrimSpace(sanitizeOutput(stderr)))
 	}
+	unreadable := 0
 	for _, child := range parseCodexChildUsage([]byte(stdout)) {
+		if child.Unreadable {
+			unreadable++
+		}
 		if !child.HasUsage {
 			continue
 		}
@@ -295,8 +319,15 @@ func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string,
 		m.CacheReadInputTokens += cacheRead
 		folded++
 	}
+	var lost []string
+	if unreadable > 0 {
+		lost = append(lost, fmt.Sprintf("%d child rollout(s) could not be read", unreadable))
+	}
 	if len(stdout) >= codexChildUsageMaxBytes {
-		return folded, fmt.Errorf("reading the child rollouts: cut at %d bytes; only the children before the cut are counted", codexChildUsageMaxBytes)
+		lost = append(lost, fmt.Sprintf("cut at %d bytes; only the children before the cut are counted", codexChildUsageMaxBytes))
+	}
+	if len(lost) > 0 {
+		return folded, fmt.Errorf("reading the child rollouts: %s", strings.Join(lost, "; "))
 	}
 	return folded, nil
 }

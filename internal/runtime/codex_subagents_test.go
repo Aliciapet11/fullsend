@@ -441,6 +441,47 @@ func TestFoldCodexChildUsage_CutReadIsAWarning(t *testing.T) {
 	assertCodexUsageSumsToTotals(t, m)
 }
 
+// A rollout the read cannot open, or one a failed search of the sessions
+// directory does not find, is a warning; the children it did read stay
+// folded.
+func TestFoldCodexChildUsage_UnreadableRolloutIsAWarning(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("file modes do not stop root")
+	}
+	tests := []struct {
+		name string
+		lock func(t *testing.T, sessions string) string
+	}{
+		{name: "rollout file", lock: func(t *testing.T, sessions string) string {
+			return filepath.Join(sessions, "2026", "09", "29", "rollout-2026-09-29T15-46-38-"+codexChildOtherModelID+".jsonl")
+		}},
+		{name: "sessions subdirectory", lock: func(t *testing.T, sessions string) string {
+			dir := filepath.Join(sessions, "2026", "09", "30")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			name := "rollout-2026-09-29T15-46-38-" + codexChildOtherModelID + ".jsonl"
+			require.NoError(t, os.Rename(filepath.Join(sessions, "2026", "09", "29", name), filepath.Join(dir, name)))
+			return dir
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions := writeCodexChildRollouts(t, codexChildSameModelID, codexChildOtherModelID)
+			locked := tt.lock(t, sessions)
+			require.NoError(t, os.Chmod(locked, 0))
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+			fakeOpenshellCodexChildren(t, filepath.Join(t.TempDir(), "openshell.log"), t.TempDir(), "", sessions)
+
+			m := codexParentMetrics("gpt-5.6-luna")
+			n, err := CodexRuntime{}.foldCodexChildUsage("sb", []string{codexChildSameModelID, codexChildOtherModelID}, m)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "1 child rollout(s) could not be read", "a failed search that still found a rollout is not a warning for it")
+			assert.Equal(t, 1, n, "the readable child is still folded")
+			assert.Equal(t, 2, m.PerModelUsage["gpt-5.6-luna"].Requests)
+			assertCodexUsageSumsToTotals(t, m)
+		})
+	}
+}
+
 // A counter no real thread reaches is skipped: two planted rollouts whose
 // input sums past MaxInt would otherwise wrap the run's 15 down to 5.
 func TestFoldCodexChildUsage_SkipsImplausibleCounters(t *testing.T) {
