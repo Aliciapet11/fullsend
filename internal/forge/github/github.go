@@ -954,8 +954,10 @@ func (c *LiveClient) CreateRepo(ctx context.Context, org, name, description stri
 	}
 
 	var repo struct {
+		ID            int64  `json:"id"`
 		Name          string `json:"name"`
 		FullName      string `json:"full_name"`
+		Description   string `json:"description"`
 		DefaultBranch string `json:"default_branch"`
 		Private       bool   `json:"private"`
 	}
@@ -964,8 +966,10 @@ func (c *LiveClient) CreateRepo(ctx context.Context, org, name, description stri
 	}
 
 	return &forge.Repository{
+		ID:            repo.ID,
 		Name:          repo.Name,
 		FullName:      repo.FullName,
+		Description:   repo.Description,
 		DefaultBranch: repo.DefaultBranch,
 		Private:       repo.Private,
 	}, nil
@@ -986,6 +990,7 @@ func (c *LiveClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Re
 		ID            int64  `json:"id"`
 		Name          string `json:"name"`
 		FullName      string `json:"full_name"`
+		Description   string `json:"description"`
 		DefaultBranch string `json:"default_branch"`
 		Private       bool   `json:"private"`
 		Archived      bool   `json:"archived"`
@@ -999,6 +1004,7 @@ func (c *LiveClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Re
 		ID:            r.ID,
 		Name:          r.Name,
 		FullName:      r.FullName,
+		Description:   r.Description,
 		DefaultBranch: r.DefaultBranch,
 		Private:       r.Private,
 		Archived:      r.Archived,

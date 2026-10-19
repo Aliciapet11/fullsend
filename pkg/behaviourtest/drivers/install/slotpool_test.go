@@ -24,20 +24,57 @@ type orgClient struct {
 
 	mu        sync.Mutex
 	createErr error
-	rl        forge.RateLimit
-	rlSeen    bool
-	creates   int
+	// createLostErr makes CreateRepo succeed server-side and then fail
+	// with this error, as a retried create whose first attempt landed.
+	createLostErr error
+	// createBlocks makes CreateRepo wait for its context, as a client
+	// sitting in rate-limit backoff.
+	createBlocks bool
+	// createLandsThenBlocks is createBlocks after the repo was created
+	// server-side, as a create whose response never arrives.
+	createLandsThenBlocks bool
+	// deleteLostErr makes DeleteRepo succeed server-side and then fail
+	// with this error.
+	deleteLostErr error
+	rl            forge.RateLimit
+	rlSeen        bool
+	creates       int
 }
 
 func (c *orgClient) CreateRepo(ctx context.Context, org, name, description string, private bool) (*forge.Repository, error) {
 	c.mu.Lock()
 	c.creates++
 	err := c.createErr
+	lost := c.createLostErr
+	blocks := c.createBlocks || c.createLandsThenBlocks
+	lands := c.createLandsThenBlocks
 	c.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return c.FakeClient.CreateRepo(ctx, org, name, description, private)
+	if lands {
+		_, _ = c.FakeClient.CreateRepo(ctx, org, name, description, private)
+	}
+	if blocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	repo, createErr := c.FakeClient.CreateRepo(ctx, org, name, description, private)
+	if createErr == nil && lost != nil {
+		return nil, lost
+	}
+	return repo, createErr
+}
+
+func (c *orgClient) DeleteRepo(ctx context.Context, owner, repo string) error {
+	c.mu.Lock()
+	lost := c.deleteLostErr
+	c.mu.Unlock()
+	err := c.FakeClient.DeleteRepo(ctx, owner, repo)
+	if err == nil && lost != nil {
+		return lost
+	}
+	return err
 }
 
 func (c *orgClient) RateLimit() (forge.RateLimit, bool) {
@@ -114,8 +151,9 @@ func TestPoolNames(t *testing.T) {
 }
 
 func TestDevPoolLayout(t *testing.T) {
-	l := PoolLayoutForEnvironment("dev")
-	assert.Equal(t, DevPoolLayout(), l)
+	t.Setenv("BEHAVIOUR_POOL_SIZE", "")
+	l := PoolLayoutForEnvironment("dev", t.Logf)
+	assert.Equal(t, DevPoolLayout(DefaultPoolSize), l)
 	orgs := l.Orgs()
 	require.Len(t, orgs, 12)
 	assert.Equal(t, "halfsend-01", orgs[0])
@@ -127,8 +165,9 @@ func TestDevPoolLayout(t *testing.T) {
 }
 
 func TestStagePoolLayout_OnlyUnsuffixedOrg(t *testing.T) {
-	l := PoolLayoutForEnvironment("stage")
-	assert.Equal(t, StagePoolLayout(), l)
+	t.Setenv("BEHAVIOUR_POOL_SIZE", "")
+	l := PoolLayoutForEnvironment("stage", t.Logf)
+	assert.Equal(t, StagePoolLayout(DefaultPoolSize), l)
 	assert.Equal(t, []string{"halfsend"}, l.Orgs())
 	slots := l.Slots()
 	require.Len(t, slots, 12)
@@ -149,10 +188,10 @@ func TestNewSlotAllocator_Validation(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
-	_, err := newSlotAllocator(StagePoolLayout(), nil, nil)
+	_, err := newSlotAllocator(StagePoolLayout(DefaultPoolSize), nil, nil)
 	require.Error(t, err)
 
-	a, err := newSlotAllocator(DevPoolLayout(), cf, nil)
+	a, err := newSlotAllocator(DevPoolLayout(DefaultPoolSize), cf, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 144, a.Capacity())
 }
