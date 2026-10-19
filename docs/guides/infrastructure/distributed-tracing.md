@@ -612,12 +612,19 @@ The token mint takes part in the same trace model. It records one server
 span per request and child spans for each stage, then exports them over
 OTLP/HTTP (JSON encoding) when a traces endpoint is configured.
 
-**Availability:** tracing is configurable today for the
-[standalone mint](standalone-mint.md#tracing). `fullsend mint deploy`
-does not yet accept trace destination settings for the GCP Cloud Function
-or Cloudflare Worker mints, so those deployments run with tracing
-disabled. The instrumentation is shared by all backends (it lives in
-`internal/mintcore`).
+**Availability:** tracing is configurable for the
+[standalone mint](standalone-mint.md#tracing) and for Cloudflare Worker
+mints, durable and preview, through `fullsend mint deploy
+--otlp-traces-endpoint` and `--otlp-headers-file` (see
+[`mint deploy` tracing](../../cli/mint.md#tracing)). The endpoint is
+compiled into the Worker WASM binary; collector headers are stored as
+a Worker secret (`MINT_OTLP_HEADERS`, scoped to the version, for previews; a
+per-deploy `MINT_OTLP_HEADERS_<random>` name for durable deploys).
+`fullsend mint deploy` does not yet accept trace settings for the GCP
+Cloud Function mint, so that deployment runs with tracing disabled. The
+instrumentation is shared by all backends (it lives in
+`internal/mintcore`). Behaviour-test preview mints export to the suite's
+[job-scoped collector](../dev/behaviour-testing.md#job-scoped-trace-collection).
 
 **Propagation:** the mint client (`internal/mintclient`) starts a
 `fullsend.mint.token` client span when the caller's context has an active
@@ -679,10 +686,13 @@ a 2-second timeout. Collector errors, non-2xx responses, and timeouts are
 logged (without header values) and never change the mint response. The
 standalone mint exports in the background after the response is returned;
 serverless backends export before returning because they cannot run work
-afterwards. OTLP export does not follow redirects on native backends, so
-collector credentials and span payloads are never forwarded to another
-origin. The Cloudflare Worker host fetch bridge cannot disable redirects,
-so OTLP export is refused there until it can.
+afterwards. OTLP export does not follow redirects, so collector
+credentials and span payloads are never forwarded to another origin. On
+the Cloudflare Worker the host fetch bridge uses `redirect: "manual"` for
+export requests. A Worker export adds at most the 2-second export timeout
+to the response. If the collector headers secret cannot be parsed, the
+Worker logs a warning without header values and runs with tracing
+disabled.
 
 **Export budget:** an inbound `traceparent` sampled flag is honored only
 within a local budget of 20 sampled requests per second; requests beyond it

@@ -300,8 +300,15 @@ through `mintHTTP`, so it works unchanged on every target.
   the endpoint is empty, and a nil tracer is a no-op. `cmd/mint` reads
   `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`
   (resolved with `ResolveOTLPTracesEndpoint`) and collector headers from
-  `MINT_OTLP_HEADERS_FILE` (parsed with `ParseOTLPHeaders`). The GCF and
-  Worker load sites do not configure a tracer yet.
+  `MINT_OTLP_HEADERS_FILE` (parsed with `ParseOTLPHeaders`).
+  `cmd/mint-wasm` calls `NewStampedTracer` with the endpoint and
+  deployment stamped into `main.otlpTracesEndpoint` /
+  `main.traceDeployment` via `-ldflags` (`traceLDFlags` in
+  `internal/dispatch/cf`) and the Worker secret named by
+  `main.otlpHeadersSecret` (default `MINT_OTLP_HEADERS`; durable deploys
+  stamp a unique per-deploy name), read through the getEnv callback. A bad configuration is logged and leaves
+  tracing off rather than failing `mintcoreInitMint`. Header values are
+  never stamped. The GCF load site does not configure a tracer yet.
 - **Adding spans:** call `startSpan(ctx, name, stage)` and use the
   returned context for downstream calls. Call `recordError(err)` and then
   `end()`. Spans are nil-safe, so call sites need no enabled checks. The
@@ -321,8 +328,15 @@ through `mintHTTP`, so it works unchanged on every target.
   the server stops to drain it. Never let an export error affect the
   response.
 - **No redirects:** export marks its request with `withNoRedirect`. The
-  native `mintHTTP` honors it; the `js` `mintHTTP` refuses such requests
-  because the host fetch bridge cannot disable redirects.
+  native `mintHTTP` honors it. The `js` `mintHTTP` passes it as the fifth
+  `noRedirect` argument of the host fetch callback, and the Worker
+  adapter then fetches with `redirect: "manual"`.
+- **Bounded fetch:** for `noRedirect` requests, the `js` `mintHTTP` also
+  passes the remaining context deadline as a sixth `timeoutMs` argument.
+  The Worker adapter aborts the underlying fetch at that deadline (never
+  later than its 20 s host-fetch budget), so a stalled collector cannot
+  keep fetches and payloads alive after the exporter releases its export
+  slot. The adapter discards the collector's response body unread.
 
 ## Embed sync and `make wasm-build`
 
@@ -366,6 +380,9 @@ The Cloudflare Worker follows the same principle: `wasmLDFlags` in
 `internal/dispatch/cf/provisioner.go` stamps `mintcore.Version`,
 `mintcore.Commit`, and status-auth config into the WASM binary via
 `-ldflags` at compile time rather than injecting runtime env vars.
+`traceLDFlags` adds the tracing endpoint and deployment identity the same
+way. A traces endpoint always forces a rebuild of a pre-staged
+`mintcore.wasm`, because a staged binary does not carry the stamp.
 
 This keeps metadata in lockstep with the deployed code. Follow this
 pattern for any future build metadata the function needs — never use
