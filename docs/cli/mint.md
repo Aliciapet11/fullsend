@@ -53,6 +53,26 @@ fullsend mint deploy \
   --public
 ```
 
+#### Tracing (GCP)
+
+Pass an OTLP/HTTP traces destination to have the Cloud Function export mint spans (see [Mint tracing](../guides/infrastructure/distributed-tracing.md#mint-tracing)). The flags and the endpoint precedence are the same as for [Cloudflare](#tracing):
+
+```bash
+chmod 600 otlp-headers   # one key=value per line, OTEL_EXPORTER_OTLP_HEADERS syntax
+fullsend mint deploy \
+  --project "<GCP_PROJECT>" \
+  --otlp-traces-endpoint https://collector.example/v1/traces \
+  --otlp-headers-file otlp-headers
+```
+
+- The endpoint and the deployment identity (`fullsend-mint/<region>`) are stamped into the generated function source (`trace_consts.go`). Changing the endpoint changes the source hash, so the function is redeployed. Tracing flags cannot be combined with `--skip-deploy`.
+- The endpoint must use `https`, and it requires `--otlp-headers-file`, or `--otlp-no-headers` for a collector that needs no authentication.
+- Header values are never passed on the command line or written into the function source. The CLI stores the header file content as a new version of the Secret Manager secret `fullsend-mint-otlp-headers` (created if missing) and grants the `fullsend-mint` service account `roles/secretmanager.secretAccessor` on it, as for the role PEM secrets. The function reads the latest version once, at cold start, with a bounded timeout. If it cannot read the secret, tracing stays off and token minting is unaffected.
+- **Collector rotation:** re-run `mint deploy` with the new endpoint and its `--otlp-headers-file` (or `--otlp-no-headers`). When the header content differs from the latest secret version, the CLI adds a new version before deploying and then redeploys the function, even if the source is unchanged, so new instances read the new headers. Re-running with the same headers adds no version and does not redeploy. Disable or destroy old versions with `gcloud secrets versions disable|destroy`.
+- **Disable tracing:** redeploy without an endpoint flag. The function is redeployed without an endpoint and makes no export attempts. You can delete the secret with `gcloud secrets delete fullsend-mint-otlp-headers`.
+- Only `mint deploy` stamps tracing settings. A later `mint deploy` without the tracing flags redeploys the function with tracing disabled, so pass the flags on every deploy of a traced mint.
+- Avoid running concurrent deploys against the same function: the endpoint is stamped at deploy time, but the headers secret is shared, so overlapping deploys with different collectors could pair one collector's endpoint with the other's headers.
+
 ### Cloudflare mode (`--platform=cloudflare`)
 
 Deploys the mint as a Cloudflare Worker running the mintcore WASM module with a thin TypeScript adapter. The WASM binary and `wasm_exec.js` are auto-built at deploy time if not already present (requires Go toolchain + wrangler).
@@ -103,7 +123,7 @@ fullsend mint deploy \
 - **Collector rotation:** re-run `mint deploy` with the new endpoint and its `--otlp-headers-file` (or `--otlp-no-headers`). The CLI deploys the Worker stamped with the new endpoint and a fresh secret name, then stores the new headers under that name. Until that last step completes (or if it fails), the mint exports to the new endpoint without authentication; exports fail open, and the previous collector's credentials are never sent to the new endpoint. Re-running the deploy is safe. Secrets of earlier deploys are not deleted: remove stale `MINT_OTLP_HEADERS_*` secrets with `wrangler secret delete <name>` (list them with `wrangler secret list --name <worker-name>`). Preview versions do not inherit the durable Worker's secrets. A preview with an endpoint always binds `MINT_OTLP_HEADERS` explicitly, to the headers file content or, without `--otlp-headers-file`, to an empty value, so pass the file on every preview deploy that needs collector authentication.
 - **Concurrent durable deploys:** collector headers are safe against overlapping deploys (see above), but the role PEM secrets are still replaced by separate, unsynchronized steps, so avoid running durable deploys against the same Worker at the same time.
 - **Disable tracing:** redeploy without an endpoint flag. The mint then makes no export attempts. You can remove leftover `MINT_OTLP_HEADERS_*` secrets with `wrangler secret delete <name>`.
-- Export failures never affect token minting. GCP Cloud Function deploys do not support these flags yet and reject them. For the standalone mint, see [Standalone mint tracing](../guides/infrastructure/standalone-mint.md#tracing).
+- Export failures never affect token minting. For GCP Cloud Function deploys, see [Tracing (GCP)](#tracing-gcp). For the standalone mint, see [Standalone mint tracing](../guides/infrastructure/standalone-mint.md#tracing).
 
 Authentication (one of):
 - `CLOUDFLARE_API_TOKEN` env var (+ `CLOUDFLARE_ACCOUNT_ID`) — API token with Workers write permission
@@ -143,10 +163,10 @@ Example: `--per-repo-wif-repos=` clears `PER_REPO_WIF_REPOS` without requiring `
 | `--workflow-host-repos` | | Comma-separated workflow host repos (Cloudflare only, sets `WORKFLOW_HOST_REPOS`). Omit to preserve existing; set to `""` to clear |
 | `--allowed-workflow-files` | | Comma-separated workflow file basenames (Cloudflare only, sets `ALLOWED_WORKFLOW_FILES`). Durable: omit to preserve existing binding; set to `""` to clear. Preview: defaults to `*` when omitted (all basenames allowed) |
 | `--custom-domain` | | Hostname to attach as a Workers Custom Domain (Cloudflare only, durable deploys only). Zone ID is resolved automatically. Example: `--custom-domain=mint.fullsend.sh` |
-| `--otlp-traces-endpoint` | | OTLP/HTTP traces URL compiled into the Worker, used verbatim (Cloudflare only). See [Tracing](#tracing) |
-| `--otlp-endpoint` | | OTLP/HTTP base URL; `/v1/traces` is appended. Ignored when `--otlp-traces-endpoint` is set (Cloudflare only) |
-| `--otlp-headers-file` | | `chmod 600` file with collector auth headers in `OTEL_EXPORTER_OTLP_HEADERS` syntax, stored as a Worker secret (`MINT_OTLP_HEADERS` for previews, `MINT_OTLP_HEADERS_<random>` for durable deploys) (Cloudflare only). Requires an endpoint flag. Required with an endpoint on durable deploys unless `--otlp-no-headers` is set |
-| `--otlp-no-headers` | `false` | The collector needs no auth headers; binds no collector headers to the new endpoint (Cloudflare only). Requires an endpoint flag; mutually exclusive with `--otlp-headers-file` |
+| `--otlp-traces-endpoint` | | OTLP/HTTP traces URL stamped into the function source (GCP) or compiled into the Worker (Cloudflare), used verbatim. See [Tracing (GCP)](#tracing-gcp) and [Tracing](#tracing). GCP: not allowed with `--skip-deploy` |
+| `--otlp-endpoint` | | OTLP/HTTP base URL; `/v1/traces` is appended. Ignored when `--otlp-traces-endpoint` is set |
+| `--otlp-headers-file` | | `chmod 600` file with collector auth headers in `OTEL_EXPORTER_OTLP_HEADERS` syntax. GCP: stored in Secret Manager (`fullsend-mint-otlp-headers`). Cloudflare: stored as a Worker secret (`MINT_OTLP_HEADERS` for previews, `MINT_OTLP_HEADERS_<random>` for durable deploys). Requires an endpoint flag. Required with an endpoint on GCP and Cloudflare durable deploys unless `--otlp-no-headers` is set |
+| `--otlp-no-headers` | `false` | The collector needs no auth headers; binds no collector headers to the new endpoint. Requires an endpoint flag; mutually exclusive with `--otlp-headers-file` |
 
 ### Required IAM roles (GCP)
 
@@ -156,7 +176,7 @@ Example: `--per-repo-wif-repos=` clears `PER_REPO_WIF_REPOS` without requiring `
 | `roles/iam.workloadIdentityPoolAdmin` | Create WIF pool and provider |
 | `roles/cloudfunctions.developer` | Deploy the Cloud Function |
 | `roles/run.admin` | Set Cloud Run IAM policy |
-| `roles/secretmanager.admin` | Create secrets (only with `--pem-dir`) |
+| `roles/secretmanager.admin` | Create secrets (only with `--pem-dir` or `--otlp-headers-file`) |
 | `roles/resourcemanager.projectIamAdmin` | Set project IAM policy (only with `--pem-dir`) |
 
 ### Required GCP APIs

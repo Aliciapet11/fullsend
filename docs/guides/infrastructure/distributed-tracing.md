@@ -613,15 +613,18 @@ span per request and child spans for each stage, then exports them over
 OTLP/HTTP (JSON encoding) when a traces endpoint is configured.
 
 **Availability:** tracing is configurable for the
-[standalone mint](standalone-mint.md#tracing) and for Cloudflare Worker
-mints, durable and preview, through `fullsend mint deploy
---otlp-traces-endpoint` and `--otlp-headers-file` (see
-[`mint deploy` tracing](../../cli/mint.md#tracing)). The endpoint is
+[standalone mint](standalone-mint.md#tracing), for GCP Cloud Function
+mints, and for Cloudflare Worker mints, durable and preview, through
+`fullsend mint deploy --otlp-traces-endpoint` and `--otlp-headers-file`
+(see [`mint deploy` tracing for GCP](../../cli/mint.md#tracing-gcp) and
+[for Cloudflare](../../cli/mint.md#tracing)). On GCP the endpoint is
+stamped into the generated function source and collector headers are
+stored in the Secret Manager secret `fullsend-mint-otlp-headers`, which
+the function reads at cold start; rotating the headers adds a secret
+version and redeploys the function. On Cloudflare the endpoint is
 compiled into the Worker WASM binary; collector headers are stored as
 a Worker secret (`MINT_OTLP_HEADERS`, scoped to the version, for previews; a
-per-deploy `MINT_OTLP_HEADERS_<random>` name for durable deploys).
-`fullsend mint deploy` does not yet accept trace settings for the GCP
-Cloud Function mint, so that deployment runs with tracing disabled. The
+per-deploy `MINT_OTLP_HEADERS_<random>` name for durable deploys). The
 instrumentation is shared by all backends (it lives in
 `internal/mintcore`). Behaviour-test preview mints export to the suite's
 [job-scoped collector](../dev/behaviour-testing.md#job-scoped-trace-collection).
