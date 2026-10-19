@@ -59,11 +59,14 @@ const (
 // envDataDropNames are never taken from .env, for any runtime: the dynamic
 // loader variables (#7580), the Python startup variables (a PYTHONPATH with a
 // sitecustomize.py would run in every python3 the CLI starts, such as pi's
-// hook adapter), IFS (it would change how the rest of the launch splits
+// hook adapter), the shell startup variables (an exported BASH_ENV runs a
+// file in every non-interactive bash the CLI starts, ENV the same for an
+// interactive sh), IFS (it would change how the rest of the launch splits
 // words), and the loader's own variables.
 var envDataDropNames = []string{
 	"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
 	"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+	"BASH_ENV", "ENV",
 	"IFS",
 	envDataPythonVar, envDataExportsVar,
 }

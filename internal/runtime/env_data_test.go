@@ -324,6 +324,28 @@ func TestEnvDataLoad_DropsPythonStartupVariables(t *testing.T) {
 	}
 }
 
+// Shell startup variables are never taken from .env, so a planted
+// BASH_ENV cannot run a file in a bash the CLI starts later.
+func TestEnvDataLoad_DropsShellStartupVariables(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	f := newEnvDataFixture(t)
+	marker := filepath.Join(f.ws, "pwned")
+	f.write(t, "startup.sh", "touch "+marker+"\n")
+	f.write(t, ".env", "export BASH_ENV="+filepath.Join(f.ws, "startup.sh")+"\nexport ENV="+filepath.Join(f.ws, "startup.sh")+"\nexport KEEP=1\n")
+	env, stderr := f.envOf(t)
+	assert.Equal(t, "1", env["KEEP"])
+	for _, name := range []string{"BASH_ENV", "ENV"} {
+		_, ok := env[name]
+		assert.False(t, ok, "%s must not reach the CLI", name)
+		assert.Contains(t, stderr, name+" is not taken from .env")
+	}
+	_, stderr, err := f.load(t, "bash -c true")
+	require.NoError(t, err, stderr)
+	assert.NoFileExists(t, marker, "a bash child must not run the .env BASH_ENV file")
+}
+
 // The loader script spells the runner-PATH variable out; keep it in step
 // with the constant the control lines use.
 func TestEnvDataLoaderScript_RunnerPathVar(t *testing.T) {
@@ -336,7 +358,7 @@ func TestEnvDataLoad_Shape(t *testing.T) {
 	assert.True(t, strings.HasPrefix(frag, envDataPin()+" && "), frag)
 	assert.Contains(t, frag, `"$`+envDataPythonVar+`" -I -S -c `)
 	assert.Contains(t, frag, `eval "$`+envDataExportsVar+`" && unset `+envDataExportsVar)
-	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE IFS "+envDataPythonVar+" "+envDataExportsVar+" FULLSEND_X_BIN'")
+	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE BASH_ENV ENV IFS "+envDataPythonVar+" "+envDataExportsVar+" FULLSEND_X_BIN'")
 	assert.NotContains(t, frag, ". /sandbox/workspace/.env")
 	assert.NotContains(t, frag, "  ", "the launch commands are checked for double spaces")
 	for _, line := range EnvDataControlLines() {

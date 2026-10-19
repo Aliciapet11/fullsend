@@ -237,7 +237,7 @@ Use the gateway route above. For Claude models, the default Vertex route is the 
 The launch reads the sandbox `.env` as data and then clears variables before it starts Claude Code.
 No line of `.env` runs as shell: a `python3` resolved before anything the agent wrote parses its
 `NAME=value` assignments and ignores everything else, and `LD_PRELOAD`, `LD_LIBRARY_PATH`,
-`LD_AUDIT`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE` and `IFS` are never taken from it (#8498). `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
+`LD_AUDIT`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE`, `BASH_ENV`, `ENV` and `IFS` are never taken from it (#8498). `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
 the agent wrote there between iterations. The rest of the environment, including provider
 credentials, comes from the sandbox.
 
