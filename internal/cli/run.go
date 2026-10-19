@@ -3188,13 +3188,14 @@ var oidcDenyKeys = map[string]bool{
 	gatewayAPIKeyEnv: true,
 	// The GitLab webhook fast-path credentials `fullsend repos install`
 	// provisions as protected, wildcard-scoped CI/CD variables. The trigger
-	// token is a bearer credential that starts pipelines on the protected
-	// default branch; no run needs either value. The job scripts unset both,
+	// tokens are bearer credentials that start protected-branch pipelines;
+	// no run needs these values. The job scripts unset all three,
 	// and listing them here is defense in depth so a harness cannot expand
 	// them into sandbox-visible values and host-side scripts never inherit
 	// them.
-	"FULLSEND_TRIGGER_TOKEN":  true,
-	"FULLSEND_WEBHOOK_SECRET": true,
+	"FULLSEND_TRIGGER_TOKEN":                true,
+	"FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN": true,
+	"FULLSEND_WEBHOOK_SECRET":               true,
 	// The runner secrets bundle and its file path (ADR 0136).
 	// loadRunnerSecrets unsets both at start-up; listing them here keeps a
 	// harness from expanding the whole bundle and strips them from child

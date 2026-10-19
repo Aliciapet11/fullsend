@@ -181,7 +181,7 @@ func TestRunPollJobScript_BlanksSiblingSecretsBeforePoll(t *testing.T) {
 	}
 	writeStub("fullsend", "echo POLL_RAN\nexit 0\n")
 
-	cmd := exec.Command("bash", "-c", `set -euo pipefail; . "$SCRIPT"; echo ANALYST="${FULLSEND_GITLAB_ANALYST_TOKEN-unset}"; echo CODER="${FULLSEND_GITLAB_CODER_TOKEN-unset}"; echo SHARED="${FULLSEND_FORGE_TOKEN-unset}"; echo JOB="${FULLSEND_JOB_TOKEN-unset}"; echo TRIGGER="${FULLSEND_TRIGGER_TOKEN-unset}"; echo WEBHOOK_SECRET="${FULLSEND_WEBHOOK_SECRET-unset}"`)
+	cmd := exec.Command("bash", "-c", `set -euo pipefail; . "$SCRIPT"; echo ANALYST="${FULLSEND_GITLAB_ANALYST_TOKEN-unset}"; echo CODER="${FULLSEND_GITLAB_CODER_TOKEN-unset}"; echo SHARED="${FULLSEND_FORGE_TOKEN-unset}"; echo JOB="${FULLSEND_JOB_TOKEN-unset}"; echo TRIGGER="${FULLSEND_TRIGGER_TOKEN-unset}"; echo ACCOUNT_TRIGGER="${FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN-unset}"; echo WEBHOOK_SECRET="${FULLSEND_WEBHOOK_SECRET-unset}"`)
 	cmd.Env = append([]string{
 		"SCRIPT=" + script,
 		"PATH=" + bin + ":" + os.Getenv("PATH"),
@@ -194,6 +194,7 @@ func TestRunPollJobScript_BlanksSiblingSecretsBeforePoll(t *testing.T) {
 		"FULLSEND_GITLAB_CODER_TOKEN=coder-pat",
 		"FULLSEND_FORGE_TOKEN=shared-pat",
 		"FULLSEND_TRIGGER_TOKEN=trigger-bearer",
+		"FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN=account-bearer",
 		"FULLSEND_WEBHOOK_SECRET=webhook-secret",
 		"FULLSEND_POLL_MODE=events",
 		"CI_PROJECT_ID=1",
@@ -209,6 +210,7 @@ func TestRunPollJobScript_BlanksSiblingSecretsBeforePoll(t *testing.T) {
 	assert.Contains(t, got, "SHARED=unset")
 	assert.Contains(t, got, "JOB=poll-pat")
 	assert.Contains(t, got, "TRIGGER=unset", "the webhook trigger bearer must not outlive the job preamble")
+	assert.Contains(t, got, "ACCOUNT_TRIGGER=unset", "the account trigger bearer must not outlive the job preamble")
 	assert.Contains(t, got, "WEBHOOK_SECRET=unset", "the webhook secret must not outlive the job preamble")
 }
 
@@ -222,7 +224,7 @@ func TestGitLabJobScripts_UnsetWebhookCredentialsBeforePin(t *testing.T) {
 	for _, path := range []string{gitlabRunPollJobScriptPath, gitlabRunDispatcherJobScriptPath, gitlabRunAgentJobScriptPath} {
 		t.Run(path, func(t *testing.T) {
 			s := gitlabPerRepoText(t, path)
-			unsetIdx := strings.Index(s, "unset FULLSEND_TRIGGER_TOKEN FULLSEND_WEBHOOK_SECRET\n")
+			unsetIdx := strings.Index(s, "unset FULLSEND_TRIGGER_TOKEN FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN FULLSEND_WEBHOOK_SECRET\n")
 			require.NotEqual(t, -1, unsetIdx, "expected the webhook credential unset")
 			pinIdx := strings.Index(s, ". \"${CI_PROJECT_DIR:-.}/.gitlab/ci/scripts/pin-ci-job-identity.sh\"")
 			require.NotEqual(t, -1, pinIdx, "expected the identity pin to be sourced")
