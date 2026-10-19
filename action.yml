@@ -499,7 +499,8 @@ runs:
         if [[ -n "${MINT_URL}" ]]; then
           MINT_FLAGS+=(--mint-url "${MINT_URL}")
         fi
-        fullsend run "${AGENT}" \
+        # Replace this shell so Actions cancellation signals reach the CLI.
+        exec fullsend run "${AGENT}" \
           --fullsend-dir "${FULLSEND_DIR}" \
           --output-dir "${GITHUB_WORKSPACE}/output" \
           --target-repo "${TARGET_REPO}" \
