@@ -364,11 +364,9 @@ func TestPiManifestGuard(t *testing.T) {
 	assert.NotContains(t, out, "RAN")
 }
 
-// TestBuildPiRunCommand_ManifestGuard checks where the guard is emitted:
-// before .env can shadow the tools it uses, and again after .env, since
-// .env could have rewritten the manifest between the two.
-// #8577: the hook adapter runs its scripts with the python3 pinned before
-// .env was read, handed over in an exported variable .env cannot set.
+// TestBuildPiRunCommand_HookPythonPinned checks (#8577) that the hook adapter
+// runs its scripts with the python3 pinned before .env was read, handed over
+// in an exported variable .env cannot set.
 func TestBuildPiRunCommand_HookPythonPinned(t *testing.T) {
 	t.Setenv("FULLSEND_PI_MODEL", "")
 	m := &piManifest{AgentName: "triage", Model: "opus"}
@@ -383,9 +381,9 @@ func TestBuildPiRunCommand_HookPythonPinned(t *testing.T) {
 	assert.Less(t, export, strings.Index(cmd, `&& "$`+piBinaryVar+`" --print`), "before pi starts")
 }
 
-// The exported value is the python3 found before .env ran: neither a .env
-// assignment to the name nor a python3 stub .env puts first on PATH reaches
-// it.
+// TestPiHookPythonExport_IgnoresEnv checks that the exported value is the
+// python3 found before .env ran: neither a .env assignment to the name nor a
+// python3 stub .env puts first on PATH reaches it.
 func TestPiHookPythonExport_IgnoresEnv(t *testing.T) {
 	f := newEnvDataFixture(t)
 	want, err := exec.LookPath("python3")
@@ -407,6 +405,9 @@ func TestPiHookPythonExport_IgnoresEnv(t *testing.T) {
 	assert.Contains(t, stderr, piHookPythonEnv+" is not taken from .env")
 }
 
+// TestBuildPiRunCommand_ManifestGuard checks where the guard is emitted:
+// before .env can shadow the tools it uses, and again after .env, since
+// .env could have rewritten the manifest between the two.
 func TestBuildPiRunCommand_ManifestGuard(t *testing.T) {
 	t.Setenv("FULLSEND_PI_MODEL", "")
 	m := &piManifest{AgentName: "triage", Model: "opus"}
