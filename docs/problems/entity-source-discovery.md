@@ -427,7 +427,10 @@ The questions in #8421 and the choices above fall into three destinations.
 **Needs a follow-up ADR** (architectural, decided before implementing field
 acquisition):
 
-- Which acquisition strategy (A, B, C, or D) to adopt, or which combination.
+- ~~Which acquisition strategy (A, B, C, or D) to adopt, or which
+  combination.~~ Decided in
+  [ADR 0143](../ADRs/0143-pre-read-fixed-entity-profiles-for-scheduled-discovery.md):
+  Option D, a fixed per-kind profile read before evaluation.
 - The entity-source declaration shape: presets, a structured filter, or
   provider-native queries.
 - The first-slice scenarios, entity kinds, and providers, including whether
@@ -492,7 +495,9 @@ once the ADR is decided):
   reconsideration, where the action-indicating floor is the main cost)?
 - Is cost dominated by the mandatory action-indicating floor in practice? If
   it is, the simplest strategy (Option D) may be adequate for the first slice,
-  and planning or lazy loading matters only later.
+  and planning or lazy loading matters only later. ([ADR 0143](../ADRs/0143-pre-read-fixed-entity-profiles-for-scheduled-discovery.md)
+  adopts Option D on that premise. Measurements remain open and could
+  justify superseding it with Option B or C.)
 - Can every first-slice provider enumerate label applications with the
   applying actor, or does some provider force label-triggered scenarios to be
   unsupported there?
