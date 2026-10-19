@@ -100,21 +100,25 @@ func envDataControlLines(workspace string) []string {
 
 // envDataWritableAncestor is the sh loop body shared by the trusted-PATH and
 // interpreter lookups: starting at $p, it walks up to / and moves on to the
-// next candidate (`continue 2`) when the agent user can write any directory
+// next candidate (`continue 2`) when the agent user owns or can write any
+// directory
 // (case patterns carry a leading paren: bash 3.2 cannot parse a bare `)`
 // pattern inside `$( )`)
 // on the way, since a writable ancestor can rename the entry away and put
-// another in its place.
-const envDataWritableAncestor = `while :; do if test -w "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done`
+// another in its place, and an owner can make a read-only entry writable
+// again.
+const envDataWritableAncestor = `while :; do if test -w "$p" || test -O "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done`
 
 // envDataTrustedPath records the launch PATH without the directories the
 // agent user can write. It runs before anything the agent wrote is read, so
 // the PATH it filters is the runner's. A sandbox image can put an
 // agent-owned directory first (a virtualenv's bin, say), so a plain PATH
-// lookup there finds whatever the agent left. Under root every directory
-// is writable and nothing could be protected, so the PATH is kept as is.
+// lookup there finds whatever the agent left. A directory is left out when
+// the agent user owns it or can write it, or any directory above it. When
+// the launch runs as the owner of / (root), nothing could be protected, so
+// the PATH is kept as is.
 func envDataTrustedPath() string {
-	return `{ readonly ` + envDataTrustedPathVar + `="$(if test -w /; then printf '%s' "$PATH"; else IFS=:; set -f; s=; ` +
+	return `{ readonly ` + envDataTrustedPathVar + `="$(if test -O /; then printf '%s' "$PATH"; else IFS=:; set -f; s=; ` +
 		`for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; p=$d; ` + envDataWritableAncestor + `; ` +
 		`if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done; fi)"; }`
 }
@@ -128,7 +132,7 @@ func envDataTrustedPath() string {
 func envDataPin() string {
 	return envDataTrustedPath() + ` && { readonly ` + envDataPythonVar + `="$(IFS=:; set -f; for d in $` + envDataTrustedPathVar +
 		`; do test -x "$d/python3" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" readlink -f "$d/python3")" || continue; ` +
-		`if ! test -w /; then p=$r; ` + envDataWritableAncestor + `; fi; printf '%s' "$r"; break; done)" && ` +
+		`if ! test -O /; then p=$r; ` + envDataWritableAncestor + `; fi; printf '%s' "$r"; break; done)" && ` +
 		`case "$` + envDataPythonVar + `" in /*) ;; *) false ;; esac || ` +
 		`{ echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
 }

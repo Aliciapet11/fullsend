@@ -532,9 +532,15 @@ func TestEnvDataPin_SkipsAgentWritableInterpreters(t *testing.T) {
 	writable := t.TempDir()
 	marker := filepath.Join(writable, "ran")
 	require.NoError(t, os.WriteFile(filepath.Join(writable, "python3"), []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755))
+	owned := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(owned, "python3"), []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o555))
+	require.NoError(t, os.Chmod(owned, 0o555)) // read-only, but the agent user still owns both
+	t.Cleanup(func() { _ = os.Chmod(owned, 0o755) })
 	for name, path := range map[string]string{
-		"writable dir first": writable + ":" + os.Getenv("PATH"),
-		"relative entry":     ".:" + os.Getenv("PATH"),
+		"writable dir first":        writable + ":" + os.Getenv("PATH"),
+		"owned read-only dir first": owned + ":" + os.Getenv("PATH"),
+		"relative entry":            ".:" + os.Getenv("PATH"),
+		"empty entry":               ":" + os.Getenv("PATH"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command("/bin/sh", "-c", envDataPin()+` && printf '%s|%s' "$`+envDataPythonVar+`" "$`+envDataTrustedPathVar+`"`)
@@ -545,6 +551,7 @@ func TestEnvDataPin_SkipsAgentWritableInterpreters(t *testing.T) {
 			py, tp, _ := strings.Cut(string(out), "|")
 			assert.Equal(t, string(trusted), py)
 			assert.NotContains(t, ":"+tp+":", ":"+writable+":")
+			assert.NotContains(t, ":"+tp+":", ":"+owned+":")
 			assert.NotContains(t, ":"+tp+":", ":.:")
 			assert.False(t, strings.HasSuffix(tp, ":") || strings.HasPrefix(tp, ":"), "an empty entry would mean the working directory: %q", tp)
 		})
