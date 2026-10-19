@@ -63,6 +63,7 @@ create_issues:
       - my-org
     repos:                           # Specific repos (owner/name) agents may create issues in
       - fullsend-ai/fullsend
+      - fullsend-ai/agents
 
 # ── Authorization ────────────────────────────────────────────
 authorization:                       # Extra sources of slash-command permission, checked before the collaborator API
@@ -226,8 +227,15 @@ restricts which orgs and repos agents may create issues in.
 When omitted, agents cannot create issues outside the repository they are
 running in. That repository is always allowed, so it does not need an
 entry. The default per-repo configuration generated without a preset lists
-only `fullsend-ai/fullsend` in `allow_targets.repos`, which lets retro file
-upstream proposals and triage file upstream prerequisites.
+both `fullsend-ai/fullsend` and `fullsend-ai/agents` in `allow_targets.repos`,
+so retro proposals and triage prerequisites can reach the platform or agent
+repository that owns the change. These are installation defaults, not an
+automatic grant for every repository in `allowed_remote_resources`.
+Explicit `create_issues` settings and preset inheritance remain authoritative.
+Existing installations retain their permissions on upgrade; to opt in, add
+`fullsend-ai/agents` to the existing target list in the managed repository’s
+`repos.yaml` configuration, or in `.fullsend/config.yaml` for an installation
+not managed through `fullsend repos`. Preserve any other targets you need.
 
 ### `authorization`
 

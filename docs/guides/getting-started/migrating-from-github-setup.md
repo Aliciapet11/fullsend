@@ -285,7 +285,7 @@ The repository has no Fullsend files.
    ```
 
    A first install without a preset records
-   `config.create_issues.allow_targets.repos: [fullsend-ai/fullsend]` on
+   `config.create_issues.allow_targets.repos: [fullsend-ai/fullsend, fullsend-ai/agents]` on
    the entry, and writes `github.fullsend_ref` when it is unset. Commit
    both.
 
@@ -464,11 +464,27 @@ Install writes to `repos.yaml` itself only in two cases, both of which
 predate this change:
 
 - On a first install with no preset and no `create_issues` declaration, it
-  records `config.create_issues.allow_targets.repos: [fullsend-ai/fullsend]`
+  records `config.create_issues.allow_targets.repos: [fullsend-ai/fullsend, fullsend-ai/agents]`
   on the repository's entry. For a repository covered only by a glob, this
   adds an explicit entry.
 - After a first install, it writes the CLI's release to
   `github.fullsend_ref` or `gitlab.fullsend_ref` when that key is unset.
+
+### Permit agent improvement proposals on existing installations
+
+Fresh no-preset installations without an explicit `create_issues` setting
+include both `fullsend-ai/fullsend` and `fullsend-ai/agents` as cross-repository
+issue targets. Upgrading the CLI or rerunning install does not widen an
+established installation’s permissions or override a declared preset.
+
+To let retro file agent-layer proposals from an existing managed installation,
+add `fullsend-ai/agents` to the existing
+`config.create_issues.allow_targets.repos` list in the repository’s `repos.yaml`
+entry (or the manifest layer that owns that policy), then run `fullsend repos
+install` for that repository. Keep any existing targets; this is an explicit
+permission change. For an installation still using `github setup`, edit its
+`.fullsend/config.yaml` instead. If a preset owns the setting, update that policy
+explicitly rather than relying on the new installation default.
 
 ## Why install requires `inference.auth`
 
