@@ -1205,6 +1205,53 @@ func TestOpenAIRefreshRoundWait_ClampsToHeldExpiry(t *testing.T) {
 	}
 }
 
+// A round that is exhausted while the held credential is still valid waits
+// at most until its expiry, not the full backoff delay, so the credential is
+// renewed as it lapses.
+func TestRunOpenAIRefresh_RoundWaitClampedToHeldExpiry(t *testing.T) {
+	shrinkOpenAIRefreshSchedule(t)
+	openAIRefreshMargin = 400 * time.Millisecond
+	fakeOpenshellRecorder(t)
+	setOpenAIWIFTestEnv(t)
+	var calls atomic.Int32
+	stubOpenAIExchange(t, func(context.Context, openaiwif.Config) (*openaiwif.Token, error) {
+		switch calls.Add(1) {
+		case 1:
+			// An immediate first refresh succeeds with a short-lived credential
+			// whose next refresh starts about 300ms before it expires.
+			return &openaiwif.Token{Value: "tok-refreshed-clamp-abcdef", ExpiresAt: time.Now().Add(600 * time.Millisecond), Scope: "api.model.request"}, nil
+		case 2:
+			// The next round fails; make its unclamped delay far longer than
+			// the credential has left. Set here, on the refresher's own
+			// goroutine, after the wait before this round was computed.
+			openAIRefreshMinDelay, openAIRefreshMaxRoundDelay = 5*time.Second, 10*time.Second
+		}
+		return nil, errors.New("exchange unavailable")
+	})
+	var buf syncBuffer
+	h := openAIProviderHandle{name: "openai-abc", keys: []string{"OPENAI_API_KEY"}, source: "wif", expiresAt: time.Now()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runOpenAIRefresh(ctx, h, ui.New(&buf))
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	// One success plus a round of failures, then the next round begins by the
+	// held expiry, well before the 5s delay.
+	require.Eventually(t, func() bool { return calls.Load() > int32(1+openAIRefreshRetries) }, 3*time.Second, 5*time.Millisecond,
+		"a failed round near expiry retries by the held expiry, not after the full backoff")
+	m := regexp.MustCompile(`retrying in (\S+) \(`).FindStringSubmatch(buf.String())
+	require.NotNil(t, m, buf.String())
+	wait, err := time.ParseDuration(m[1])
+	require.NoError(t, err)
+	assert.Less(t, wait, time.Second, "the wait is clamped to the remaining lifetime")
+}
+
 // With every re-seed failing, each attempt adds the generation it saw to
 // the unrecorded set, which every later re-seed retires. The set stops at
 // its cap: the refresher fails closed instead of rotating again, so the

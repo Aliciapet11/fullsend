@@ -1138,7 +1138,7 @@ func refreshOpenAIProvider(ctx context.Context, h openAIProviderHandle, placehol
 // runOpenAIRefresh keeps a run-scoped provider's credential valid for the
 // life of the run. Each cycle waits until shortly before the current
 // expiry, then refreshes with bounded retries. When a round of retries is
-// exhausted it says so and tries again after openAIRefreshRoundDelay — the
+// exhausted it says so and tries again after openAIRefreshRoundWait — the
 // minimum delay, doubling per consecutive failed round up to a cap (and,
 // while the held expiry is still ahead, never past it), and back to the
 // minimum after a success — until a refresh succeeds: the
@@ -1242,9 +1242,9 @@ func runOpenAIRefresh(ctx context.Context, h openAIProviderHandle, printer *ui.P
 			// The recorded expiry still makes the gateway fail closed, so a
 			// persistent failure fails the run visibly.
 			failedRounds++
-			wait := openAIRefreshRoundDelay(failedRounds)
-			printer.StepWarn(fmt.Sprintf("OpenAI credential refresh for %s failed %d attempts; retrying in %s (recorded expiry %s)", h.name, openAIRefreshRetries, wait, expiresAt.UTC().Format(time.RFC3339)))
 			now := openAIWallNowFn()
+			wait := openAIRefreshRoundWait(failedRounds, expiresAt, now)
+			printer.StepWarn(fmt.Sprintf("OpenAI credential refresh for %s failed %d attempts; retrying in %s (recorded expiry %s)", h.name, openAIRefreshRetries, wait, expiresAt.UTC().Format(time.RFC3339)))
 			if !waitOpenAIRefresh(ctx, wait, now.Add(wait)) {
 				return
 			}
