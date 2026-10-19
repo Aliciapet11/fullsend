@@ -591,11 +591,12 @@ printf '{"token":"anonymous-pull-token","access_token":"anonymous-pull-token"}\n
 digest_of() {
   printf 'sha256:%s' "$(printf '%s' "$1" | sha256sum | cut -c1-64)"
 }
-# publish_image <rev> [digest]: ghcr.io serves <digest> (default digest_of <rev>)
-# for the runner image tag the workflow gives that commit (its 7-char SHA).
+# publish_image <rev> [digest]: Fullsend's runner image repository holds a
+# manifest with <digest> (default digest_of <rev>), served by digest.
 publish_image() {
+  local d="${2:-$(digest_of "$1")}"
   printf 'HTTP/2 200\r\ncontent-type: application/vnd.oci.image.index.v1+json\r\ndocker-content-digest: %s\r\n\r\n' \
-    "${2:-$(digest_of "$1")}" > "${NET_DIR}/ghcr-${1:0:7}"
+    "${d}" > "${NET_DIR}/ghcr-${d}"
 }
 
 # add_fullsend_commit <rev> <openshell-version> <openshell-sha> [compare-status]
@@ -872,17 +873,21 @@ IMAGE_DIGESTS_OVERRIDE="$(digest_of "some-custom-build")" \
 refused "release-tagged reference whose content is not the published image"
 IMAGE_DIGESTS_OVERRIDE="-" run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
 refused "image with no recorded digest"
-rm -f "${NET_DIR}/ghcr-${REV_NEW:0:7}"
+rm -f "${NET_DIR}/ghcr-$(digest_of "${REV_NEW}")"
 run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
-refused "commit whose runner image Fullsend's registry does not serve"
+refused "image whose digest Fullsend's registry does not hold"
 publish_image "${REV_NEW}"
 mv "${NET_DIR}/ghcr-token" "${NET_DIR}/ghcr-token.off"
 run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
 mv "${NET_DIR}/ghcr-token.off" "${NET_DIR}/ghcr-token"
 refused "GHCR token endpoint unavailable"
-printf 'HTTP/2 200\r\ncontent-type: text/plain\r\n\r\n' > "${NET_DIR}/ghcr-${REV_NEW:0:7}"
+printf 'HTTP/2 200\r\ncontent-type: text/plain\r\n\r\n' > "${NET_DIR}/ghcr-$(digest_of "${REV_NEW}")"
 run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
 refused "registry response without a digest header"
+printf 'HTTP/2 200\r\ndocker-content-digest: %s\r\n\r\n' "$(digest_of "some-other-manifest")" \
+  > "${NET_DIR}/ghcr-$(digest_of "${REV_NEW}")"
+run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
+refused "registry response naming a different digest than requested"
 publish_image "${REV_NEW}"
 # The multi-arch index digest may appear only among the repo digests.
 IMAGE_DIGESTS_OVERRIDE="sha256:$(printf 'e%.0s' $(seq 1 64)) registry.example.com/mirror/runner@$(digest_of "${REV_NEW}")" \
@@ -893,26 +898,39 @@ else
   fail "mirrored official image refused: ${JOB_ERR}"
 fi
 
-echo "== main and release builds of one commit share the bare SHA tag but have different digests =="
-# runner-image.yml writes the 7-char SHA tag on main and on tag-push builds, so
-# after a release is cut at the commit :dev points to, the SHA tag serves the
-# release image while :dev still serves the main image. Both must be accepted.
-serve_tag() {
-  printf 'HTTP/2 200\r\ncontent-type: application/vnd.oci.image.index.v1+json\r\ndocker-content-digest: %s\r\n\r\n' \
-    "$2" > "${NET_DIR}/ghcr-$1"
-}
+echo "== moving tags are never consulted: an official image stays verified after its tags move =="
+# runner-image.yml writes the 7-char SHA tag on main and on tag-push builds, and
+# `dev` moves on every main build. The registry is asked about the pulled
+# image's digest, so an official image keeps verifying after a release build of
+# the same commit took the SHA tag and a later main build advanced :dev.
 MAIN_DIGEST="$(digest_of "main-build-${REV_NEW}")"
 RELEASE_DIGEST="$(digest_of "release-build-${REV_NEW}")"
-RC_DIGEST="$(digest_of "rc-build-${REV_NEW}")"
-serve_tag "${REV_NEW:0:7}" "${RELEASE_DIGEST}"
-serve_tag dev "${MAIN_DIGEST}"
-serve_tag 1.2.0 "${RELEASE_DIGEST}"
+LATER_MAIN_DIGEST="$(digest_of "later-main-build")"
+publish_image "${REV_NEW}" "${MAIN_DIGEST}"
+publish_image "${REV_NEW}" "${RELEASE_DIGEST}"
+publish_image "${REV_NEW}" "${LATER_MAIN_DIGEST}"
+# Tag manifests now point at other builds (or are gone); a lookup through any
+# of them would refuse the original main image.
+printf 'HTTP/2 200\r\ndocker-content-digest: %s\r\n\r\n' "${RELEASE_DIGEST}" > "${NET_DIR}/ghcr-${REV_NEW:0:7}"
+printf 'HTTP/2 200\r\ndocker-content-digest: %s\r\n\r\n' "${LATER_MAIN_DIGEST}" > "${NET_DIR}/ghcr-dev"
 IMAGE_DIGESTS_OVERRIDE="${MAIN_DIGEST}" \
   run_job "ghcr.io/fullsend-ai/fullsend-runner:dev" "${REV_NEW}" 7.0.2 7.0.1
 if [ "${JOB_RC}" -eq 0 ]; then
-  pass "the official :dev image is accepted after a release overwrote the SHA tag"
+  pass "the original main image is accepted after the SHA tag and :dev moved"
 else
-  fail ":dev image refused after the SHA tag moved: ${JOB_ERR}"
+  fail "main image refused after its tags moved: ${JOB_ERR}"
+fi
+if ! grep -qE "manifests/(dev|latest|${REV_NEW:0:7}|[0-9]+\.[0-9]+)( |\$)" "${CURL_LOG}"; then
+  pass "registry lookups use digests, never tags"
+else
+  fail "a mutable tag was looked up: $(tr '\n' '|' < "${CURL_LOG}")"
+fi
+IMAGE_DIGESTS_OVERRIDE="ghcr.io/fullsend-ai/fullsend-runner@${MAIN_DIGEST}" \
+  run_job "ghcr.io/fullsend-ai/fullsend-runner@${MAIN_DIGEST}" "${REV_NEW}" 7.0.2 7.0.1
+if [ "${JOB_RC}" -eq 0 ]; then
+  pass "an immutable digest reference to the original main image is accepted"
+else
+  fail "digest reference refused after its tags moved: ${JOB_ERR}"
 fi
 IMAGE_DIGESTS_OVERRIDE="${RELEASE_DIGEST}" \
   run_job "ghcr.io/fullsend-ai/fullsend-runner:1.2.0" "${REV_NEW}" 7.0.2 7.0.1
@@ -921,31 +939,13 @@ if [ "${JOB_RC}" -eq 0 ]; then
 else
   fail "release image refused: ${JOB_ERR}"
 fi
-# Release candidate and final release cut at one commit: the SHA tag serves the
-# last build; each version tag still names its own image.
-add_release_tag 1.2.0-rc.1 "${REV_NEW}"
-serve_tag 1.2.0-rc.1 "${RC_DIGEST}"
-IMAGE_DIGESTS_OVERRIDE="${RC_DIGEST}" \
-  run_job "ghcr.io/fullsend-ai/fullsend-runner:1.2.0-rc.1" "${REV_NEW}" 7.0.2 7.0.1
-if [ "${JOB_RC}" -eq 0 ]; then
-  pass "a release candidate image is accepted after the final release took the SHA tag"
-else
-  fail "release candidate image refused: ${JOB_ERR}"
-fi
-# A release reference never borrows :dev: its own version tag must serve it.
-IMAGE_DIGESTS_OVERRIDE="${MAIN_DIGEST}" \
-  run_job "ghcr.io/fullsend-ai/fullsend-runner:1.2.0" "${REV_NEW}" 7.0.2 7.0.1
-refused "release-tagged reference carrying the main image's digest"
-# An image matching none of the candidate tags is still refused.
-IMAGE_DIGESTS_OVERRIDE="${RC_DIGEST}" \
+# An image whose digest the repository does not hold is refused even when a tag
+# for its commit exists.
+IMAGE_DIGESTS_OVERRIDE="$(digest_of "unpublished-build-${REV_NEW}")" \
   run_job "registry.example.com/runner:dev" "${REV_NEW}" 7.0.2 7.0.1
-refused "image matching neither the SHA tag nor :dev"
-if [[ "${JOB_ERR}" == *"checked ${FULLSEND_RUNNER_IMAGE_REPO} tags: ${REV_NEW:0:7} dev"* ]]; then
-  pass "refusal names the Fullsend tags that were checked"
-else
-  fail "refusal does not name the checked tags: ${JOB_ERR}"
-fi
-rm -f "${NET_DIR}/ghcr-dev" "${NET_DIR}/ghcr-1.2.0" "${NET_DIR}/ghcr-1.2.0-rc.1" "${NET_DIR}/tag-v1.2.0-rc.1"
+refused "image whose digest the repository does not hold"
+rm -f "${NET_DIR}/ghcr-dev" "${NET_DIR}/ghcr-${REV_NEW:0:7}" "${NET_DIR}/ghcr-${MAIN_DIGEST}" \
+  "${NET_DIR}/ghcr-${RELEASE_DIGEST}" "${NET_DIR}/ghcr-${LATER_MAIN_DIGEST}"
 publish_image "${REV_NEW}"
 
 echo "== a successful installer run that does not switch the host version is an error =="

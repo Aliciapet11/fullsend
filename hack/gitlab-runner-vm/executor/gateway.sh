@@ -306,10 +306,9 @@ job_image_digests() {
   printf '%s\n' "${out}" | grep -oE 'sha256:[0-9a-f]{64}' || true
 }
 
-# Print the digest Fullsend's registry currently serves for runner image tag
-# $1, read with an anonymous pull token from GHCR.
-fullsend_published_image_digest() {
-  local tag="$1" token_json token headers digest
+# Print an anonymous pull token for Fullsend's runner image repository on GHCR.
+fullsend_ghcr_pull_token() {
+  local token_json token
   if ! token_json="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
     "https://ghcr.io/token?service=ghcr.io&scope=repository:${FULLSEND_RUNNER_IMAGE_REPO}:pull" 2>/dev/null)"; then
     echo "ERROR: could not get a GHCR pull token for ${FULLSEND_RUNNER_IMAGE_REPO}" >&2
@@ -320,56 +319,51 @@ fullsend_published_image_digest() {
     echo "ERROR: GHCR returned no pull token for ${FULLSEND_RUNNER_IMAGE_REPO}" >&2
     return 1
   fi
+  printf '%s' "${token}"
+}
+
+# Succeed only when Fullsend's runner image repository holds a manifest with
+# digest $2, read with pull token $1. The manifest is requested by digest, so
+# the answer cannot change when a tag moves, and the registry must echo the
+# requested digest back.
+fullsend_registry_has_digest() {
+  local token="$1" digest="$2" headers served
   if ! headers="$(curl -fsSI --retry 3 --retry-delay 2 --max-time 30 \
     -H "Authorization: Bearer ${token}" \
     -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
-    "https://ghcr.io/v2/${FULLSEND_RUNNER_IMAGE_REPO}/manifests/${tag}" 2>/dev/null)"; then
-    echo "ERROR: could not resolve ${FULLSEND_RUNNER_IMAGE_REPO}:${tag} on ghcr.io" >&2
+    "https://ghcr.io/v2/${FULLSEND_RUNNER_IMAGE_REPO}/manifests/${digest}" 2>/dev/null)"; then
     return 1
   fi
-  digest="$(grep -iE '^docker-content-digest:' <<< "${headers}" | grep -oE 'sha256:[0-9a-f]{64}' | head -1)" || true
-  if [ -z "${digest}" ]; then
-    echo "ERROR: ghcr.io returned no digest for ${FULLSEND_RUNNER_IMAGE_REPO}:${tag}" >&2
-    return 1
-  fi
-  printf '%s' "${digest}"
+  served="$(grep -iE '^docker-content-digest:' <<< "${headers}" | grep -oE 'sha256:[0-9a-f]{64}' | head -1)" || true
+  [ "${served}" = "${digest}" ]
 }
 
 # Succeed only when the already-pulled image $1 is byte-for-byte an image
-# Fullsend's workflow published for commit $2. The image's revision label and
-# `openshell --version` are written by whoever built the image, so on their own
-# they prove nothing about where it came from. Only Fullsend can push to its
-# runner image repository, so the image must carry the digest one of its tags
-# serves. The bare 7-character commit SHA tag is not enough on its own: main
-# and tag-push builds of the same commit both write it, so it ends up on
-# whichever built last while `dev` (or a release version tag) still names the
-# other image. Every tag that can legitimately name an image built from $2 is
-# therefore a candidate: the SHA tag, the release version tag $3 for a release
-# reference, or `dev` (main builds only) otherwise. Any one of them matching is
-# proof Fullsend published the image; none matching refuses it.
+# Fullsend's workflow published, which names commit $2 in its revision label.
+# The label and `openshell --version` are written by whoever built the image,
+# so on their own they prove nothing about where it came from. Only Fullsend
+# can push to its runner image repository, so an image whose content digest
+# that repository holds was built by Fullsend's workflow, which writes the
+# label from the commit it built. The digests come from the already-pulled
+# image and are looked up in the registry by digest, never through a tag: tags
+# are mutable (main and tag-push builds of one commit both write the bare SHA
+# tag, and `dev` moves on every main build), so a tag lookup would start
+# refusing an official image once a later build moved the tag. Any one of the
+# image's digests (manifest or multi-arch index) held by the repository is
+# proof Fullsend published it; none refuses it.
 verify_image_published_by_fullsend() {
-  local image="$1" rev="$2" release="${3:-}" local_digests tag published out errors=""
-  local -a tags=("${rev:0:7}")
-  if [ -n "${release}" ]; then
-    tags+=("${release}")
-  else
-    tags+=("dev")
-  fi
+  local image="$1" rev="$2" local_digests digest token
   local_digests="$(job_image_digests "${image}")" || return 1
-  for tag in "${tags[@]}"; do
-    if ! out="$(fullsend_published_image_digest "${tag}" 2>&1)"; then
-      errors+="${out}"$'\n'
-      continue
-    fi
-    published="${out}"
-    if grep -Fxq "${published}" <<< "${local_digests}"; then
-      return 0
-    fi
-  done
-  if [ -n "${errors}" ]; then
-    printf '%s' "${errors}" >&2
+  if [ -n "${local_digests}" ]; then
+    token="$(fullsend_ghcr_pull_token)" || return 1
+    while IFS= read -r digest; do
+      [ -n "${digest}" ] || continue
+      if fullsend_registry_has_digest "${token}" "${digest}"; then
+        return 0
+      fi
+    done <<< "${local_digests}"
   fi
-  echo "ERROR: job image ${image} is not an image Fullsend published for commit ${rev} (checked ${FULLSEND_RUNNER_IMAGE_REPO} tags: ${tags[*]}); refusing to trust its OpenShell pin" >&2
+  echo "ERROR: job image ${image} is not an image Fullsend published for commit ${rev} (no digest of the pulled image is held by ${FULLSEND_RUNNER_IMAGE_REPO}); refusing to trust its OpenShell pin" >&2
   return 1
 }
 
@@ -409,7 +403,7 @@ resolve_fullsend_openshell_pin() {
   else
     verify_fullsend_commit_on_default_branch "${rev}" || return 1
   fi
-  verify_image_published_by_fullsend "${image}" "${rev}" "${release}" || return 1
+  verify_image_published_by_fullsend "${image}" "${rev}" || return 1
   fetch_fullsend_openshell_pin "${rev}"
 }
 

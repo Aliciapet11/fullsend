@@ -308,8 +308,8 @@ re-provisioning between jobs.
 (`ghcr.io/fullsend-ai/fullsend-runner`), referenced by release tag
 (`X.Y.Z`), by digest, or by a moving tag (`dev`, `latest`, `X.Y`, a short
 commit SHA), including a registry mirror that holds identical content. The
-image must still be the one `dev` or its release tag serves, or the one the
-7-character commit tag serves (step 3 below). A
+image's digest must be held by Fullsend's runner image repository (step 3
+below), so an official image keeps working after its tags move. A
 custom or rebuilt image is not supported, even if it copies an official
 image's labels and `openshell --version` output: those are written by
 whoever built the image, so the executor only accepts an image whose digest
@@ -327,16 +327,14 @@ releases, so a newly published release needs no VM update.
    the parent repository's URLs, so this check is what ties the commit to
    Fullsend).
 3. Verifies that the pulled image is one Fullsend published for that
-   commit: the digest of at least one candidate tag in
-   `ghcr.io/fullsend-ai/fullsend-runner` (read anonymously from GHCR; only
-   Fullsend's workflow can push there) must be one of the digests podman
-   recorded for the pulled image. The candidates are the first 7 characters
-   of the commit plus, for a release image, its `X.Y.Z` version tag, or
-   `dev` otherwise. The 7-character tag alone is not enough: main and
-   release builds of the same commit both write it, so it ends up on
-   whichever built last. Without this check, an image could name any real
-   commit, including one with an older OpenShell pin, and so steer the host
-   to an older version. This check needs `ghcr.io` (token and manifest
+   commit: at least one of the digests podman recorded for the pulled image
+   must be held by `ghcr.io/fullsend-ai/fullsend-runner` (only Fullsend's
+   workflow can push there). The registry is asked for the manifest by
+   digest, anonymously, never through a tag, so the answer does not change
+   when `dev`, the 7-character commit tag, or a release tag later moves to
+   another build. Without this check, an image could name any real commit,
+   including one with an older OpenShell pin, and so steer the host to an
+   older version. This check needs `ghcr.io` (token and manifest
    endpoints) during job preparation, and runs on every job.
 4. Reads `OPENSHELL_VERSION` and `OPENSHELL_SHA` from
    `.github/scripts/openshell-version.sh` at that exact commit.
@@ -359,12 +357,10 @@ served after a host has moved to 0.1: the executor migrates forward only.
   CLI. Use an official Fullsend runner image.
 - `has no org.opencontainers.image.revision label`: the image was not built
   by the Fullsend runner image workflow. Use an official image.
-- `is not an image Fullsend published for commit`: the image's digest is
-  not one Fullsend's registry serves under the tags checked for the commit
-  it names (a custom or rebuilt image, an old digest reference whose tags
-  have since moved to another build, or an official image rebuilt after this
-  copy was pulled). Use an official image by its release tag or `dev`; for a
-  rebuilt official tag, pull it again.
+- `is not an image Fullsend published for commit`: none of the image's
+  digests is held by Fullsend's runner image repository (a custom or
+  rebuilt image, or a copy that was not built by Fullsend's workflow). Use
+  an official image by its release tag, `dev`, or digest.
 - `Git tag vX.Y.Z resolves to ...` or `is not on fullsend-ai/fullsend@main`:
   the image's label does not match its release tag, or its commit is not on
   `main`. Use the release-tagged image, or an image built from `main`
