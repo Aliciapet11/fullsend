@@ -221,8 +221,8 @@ What a local codex run needs, beyond the guide:
   `AGENTS.override.md` are not, and a symlinked `AGENTS.md` is skipped. No `CLAUDE.md` bridge is
   injected.
 - **`.env` is read as data, not run.** The launch parses the sandbox `.env` with a `python3` resolved
-  before anything the agent wrote (`-I -S`) and evals only the `export` lines that parser prints, so
-  no line of `.env` executes as shell. Only `NAME=value`, `export NAME` and comments are taken;
+  before anything the agent wrote (`-I -S`) and evals only the single-quoted `[export ]NAME='value'`
+  lines that parser prints, so no line of `.env` executes as shell. Only `NAME=value`, `export NAME` and comments are taken;
   anything else is ignored with a warning naming the file and line. `LD_PRELOAD`,
   `LD_LIBRARY_PATH`, `LD_AUDIT`, every `PYTHON*` variable, `BASH_ENV`, `ENV`, `IFS` and the launch's own read-only
   pins are never taken from `.env` (#8498). The sandbox image needs `python3` for this; without

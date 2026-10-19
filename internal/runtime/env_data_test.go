@@ -46,8 +46,16 @@ func (f envDataFixture) write(t *testing.T, rel, content string) {
 // minimal environment, and returns stdout and stderr.
 func (f envDataFixture) load(t *testing.T, tail string, extraDrop ...string) (string, string, error) {
 	t.Helper()
+	return f.loadIn(t, "", nil, tail, extraDrop...)
+}
+
+// loadIn is load run from dir (the test's own when empty), with extraEnv
+// added to the launch environment; a PATH in extraEnv replaces the default.
+func (f envDataFixture) loadIn(t *testing.T, dir string, extraEnv []string, tail string, extraDrop ...string) (string, string, error) {
+	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", envDataLoadWith(f.envFile, envDataControlLines(f.ws), extraDrop)+" && "+tail)
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=/home/agent"}
+	cmd.Dir = dir
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=/home/agent"}, extraEnv...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -359,10 +367,153 @@ func TestEnvDataLoad_DropsShellStartupVariables(t *testing.T) {
 	assert.NoFileExists(t, marker, "a bash child must not run the .env BASH_ENV file")
 }
 
-// The loader script spells the runner-PATH variable out; keep it in step
-// with the constant the control lines use.
-func TestEnvDataLoaderScript_RunnerPathVar(t *testing.T) {
-	assert.Contains(t, envDataLoaderScript, `"`+envDataRunnerPathVar+`"`)
+// The dropped names stay dropped wherever the assignment comes from: an
+// .env.d file, iteration.env, or a plain assignment exported by a separate
+// `export NAME` line.
+func TestEnvDataLoad_DropsNamesFromIncludedFiles(t *testing.T) {
+	names := []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV"}
+	assignments := func(prefix string) string {
+		var b strings.Builder
+		for _, n := range names {
+			b.WriteString(prefix)
+			b.WriteString(n)
+			b.WriteString("=/tmp/evil\n")
+		}
+		return b.String()
+	}
+	separateExport := assignments("") + "export " + strings.Join(names, " ") + "\n"
+	for _, tc := range []struct{ rel, content string }{
+		{".env.d/a.env", assignments("export ")},
+		{".env.d/a.env", separateExport},
+		{".fullsend/iteration.env", assignments("export ")},
+		{".fullsend/iteration.env", separateExport},
+		{".env", separateExport},
+	} {
+		f := newEnvDataFixture(t)
+		env := strings.Join(envDataControlLines(f.ws), "\n") + "\nexport KEEP=1\n"
+		if tc.rel == ".env" {
+			env = tc.content + env
+		} else {
+			f.write(t, tc.rel, tc.content)
+		}
+		f.write(t, ".env", env)
+		got, stderr := f.envOf(t)
+		assert.Equal(t, "1", got["KEEP"], "%s: %q", tc.rel, tc.content)
+		for _, n := range names {
+			_, ok := got[n]
+			assert.False(t, ok, "%s from %s reaches the CLI", n, tc.rel)
+			assert.Contains(t, stderr, n+" is not taken from .env", "%s from %s", n, tc.rel)
+		}
+		assert.Contains(t, stderr, filepath.Base(tc.rel))
+	}
+}
+
+// A value holding a NUL byte is dropped with a warning naming the file and
+// line, like every other dropped line; an earlier value of the name stands.
+func TestEnvDataLoad_NulValueWarns(t *testing.T) {
+	f := newEnvDataFixture(t)
+	f.write(t, ".env", "export KEEP=1\nexport A=ok\nexport A='x\x00y'\n"+strings.Join(envDataControlLines(f.ws), "\n")+"\n")
+	f.write(t, ".env.d/n.env", "export B=\"a\x00b\"\n")
+	env, stderr := f.envOf(t)
+	assert.Equal(t, "1", env["KEEP"])
+	assert.Equal(t, "ok", env["A"])
+	_, ok := env["B"]
+	assert.False(t, ok, "B with a NUL byte reaches the CLI")
+	assert.Contains(t, stderr, "line 3: the value of A contains a NUL byte")
+	assert.Contains(t, stderr, "n.env' line 1: the value of B contains a NUL byte")
+	assert.NotContains(t, stderr, "\x00")
+}
+
+// A statement rejected on its first line is skipped to where a shell would
+// end it, so the lines inside its quoted value are not read as assignments.
+func TestEnvDataLoad_RejectedMultiLineStatementSkippedWhole(t *testing.T) {
+	f := newEnvDataFixture(t)
+	f.write(t, ".env", strings.Join([]string{
+		`export X="${UNSET:-a`,
+		`export INSIDE_DQ=1`,
+		`"`,
+		`Y=$(printf '%s' 'b`,
+		`export INSIDE_SQ=1`,
+		`')`,
+		`export Z=${UNSET:-c} # a comment's quote does not open a value`,
+		`export AFTER_COMMENT=1`,
+		`export W=${UNSET:-"\"`,
+		`export INSIDE_ESCAPED=1"}`,
+		`export U=${UNSET:-'never closed}`,
+		`export AFTER_UNTERMINATED=1`,
+		`export KEEP=1`,
+	}, "\n")+"\n")
+	env, stderr := f.envOf(t)
+	for _, name := range []string{"X", "INSIDE_DQ", "Y", "INSIDE_SQ", "Z", "W", "INSIDE_ESCAPED", "U"} {
+		_, ok := env[name]
+		assert.False(t, ok, "%s was taken from .env", name)
+	}
+	assert.Equal(t, "1", env["AFTER_COMMENT"])
+	assert.Equal(t, "1", env["AFTER_UNTERMINATED"], "an unterminated quote falls back to the line end")
+	assert.Equal(t, "1", env["KEEP"])
+	for _, line := range []string{"line 1:", "line 4:", "line 7:", "line 9:", "line 11:"} {
+		assert.Contains(t, stderr, line)
+	}
+	for _, line := range []string{"line 2:", "line 3:", "line 5:", "line 6:", "line 8:", "line 10:", "line 12:"} {
+		assert.NotContains(t, stderr, line)
+	}
+}
+
+// An .env.d directory that exists but cannot be listed, or whose files
+// cannot be examined, fails the launch instead of losing every setting in it.
+func TestEnvDataLoad_UnreadableEnvDirFails(t *testing.T) {
+	for _, mode := range []os.FileMode{0, 0o644} {
+		t.Run(mode.String(), func(t *testing.T) {
+			f := newEnvDataFixture(t)
+			f.write(t, ".env", strings.Join(envDataControlLines(f.ws), "\n")+"\nexport KEEP=1\n")
+			f.write(t, ".env.d/a.env", "export LOST=1\n")
+			dir := filepath.Join(f.ws, ".env.d")
+			require.NoError(t, os.Chmod(dir, mode))
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			if _, err := os.ReadFile(filepath.Join(dir, "a.env")); err == nil {
+				t.Skip("directory stays readable (running as root)")
+			}
+			out, stderr, err := f.load(t, "echo LAUNCHED")
+			require.Error(t, err)
+			assert.NotContains(t, out, "LAUNCHED")
+			assert.Contains(t, stderr, "cannot read")
+			assert.Contains(t, stderr, ".env.d")
+		})
+	}
+}
+
+// -I keeps the working directory and PYTHONPATH off sys.path, so a planted
+// re/ package there is not what the loader imports.
+func TestEnvDataLoad_IgnoresPlantedModules(t *testing.T) {
+	f := newEnvDataFixture(t)
+	f.write(t, ".env", "export KEEP=1\n")
+	plant := t.TempDir()
+	marker := filepath.Join(plant, "imported")
+	require.NoError(t, os.MkdirAll(filepath.Join(plant, "re"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(plant, "re", "__init__.py"),
+		[]byte("open('"+marker+"', 'w').close()\n"), 0o644))
+	out, stderr, err := f.loadIn(t, plant, []string{"PYTHONPATH=" + plant}, `printf '%s' "$KEEP"`)
+	require.NoError(t, err, stderr)
+	assert.Equal(t, "1", out)
+	assert.NoFileExists(t, marker, "the loader imported re from the working directory or PYTHONPATH")
+}
+
+// The loader's python3 comes from the system default PATH when it has one,
+// not from a directory early on the launch PATH.
+func TestEnvDataLoad_PinsPythonFromDefaultPath(t *testing.T) {
+	if err := exec.Command("/bin/sh", "-c", "command -p -v python3").Run(); err != nil {
+		t.Skip("no python3 on the default PATH")
+	}
+	f := newEnvDataFixture(t)
+	f.write(t, ".env", "export KEEP=1\n")
+	early := t.TempDir()
+	marker := filepath.Join(early, "ran")
+	require.NoError(t, os.WriteFile(filepath.Join(early, "python3"), []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755))
+	out, stderr, err := f.loadIn(t, "", []string{"PATH=" + early + ":" + os.Getenv("PATH")}, `printf '%s' "$KEEP"`)
+	require.NoError(t, err, stderr)
+	assert.Equal(t, "1", out)
+	assert.NoFileExists(t, marker, "the launch-PATH python3 parsed .env")
+	assert.Contains(t, envDataPin(), `"$(command -p -v python3 || command -v python3)"`, "an image without a default-PATH python3 still resolves one")
 }
 
 // The fragment pins python3 before reading .env and runs it isolated.

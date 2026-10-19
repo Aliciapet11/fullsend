@@ -13,13 +13,12 @@ import (
 // second integrity pass and the pinned binary never ran.
 //
 // envDataLoad replaces `. .env` in the Claude Code, codex and pi launches. A
-// python3 resolved before anything the agent wrote is consulted (envDataPin,
-// the same `command -v` pin the CLIs use) runs isolated (-I: no PYTHON*
-// variables, no user site, no script directory on sys.path; -S: no site
-// module, so no .pth file runs), parses .env and the files it names, and
-// prints one single-quoted `NAME='value'` line per variable, with `export `
-// in front for the exported ones. The launch shell evals only that output, so
-// no construct from .env executes.
+// python3 resolved before anything the agent wrote is consulted (envDataPin)
+// runs isolated (-I: no PYTHON* variables, no user site, no script or working
+// directory on sys.path; -S: no site module, so no .pth file runs), parses
+// .env and the files it names, and prints one single-quoted `NAME='value'`
+// line per variable, with `export ` in front for the exported ones. The
+// launch shell evals only that output, so no construct from .env executes.
 //
 // The grammar, per statement (a statement ends at a newline; a quoted value
 // may span lines):
@@ -35,9 +34,14 @@ import (
 //     grammar, without control lines.
 //
 // Anything else (command substitution, functions, `.`, `exec`, `unset`,
-// `readonly`, `alias`, `;`-joined commands, other parameter expansion forms)
-// is dropped and reported on stderr by file and line only, never by content,
-// since a dropped line can carry a credential.
+// `readonly`, `alias`, `;`-joined commands such as `FOO=x; export FOO`,
+// `export A=1 B=2`, other parameter expansion forms such as
+// `${NAME:-default}`) is dropped and reported on stderr by file and line
+// only, never by content, since a dropped line can carry a credential. An
+// assignment whose value contains a NUL byte, which the launch shell could
+// not hold, is dropped and reported the same way. A dropped statement whose
+// quotes span lines is skipped to where a shell would end it, so its later
+// lines are not read as statements of their own.
 //
 // A name is exported when it was in the launch environment or is marked by
 // `export`, as in a POSIX shell. Any other assignment is still set as a shell
@@ -51,8 +55,7 @@ const (
 	envDataPythonVar  = "FULLSEND_ENV_PYTHON"
 	envDataExportsVar = "FULLSEND_ENV_EXPORTS"
 	// envDataRunnerPathVar is the read-only variable the runner's PATH capture
-	// line sets. The loader script spells the name out; a test keeps the two
-	// in step.
+	// line sets. envDataLoaderScript takes the name from this constant.
 	envDataRunnerPathVar = "FULLSEND_RUNNER_PATH"
 )
 
@@ -93,16 +96,21 @@ func envDataControlLines(workspace string) []string {
 }
 
 // envDataPin records where python3 is before anything the agent wrote can
-// influence the lookup; see binaryPin.
+// influence the lookup; see binaryPin. It looks on the system default PATH
+// first (`command -p -v`), so a python3 in a directory early on the launch
+// PATH that the agent can write to is not the one that parses .env; an image
+// whose only python3 is off the default PATH still resolves it through the
+// launch PATH, as before.
 func envDataPin() string {
-	return binaryPin(envDataPythonVar, "python3")
+	return binaryPinLookup(envDataPythonVar, "python3", "command -p -v python3 || command -v python3")
 }
 
 // envDataLoad is the POSIX sh fragment that replaces `. envFile`. The
 // assignment's status is the command substitution's, so a loader failure (a
 // missing .env, a missing interpreter) ends the && chain. `eval` is a
 // special builtin and nothing from .env has run, so no function can stand
-// in for it, and it only ever sees the loader's single-quoted export lines.
+// in for it, and it only ever sees the loader's single-quoted
+// `[export ]NAME='value'` lines.
 // extraDrop are names the calling runtime pins read-only before the load.
 func envDataLoad(envFile string, extraDrop ...string) string {
 	return envDataLoadWith(envFile, EnvDataControlLines(), extraDrop)
@@ -125,11 +133,12 @@ func envDataLoadWith(envFile string, control []string, extraDrop []string) strin
 // envDataLoaderScript is the python3 program envDataLoad runs. argv: the .env
 // path, the four control lines, then the space-separated drop names. It
 // prints `[export ]NAME='value'` lines on stdout and exits non-zero, printing
-// nothing, when .env or a file it names (an .env.d file or iteration.env)
-// exists but cannot be read. Indented with tabs: the launch command is
-// checked for double spaces.
-const envDataLoaderScript = `import os, re, sys
+// nothing, when .env, the .env.d directory or a file it names (an .env.d file
+// or iteration.env) exists but cannot be read. Indented with tabs: the launch
+// command is checked for double spaces.
+const envDataLoaderScript = `import os, re, stat, sys
 env_file, cap_line, envd_line, restore_line, iter_line, drop_arg = sys.argv[1:7]
+RUNNER_PATH = "` + envDataRunnerPathVar + `"
 drop = set(drop_arg.split())
 drop_prefixes = tuple(d[:-1] for d in drop if d.endswith("*"))
 envd_dir = os.path.dirname(envd_line.split()[3])
@@ -147,6 +156,9 @@ def taken(name):
 def assign(path, line, name, value):
 	if not taken(name):
 		warn(path, line, "%s is not taken from .env" % name)
+		return
+	if "\0" in value:
+		warn(path, line, "the value of %s contains a NUL byte" % name)
 		return
 	values[name] = value
 	if name not in order:
@@ -223,6 +235,29 @@ def end_of_statement(s, i):
 	if i < len(s) and s[i] != "\n":
 		raise ValueError("trailing text after the assignment")
 	return i
+def skip_statement(s, i, eol):
+	q = None
+	while i < len(s):
+		c = s[i]
+		if q == "'":
+			if c == "'":
+				q = None
+		elif q:
+			if c == "\\":
+				i += 1
+			elif c == "\"":
+				q = None
+		elif c == "\n":
+			return i
+		elif c in "'\"":
+			q = c
+		elif c == "\\":
+			i += 1
+		elif c == "#" and s[i - 1] in " \t;&|()":
+			i = s.find("\n", i)
+			return len(s) if i < 0 else i
+		i += 1
+	return eol if q else len(s)
 def statement(path, line, s, i, eol):
 	j = i
 	export = False
@@ -254,6 +289,18 @@ def statement(path, line, s, i, eol):
 			if n in values and n not in order:
 				order.append(n)
 	return eol
+def is_file(p):
+	try:
+		return stat.S_ISREG(os.stat(p).st_mode)
+	except PermissionError as e:
+		failed.append((p, e))
+	except OSError:
+		pass
+	return False
+def read_included(p):
+	e = read_file(p, False)
+	if e is not None:
+		failed.append((p, e))
 def read_file(path, control):
 	try:
 		with open(path, encoding=sys.getfilesystemencoding(), errors="surrogateescape", newline="") as f:
@@ -273,34 +320,34 @@ def read_file(path, control):
 		if text.startswith("#"):
 			pass
 		elif control and text == cap_line:
-			if "FULLSEND_RUNNER_PATH" not in readonly:
-				assign(path, line, "FULLSEND_RUNNER_PATH", values.get("PATH", ""))
-				readonly.add("FULLSEND_RUNNER_PATH")
+			if RUNNER_PATH not in readonly:
+				assign(path, line, RUNNER_PATH, values.get("PATH", ""))
+				readonly.add(RUNNER_PATH)
 		elif control and text == envd_line:
 			try:
 				names = sorted(os.listdir(envd_dir))
-			except OSError:
+			except (FileNotFoundError, NotADirectoryError):
+				names = []
+			except OSError as e:
+				failed.append((envd_dir, e))
 				names = []
 			for n in names:
 				p = os.path.join(envd_dir, n)
-				if n.endswith(".env") and not n.startswith(".") and os.path.isfile(p):
-					e = read_file(p, False)
-					if e is not None:
-						failed.append((p, e))
+				if n.endswith(".env") and not n.startswith(".") and is_file(p):
+					read_included(p)
 		elif control and text == restore_line:
 			now = values.get("PATH", "")
-			assign(path, line, "PATH", values.get("FULLSEND_RUNNER_PATH", "") + (":" + now if now else ""))
+			assign(path, line, "PATH", values.get(RUNNER_PATH, "") + (":" + now if now else ""))
 			exported.add("PATH")
 		elif control and text == iter_line:
-			if os.path.isfile(iter_file):
-				e = read_file(iter_file, False)
-				if e is not None:
-					failed.append((iter_file, e))
+			if is_file(iter_file):
+				read_included(iter_file)
 		else:
 			try:
 				eol = statement(path, line, s, i, eol)
 			except ValueError as e:
 				warn(path, line, str(e))
+				eol = skip_statement(s, i, eol)
 		i = eol
 	return None
 err = read_file(env_file, True)

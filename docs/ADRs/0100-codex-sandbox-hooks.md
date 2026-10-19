@@ -66,7 +66,7 @@ which is a stronger check than the trust hash it replaces.
 
 > **Implementation note (October 2026):** Since #8498 the Claude Code, codex and pi launches read
 > the agent-writable `.env` as data (a pinned `python3 -I -S` parses it and the launch evals only the
-> `export` lines it prints) instead of sourcing it, so code in `.env` can no longer run before the
+> single-quoted `[export ]NAME='value'` lines it prints) instead of sourcing it, so code in `.env` can no longer run before the
 > launch-time checks finish. The post-`.env` unsets and second guard passes stay as a second layer.
 
 Because the hook scripts and their directory stay agent-writable between iterations — the residue
