@@ -41,8 +41,14 @@ The container keeps **host secrets** out. It is **not a sandbox** against the
 code under test, which has the same access to the checkout as `make test` on
 the host.
 
-- No host environment variables, SSH agent or credential files from outside
-  the checkout enter the container. `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on
+- `ci-local` passes no host environment variables, SSH agent or credential
+  files from outside the checkout into the container. Podman's own
+  configuration still applies, though: the default mounts in `mounts.conf`
+  (on RHEL, the host's subscription certificates under `/run/secrets`) and
+  any `env` or `env_host = true` setting in `containers.conf`. `ci-local`
+  can't turn these off portably: the remote Podman client used on macOS has
+  no `--env-host` flag, and there is no flag to replace the default-mounts
+  file. `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on
   CI. No host proxy settings, which can carry credentials, reach builds or
   containers either. Podman builds and runs with `--http-proxy=false`, so host
   `HTTP(S)_PROXY` values are not copied in. Docker would inject any `proxies`

@@ -51,10 +51,13 @@ Environment:
   CI_LOCAL_DNS     resolvers for the container, space-separated, tried in order
                    (default: the host's own; empty = the engine's own; see README)
 
-Isolation: no host environment variables, SSH agent or credential files from
-outside the checkout enter the container, and no host proxy settings: Podman
-builds and runs with --http-proxy=false, and Docker's ~/.docker/config.json
-proxies are overridden with empty values. Only the checkout (including
+Isolation: ci-local passes no host environment variables, SSH agent or
+credential files from outside the checkout into the container, and no host
+proxy settings: Podman builds and runs with --http-proxy=false, and Docker's
+~/.docker/config.json proxies are overridden with empty values. Podman's own
+configuration still applies: default mounts from mounts.conf (on RHEL, the
+host's subscription certificates under /run/secrets) and any env or env_host
+setting in containers.conf. Only the checkout (including
 gitignored files), its .git directory and cache volumes are mounted,
 read-write. GH_TOKEN/GITHUB_TOKEN are empty, as on CI. This keeps host
 secrets out; it is not a sandbox against the code under test. The download
