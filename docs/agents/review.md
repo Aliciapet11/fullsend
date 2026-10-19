@@ -46,6 +46,10 @@ cancel an in-progress review for that HEAD. If the current HEAD cannot be
 verified, the comment omits retry guidance. Status comments routed to Jira omit
 this GitHub-only guidance.
 
+The reviewed commit comes from the explicit workflow input or the PR event's
+`pull_request.head.sha`; GitHub's generic `GITHUB_SHA` can identify a merge or
+base commit and is not used to decide whether a cancelled review was superseded.
+
 GitHub review submissions, including `commented` reviews with an empty summary,
 continue through normal routing. An empty summary can still accompany
 substantive inline review comments, so custom triggers receive the complete

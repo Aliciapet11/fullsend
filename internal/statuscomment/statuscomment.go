@@ -761,6 +761,8 @@ type ReconcileOptions struct {
 // agentDescription is used as the heading for a synthesized "Interrupted"
 // comment (e.g. "Code" for the code agent), so operators can tell which
 // agent failed when multiple agents run against the same issue/PR.
+// options.CancellationGuidance is appended to cancelled comments when set;
+// it has no effect on other outcomes.
 //
 // This function is designed to be called from an out-of-process cleanup
 // mechanism (e.g., a GitHub Actions post-job step) that runs even when the

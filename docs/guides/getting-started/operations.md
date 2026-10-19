@@ -246,7 +246,7 @@ The composite action accepts seven optional inputs for status notifications and 
 | `status-comment-id` | ID of the comment that triggered a slash-command run; when set, reactions target that comment instead of the issue/PR |
 | `mint-url` | URL of the token mint service used to obtain fresh tokens for posting comments |
 | `role` | Mint role selected by dispatch, used to reconcile an interrupted run before the agent reports its resolved role (default: empty) |
-| `pr-head-sha` | PR head commit SHA for per-repo workflows whose event payload does not include it (default: empty) |
+| `pr-head-sha` | PR head commit SHA for per-repo workflows whose event payload does not include it; takes precedence over native PR and workflow dispatch event extraction (default: empty) |
 
 Reusable workflows pass the inputs they need automatically.
 

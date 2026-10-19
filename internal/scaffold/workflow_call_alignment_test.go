@@ -1286,12 +1286,16 @@ func TestActionReconcileStatusSupportsOlderCLIs(t *testing.T) {
 	}
 	require.NotEmpty(t, script)
 
-	run := func(t *testing.T, supportsReviewRun bool) []string {
+	run := func(t *testing.T, supportsReviewRun bool, eventName, eventJSON, prHeadInput string) []string {
 		t.Helper()
 		dir := t.TempDir()
 		bin := filepath.Join(dir, "bin")
 		require.NoError(t, os.Mkdir(bin, 0o755))
 		outputPath := filepath.Join(dir, "reconcile-args")
+		eventPath := filepath.Join(dir, "event.json")
+		if eventJSON != "" {
+			require.NoError(t, os.WriteFile(eventPath, []byte(eventJSON), 0o644))
+		}
 
 		help := ":"
 		if supportsReviewRun {
@@ -1318,11 +1322,12 @@ func TestActionReconcileStatusSupportsOlderCLIs(t *testing.T) {
 			"HARNESS_ROLE=",
 			"SUPPLIED_ROLE=",
 			"WAS_SKIPPED=false",
-			"PR_HEAD_SHA_INPUT=deadbeef",
+			"PR_HEAD_SHA_INPUT="+prHeadInput,
 			"FULLSEND_DIR="+dir,
 			"GITHUB_WORKSPACE="+dir,
-			"GITHUB_SHA=deadbeef",
-			"GITHUB_EVENT_PATH="+filepath.Join(dir, "event.json"),
+			"GITHUB_SHA=merge-or-base",
+			"GITHUB_EVENT_NAME="+eventName,
+			"GITHUB_EVENT_PATH="+eventPath,
 		)
 		result, err := cmd.CombinedOutput()
 		require.NoError(t, err, "%s", result)
@@ -1331,8 +1336,24 @@ func TestActionReconcileStatusSupportsOlderCLIs(t *testing.T) {
 		return strings.Fields(string(args))
 	}
 
-	assert.Contains(t, run(t, true), "--review-run", "a supporting CLI must receive --review-run even when help continues after the flag")
-	assert.NotContains(t, run(t, false), "--review-run", "older CLIs must still reconcile without the unknown flag")
+	assert.Contains(t, run(t, true, "workflow_dispatch", "", "explicit-head"), "--review-run", "a supporting CLI must receive --review-run even when help continues after the flag")
+	assert.NotContains(t, run(t, false, "workflow_dispatch", "", "explicit-head"), "--review-run", "older CLIs must still reconcile without the unknown flag")
+
+	nativeEvent := `{"pull_request":{"number":7,"head":{"sha":"native-head"}}}`
+	assert.Contains(t, run(t, true, "pull_request", nativeEvent, "explicit-head"), "explicit-head",
+		"the workflow input takes precedence over the native event")
+	for _, eventName := range []string{"pull_request", "pull_request_target"} {
+		t.Run(eventName, func(t *testing.T) {
+			args := run(t, true, eventName, nativeEvent, "")
+			assert.Contains(t, args, "native-head")
+			assert.NotContains(t, args, "merge-or-base")
+		})
+	}
+	wrappedEvent := `{"inputs":{"event_payload":"{\"pull_request\":{\"head\":{\"sha\":\"wrapped-head\"}}}"}}`
+	assert.Contains(t, run(t, true, "workflow_dispatch", wrappedEvent, ""), "wrapped-head",
+		"workflow dispatch continues to extract the embedded PR head")
+	assert.NotContains(t, run(t, true, "pull_request", `{"pull_request":{"number":7}}`, ""), "--sha",
+		"an unknown PR head must not be compared with the live HEAD")
 }
 
 // TestReusableDispatchPRHeadSHAPassthrough validates that agent jobs in

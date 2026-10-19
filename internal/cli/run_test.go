@@ -4036,6 +4036,28 @@ func TestPRHeadSHAFromEventPath_NoInputs(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestPRHeadSHAFromEventPath_NativePullRequest(t *testing.T) {
+	eventJSON := `{"action":"synchronize","pull_request":{"number":7,"head":{"sha":"native-head"}}}`
+	f := filepath.Join(t.TempDir(), "event.json")
+	require.NoError(t, os.WriteFile(f, []byte(eventJSON), 0o644))
+
+	assert.Equal(t, "native-head", prHeadSHAFromEventPath(f))
+}
+
+func TestReviewedPRHeadSHA_UsesOnlyVerifiedHead(t *testing.T) {
+	eventFile := filepath.Join(t.TempDir(), "event.json")
+	require.NoError(t, os.WriteFile(eventFile, []byte(`{"pull_request":{"number":7}}`), 0o644))
+	t.Setenv("GITHUB_EVENT_PATH", eventFile)
+	t.Setenv("PR_HEAD_SHA", "")
+	t.Setenv("GITHUB_SHA", "merge-or-base")
+
+	assert.Empty(t, reviewedPRHeadSHA(), "GITHUB_SHA is not a verified PR head")
+	assert.Equal(t, "merge-or-base", githubStatusSHA(), "status display retains its fallback")
+
+	t.Setenv("PR_HEAD_SHA", "explicit-head")
+	assert.Equal(t, "explicit-head", reviewedPRHeadSHA())
+}
+
 // --- detectForgePlatform tests ---
 
 func TestDetectForgePlatform_ExplicitFlag(t *testing.T) {

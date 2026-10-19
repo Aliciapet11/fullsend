@@ -56,7 +56,8 @@ inputs:
     description: >-
       PR head commit SHA, passed explicitly by per-repo (workflow_call)
       callers where GITHUB_EVENT_PATH lacks the dispatched event_payload
-      wrapper. Takes precedence over GITHUB_EVENT_PATH extraction.
+      wrapper. Takes precedence over native pull_request and
+      workflow_dispatch event extraction.
     default: ""
   gcp_wif_provider:
     description: Workload Identity Federation provider resource name, used only when the selected agent resolves to Vertex inference.
@@ -602,14 +603,16 @@ runs:
 
         # Resolve the correct commit SHA. Priority order:
         # 1. Explicit pr-head-sha input (per-repo workflow_call callers)
-        # 2. Extracted from .inputs.event_payload (workflow_dispatch payload)
-        # 3. GITHUB_SHA fallback
+        # 2. Native pull_request.head.sha
+        # 3. Extracted from .inputs.event_payload (workflow_dispatch payload)
+        # 4. GITHUB_SHA fallback, except for cancelled built-in reviews
         COMMIT_SHA=""
         if [[ -n "${PR_HEAD_SHA_INPUT}" ]]; then
           COMMIT_SHA="${PR_HEAD_SHA_INPUT}"
         elif [[ -f "${GITHUB_EVENT_PATH}" ]]; then
+          COMMIT_SHA=$(jq -r '.pull_request.head.sha // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null) || true
           EVENT_PAYLOAD_RAW=$(jq -r '.inputs.event_payload // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null) || true
-          if [[ -n "${EVENT_PAYLOAD_RAW}" ]]; then
+          if [[ -z "${COMMIT_SHA}" && -n "${EVENT_PAYLOAD_RAW}" ]]; then
             HAS_PR=$(printf '%s' "${EVENT_PAYLOAD_RAW}" | jq -r '.pull_request // empty' 2>/dev/null) || true
             if [[ -n "${HAS_PR}" && "${HAS_PR}" != "null" ]]; then
               COMMIT_SHA=$(printf '%s' "${EVENT_PAYLOAD_RAW}" | jq -r '.pull_request.head.sha // empty' 2>/dev/null) || true
@@ -620,7 +623,11 @@ runs:
           fi
         fi
         if [[ -z "${COMMIT_SHA}" ]]; then
-          COMMIT_SHA="${GITHUB_SHA}"
+          if [[ "${AGENT}" == "review" && "${JOB_STATUS}" == "cancelled" ]]; then
+            echo "::warning::PR head SHA unavailable; omitting cancellation review guidance"
+          else
+            COMMIT_SHA="${GITHUB_SHA}"
+          fi
         fi
 
         FULLSEND_DIR="${FULLSEND_DIR:-${GITHUB_WORKSPACE}}"

@@ -47,6 +47,7 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/normevent"
 	"github.com/fullsend-ai/fullsend/internal/pluginformat"
 	"github.com/fullsend-ai/fullsend/internal/prescript"
+	"github.com/fullsend-ai/fullsend/internal/repos"
 	"github.com/fullsend-ai/fullsend/internal/resolve"
 	agentruntime "github.com/fullsend-ai/fullsend/internal/runtime"
 	"github.com/fullsend-ai/fullsend/internal/sandbox"
@@ -1358,7 +1359,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 				// is fully populated by now (after all iterations).
 				notifier.SetRunInfo(runInfoFor(aggMetrics, h.Effort))
 				finalizeTimeout := 15 * time.Second
-				if status == "cancelled" && forgePlatform == "github" {
+				if status == "cancelled" && forgePlatform == repos.ForgeGitHub {
 					// The priority defer registered before the agent loop starts this
 					// work before run-level teardown. Keep it bounded as well; the
 					// always() reconciliation step remains the hard-kill fallback.
@@ -1379,7 +1380,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 						var guidance string
 						guidance, err = resolveBuiltInGitHubReviewCancellationGuidance(
 							headCtx, client, agentName, forgePlatform, sOpts.trackerSource,
-							sOpts.statusRepo, sOpts.statusNum, githubStatusSHA(),
+							sOpts.statusRepo, sOpts.statusNum, reviewedPRHeadSHA(),
 						)
 						notifier.SetCancellationGuidance(guidance)
 					}
@@ -6370,12 +6371,16 @@ func setupStatusNotifier(fullsendDir string, role string, forgePlatform string, 
 // agent, not the custom one. Jira-routed comments cannot invoke that command,
 // even when the code-hosting forge is GitHub.
 func builtInGitHubReview(agentName, forgePlatform, trackerSource string) bool {
-	return agentName == "review" && forgePlatform == "github" && trackerSource != "jira"
+	return agentName == "review" && forgePlatform == repos.ForgeGitHub && trackerSource != "jira"
 }
 
+// builtInGitHubReviewRetryGuidance tells readers how to retry a cancelled review of the current PR head.
 const builtInGitHubReviewRetryGuidance = "**Automated review did not complete for this commit. Check the latest review status before merging. If no review is queued or running, comment `/fs-review` to retry.**"
+
+// builtInGitHubReviewSupersededGuidance identifies a review cancelled after a newer PR head appeared.
 const builtInGitHubReviewSupersededGuidance = "**This review was superseded by a newer commit. Check the current pull request HEAD's review status before merging.**"
 
+// resolveBuiltInGitHubReviewCancellationGuidance compares a verified reviewed SHA with the current PR head.
 func resolveBuiltInGitHubReviewCancellationGuidance(
 	ctx context.Context,
 	client forge.Client,
@@ -6442,20 +6447,24 @@ func setupStatusNotifierGitHub(notifyCfg config.StatusNotificationConfig, owner,
 	return n, nil
 }
 
-func githubStatusSHA() string {
-	sha := os.Getenv("GITHUB_SHA")
-	// Prefer explicit PR_HEAD_SHA (set by per-repo workflow_call callers
-	// where GITHUB_EVENT_PATH lacks the dispatched event_payload wrapper).
-	// Fall back to extracting from the workflow_dispatch event payload.
+// reviewedPRHeadSHA returns only an explicit or event-derived PR head.
+// GITHUB_SHA may identify a merge or base commit on native PR events.
+func reviewedPRHeadSHA() string {
 	if prSHA := os.Getenv("PR_HEAD_SHA"); prSHA != "" {
 		return prSHA
 	}
-	if prSHA := prHeadSHAFromEventPath(os.Getenv("GITHUB_EVENT_PATH")); prSHA != "" {
-		return prSHA
-	}
-	return sha
+	return prHeadSHAFromEventPath(os.Getenv("GITHUB_EVENT_PATH"))
 }
 
+// githubStatusSHA returns a PR head when available, or GITHUB_SHA for status display.
+func githubStatusSHA() string {
+	if prSHA := reviewedPRHeadSHA(); prSHA != "" {
+		return prSHA
+	}
+	return os.Getenv("GITHUB_SHA")
+}
+
+// newStatusGitHubForgeClient mints a write-scoped token for status updates and returns a GitHub forge client.
 func newStatusGitHubForgeClient(ctx context.Context, mintURL, role, repo string) (forge.Client, error) {
 	if mintURL == "" {
 		mintURL = os.Getenv("FULLSEND_MINT_URL")
@@ -6576,10 +6585,9 @@ func extractMapString(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// prHeadSHAFromEventPath extracts pull_request.head.sha from the event
-// payload embedded in a workflow_dispatch event file. For workflow_dispatch
-// events, the file contains {"inputs": {"event_payload": "<json-string>"}}.
-// Returns empty string if the file is unreadable or the field is absent.
+// prHeadSHAFromEventPath extracts pull_request.head.sha from a native PR event
+// or from the event_payload JSON string embedded in a workflow_dispatch event.
+// It returns empty if the file is unreadable or the field is absent.
 func prHeadSHAFromEventPath(path string) string {
 	if path == "" {
 		return ""
@@ -6588,13 +6596,23 @@ func prHeadSHAFromEventPath(path string) string {
 	if err != nil {
 		return ""
 	}
-	// The workflow_dispatch event has inputs.event_payload as a JSON string.
 	var event struct {
+		PullRequest struct {
+			Head struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
+		} `json:"pull_request"`
 		Inputs struct {
 			EventPayload string `json:"event_payload"`
 		} `json:"inputs"`
 	}
-	if err := json.Unmarshal(data, &event); err != nil || event.Inputs.EventPayload == "" {
+	if err := json.Unmarshal(data, &event); err != nil {
+		return ""
+	}
+	if event.PullRequest.Head.SHA != "" {
+		return event.PullRequest.Head.SHA
+	}
+	if event.Inputs.EventPayload == "" {
 		return ""
 	}
 	var payload struct {
