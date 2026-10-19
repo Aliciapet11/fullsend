@@ -114,8 +114,10 @@ func TestCreateRepo(t *testing.T) {
 
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
+			"id":             int64(4242),
 			"name":           "new-repo",
 			"full_name":      "myorg/new-repo",
+			"description":    "A repo",
 			"default_branch": "main",
 			"private":        true,
 		})
@@ -125,9 +127,29 @@ func TestCreateRepo(t *testing.T) {
 	client := newTestClient(t, srv)
 	repo, err := client.CreateRepo(context.Background(), "myorg", "new-repo", "A repo", true)
 	require.NoError(t, err)
+	assert.Equal(t, int64(4242), repo.ID)
+	assert.Equal(t, "A repo", repo.Description)
 	assert.Equal(t, "new-repo", repo.Name)
 	assert.Equal(t, "myorg/new-repo", repo.FullName)
 	assert.True(t, repo.Private)
+}
+
+func TestGetRepo_ReportsIDAndDescription(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/myorg/slot", r.URL.Path)
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":          int64(99),
+			"name":        "slot",
+			"full_name":   "myorg/slot",
+			"description": "lease marker",
+		})
+	}))
+	defer srv.Close()
+
+	repo, err := newTestClient(t, srv).GetRepo(context.Background(), "myorg", "slot")
+	require.NoError(t, err)
+	assert.Equal(t, int64(99), repo.ID)
+	assert.Equal(t, "lease marker", repo.Description)
 }
 
 func TestDeleteRepo(t *testing.T) {
