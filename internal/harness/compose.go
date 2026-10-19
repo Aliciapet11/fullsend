@@ -202,6 +202,9 @@ func LoadWithBase(ctx context.Context, path string, opts ComposeOpts) (*Harness,
 		if err := ValidateOverlayRunnerSecretRefs(child.Overlays, opts.RunnerSecretNames); err != nil {
 			return nil, nil, fmt.Errorf("invalid harness: %w", err)
 		}
+		// Capture forge presence before ResolveForge nils the map so Lint()
+		// can emit the forge deprecation warning; LoadWithOpts does the same.
+		child.hadForgeBeforeResolve = child.Forge != nil
 		if err := child.ResolveForge(opts.ForgePlatform); err != nil {
 			return nil, nil, fmt.Errorf("resolving forge config: %w", err)
 		}
@@ -321,6 +324,11 @@ func LoadWithBase(ctx context.Context, path string, opts ComposeOpts) (*Harness,
 	}
 	if err := ValidateOverlayRunnerSecretRefs(child.Overlays, opts.RunnerSecretNames); err != nil {
 		return nil, nil, fmt.Errorf("invalid harness: %w", err)
+	}
+	// mergeBaseIntoChild already propagated the base chain's marker; capture
+	// the child's own forge presence before ResolveForge nils the map.
+	if child.Forge != nil {
+		child.hadForgeBeforeResolve = true
 	}
 	if err := child.ResolveForge(opts.ForgePlatform); err != nil {
 		return nil, nil, fmt.Errorf("resolving forge config: %w", err)
@@ -557,6 +565,13 @@ func loadBaseChain(
 // used by a child that runs on github only). The non-matching platform's
 // config is simply discarded when the forge map is niled.
 func resolveBaseForgeAndOverlays(base *Harness, opts ComposeOpts) error {
+	// Capture forge presence before the map is niled below so the
+	// deprecation marker survives for Lint(); mergeBaseIntoChild propagates
+	// it up the chain. OR semantics: an ancestor's marker may already be
+	// set via the recursive merge in loadBaseChain.
+	if base.Forge != nil {
+		base.hadForgeBeforeResolve = true
+	}
 	// Validate forge and overlays before resolving. Validation must run
 	// while both are still present so mutual-exclusion checks fire.
 	if base.Forge != nil {
@@ -723,6 +738,13 @@ func mergeBaseIntoChild(base, child *Harness) {
 	// Enforce precondition: base must be flat (forge/overlays resolved).
 	if base.Forge != nil || base.Overlays != nil {
 		panic("mergeBaseIntoChild: base.Forge and base.Overlays must be nil (call resolveBaseForgeAndOverlays first)")
+	}
+
+	// Propagate the forge deprecation marker: the base chain's layers had
+	// their forge maps consumed by resolveBaseForgeAndOverlays, so the
+	// marker is the only trace left for Lint().
+	if base.hadForgeBeforeResolve {
+		child.hadForgeBeforeResolve = true
 	}
 
 	// Scalars: child overrides if non-zero

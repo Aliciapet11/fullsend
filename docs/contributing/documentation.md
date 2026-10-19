@@ -167,8 +167,8 @@ The `admin` command group's `uninstall`/`analyze`/`enable`/`disable` subcommands
 
 ## Minor commands
 
-The commands below have lighter documentation footprints. Apply the general `grep` rule when changing them:
-
-`dispatch`, `scan`, `lock`, `poll`, `fetch-skill`, `fetch-review-threads`, `post-review`, `post-comment`, `reconcile-status`, `resolve-mr-source`, `check-protected-branch`
-
-The most comprehensive single reference for all commands (including minor ones) is `docs/guides/dev/cli-internals.md`, which documents the full command tree with flags.
+Commands without a subsection above have lighter documentation footprints.
+Apply the general `grep` rule when changing them. The comprehensive single
+reference for all commands (including minor ones) is
+`docs/guides/dev/cli-internals.md`, which documents the full command tree
+with flags.

@@ -3,6 +3,7 @@ package agentnew
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/fullsend-ai/fullsend/internal/harness"
@@ -15,7 +16,27 @@ func loadAndCheck(t *testing.T, dir, name string) ([]harness.Diagnostic, error) 
 	if err != nil {
 		return nil, err
 	}
-	return harness.CheckGenerated(h, dir)
+	diags, err := harness.CheckGenerated(h, dir)
+	return ignoreIssueURLDeprecation(diags), err
+}
+
+// ignoreIssueURLDeprecation drops exactly the GITHUB_ISSUE_URL deprecation
+// warning on the scaffold's env maps. The generator still emits
+// ISSUE_URL: ${GITHUB_ISSUE_URL} until the template migrates to
+// FULLSEND_WORK_ITEM_URL (follow-up to #6610); until then, generated-tree
+// tests exempt this one diagnostic and nothing else — in particular,
+// error-level diagnostics always survive.
+func ignoreIssueURLDeprecation(diags []harness.Diagnostic) []harness.Diagnostic {
+	kept := make([]harness.Diagnostic, 0, len(diags))
+	for _, d := range diags {
+		if d.Severity == harness.SeverityWarning &&
+			(d.Field == "env.runner" || d.Field == "env.sandbox") &&
+			strings.HasPrefix(d.Message, harness.DeprecatedIssueURLWarning) {
+			continue
+		}
+		kept = append(kept, d)
+	}
+	return kept
 }
 
 func generateInto(t *testing.T, dir string, opts Options) {
@@ -111,5 +132,28 @@ func TestCheckGeneratedCatchesMissingSchema(t *testing.T) {
 	}
 	if _, err := loadAndCheck(t, dir, "lint-docs"); err == nil {
 		t.Fatal("deleting the schema was not detected")
+	}
+}
+
+// TestIgnoreIssueURLDeprecationKeepsOtherDiagnostics pins the filter's
+// narrowness: only the scaffold's known GITHUB_ISSUE_URL deprecation warning
+// on env.runner/env.sandbox is dropped. Error-level diagnostics — even ones
+// mentioning GITHUB_ISSUE_URL in their message — and warnings on other
+// fields survive.
+func TestIgnoreIssueURLDeprecationKeepsOtherDiagnostics(t *testing.T) {
+	diags := []harness.Diagnostic{
+		{Severity: harness.SeverityWarning, Field: "env.runner", Message: harness.DeprecatedIssueURLWarning + ` (entry "ISSUE_URL")`},
+		{Severity: harness.SeverityWarning, Field: "env.sandbox", Message: harness.DeprecatedIssueURLWarning + ` (entry "GITHUB_ISSUE_URL")`},
+		{Severity: harness.SeverityError, Field: "validation_loop.preflight_check", Message: `value "GITHUB_ISSUE_URL.sh" looks like a script path`},
+		{Severity: harness.SeverityWarning, Field: "runner_env", Message: harness.DeprecatedIssueURLWarning + ` (entry "GITHUB_ISSUE_URL")`},
+	}
+	kept := ignoreIssueURLDeprecation(diags)
+	if len(kept) != 2 {
+		t.Fatalf("kept %d diagnostics, want 2: %v", len(kept), kept)
+	}
+	for _, d := range kept {
+		if d.Severity != harness.SeverityError && d.Field != "runner_env" {
+			t.Errorf("unexpectedly kept diagnostic: %v", d)
+		}
 	}
 }
