@@ -142,11 +142,12 @@ depend on the process cwd.
 
 A map from model spec to
 `{requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, cost_usd}`.
-On `pi` the key is the pi model spec (`anthropic-vertex/claude-opus-4-6`); on `codex` it is the bare
-OpenAI id (`gpt-5.6-luna`). It exists because a sub-agent's tokens never appear in the parent's
+On `pi` the key is the pi model spec (`anthropic-vertex/claude-opus-4-6`); on `codex` it is the
+model id codex ran (`gpt-5.6-luna`, or the id after `gateway/`). It exists because a sub-agent's tokens never appear in the parent's
 stream: a pi sub-agent is a separate `pi` process, and a codex sub-agent is a separate thread whose
 usage codex records only in that thread's rollout. Without it `total_cost_usd` would grow with no
-way to attribute it on pi, and child tokens would be missing from the totals on codex.
+way to attribute it on pi, and the child tokens the runner adds to the totals on codex could not be
+attributed to a model.
 
 On `claude` the key is the model id Claude Code reports (`claude-haiku-4-5@20251001`), with one
 entry per model that ran, sub-agents included. The token totals come from the result event's
@@ -176,10 +177,11 @@ differences in the last bullet.
   at all; its usage is bucketed there rather than dropped. A dispatch rejected *before* a model was
   resolved writes no record, so it never reaches the breakdown.
 - **On codex.** `cost_usd` is `0` in every entry: codex reports no dollar cost, so compare tokens
-  there. `requests` counts one per child thread that reported usage; `wait`, `send_input` and
-  `close_agent` calls add none, and a child that errored before its first response has no usage
-  and adds no `requests`. A codex run that is cancelled or times out reports the parent's tokens
-  only.
+  there. `requests` counts one per child rollout that reported usage (codex writes one per thread);
+  `wait`, `send_input` and `close_agent` calls add none, and a child that errored before its first
+  response has no usage and adds no `requests`. A codex iteration that exits non-zero, after a
+  failed or interrupted turn, a cancel or a timeout, still counts what its children recorded: codex
+  writes a child's usage as each response completes.
 
 ## Budget and deadline
 

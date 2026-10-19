@@ -659,15 +659,18 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 			r.ConfigDir())
 	}
 
-	// Children are separate threads whose tokens never reached the stream
-	// just parsed; their rollouts are the only record. Read after any exit
-	// 0, even one the stream reports as an error below; a killed, cancelled
-	// or timed-out iteration exits non-zero and reports the parent's tokens
-	// only. A read failure costs the breakdown, not the iteration.
-	if exitCode == 0 && (digests.delegating() || len(childIDs.IDs) > 0) {
+	// The fold runs whatever the exit code. The parent's entry goes into the
+	// breakdown, so a retry keeps per_model_usage summing to the totals, and
+	// the children's rollouts are read: they are separate threads whose
+	// tokens never reached the stream just parsed, and codex writes a
+	// child's usage record as each response completes, so a failed,
+	// interrupted, cancelled or timed-out iteration keeps what its children
+	// recorded. A read failure costs the children's tokens, not the
+	// iteration.
+	if digests.delegating() || len(childIDs.IDs) > 0 {
 		n, ferr := r.foldCodexChildUsage(params.SandboxName, childIDs.IDs, metrics)
 		if ferr != nil {
-			printer.StepWarn("Could not read the sub-agent usage: " + sanitizeOutput(ferr.Error()))
+			printer.StepWarn("Sub-agent usage not fully counted: " + redactSummary(sanitizeOutput(ferr.Error())))
 		}
 		if n > 0 {
 			printer.StepInfo(fmt.Sprintf("%d sub-agent thread(s) folded into the run metrics", n))
