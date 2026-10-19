@@ -12,11 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// piEnvLoad and codexEnvLoad are the .env reads the pi and codex launches
-// emit where they used to source the file.
+// piEnvLoad, codexEnvLoad and openCodeEnvLoad are the .env reads the pi,
+// codex and OpenCode launches emit where they used to source the file.
 var (
-	piEnvLoad    = envDataLoad(sandbox.SandboxWorkspace+"/.env", piBinaryVar)
-	codexEnvLoad = envDataLoad(sandbox.SandboxWorkspace+"/.env", codexBinaryVar, codexPathVar)
+	piEnvLoad       = envDataLoad(sandbox.SandboxWorkspace+"/.env", piBinaryVar)
+	codexEnvLoad    = envDataLoad(sandbox.SandboxWorkspace+"/.env", codexBinaryVar, codexPathVar)
+	openCodeEnvLoad = envDataLoad(sandbox.SandboxWorkspace+"/.env", openCodeEnvDataDrop...)
 )
 
 // envDataFixture is a temporary workspace with a .env, an .env.d directory
@@ -661,6 +662,12 @@ func TestEnvDataPin_TrustedPathIsPhysicalAndIsolated(t *testing.T) {
 		assert.True(t, strings.HasPrefix(entry, "/"), "a trusted PATH entry is not absolute: %q in %q", entry, out)
 	}
 	assert.NotContains(t, string(out), "x:.")
+}
+
+// The runner's in-sandbox probes read .env with the launch loader and drop
+// only the shared names: the probe shell pins nothing read-only (#8574).
+func TestEnvDataLoad_ProbeFragment(t *testing.T) {
+	assert.Equal(t, envDataLoad("/sandbox/workspace/.env"), EnvDataLoad("/sandbox/workspace/.env"))
 }
 
 // The fragment pins python3 before reading .env and runs it isolated.

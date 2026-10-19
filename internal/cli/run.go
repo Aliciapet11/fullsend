@@ -5698,15 +5698,17 @@ func buildScanContextCommand(repoDir, traceID string) string {
 	sort.Strings(inames) // deterministic ordering
 	inameExpr := strings.Join(inames, " -o ")
 
-	// Source .env for the run's environment. The scanner is the binary
+	// Read .env as data for the run's environment, as the launch does
+	// (EnvDataLoad, #8574): no .env or .env.d line runs as shell, so none
+	// can stand in for find or the scan. The scanner is the binary
 	// bootstrapCommon uploaded, named by its absolute path so the version
 	// that runs matches the runner whatever PATH .env ends up with.
 	envFile := sandbox.SandboxWorkspace + "/.env"
 	scanner := sandbox.SandboxWorkspace + "/bin/fullsend"
 
 	return fmt.Sprintf(
-		". %s && FULLSEND_TRACE_ID='%s' find '%s' -maxdepth %d -type f \\( %s \\) -exec %s scan context {} +",
-		envFile, traceID, escapedDir, maxContextScanDepth, inameExpr, scanner,
+		"%s && FULLSEND_TRACE_ID='%s' find '%s' -maxdepth %d -type f \\( %s \\) -exec %s scan context {} +",
+		agentruntime.EnvDataLoad(envFile), traceID, escapedDir, maxContextScanDepth, inameExpr, scanner,
 	)
 }
 

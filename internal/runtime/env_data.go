@@ -12,8 +12,11 @@ import (
 // could rewrite a hook file and `exec` the CLI, so the later unsets, the
 // second integrity pass and the pinned binary never ran.
 //
-// envDataLoad replaces `. .env` in the Claude Code, codex and pi launches. A
-// python3 resolved before anything the agent wrote is consulted (envDataPin)
+// envDataLoad replaces `. .env` in the Claude Code, codex, pi and OpenCode
+// launches, and in the runner's in-sandbox probes that read the run's
+// environment (EnvDataLoad, #8574), so a probe sees the values the launch
+// does and no .env or .env.d line runs as shell anywhere the runner reads it.
+// A python3 resolved before anything the agent wrote is consulted (envDataPin)
 // runs isolated (-I: no PYTHON* variables, no user site, no script or working
 // directory on sys.path; -S: no site module, so no .pth file runs), parses
 // .env and the files it names, and prints one single-quoted `NAME='value'`
@@ -166,6 +169,14 @@ func envDataPin() string {
 // extraDrop are names the calling runtime pins read-only before the load.
 func envDataLoad(envFile string, extraDrop ...string) string {
 	return envDataLoadWith(envFile, EnvDataControlLines(), extraDrop)
+}
+
+// EnvDataLoad is envDataLoad for the runner's in-sandbox probes in
+// internal/cli (the pre-agent context scan and the GitHub preflight), which
+// read the run's environment from .env before they run a command (#8574).
+// The probe shell pins nothing read-only, so no extra names are dropped.
+func EnvDataLoad(envFile string) string {
+	return envDataLoad(envFile)
 }
 
 // envDataLoadWith is envDataLoad with the control lines given, so tests can
