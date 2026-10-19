@@ -72,11 +72,13 @@ const (
 // pool has no eligible capacity. Overridden in tests.
 var slotClaimPoll = 15 * time.Second
 
-// claimCreateTimeout bounds one CreateRepo call made for a claim. The
-// live client retries 429 and rate-limit 403 responses with backoff for
-// minutes before surfacing a rate-limit error, which would keep a claim
-// pinned to a limited org; a create that has not finished by then marks
-// the org as backed off instead. Overridden in tests.
+// claimCreateTimeout bounds each API request a claim makes: the create,
+// the org listing, and the ownership lookup. The live client retries 429
+// and rate-limit 403 responses with backoff for minutes before surfacing a
+// rate-limit error, which would keep a claim pinned to a limited org; a
+// request that has not finished by then marks the org as backed off
+// instead, for the Retry-After wait the client was honouring when known.
+// Overridden in tests.
 var claimCreateTimeout = 30 * time.Second
 
 // ErrPoolCapacityExhausted reports that no slot could be claimed in a
@@ -376,7 +378,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			case err == nil:
 			case ctx.Err() != nil:
 				return Slot{}, nil, fmt.Errorf("claiming pool slot: %w", ctx.Err())
-			case gh.IsRateLimitError(err) || isDeniedError(err):
+			case isBackoffError(err) || isDeniedError(err):
 				a.recordOrgError(slot, client, err, capErr)
 				continue
 			default:
@@ -418,10 +420,17 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 
 		switch {
 		case forge.IsAlreadyExists(err):
-			if l, ours := a.findOwn(ctx, client, slot, desc); ours {
+			l, ours, ownErr := a.findOwn(ctx, client, slot, desc)
+			if ours {
 				a.logf("[slots] %s already existed after our create; adopting it", slot)
 				a.recordLease(slot, l)
 				return slot, client, nil
+			}
+			if ownErr != nil && isBackoffError(ownErr) {
+				// The ownership lookup was throttled or timed out: move on
+				// to other orgs instead of probing this one again.
+				a.recordOrgError(slot, client, ownErr, capErr)
+				break
 			}
 			capErr.Occupied++
 		case ctx.Err() != nil:
@@ -430,10 +439,16 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
 		case timedOut:
 			// The create may have landed before the deadline cut it off.
-			if l, ours := a.findOwn(ctx, client, slot, desc); ours {
+			l, ours, ownErr := a.findOwn(ctx, client, slot, desc)
+			if ours {
 				a.logf("[slots] %s was created despite create timeout; adopting it", slot)
 				a.recordLease(slot, l)
 				return slot, client, nil
+			}
+			if ownErr != nil && isBackoffError(ownErr) {
+				// Honour a rate-limit deadline the lookup observed too;
+				// the longer window wins.
+				a.blockOrg(slot.Org, client, ownErr)
 			}
 			until := a.blockOrg(slot.Org, client, err)
 			a.logf("[slots] creating %s did not finish within %v, backing off %s until %s: %v",
@@ -462,6 +477,13 @@ func (a *slotAllocator) recordOrgError(slot Slot, client forge.Client, err error
 		until := a.blockOrg(slot.Org, client, err)
 		a.logf("[slots] %s rate-limited until %s: %v", slot.Org, until.UTC().Format(time.RFC3339), err)
 		capErr.RateLimited[slot.Org] = until
+	case errors.Is(err, context.DeadlineExceeded):
+		// A request bounded by claimCreateTimeout did not finish: the org
+		// is slow or throttling with no deadline we could read.
+		until := a.blockOrg(slot.Org, client, err)
+		a.logf("[slots] %s request did not finish within %v, backing off until %s: %v",
+			slot.Org, claimCreateTimeout, until.UTC().Format(time.RFC3339), err)
+		capErr.RateLimited[slot.Org] = until
 	case isDeniedError(err):
 		a.logf("[slots] %s denied, skipping org: %v", slot, err)
 		capErr.Denied[slot.Org] = err
@@ -475,7 +497,9 @@ func (a *slotAllocator) recordOrgError(slot Slot, client forge.Client, err error
 // repositories currently in org. It is a hint only: archived repos and
 // forks are not listed, so a create can still report "already exists".
 func (a *slotAllocator) listOccupied(ctx context.Context, client forge.Client, org string) (map[string]bool, error) {
-	repos, err := client.ListOrgRepos(ctx, org, true)
+	reqCtx, cancel := context.WithTimeout(ctx, claimCreateTimeout)
+	defer cancel()
+	repos, err := client.ListOrgRepos(reqCtx, org, true)
 	if err != nil {
 		return nil, err
 	}
@@ -487,13 +511,22 @@ func (a *slotAllocator) listOccupied(ctx context.Context, client forge.Client, o
 }
 
 // findOwn looks the slot's repository up by name and reports whether it
-// carries desc, in which case the returned lease adopts it.
-func (a *slotAllocator) findOwn(ctx context.Context, client forge.Client, slot Slot, desc string) (lease, bool) {
-	repo, err := client.GetRepo(ctx, slot.Org, slot.Repo)
-	if err != nil || repo == nil || repo.Description != desc {
-		return lease{}, false
+// carries desc, in which case the returned lease adopts it. The lookup is
+// bounded by claimCreateTimeout. A lookup failure is returned so the caller
+// can back the org off when it is throttling; the repo is then treated as
+// not ours.
+func (a *slotAllocator) findOwn(ctx context.Context, client forge.Client, slot Slot, desc string) (lease, bool, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, claimCreateTimeout)
+	defer cancel()
+	repo, err := client.GetRepo(reqCtx, slot.Org, slot.Repo)
+	a.observeQuota(slot.Org, client)
+	if err != nil {
+		return lease{}, false, err
 	}
-	return lease{client: client, repoID: repo.ID, description: desc}, true
+	if repo == nil || repo.Description != desc {
+		return lease{}, false, nil
+	}
+	return lease{client: client, repoID: repo.ID, description: desc}, true, nil
 }
 
 // Acquire repeats Claim until a slot is leased or ctx ends, waiting
@@ -556,7 +589,11 @@ func (a *slotAllocator) Release(ctx context.Context, slot Slot) error {
 		return nil
 	}
 
-	err = client.DeleteRepo(ctx, slot.Org, slot.Repo)
+	// The live client must not replay this DELETE after a timeout or 5xx:
+	// the first attempt may have landed and the name may since have been
+	// recreated by another allocator. The identity re-check below decides
+	// what to do after such a failure.
+	err = client.DeleteRepo(gh.WithoutAmbiguousRetry(ctx), slot.Org, slot.Repo)
 	a.observeQuota(slot.Org, client)
 	if err != nil && !forge.IsNotFound(err) {
 		// The delete may have succeeded server-side with the response
@@ -688,6 +725,12 @@ func (a *slotAllocator) quotaSummary(org string) string {
 		return "quota unknown"
 	}
 	return "quota " + rl.String()
+}
+
+// isBackoffError reports whether err means the org is throttling or too
+// slow to answer, so claims should move to another org for a while.
+func isBackoffError(err error) bool {
+	return gh.IsRateLimitError(err) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // isDeniedError reports whether err means the credentials or the call
