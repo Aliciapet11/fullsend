@@ -229,7 +229,8 @@ Install then converges the project:
   `FULLSEND_TRIGGER_TOKEN` variable, a generated `FULLSEND_WEBHOOK_SECRET`,
   and a project webhook (issues, merge requests, comments) that triggers a
   pipeline on the protected default branch. Opening an issue dispatches
-  triage when the webhook fast path is active. The agent job runs triage
+  triage through the webhook fast path; events-mode cron polling recovers
+  the issue open if webhook delivery is missed. The agent job runs triage
   only when the issue author has Developer access or higher; for a
   Reporter, Guest, or non-member author it exits successfully without
   running triage. Existing credential variables

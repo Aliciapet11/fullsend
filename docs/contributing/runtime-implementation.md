@@ -600,6 +600,25 @@ treated as companion files:
   made.
 - All other files are placed relative to the sandbox workspace root.
 
+### Review results
+
+For a review result, the runtime fills in `head_sha`, `pr_number` and `repo`
+from the run's environment. A later review round must also answer the prior
+review's open findings, but their ids are minted at random when the prior
+review is posted, so a fixture cannot name them. Instead it uses the
+placeholder id `f_PRIOR`:
+
+```json
+"dispositions": [
+  {"id": "f_PRIOR", "status": "resolved_by_change", "rationale": "…", "evidence": "…"}
+]
+```
+
+The runtime copies each placeholder entry once per open id in the prior
+review projection (`PRIOR_REVIEW_FILE`). With no projection or no open ids,
+as on a first review, it drops the placeholder entries. Dispositions with a
+real id are kept as they are.
+
 ### Playback comment tracking
 
 When a `.fullsend/playback-comment-url` file exists, the runtime reads the
