@@ -411,6 +411,44 @@ func TestGitLabWebhookSafety_ProjectDriftRequestsAccountContainment(t *testing.T
 	}
 }
 
+// A failed safety read must not drop the containment signal: removing the
+// webhook does not invalidate a published account bearer whose safety cannot be
+// verified.
+func TestGitLabWebhookSafety_UnreadableInvariantsRequestAccountContainment(t *testing.T) {
+	for _, method := range []string{"ListPipelineTriggerTokens", "ListProjectHooks", "GetRepo"} {
+		t.Run(method, func(t *testing.T) {
+			c := newWebhookFake()
+			seedWebhookAccountRoute(t, c, webhookAccountTrigger, webhookAccountToken, true)
+			ensureWebhook(t, c, false, false)
+			c.Errors = map[string]error{method: errors.New("503 unavailable")}
+
+			_, err := ReconcileGitLabWebhookSafety(context.Background(), c, webhookTestOwner, webhookTestRepo, false)
+
+			require.Error(t, err)
+			assert.True(t, GitLabWebhookTriggerOwnerUnsafe(err), "the installer must contain the published account credential")
+		})
+	}
+	t.Run("unreadable ledger", func(t *testing.T) {
+		c := newWebhookFake()
+		seedWebhookAccountRoute(t, c, webhookAccountTrigger, webhookAccountToken, true)
+		c.Errors = map[string]error{"GetRepoVariable": errors.New("503 unavailable")}
+
+		_, accountUnsafe, err := gitlabTriggerSafetyCheck(context.Background(), c, webhookTestOwner, webhookTestRepo, "main")
+
+		require.Error(t, err)
+		assert.True(t, accountUnsafe)
+	})
+	t.Run("no published credential", func(t *testing.T) {
+		c := newWebhookFake()
+		c.Errors = map[string]error{"ListPipelineTriggerTokens": errors.New("503 unavailable")}
+
+		_, accountUnsafe, err := gitlabTriggerSafetyCheck(context.Background(), c, webhookTestOwner, webhookTestRepo, "main")
+
+		require.Error(t, err)
+		assert.False(t, accountUnsafe, "a project without a published account bearer needs no containment")
+	})
+}
+
 func TestGitLabTriggerAccountCredentialPublished_RetiredGeneration(t *testing.T) {
 	c := newWebhookFake()
 	st := seedWebhookAccountRoute(t, c, webhookAccountTrigger, webhookAccountToken, false)

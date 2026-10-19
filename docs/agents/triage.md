@@ -10,7 +10,7 @@ Inspects a GitHub issue, assesses information sufficiency, asks clarifying quest
 
 ## How the agent works
 
-The triage agent is triggered when a new issue is opened or when an existing issue is updated. It fetches the issue content — title, body, labels, comments — and reads repository context (architecture docs, existing issues, PRs) to understand the landscape. It then decides whether the issue has enough information to act on, or whether clarification is needed.
+The triage agent is triggered when a new issue is opened or when an existing issue is updated. On GitLab, opening an issue also dispatches triage when the webhook fast path is active. It fetches the issue content — title, body, labels, comments — and reads repository context (architecture docs, existing issues, PRs) to understand the landscape. It then decides whether the issue has enough information to act on, or whether clarification is needed.
 
 The agent runs in a read-only sandbox. It cannot modify issues, push code, or interact with external services. Its only output is a structured JSON triage result consumed by the post-script, which applies labels and posts a summary comment.
 

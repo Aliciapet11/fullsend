@@ -1064,7 +1064,7 @@ func (op *gitLabTriggerAccountOp) containBySinkState(ctx context.Context) (conta
 		// deleted it and then failed to revoke the trigger. A missing sink
 		// holds no recoverable value, so retry the ownership-verified
 		// revocation before the deferral stands; it is idempotent.
-		if op.st.PublicationPending && len(op.st.Retired) > 0 {
+		if op.retiredBearerAwaitsReplacement() {
 			// The old webhook still uses a retired trigger during the gap
 			// between clearing the old variable and publishing the new one.
 			// Project safety and every published owner's access were checked
@@ -1102,6 +1102,30 @@ func (op *gitLabTriggerAccountOp) containBySinkState(ctx context.Context) (conta
 		return true, op.removeRevokeAndSave(ctx, true)
 	}
 	return false, nil
+}
+
+// retiredBearerAwaitsReplacement reports whether an empty sink is the expected
+// gap between clearing a retired generation's variable and publishing the
+// current generation's. That holds while the current generation has not
+// published and either its own publication is pending or a retired generation
+// still has a published trigger. The second case survives an interrupted
+// retry: startFreshGeneration clears PublicationPending when it retires the
+// pending generation, but the generation the webhook still uses stays
+// published until webhook cutover or an explicit containment revokes it and
+// clears its marker (removeAndRevokePublished).
+func (op *gitLabTriggerAccountOp) retiredBearerAwaitsReplacement() bool {
+	if len(op.st.Retired) == 0 || op.st.TriggerPublished {
+		return false
+	}
+	if op.st.PublicationPending {
+		return true
+	}
+	for _, old := range op.st.Retired {
+		if old.PublishStarted && old.TriggerPublished {
+			return true
+		}
+	}
+	return false
 }
 
 // removeAndRevokePublished optionally removes the token sink, then revokes the

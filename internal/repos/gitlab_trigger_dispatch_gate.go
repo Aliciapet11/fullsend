@@ -142,6 +142,10 @@ func CheckGitLabTriggerDispatchGate(ctx context.Context, client forge.Client, ap
 	return GitLabTriggerDispatchGate{Ready: len(deferred) == 0, Deferred: deferred, UnverifiedInheritedScopes: unverifiedScopes}
 }
 
+// gitlabRetiredPublishedSafetyProblems returns the deferral reasons for retired
+// generations whose published trigger may still serve the webhook: each must
+// stay Developer-owned and bound to its recorded trigger. Ledger read and
+// decode failures yield none; the current-generation diagnosis reports them.
 func gitlabRetiredPublishedSafetyProblems(ctx context.Context, client forge.Client, api GitLabTriggerAccountAPI, owner, repo, branch string) []string {
 	if api == nil {
 		return nil // the gate already reports the missing API

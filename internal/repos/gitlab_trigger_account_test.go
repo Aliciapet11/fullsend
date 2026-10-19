@@ -925,6 +925,42 @@ func TestConvergeGitLabTriggerAccount_InterruptedPublishAfterClearKeepsOldTrigge
 	assert.Contains(t, e.f.triggers, old.TriggerTokenID, "the old hook remains usable until cutover")
 }
 
+// A second interrupted retry retires the pending generation and clears its
+// PublicationPending marker; the cleared sink must still not revoke the older
+// generation the webhook uses before it is repointed.
+func TestContainGitLabTriggerAccount_ClearedSinkSurvivesSecondInterruptedRetry(t *testing.T) {
+	ctx := context.Background()
+	e := newTrigEnv()
+	o := e.opts()
+	o.DeferRetirement = true
+	old, err := ConvergeGitLabTriggerAccount(ctx, o)
+	require.NoError(t, err)
+	e.f.fail["Unpublish"] = true // stop after the new publication marker
+	_, err = RotateGitLabTriggerAccount(ctx, o)
+	require.Error(t, err)
+	st, _ := e.ledger(t)
+	require.True(t, st.PublicationPending)
+	require.Len(t, st.Retired, 1)
+
+	// The next retry retired the pending generation (startFreshGeneration) and
+	// then failed before publishing: the current generation is empty and the
+	// sink was cleared.
+	pending := st
+	pending.Retired = nil
+	pending.PublicationPending = false
+	st.Nonce = "0123456789abcdef"
+	st.AccountID, st.DeployKeyID, st.DeployKeyFingerprint, st.GrantEntryID = 0, 0, "", 0
+	st.TriggerTokenID, st.TriggerTokenDigest = 0, ""
+	st.TriggerPublished, st.PublishStarted, st.PublicationPending = false, false, false
+	st.Retired = append(st.Retired, pending)
+	e.setLedger(t, st)
+	e.setSink(false)
+	delete(e.state.VariableValues, trigOwner+"/"+trigRepo+"/"+forge.SecretGitLabTriggerAccountToken)
+
+	require.NoError(t, ContainGitLabTriggerAccount(ctx, o))
+	assert.Contains(t, e.f.triggers, old.TriggerTokenID, "the old hook remains usable until cutover")
+}
+
 func TestConvergeGitLabTriggerAccount_InterruptedLedgerSaveAfterPublish(t *testing.T) {
 	ctx := context.Background()
 	e := newTrigEnv()

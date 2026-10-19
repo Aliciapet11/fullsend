@@ -394,7 +394,11 @@ func refreshGitLabWebhookAfterPollerFailure(ctx context.Context, client forge.Cl
 	repoFullName := owner + "/" + repo
 	res, err := repos.EnsureGitLabWebhookAccountRouteAfterPollerFailure(ctx, client, gitlabTriggerOwnerFor(client), repos.GitLabBaseURL(client), owner, repo)
 	for _, d := range res.Details {
-		printer.StepDone(fmt.Sprintf("[%s] %s", repoFullName, d))
+		if res.Action == "deferred" {
+			printer.StepInfo(fmt.Sprintf("[%s] %s", repoFullName, d))
+		} else {
+			printer.StepDone(fmt.Sprintf("[%s] %s", repoFullName, d))
+		}
 	}
 	if err != nil {
 		printer.StepFail(fmt.Sprintf("[%s] GitLab webhook fast-path: %v", repoFullName, err))

@@ -138,7 +138,8 @@ type gitlabWebhookState struct {
 	secretUnsafe  bool
 	// triggerStored reports that the wildcard-scoped FULLSEND_TRIGGER_TOKEN
 	// variable holds a value, safe or not. An environment-scoped variable of
-	// the same name does not count: it cannot be deleted here. On the trigger-account route (#8509) it is retired.
+	// the same name does not count: it cannot be deleted here. On the
+	// trigger-account route (#8509) it is retired.
 	triggerStored bool
 	// known holds every credential value seen while probing (including
 	// discarded ones) so errors can be redacted.
@@ -744,8 +745,8 @@ func gitlabTriggerSafetyCheck(ctx context.Context, client forge.Client, owner, r
 		// trigger API after the webhook is removed. A recorded published
 		// generation must be contained on every project safety failure, even
 		// when dispatch activation has already been withdrawn.
-		published, accountErr := gitlabTriggerAccountCredentialPublished(ctx, client, owner, repo)
-		return problem, published, errors.Join(err, accountErr)
+		required, accountErr := gitlabTriggerAccountContainmentRequired(ctx, client, owner, repo)
+		return problem, required, errors.Join(err, accountErr)
 	}
 	return gitlabTriggerOwnerSafety(ctx, client, owner, repo, defaultBranch)
 }
@@ -852,9 +853,17 @@ func gitlabTriggerProjectSafetyProblem(ctx context.Context, client forge.Client,
 // could not be verified; the account's trigger and token are then contained
 // by the trigger-account lifecycle, which repos install runs for it.
 func gitlabTriggerOwnerSafety(ctx context.Context, client forge.Client, owner, repo, defaultBranch string) (problem string, accountUnsafe bool, err error) {
+	// Whether a published account bearer needs containment is established
+	// first, so every later read failure keeps the signal: an unreadable
+	// ledger is treated as published, since removing the webhook does not
+	// invalidate a bearer whose safety cannot be verified.
+	published, err := gitlabTriggerAccountContainmentRequired(ctx, client, owner, repo)
+	if err != nil {
+		return "", published, err
+	}
 	triggers, err := client.ListPipelineTriggerTokens(ctx, owner, repo)
 	if err != nil {
-		return "", false, safeAPIError("listing pipeline trigger tokens", err)
+		return "", published, safeAPIError("listing pipeline trigger tokens", err)
 	}
 	var managed []forge.PipelineTriggerToken
 	for _, t := range triggers {
@@ -867,11 +876,7 @@ func gitlabTriggerOwnerSafety(ctx context.Context, client forge.Client, owner, r
 	// is recorded; without it only the privilege ceiling is enforced.
 	acct, active, err := loadGitLabTriggerAccountRoute(ctx, client, owner, repo)
 	if err != nil {
-		return "", false, err
-	}
-	published, err := gitlabTriggerAccountCredentialPublished(ctx, client, owner, repo)
-	if err != nil {
-		return "", false, err
+		return "", published, err
 	}
 	var accountTriggers []forge.PipelineTriggerToken
 	skipAdmission := map[int64]bool{}
@@ -895,7 +900,7 @@ func gitlabTriggerOwnerSafety(ctx context.Context, client forge.Client, owner, r
 	}
 	hooked, err := gitlabHookNamedTriggers(ctx, client, owner, repo, triggers)
 	if err != nil {
-		return "", false, err
+		return "", published, err
 	}
 	for _, t := range hooked {
 		addAccountSide(t)
@@ -1322,7 +1327,14 @@ func failClosedOnProjectLookup(ctx context.Context, client forge.Client, owner, 
 	if changed && !dryRun {
 		res.Action = "update"
 	}
-	return res, errors.Join(lookupErr, credErr, revokeErr)
+	var unsafeErr error
+	if required, _ := gitlabTriggerAccountContainmentRequired(ctx, client, owner, repo); required && !dryRun {
+		// Removing the webhook does not invalidate a published account bearer
+		// whose safety could not be verified: the caller contains the account
+		// (GitLabWebhookTriggerOwnerUnsafe).
+		unsafeErr = errGitLabAccountTriggerUnsafe
+	}
+	return res, errors.Join(lookupErr, credErr, revokeErr, unsafeErr)
 }
 
 // revokeGitLabWebhookFastPath removes the managed webhook and trigger tokens

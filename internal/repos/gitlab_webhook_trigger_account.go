@@ -123,6 +123,16 @@ func gitlabTriggerAccountCredentialPublished(ctx context.Context, client forge.C
 	return false, nil
 }
 
+// gitlabTriggerAccountContainmentRequired reports whether a published trigger
+// account bearer may be live and so needs containment when the project's
+// safety cannot be verified. An unreadable or undecodable ledger counts as
+// required (with the error), because the bearer's presence cannot be ruled
+// out.
+func gitlabTriggerAccountContainmentRequired(ctx context.Context, client forge.Client, owner, repo string) (bool, error) {
+	published, err := gitlabTriggerAccountCredentialPublished(ctx, client, owner, repo)
+	return published || err != nil, err
+}
+
 // GitLabWebhookUsesRetiredTriggerCredential reports whether a managed webhook
 // still carries the credential of a retired trigger-account generation: its
 // description names a retired generation's trigger, or its URL token matches a
@@ -191,8 +201,7 @@ func resolveGitLabWebhookAccountToken(ctx context.Context, client forge.Client, 
 	}
 	found := false
 	for _, t := range triggers {
-		switch {
-		case t.ID == acct.triggerID:
+		if t.ID == acct.triggerID {
 			found = true
 			if t.OwnerID != acct.accountID {
 				return "", fmt.Sprintf("the trigger account's recorded pipeline trigger token (ID %d) is not owned by the trigger account", t.ID), false, nil
@@ -393,11 +402,11 @@ func ensureGitLabWebhookAccountRoute(ctx context.Context, client forge.Client, s
 // credential no longer matches the dispatch route (#8509): the trigger-account
 // route is active but no managed webhook names the account's recorded trigger,
 // or the route is inactive while a managed webhook names a trigger that is not
-// a Poller-owned webhook trigger. repos install runs it after the trigger
-// account lifecycle, which can activate, rotate or withdraw the route, and
-// converges the webhook again when it reports true. A project without a
-// managed webhook is stale only while the account route is active; on the
-// Poller route the webhook step provisions it.
+// a Poller-owned webhook trigger. Its only production caller is the
+// account-route repair after a failed Poller stage (the account-only webhook
+// path), which converges the webhook again when it reports true. A project
+// without a managed webhook is stale only while the account route is active;
+// on the Poller route the webhook step provisions it.
 func GitLabWebhookTriggerRouteStale(ctx context.Context, client forge.Client, baseURL, owner, repo string) (bool, error) {
 	if baseURL == "" {
 		return false, nil

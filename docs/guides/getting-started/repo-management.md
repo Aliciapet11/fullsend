@@ -615,7 +615,8 @@ account that owns a push-capable deploy key on the default branch's
 exact-name protected-branch rule and a pipeline trigger token. It uses only
 project-scoped authority, so it works on GitLab.com Free. Once the trigger
 dispatch activation is recorded, it also owns the managed polling schedules, so
-a scheduled poll runs as that account. Details are in
+a scheduled poll runs as that account, and the managed webhook posts to its
+published trigger token instead of the Poller-owned one. Details are in
 [Configuring GitLab](configuring-gitlab.md) and the
 [`repos install` reference](../../cli/repos.md).
 
@@ -645,10 +646,11 @@ a scheduled poll runs as that account. Details are in
   installer, then moved to the new account once its activation is recorded.
 - **Uninstall:** `repos uninstall` deletes the managed polling schedules the
   account owns, along with the account.
-- **Breaking change:** once the account owns the managed polling schedules,
-  older CLIs treat them as foreign and refuse `repos install` and
-  `repos uninstall`. Upgrade the CLI first and do not delete the schedules by
-  hand; see the
+- **Breaking change:** the ledger now records the trigger token digest, so
+  older CLIs cannot decode it and fail `repos install`, `repos status`, and
+  `repos uninstall` regardless of schedule ownership. Once the account owns the
+  managed polling schedules, older CLIs also treat them as foreign and refuse
+  cleanup. Upgrade the CLI first and do not delete the schedules by hand; see the
   [CLI reference](../../cli/repos.md#trigger-only-service-account).
 - **Branch change:** run `repos uninstall`, then `repos install`.
 
