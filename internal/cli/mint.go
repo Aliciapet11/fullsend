@@ -883,9 +883,14 @@ func runMintDeployGCP(ctx context.Context, project, region, sourceDir string, sk
 		fmt.Sprintf("Version: %s", version),
 		fmt.Sprintf("Commit: %s", deployCommit),
 	}
-	if tracing.enabled() {
+	switch {
+	case skipDeploy:
+		// --skip-deploy reuses the existing function, so its stamped
+		// endpoint and headers secret are untouched; tracing may be on.
+		summaryLines = append(summaryLines, "Tracing: unchanged (--skip-deploy reuses the existing function)")
+	case tracing.enabled():
 		summaryLines = append(summaryLines, fmt.Sprintf("Tracing: exporting to %s", tracing.endpointOrigin()))
-	} else {
+	default:
 		summaryLines = append(summaryLines, "Tracing: disabled")
 	}
 	if pemDir != "" {

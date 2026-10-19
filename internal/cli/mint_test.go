@@ -249,6 +249,8 @@ func TestRunMintDeployGCP_SkipDeployReportsCommitResolution(t *testing.T) {
 	assert.Contains(t, out, "Version:")
 	assert.Contains(t, out, "Commit:")
 	assert.Contains(t, out, "Deployment complete")
+	assert.Contains(t, out, "Tracing: unchanged")
+	assert.NotContains(t, out, "Tracing: disabled")
 }
 
 func TestMintDeployCmd_DryRunShowsResolvedSource(t *testing.T) {
