@@ -315,6 +315,76 @@ func TestRun_IssueAuthorLookupFailureDoesNotAdvanceWatermark(t *testing.T) {
 	}
 }
 
+// TestRun_IssueAuthorLookupFailureDoesNotBlockOtherEvents: a persistently
+// failing author lookup fails closed for that issue open only. An unrelated
+// issue open still dispatches once, the failing one is held back and counted
+// against its retry budget, and the poll stops retrying it once spent.
+func TestRun_IssueAuthorLookupFailureDoesNotBlockOtherEvents(t *testing.T) {
+	mc := newMockClient()
+	failing := UserRef{ID: 205, Username: "release-automation"}
+	issueOpenFixture(mc, failing)
+	mc.memberLevel[alice.ID] = 30
+	other := Issue{IID: 10, State: "opened", Labels: []string{"bug"}, Author: alice, CreatedAt: recent, UpdatedAt: recent}
+	mc.issue[10] = &other
+	mc.issues = append(mc.issues, other)
+	mc.userBotErr[failing.ID] = errors.New("temporary user API failure")
+	mc.setPollState(persistedPollState{LastPollAtFull: beforeRecent, IssueOpenCutoff: beforeRecentTime})
+
+	if err := issueOpenPoller(mc).Run(context.Background()); err == nil {
+		t.Fatal("expected author lookup failure to be reported")
+	}
+	if len(mc.pipelineCalls) != 1 {
+		t.Fatalf("pipeline calls = %d, want 1 (unrelated issue open)", len(mc.pipelineCalls))
+	}
+	state, _ := mc.getPollState()
+	watermark, err := time.Parse(time.RFC3339, state.LastPollAtFull)
+	if err != nil {
+		t.Fatalf("parse watermark %q: %v", state.LastPollAtFull, err)
+	}
+	if watermark.After(recent) {
+		t.Errorf("watermark = %s, want held back at or before the failing open's created_at %s", watermark, recent)
+	}
+	failedKey := fmt.Sprintf("issue_event-9-opened-%d", recent.Unix())
+	if got := state.FailedKeysFull[failedKey]; got != 1 {
+		t.Errorf("FailedKeysFull[%s] = %d, want 1", failedKey, got)
+	}
+
+	for i := 1; i < maxEventRetries; i++ {
+		_ = issueOpenPoller(mc).Run(context.Background())
+	}
+	if len(mc.pipelineCalls) != 1 {
+		t.Errorf("pipeline calls = %d after retries, want 1 (unrelated open not redispatched)", len(mc.pipelineCalls))
+	}
+	state, _ = mc.getPollState()
+	if got := state.FailedKeysFull[failedKey]; got < maxEventRetries {
+		t.Errorf("FailedKeysFull[%s] = %d, want >= %d", failedKey, got, maxEventRetries)
+	}
+	// Budget spent: the next cycle skips the lookup and succeeds.
+	if err := issueOpenPoller(mc).Run(context.Background()); err != nil {
+		t.Errorf("Run after retry budget spent: %v", err)
+	}
+}
+
+// TestRun_IssueAuthorLookupSkippedWhenAlreadyDispatched: an issue open the
+// webhook already dispatched needs no author lookup, so a failing lookup
+// cannot fail the poll or re-dispatch it.
+func TestRun_IssueAuthorLookupSkippedWhenAlreadyDispatched(t *testing.T) {
+	mc := newMockClient()
+	issueOpenFixture(mc, alice)
+	mc.setPollState(persistedPollState{LastPollAtFull: beforeRecent, IssueOpenCutoff: beforeRecentTime})
+
+	if err := issueOpenPoller(mc).RunWebhook(context.Background(), issuePayload(t, "open", alice.ID, 9, nil)); err != nil {
+		t.Fatalf("RunWebhook: %v", err)
+	}
+	mc.userBotErr[alice.ID] = errors.New("temporary user API failure")
+	if err := issueOpenPoller(mc).Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(mc.pipelineCalls) != 1 {
+		t.Errorf("pipeline calls = %d, want 1", len(mc.pipelineCalls))
+	}
+}
+
 func TestReadIssueOpenCutoff(t *testing.T) {
 	mc := newMockClient()
 	p := New(mc, nil, "group/project", withTestSecret(Options{}))

@@ -158,10 +158,9 @@ func (p *Poller) Run(ctx context.Context) error {
 		return fmt.Errorf("discover events: %w", err)
 	}
 
-	if err := p.enrichIssueOpenBots(ctx, events); err != nil {
-		persistCutoffOnReadFailure(err)
-		return fmt.Errorf("check issue-open authors: %w", err)
-	}
+	// Issue-open author bot status is looked up per event in the dispatch loop
+	// below, so a failing lookup is counted against that event's retry budget
+	// instead of aborting the cycle for every other event.
 	events = p.filterBotEvents(events)
 	events = p.deduplicate(events)
 
@@ -299,6 +298,25 @@ func (p *Poller) Run(ctx context.Context) error {
 			observe(event)
 			resolvedPending[eventKey] = true
 			continue
+		}
+
+		// Resolve an issue open's authoritative bot flag before routing. The
+		// lookup is skipped when the occurrence was already dispatched (the
+		// webhook recorded it), and a failure fails closed for this event
+		// only: it is retried through the failure count and watermark holdback
+		// while unrelated events and pending handoffs proceed.
+		if p.needsIssueOpenBotLookup(event) && !dispatchedForAnyStage(previouslyDispatched, event) {
+			if err := p.enrichIssueOpenBot(ctx, &event); err != nil {
+				log.Printf("WARNING: skipping %s event on IID %d: %v", event.Type, event.IID, err)
+				recordEventFailure(&cycleErrs, failedKeys, mirrors, event, &minFailedAt, failedLabelEvents,
+					fmt.Errorf("check issue-open author for %s: %w", eventKey, err))
+				continue
+			}
+			if p.isBotEvent(event) {
+				// Bot-authored issue opens are filtered like any other bot event.
+				observe(event)
+				continue
+			}
 		}
 
 		normalizedEvent, actorID, err := p.toNormalizedEvent(ctx, event)

@@ -477,24 +477,40 @@ func isProjectAccessTokenBot(username string) bool {
 	return strings.HasPrefix(username, "project_") && strings.Contains(username, "_bot_")
 }
 
-// enrichIssueOpenBots checks the authoritative user record for issue opens.
+// needsIssueOpenBotLookup reports whether event is an issue open whose
+// author's bot status must still be read from the authoritative user record.
+func (p *Poller) needsIssueOpenBotLookup(event RoutableEvent) bool {
+	return event.Type == "issue_event" && event.Action == "opened" && !p.isBotEvent(event)
+}
+
+// enrichIssueOpenBot checks the authoritative user record for one issue open.
 // GitLab's nested issue author omits the bot flag on some instances, and
 // service accounts can have custom usernames that defeat name heuristics.
-// An unavailable or incomplete lookup fails closed so the poller can retry.
+// An unavailable or incomplete lookup fails closed so the caller can retry.
+func (p *Poller) enrichIssueOpenBot(ctx context.Context, event *RoutableEvent) error {
+	if !p.needsIssueOpenBotLookup(*event) {
+		return nil
+	}
+	if event.NoteAuthorID == 0 {
+		return fmt.Errorf("issue #%d has no author ID", event.IID)
+	}
+	bot, err := p.client.GetUserBot(ctx, event.NoteAuthorID)
+	if err != nil {
+		return fmt.Errorf("look up issue #%d author %d: %w", event.IID, event.NoteAuthorID, err)
+	}
+	event.IsBot = bot
+	return nil
+}
+
+// enrichIssueOpenBots enriches every issue open in events, failing on the
+// first lookup error. The webhook builder uses it because it fails the whole
+// payload closed; the poller enriches per event inside Run instead, so one
+// failing lookup cannot stop unrelated events.
 func (p *Poller) enrichIssueOpenBots(ctx context.Context, events []RoutableEvent) error {
 	for i := range events {
-		event := &events[i]
-		if event.Type != "issue_event" || event.Action != "opened" || p.isBotEvent(*event) {
-			continue
+		if err := p.enrichIssueOpenBot(ctx, &events[i]); err != nil {
+			return err
 		}
-		if event.NoteAuthorID == 0 {
-			return fmt.Errorf("issue #%d has no author ID", event.IID)
-		}
-		bot, err := p.client.GetUserBot(ctx, event.NoteAuthorID)
-		if err != nil {
-			return fmt.Errorf("look up issue #%d author %d: %w", event.IID, event.NoteAuthorID, err)
-		}
-		event.IsBot = bot
 	}
 	return nil
 }

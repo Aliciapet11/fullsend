@@ -45,11 +45,15 @@ func TestGetUserBot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pc, mux := setupPollTest(t)
+			handlerCalled := false
 			mux.HandleFunc("/api/v4/users/57", func(w http.ResponseWriter, r *http.Request) {
+				handlerCalled = true
 				assert.Equal(t, http.MethodGet, r.Method)
 				writeJSON(t, w, tt.status, tt.body)
 			})
 			bot, err := pc.GetUserBot(context.Background(), tt.userID)
+			// An invalid ID must be rejected before any HTTP request.
+			assert.Equal(t, tt.userID != 0, handlerCalled)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
