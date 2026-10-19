@@ -34,8 +34,9 @@ values = dict(os.environ)
 exported = set(os.environ)
 readonly = set()
 order = []
+failed = []
 def warn(path, line, why):
-	sys.stderr.write("fullsend: ignored %s line %d: %s\n" % (path, line, why))
+	sys.stderr.write("fullsend: ignored %r line %d: %s\n" % (path, line, why))
 def taken(name):
 	return name not in drop and name not in readonly
 def assign(path, line, name, value):
@@ -178,14 +179,18 @@ def read_file(path, control):
 			for n in names:
 				p = os.path.join(envd_dir, n)
 				if n.endswith(".env") and not n.startswith(".") and os.path.isfile(p):
-					read_file(p, False)
+					e = read_file(p, False)
+					if e is not None:
+						failed.append((p, e))
 		elif control and text == restore_line:
 			now = values.get("PATH", "")
 			assign(path, line, "PATH", values.get("FULLSEND_RUNNER_PATH", "") + (":" + now if now else ""))
 			exported.add("PATH")
 		elif control and text == iter_line:
 			if os.path.isfile(iter_file):
-				read_file(iter_file, False)
+				e = read_file(iter_file, False)
+				if e is not None:
+					failed.append((iter_file, e))
 		else:
 			try:
 				eol = statement(path, line, s, i, eol)
@@ -195,13 +200,16 @@ def read_file(path, control):
 	return None
 err = read_file(env_file, True)
 if err is not None:
-	sys.stderr.write("fullsend: cannot read %s: %s\n" % (env_file, err.strerror))
+	failed.insert(0, (env_file, err))
+for path, e in failed:
+	sys.stderr.write("fullsend: cannot read %r: %s\n" % (path, e.strerror))
+if failed:
 	sys.exit(1)
 for n in order:
 	if n in exported and n in values and "\0" not in values[n]:
 		sys.stdout.buffer.write(os.fsencode("export %s='\''%s'\''\n" % (n, values[n].replace("'\''", "'\''\\'\'''\''"))))
 ' '/sandbox/workspace/.env' 'if ( FULLSEND_RUNNER_PATH= ) 2>/dev/null; then FULLSEND_RUNNER_PATH="$PATH"; readonly FULLSEND_RUNNER_PATH; fi' 'for f in /sandbox/workspace/.env.d/*.env; do [ -f "$f" ] &&
-. "$f"; done' 'export PATH="$FULLSEND_RUNNER_PATH${PATH:+:$PATH}"' 'if [ -f /sandbox/workspace/.fullsend/iteration.env ]; then . /sandbox/workspace/.fullsend/iteration.env; fi' 'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT IFS FULLSEND_ENV_PYTHON FULLSEND_ENV_EXPORTS FULLSEND_CODEX_BIN FULLSEND_CODEX_PATH')" &&
+. "$f"; done' 'export PATH="$FULLSEND_RUNNER_PATH${PATH:+:$PATH}"' 'if [ -f /sandbox/workspace/.fullsend/iteration.env ]; then . /sandbox/workspace/.fullsend/iteration.env; fi' 'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE IFS FULLSEND_ENV_PYTHON FULLSEND_ENV_EXPORTS FULLSEND_CODEX_BIN FULLSEND_CODEX_PATH')" &&
 eval "$FULLSEND_ENV_EXPORTS" &&
 unset FULLSEND_ENV_EXPORTS &&
 export CODEX_HOME=/sandbox/codex-config &&

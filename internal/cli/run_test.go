@@ -4732,7 +4732,7 @@ func TestEnvDataControlLinesMatchRunner(t *testing.T) {
 	t.Parallel()
 	lines := append(runnerPathLines(), harnessEnvLines(&harness.Harness{})...)
 	want := agentruntime.EnvDataControlLines()
-	assert.Equal(t, []string{runnerPathCaptureLine(), lines[2], runnerPathRestoreLine(), iterationEnvSourceLine()}, want)
+	assert.Equal(t, []string{runnerPathCaptureLine(), harnessEnvLines(&harness.Harness{})[0], runnerPathRestoreLine(), iterationEnvSourceLine()}, want)
 	for _, line := range want {
 		assert.Contains(t, lines, line)
 	}

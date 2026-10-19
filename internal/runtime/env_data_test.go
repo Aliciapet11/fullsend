@@ -258,13 +258,68 @@ func TestEnvDataLoad_MissingEnvFails(t *testing.T) {
 	assert.Contains(t, stderr, "cannot read")
 }
 
+// An .env.d file or iteration.env that exists but cannot be read fails the
+// launch before any export is emitted, instead of losing its settings.
+func TestEnvDataLoad_UnreadableIncludedFileFails(t *testing.T) {
+	for _, rel := range []string{".env.d/a.env", ".fullsend/iteration.env"} {
+		t.Run(rel, func(t *testing.T) {
+			f := newEnvDataFixture(t)
+			f.write(t, ".env", strings.Join(envDataControlLines(f.ws), "\n")+"\nexport KEEP=1\n")
+			f.write(t, rel, "export LOST=1\n")
+			path := filepath.Join(f.ws, rel)
+			require.NoError(t, os.Chmod(path, 0))
+			if _, err := os.ReadFile(path); err == nil {
+				t.Skip("file stays readable (running as root)")
+			}
+			out, stderr, err := f.load(t, "echo LAUNCHED")
+			require.Error(t, err)
+			assert.NotContains(t, out, "LAUNCHED")
+			assert.Contains(t, stderr, "cannot read")
+			assert.Contains(t, stderr, filepath.Base(rel))
+		})
+	}
+}
+
+// The loader names a file by its escaped form, so a newline in an
+// agent-chosen .env.d file name cannot forge a separate log line.
+func TestEnvDataLoad_PathsAreEscapedInMessages(t *testing.T) {
+	f := newEnvDataFixture(t)
+	f.write(t, ".env", strings.Join(envDataControlLines(f.ws), "\n")+"\n")
+	f.write(t, ".env.d/x\n::error::forged.env", "$(id)\n")
+	_, stderr, err := f.load(t, "true")
+	require.NoError(t, err, stderr)
+	assert.Contains(t, stderr, "ignored")
+	assert.Equal(t, 1, strings.Count(strings.TrimSpace(stderr), "\n")+1, "one line: %q", stderr)
+	assert.NotContains(t, stderr, "\n::error::")
+}
+
+// Python startup variables are never taken from .env, so a planted
+// PYTHONPATH cannot reach a python3 the CLI starts later.
+func TestEnvDataLoad_DropsPythonStartupVariables(t *testing.T) {
+	f := newEnvDataFixture(t)
+	f.write(t, ".env", "export PYTHONPATH=/sandbox/workspace/evil\nexport PYTHONHOME=/x\nexport PYTHONSTARTUP=/x.py\nexport PYTHONUSERBASE=/x\nexport KEEP=1\n")
+	env, stderr := f.envOf(t)
+	assert.Equal(t, "1", env["KEEP"])
+	for _, name := range []string{"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE"} {
+		_, ok := env[name]
+		assert.False(t, ok, "%s must not reach the CLI", name)
+		assert.Contains(t, stderr, name+" is not taken from .env")
+	}
+}
+
+// The loader script spells the runner-PATH variable out; keep it in step
+// with the constant the control lines use.
+func TestEnvDataLoaderScript_RunnerPathVar(t *testing.T) {
+	assert.Contains(t, envDataLoaderScript, `"`+envDataRunnerPathVar+`"`)
+}
+
 // The fragment pins python3 before reading .env and runs it isolated.
 func TestEnvDataLoad_Shape(t *testing.T) {
 	frag := envDataLoad("/sandbox/workspace/.env", "FULLSEND_X_BIN")
 	assert.True(t, strings.HasPrefix(frag, envDataPin()+" && "), frag)
 	assert.Contains(t, frag, `"$`+envDataPythonVar+`" -I -S -c `)
 	assert.Contains(t, frag, `eval "$`+envDataExportsVar+`" && unset `+envDataExportsVar)
-	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT IFS "+envDataPythonVar+" "+envDataExportsVar+" FULLSEND_X_BIN'")
+	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE IFS "+envDataPythonVar+" "+envDataExportsVar+" FULLSEND_X_BIN'")
 	assert.NotContains(t, frag, ". /sandbox/workspace/.env")
 	assert.NotContains(t, frag, "  ", "the launch commands are checked for double spaces")
 	for _, line := range EnvDataControlLines() {

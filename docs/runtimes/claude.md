@@ -118,8 +118,8 @@ prefix only selects the route, so `gateway/claude-haiku-5-5` calls `claude-haiku
   `api.anthropic.com`;
 - the credential, per mode (below).
 
-`.env` cannot override any of these. A variable that `.env` makes `readonly` stops the launch rather
-than reaching Claude Code. The placeholder is read from the sandbox before `.env` runs.
+`.env` cannot override any of these. A `readonly` line in `.env` is ignored with a warning by the
+data loader, so it never reaches Claude Code. The placeholder is read from the sandbox before `.env` runs.
 
 The repository's own `.claude/settings.json` and `.claude/settings.local.json` can carry an `env`
 block, which Claude Code applies after launch over the launch environment. The runner therefore
@@ -237,7 +237,7 @@ Use the gateway route above. For Claude models, the default Vertex route is the 
 The launch reads the sandbox `.env` as data and then clears variables before it starts Claude Code.
 No line of `.env` runs as shell: a `python3` resolved before anything the agent wrote parses its
 `NAME=value` assignments and ignores everything else, and `LD_PRELOAD`, `LD_LIBRARY_PATH`,
-`LD_AUDIT` and `IFS` are never taken from it (#8498). `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
+`LD_AUDIT`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE` and `IFS` are never taken from it (#8498). `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
 the agent wrote there between iterations. The rest of the environment, including provider
 credentials, comes from the sandbox.
 

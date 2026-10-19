@@ -47,18 +47,23 @@ import (
 const (
 	envDataPythonVar  = "FULLSEND_ENV_PYTHON"
 	envDataExportsVar = "FULLSEND_ENV_EXPORTS"
+	// envDataRunnerPathVar is the read-only variable the runner's PATH capture
+	// line sets. The loader script spells the name out; a test keeps the two
+	// in step.
+	envDataRunnerPathVar = "FULLSEND_RUNNER_PATH"
 )
 
 // envDataDropNames are never taken from .env, for any runtime: the dynamic
-// loader variables (#7580), IFS (it would change how the rest of the launch
-// splits words), and the loader's own variables.
+// loader variables (#7580), the Python startup variables (a PYTHONPATH with a
+// sitecustomize.py would run in every python3 the CLI starts, such as pi's
+// hook adapter), IFS (it would change how the rest of the launch splits
+// words), and the loader's own variables.
 var envDataDropNames = []string{
 	"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+	"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
 	"IFS",
 	envDataPythonVar, envDataExportsVar,
 }
-
-const envDataRunnerPathVar = "FULLSEND_RUNNER_PATH"
 
 // EnvDataControlLines are the runner-written .env lines the launch-time
 // loader understands, in the order the runner writes them: the PATH
@@ -112,8 +117,9 @@ func envDataLoadWith(envFile string, control []string, extraDrop []string) strin
 
 // envDataLoaderScript is the python3 program envDataLoad runs. argv: the .env
 // path, the four control lines, then the space-separated drop names. It
-// prints `export NAME='value'` lines on stdout and exits non-zero only when
-// the .env file cannot be read. Indented with tabs: the launch command is
+// prints `export NAME='value'` lines on stdout and exits non-zero, printing
+// nothing, when .env or a file it names (an .env.d file or iteration.env)
+// exists but cannot be read. Indented with tabs: the launch command is
 // checked for double spaces.
 const envDataLoaderScript = `import os, re, sys
 env_file, cap_line, envd_line, restore_line, iter_line, drop_arg = sys.argv[1:7]
@@ -125,8 +131,9 @@ values = dict(os.environ)
 exported = set(os.environ)
 readonly = set()
 order = []
+failed = []
 def warn(path, line, why):
-	sys.stderr.write("fullsend: ignored %s line %d: %s\n" % (path, line, why))
+	sys.stderr.write("fullsend: ignored %r line %d: %s\n" % (path, line, why))
 def taken(name):
 	return name not in drop and name not in readonly
 def assign(path, line, name, value):
@@ -269,14 +276,18 @@ def read_file(path, control):
 			for n in names:
 				p = os.path.join(envd_dir, n)
 				if n.endswith(".env") and not n.startswith(".") and os.path.isfile(p):
-					read_file(p, False)
+					e = read_file(p, False)
+					if e is not None:
+						failed.append((p, e))
 		elif control and text == restore_line:
 			now = values.get("PATH", "")
 			assign(path, line, "PATH", values.get("FULLSEND_RUNNER_PATH", "") + (":" + now if now else ""))
 			exported.add("PATH")
 		elif control and text == iter_line:
 			if os.path.isfile(iter_file):
-				read_file(iter_file, False)
+				e = read_file(iter_file, False)
+				if e is not None:
+					failed.append((iter_file, e))
 		else:
 			try:
 				eol = statement(path, line, s, i, eol)
@@ -286,7 +297,10 @@ def read_file(path, control):
 	return None
 err = read_file(env_file, True)
 if err is not None:
-	sys.stderr.write("fullsend: cannot read %s: %s\n" % (env_file, err.strerror))
+	failed.insert(0, (env_file, err))
+for path, e in failed:
+	sys.stderr.write("fullsend: cannot read %r: %s\n" % (path, e.strerror))
+if failed:
 	sys.exit(1)
 for n in order:
 	if n in exported and n in values and "\0" not in values[n]:
