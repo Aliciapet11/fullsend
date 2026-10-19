@@ -380,6 +380,11 @@ func postJiraStickyComment(ctx context.Context, jc *tracker.JiraClient, project 
 		return "", fmt.Errorf("marker is empty")
 	}
 
+	// Escape marker syntax in the agent-written body, as the
+	// GitHub/GitLab path does, in the form that stays escaped through
+	// the Markdown -> ADF -> Markdown round trip.
+	body = statuscomment.NeutralizeMarkersADF(body)
+
 	// Same rule as the GitHub/GitLab path: only the poster's own comments
 	// are candidates, matched by exact account ID. Filtering before the
 	// lookup covers both the marker property and the legacy body-text
@@ -401,13 +406,21 @@ func postJiraStickyComment(ctx context.Context, jc *tracker.JiraClient, project 
 
 		// Build the updated body using sticky's history-collapsing
 		// logic. The old body is read from Jira as Markdown (via
-		// ADFToMarkdown). BuildUpdatedBody uses cfg.Marker to strip
-		// the marker from oldBody (handling both legacy body-embedded
-		// markers and the property-based path where oldBody has no
-		// marker). The new body is passed without the marker prefix
-		// because the marker lives in a property, not the visible body.
+		// ADFToMarkdown). A legacy body-embedded marker is cut from the
+		// front of oldBody (the property-based path has none). The new
+		// body is passed without the marker prefix because the marker
+		// lives in a property, not the visible body.
+		//
+		// ADFToMarkdown decodes any escaped marker in the stored text
+		// back into a live one, so the old body is neutralized again
+		// after it is read back. The legacy marker is cut first so it
+		// is dropped rather than kept as escaped text in history.
+		// BuildUpdatedBody's own escaping uses "&lt;", which Jira would
+		// decode, so its result is neutralized once more as well.
 		oldBody := jira.ADFToMarkdown(existing.Body)
-		newBody := sticky.BuildUpdatedBody(oldBody, body, cfg)
+		oldBody, _ = strings.CutPrefix(oldBody, cfg.Marker)
+		oldBody = statuscomment.NeutralizeMarkersADF(oldBody)
+		newBody := statuscomment.NeutralizeMarkersADF(sticky.BuildUpdatedBody(oldBody, body, cfg))
 
 		if cfg.DryRun {
 			printer.StepInfo("Dry run — would update comment " + existing.ID)
