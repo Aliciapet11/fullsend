@@ -98,6 +98,13 @@ var (
 	// that the refresher carries into the next re-seed (see
 	// openAIProviderHandle.unrecorded). Reaching it fails the route closed;
 	// see runOpenAIRefresh for why the older ones are not dropped instead.
+	// Each failed attempt adds at most one generation, so 16 is just over
+	// five rounds of openAIRefreshRetries (3) attempts: with every hand-off
+	// failing, the route fails closed in the sixth round. Under the default
+	// backoff that is roughly 15 minutes of waiting (in-round 15 s gaps plus
+	// round delays of 30 s, 1 m, 2 m, 4 m, 5 m), not counting the attempts
+	// themselves, so a transient outage has a few minutes to clear while the
+	// re-seed command stays bounded.
 	openAIUnrecordedMax = 16
 	// openAIRefreshWatchdog is how often the refresher compares the wall
 	// clock with the refresh deadline (#7748). Short enough that a host
@@ -1023,6 +1030,21 @@ func isPermanentOpenAIRefreshError(err error) bool {
 	return errors.Is(err, errOpenAISourceChanged) || errors.Is(err, errOpenAIUnredactable)
 }
 
+// openAIRefreshRoundWait is the wait before the next round after
+// failedRounds exhausted rounds, with the held expiry at expiresAt and the
+// wall clock at now. While the expiry is still ahead the wait is clamped so
+// it never passes the expiry: the credential is renewed at the latest as it
+// lapses, rather than a doubled delay sleeping well beyond it. Once the
+// expiry has passed the gateway already fails closed, so the delay doubles
+// as usual (openAIRefreshRoundDelay).
+func openAIRefreshRoundWait(failedRounds int, expiresAt, now time.Time) time.Duration {
+	wait := openAIRefreshRoundDelay(failedRounds)
+	if remaining := expiresAt.Sub(now); remaining > 0 && wait > remaining {
+		wait = remaining
+	}
+	return wait
+}
+
 // openAIRefreshRoundDelay is the wait after failedRounds (1 or more)
 // consecutive exhausted rounds of retries: openAIRefreshMinDelay, doubled
 // per further failed round, never more than openAIRefreshMaxRoundDelay.
@@ -1117,8 +1139,9 @@ func refreshOpenAIProvider(ctx context.Context, h openAIProviderHandle, placehol
 // life of the run. Each cycle waits until shortly before the current
 // expiry, then refreshes with bounded retries. When a round of retries is
 // exhausted it says so and tries again after openAIRefreshRoundDelay — the
-// minimum delay, doubling per consecutive failed round up to a cap, and
-// back to the minimum after a success — until a refresh succeeds: the
+// minimum delay, doubling per consecutive failed round up to a cap (and,
+// while the held expiry is still ahead, never past it), and back to the
+// minimum after a success — until a refresh succeeds: the
 // provider's recorded expiry makes the gateway fail closed at that instant,
 // so a persistent failure fails the run visibly instead of silently
 // outliving its credential. A failure no retry can fix

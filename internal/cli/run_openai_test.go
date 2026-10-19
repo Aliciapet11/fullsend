@@ -1140,13 +1140,29 @@ func TestRunOpenAIRefresh_BacksOffBetweenRoundsAndResetsAfterSuccess(t *testing.
 	assert.Equal(t, []string{"20ms", "40ms", "80ms", "80ms"}, waits()[:4], "doubling per failed round, capped")
 
 	fail.Store(false)
+	const refreshed = "OpenAI credential refreshed for openai-abc"
 	require.Eventually(t, func() bool {
-		return strings.Contains(buf.String(), "OpenAI credential refreshed for openai-abc")
+		return strings.Contains(buf.String(), refreshed)
 	}, 10*time.Second, 5*time.Millisecond)
 	fail.Store(true)
 
-	require.Eventually(t, func() bool { return len(waits()) >= 5 }, 10*time.Second, 5*time.Millisecond)
-	assert.Equal(t, "20ms", waits()[4], "the backoff starts over after a success")
+	// The first "retrying in" line after the "refreshed" line, wherever
+	// earlier rounds left the count.
+	waitAfterRefresh := func() (string, bool) {
+		out := buf.String()
+		i := strings.Index(out, refreshed)
+		if i < 0 {
+			return "", false
+		}
+		m := waitRe.FindStringSubmatch(out[i:])
+		if m == nil {
+			return "", false
+		}
+		return m[1], true
+	}
+	require.Eventually(t, func() bool { _, ok := waitAfterRefresh(); return ok }, 10*time.Second, 5*time.Millisecond)
+	first, _ := waitAfterRefresh()
+	assert.Equal(t, "20ms", first, "the backoff starts over after a success")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1161,6 +1177,32 @@ func TestRunOpenAIRefresh_BacksOffBetweenRoundsAndResetsAfterSuccess(t *testing.
 	require.Greater(t, len(calls), okAt+1, "a refresh followed the success")
 	assert.GreaterOrEqual(t, calls[okAt+1].at.Sub(calls[okAt].at), lifetime-50*time.Millisecond,
 		"the next refresh is scheduled against the renewed expiry, not the retry backoff")
+}
+
+// While the held expiry is still ahead the round wait never passes it; once
+// the expiry has passed the wait doubles up to the cap as usual.
+func TestOpenAIRefreshRoundWait_ClampsToHeldExpiry(t *testing.T) {
+	shrinkOpenAIRefreshSchedule(t) // min 20ms, cap 80ms
+	now := time.Now().Round(0)
+	tests := []struct {
+		name     string
+		failed   int
+		expiry   time.Time
+		expected time.Duration
+	}{
+		{"expiry well ahead keeps the doubled delay", 3, now.Add(time.Hour), 80 * time.Millisecond},
+		{"expiry before the doubled delay clamps to it", 3, now.Add(30 * time.Millisecond), 30 * time.Millisecond},
+		{"expiry before the minimum delay clamps to it", 1, now.Add(5 * time.Millisecond), 5 * time.Millisecond},
+		{"expiry exactly at the delay is unchanged", 2, now.Add(40 * time.Millisecond), 40 * time.Millisecond},
+		{"expired expiry still doubles", 2, now.Add(-time.Second), 40 * time.Millisecond},
+		{"expired expiry still caps", 9, now.Add(-time.Second), 80 * time.Millisecond},
+		{"expiry exactly now doubles", 3, now, 80 * time.Millisecond},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, openAIRefreshRoundWait(tc.failed, tc.expiry, now))
+		})
+	}
 }
 
 // With every re-seed failing, each attempt adds the generation it saw to
