@@ -46,6 +46,10 @@ func newTriggerInstallFake(t *testing.T) *forge.FakeClient {
 	return fc
 }
 
+type triggerInstallBaseURLClient struct{ *forge.FakeClient }
+
+func (triggerInstallBaseURLClient) BaseURL() string { return "https://gitlab.example.com" }
+
 // seedPipelineSchedules makes the fullsend poll schedules present, so the repo
 // has no GitLab post-install work (which needs the live client) and the install
 // reaches the role and trigger-account stages with local fakes.
@@ -112,7 +116,7 @@ func TestRunReposInstall_GitLabContainmentFailureExcludesRepoFromConverge(t *tes
 		return errors.New("restoring Developer access")
 	}
 	triggerCalls := 0
-	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string) error {
+	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string, bool) error {
 		triggerCalls++
 		return nil
 	}
@@ -143,10 +147,13 @@ func TestRunReposInstall_GitLabPollerProvisioningFailureStillPreparesTriggerAcco
 	seedPipelineSchedules(fc)
 
 	opts := gitlabInstallOpts(manifestPath, fc)
+	opts.testClient = triggerInstallBaseURLClient{fc}
 	opts.gitlabRoleRegistryJSON = "not json" // makes role provisioning fail
+	opts.rotateGitLabTriggerAccount = true
 	triggerCalls := 0
-	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string) error {
+	opts.testConvergeTriggerAccount = func(_ context.Context, _ forge.Client, _, _ string, rotate bool) error {
 		triggerCalls++
+		assert.False(t, rotate, "a failed Poller stage must not rotate the bearer still embedded in the webhook")
 		return nil
 	}
 	var runErr error
@@ -155,6 +162,26 @@ func TestRunReposInstall_GitLabPollerProvisioningFailureStillPreparesTriggerAcco
 	require.Error(t, runErr)
 	assert.Equal(t, 1, triggerCalls, "the trigger account is prepared despite the Poller failure")
 	assert.Equal(t, 1, strings.Count(output, "FAILED: group/project"), "the repo is counted once")
+	assert.Empty(t, fc.CreatedProjectHooks, "a failed Poller stage does not provision a new Poller webhook")
+	assert.Empty(t, fc.CreatedTriggerTokens, "a failed Poller stage does not provision a new Poller trigger")
+}
+
+func TestRunReposInstall_GitLabPollerFailureSkipsRefreshWithoutActiveAccount(t *testing.T) {
+	manifestPath := writeTestManifest(t, triggerInstallManifest)
+	fc := newTriggerInstallFake(t)
+	seedPipelineSchedules(fc)
+	opts := gitlabInstallOpts(manifestPath, fc)
+	opts.testClient = triggerInstallBaseURLClient{fc}
+	opts.gitlabRoleRegistryJSON = "not json" // fail the Poller/role stage
+	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string, bool) error {
+		fc.Errors["ListProjectHooks"] = errors.New("route probe unavailable")
+		return nil
+	}
+	var runErr error
+	output := captureStdout(t, func() { runErr = runReposInstall(context.Background(), opts) })
+
+	require.Error(t, runErr)
+	assert.NotContains(t, output, "GitLab webhook route refresh failed")
 }
 
 // Published-credential containment runs for the repo before any role stage can
@@ -172,7 +199,7 @@ func TestRunReposInstall_GitLabPublishedCredentialContainmentRunsBeforeRoleStage
 		order = append(order, "contain")
 		return nil
 	}
-	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string) error {
+	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string, bool) error {
 		order = append(order, "converge")
 		return errors.New("trigger account convergence failed")
 	}
@@ -200,7 +227,7 @@ func TestRunReposInstall_GitLabRefusedPollerMergeGrantStillPreparesTriggerAccoun
 
 	opts := gitlabInstallOpts(manifestPath, fc)
 	triggerCalls := 0
-	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string) error {
+	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string, bool) error {
 		triggerCalls++
 		return nil
 	}
@@ -223,6 +250,7 @@ func TestRunReposInstall_GitLabRefusedPollerMergeGrantStillPreparesTriggerAccoun
 func TestRunReposInstall_GitLabFreeRefusedPollerGrantPreparesTriggerAccountEndToEnd(t *testing.T) {
 	s := newTAHServer(t)
 	s.rejectMergeGrant = true
+	s.mergeRole = 40 // Maintainer-only merge rule requires Poller's refused per-user grant.
 	emu := &installEmulation{t: t}
 	s.fallback = emu.handle
 	c, err := gitlab.New(tahAdminToken, gitlab.WithBaseURL(s.srv.URL))
@@ -292,6 +320,10 @@ func (e *installEmulation) handle(w http.ResponseWriter, r *http.Request) bool {
 	case r.Method == http.MethodGet && strings.HasPrefix(p, proj+"repository/files/"):
 		// The project holds none of the scaffold yet.
 		tahJSON(w, http.StatusNotFound, map[string]any{"message": "404 File Not Found"})
+	case r.Method == http.MethodGet && p == "/api/v4/admin/ci/variables":
+		// The activation gate inventories inherited variable overrides; the
+		// emulated instance defines none.
+		tahJSON(w, http.StatusOK, []any{})
 	case r.Method == http.MethodGet && p == "/api/v4/projects/fullsend-ai%2Ffullsend/repository/commits/v0.43.0":
 		tahJSON(w, http.StatusOK, map[string]any{"id": strings.Repeat("a", 40)})
 	case r.Method == http.MethodGet && strings.HasPrefix(p, tmpl):
@@ -317,7 +349,7 @@ func (e *installEmulation) handle(w http.ResponseWriter, r *http.Request) bool {
 	case r.Method == http.MethodGet && p == proj+"repository/tree":
 		tahJSON(w, http.StatusOK, []any{})
 	case r.Method == http.MethodGet && (p == proj+"forks" || p == proj+"merge_requests" || p == proj+"hooks" ||
-		p == proj+"resource_groups" || p == proj+"protected_branches"):
+		p == proj+"resource_groups" || p == proj+"protected_branches" || p == proj+"protected_tags"):
 		tahJSON(w, http.StatusOK, []any{})
 	case r.Method == http.MethodPost && p == proj+"merge_requests":
 		tahJSON(w, http.StatusCreated, map[string]any{"iid": 1, "web_url": "https://gitlab.example.com/g/p/-/merge_requests/1"})
@@ -346,4 +378,120 @@ func (e *installEmulation) handle(w http.ResponseWriter, r *http.Request) bool {
 		tahJSON(w, http.StatusNotImplemented, map[string]any{"message": "unhandled by the test emulation"})
 	}
 	return true
+}
+
+// The early repair of drifted trigger-account-owned schedules only runs against
+// the live GitLab client and never in a dry run; other clients are skipped
+// without touching the forge.
+func TestRepairGitLabTriggerSchedules_SkipsClientsWithoutTriggerAccountAPI(t *testing.T) {
+	fc := newTriggerInstallFake(t)
+	err := repairGitLabTriggerSchedules(context.Background(), &reposInstallConfig{}, fc, ui.New(io.Discard), "group", "project")
+	require.NoError(t, err)
+	assert.Empty(t, fc.Variables)
+	assert.Empty(t, fc.CreatedSchedules)
+
+	called := false
+	opts := &reposInstallConfig{testRepairTriggerSchedules: func(context.Context, forge.Client, string, string) error {
+		called = true
+		return errors.New("repair unavailable")
+	}}
+	err = repairGitLabTriggerSchedules(context.Background(), opts, fc, ui.New(io.Discard), "group", "project")
+	require.EqualError(t, err, "repair unavailable")
+	assert.True(t, called)
+}
+
+// An account-owned schedule that drifted to carry pipeline variables blocks
+// the migration preflight convergence reaches, so the repair runs after
+// containment and the configuration preflights, before repos.Converge writes
+// anything (#8508). A repo whose containment failed is not repaired, and an
+// install that fails a preflight does not repair.
+func TestRunReposInstall_GitLabScheduleRepairRunsAfterContainmentBeforeConverge(t *testing.T) {
+	t.Run("not run when a configuration preflight fails", func(t *testing.T) {
+		manifestPath := writeTestManifest(t, triggerInstallManifest)
+		fc := newTriggerInstallFake(t)
+		seedPipelineSchedules(fc)
+
+		opts := gitlabInstallOpts(manifestPath, fc)
+		// A WIF provider without a GCP project fails the effective
+		// infrastructure preflight.
+		opts.inferenceProject = ""
+		opts.inferenceWIFProvider = "projects/123456789/locations/global/workloadIdentityPools/pool/providers/prov"
+		containCalls, repairCalls := 0, 0
+		opts.testContainTriggerAccount = func(context.Context, forge.Client, string, string) error {
+			containCalls++
+			return nil
+		}
+		opts.testRepairTriggerSchedules = func(context.Context, forge.Client, string, string) error {
+			repairCalls++
+			return nil
+		}
+		var runErr error
+		_ = captureStdout(t, func() { runErr = runReposInstall(context.Background(), opts) })
+		require.ErrorContains(t, runErr, "effective infrastructure preflight")
+		assert.Equal(t, 1, containCalls, "containment still runs first")
+		assert.Zero(t, repairCalls, "a failed preflight leaves live schedules untouched")
+	})
+
+	t.Run("after containment and before convergence", func(t *testing.T) {
+		manifestPath := writeTestManifest(t, triggerInstallManifest)
+		fc := newTriggerInstallFake(t)
+		seedPipelineSchedules(fc)
+
+		opts := gitlabInstallOpts(manifestPath, fc)
+		var order []string
+		opts.testContainTriggerAccount = func(context.Context, forge.Client, string, string) error {
+			order = append(order, "contain")
+			return nil
+		}
+		opts.testRepairTriggerSchedules = func(context.Context, forge.Client, string, string) error {
+			order = append(order, "repair")
+			assert.Empty(t, fc.CommittedFilesToBranch, "convergence has not committed anything yet")
+			assert.Empty(t, fc.CommittedFiles, "convergence has not committed anything yet")
+			assert.Empty(t, fc.CreatedProposals, "convergence has not opened a proposal yet")
+			assert.Empty(t, fc.Variables, "convergence has not written a variable yet")
+			return nil
+		}
+		opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string, bool) error {
+			order = append(order, "converge")
+			return nil
+		}
+		_ = captureStdout(t, func() { _ = runReposInstall(context.Background(), opts) })
+		assert.Equal(t, []string{"contain", "repair", "converge"}, order)
+	})
+
+	t.Run("a repair failure is only reported", func(t *testing.T) {
+		manifestPath := writeTestManifest(t, triggerInstallManifest)
+		fc := newTriggerInstallFake(t)
+		seedPipelineSchedules(fc)
+
+		opts := gitlabInstallOpts(manifestPath, fc)
+		opts.testRepairTriggerSchedules = func(context.Context, forge.Client, string, string) error {
+			return errors.New("repair unavailable")
+		}
+		triggerCalls := 0
+		opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string, bool) error {
+			triggerCalls++
+			return nil
+		}
+		output := captureStdout(t, func() { _ = runReposInstall(context.Background(), opts) })
+		assert.Contains(t, output, "GitLab trigger account schedule repair failed: repair unavailable")
+		assert.Equal(t, 1, triggerCalls, "install continues past a repair failure")
+	})
+
+	t.Run("skipped when containment failed", func(t *testing.T) {
+		manifestPath := writeTestManifest(t, triggerInstallManifest)
+		fc := newTriggerInstallFake(t)
+
+		opts := gitlabInstallOpts(manifestPath, fc)
+		opts.testContainTriggerAccount = func(context.Context, forge.Client, string, string) error {
+			return errors.New("restoring Developer access")
+		}
+		repairCalls := 0
+		opts.testRepairTriggerSchedules = func(context.Context, forge.Client, string, string) error {
+			repairCalls++
+			return nil
+		}
+		_ = captureStdout(t, func() { _ = runReposInstall(context.Background(), opts) })
+		assert.Zero(t, repairCalls)
+	})
 }

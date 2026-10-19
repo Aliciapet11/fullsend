@@ -20,6 +20,10 @@ type TriggerAccountAPI struct {
 
 var _ repos.GitLabTriggerAccountAPI = TriggerAccountAPI{}
 
+func (a TriggerAccountAPI) GetAuthenticatedUserID(ctx context.Context) (int, error) {
+	return a.c.GetAuthenticatedUserID(ctx)
+}
+
 // NewTriggerAccountAPI binds the trigger-account lifecycle to a live client.
 func NewTriggerAccountAPI(admin *gitlab.LiveClient) TriggerAccountAPI {
 	return TriggerAccountAPI{c: admin, owner: NewTriggerOwner(admin)}
@@ -182,6 +186,12 @@ func (b bootstrapClient) CreatePipelineTriggerToken(ctx context.Context, owner, 
 	return b.c.CreatePipelineTriggerToken(ctx, owner, repo, description)
 }
 
+// CreatePipelineSchedule creates a variable-free schedule owned by the
+// trigger account (#8508).
+func (b bootstrapClient) CreatePipelineSchedule(ctx context.Context, owner, repo, ref, description, cron string, active bool) (int64, error) {
+	return b.c.CreatePipelineScheduleWithActive(ctx, owner, repo, ref, description, cron, nil, active)
+}
+
 // VerifiedPollerUserIDs is the authoritative Poller identity inventory the
 // trigger account is kept separate from: every managed Poller service account,
 // including the current, retiring and abandoned Poller generations recorded in
@@ -225,7 +235,8 @@ func (o *TriggerOwner) ContainmentOptions(owner, repo string, lease *repos.GitLa
 			}
 			return nil
 		},
-		State: o.Admin,
+		State:                o.Admin,
+		EnforceWebhookSafety: true,
 	}
 }
 
@@ -234,8 +245,9 @@ func (o *TriggerOwner) ContainmentOptions(owner, repo string, lease *repos.GitLa
 // caller holds, the bootstrap client factory, and the trigger-token sink.
 //
 // The sink is the masked, protected CI/CD variable
-// FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN. No pipeline reads it until #8438
-// activates the dispatch route. A value is accepted only after GitLab reports
+// FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN. Scheduled polling uses the account's
+// job token, not this variable; the managed webhook embeds it while the
+// dispatch activation is recorded (#8509). A value is accepted only after GitLab reports
 // the variable masked, protected, not file-typed and not environment-scoped; otherwise it is deleted
 // and publication fails, so the ledger keeps the obligation and a re-run
 // revokes the token and publishes a replacement. The name is reserved to this
@@ -273,7 +285,8 @@ func (o *TriggerOwner) triggerAccountOptions(owner, repo, branch string, pollers
 			}
 			return nil
 		},
-		State: o.Admin,
+		State:                o.Admin,
+		EnforceWebhookSafety: true,
 	}
 }
 

@@ -177,7 +177,7 @@ workflow token as `GH_WORKFLOW_TOKEN`, a *provider-only* credential:
   refused in `runner_env`, `env.runner`, `env.sandbox`, `host_files` and
   `validation_loop.schema`, and pre/post/validation scripts never see it.
 - `gh` and the post-script keep using the minted token (`GH_TOKEN`,
-  `PUSH_TOKEN`).
+  `GITHUB_TOKEN`, `PUSH_TOKEN`).
 - Outside GitHub Actions the variable is left alone; a local PAT is never
   copied into it. Set it yourself only for a local run against GitHub Packages.
 - Any provider definition in `.fullsend` may reference it, the same way one
@@ -596,7 +596,10 @@ only. This triage-level access applies to **GitHub webhook dispatch** (slash
 commands, label-triggered dispatch, and event-triggered dispatch). The Go
 poll path used for GitLab and Jira currently requires `write` for all
 non-exception transitions — it does not yet distinguish observation from
-mutation thresholds.
+mutation thresholds. On GitLab, the agent job also requires the event actor
+to hold Developer access or higher for every stage except retro and
+prioritize, so automatic triage of a newly opened issue runs only when its
+author is a Developer, Maintainer, or Owner.
 See the
 [Authorization Contract](../../normative/authorization/v1/README.md) for the
 full role hierarchy, exception rules, and implementation notes.

@@ -35,6 +35,11 @@ type cfmintConfig struct {
 	// mint-status team can query /v1/status with a GitHub user token.
 	// Empty leaves status auth at the CLI default (OIDC only).
 	statusGitHubGroup string
+	// traceEndpoint and traceHeadersFile point the preview mint at the
+	// job-scoped trace collector (--otlp-traces-endpoint,
+	// --otlp-headers-file). Empty when the collector is not running.
+	traceEndpoint    string
+	traceHeadersFile string
 }
 
 // NewRepoPoolCFMintPreviews is a Factory that deploys a CF preview
@@ -66,6 +71,17 @@ func NewRepoPoolCFMintPreviews(
 		defer os.RemoveAll(pemDir)
 	}
 
+	// Start the trace collector before the mint so the preview mint can
+	// be deployed with it as its trace destination. Collection is
+	// diagnostic: if the headers file cannot be written, the mint is
+	// deployed without tracing and the collector still serves workflows.
+	traces := startTraceCollector(client, logf)
+	traceEndpoint, traceHeadersFile, cleanupHeaders, err := traces.mintTracing()
+	if err != nil {
+		logf("[trace-collector] WARNING: preview mint will not export traces: %v", err)
+	}
+	defer cleanupHeaders()
+
 	cfg := cfmintConfig{
 		pemDir:            pemDir,
 		suiteName:         envSuiteName(),
@@ -73,10 +89,13 @@ func NewRepoPoolCFMintPreviews(
 		workflowHostRepos: buildWorkflowHostRepoList(org, poolSize),
 		appSet:            envAppSet(),
 		statusGitHubGroup: mintStatusGitHubGroup(org),
+		traceEndpoint:     traceEndpoint,
+		traceHeadersFile:  traceHeadersFile,
 	}
 
 	md, err := newCFMintDriver(client, token, binary, gcpProjectID, logf, cfg)
 	if err != nil {
+		traces.abort()
 		return nil, fmt.Errorf("cfmint factory: creating mint driver: %w", err)
 	}
 
@@ -84,7 +103,7 @@ func NewRepoPoolCFMintPreviews(
 	// PLAYBACK_RUNTIME is set in the environment, in which case this same
 	// factory backs a playback suite (see NewPlaybackDriver) instead of
 	// the standard behaviour suite.
-	return buildCFMintDriverWithOpts(org, md, client, token, binary, gcpProjectID, poolSize, playbackSetupOpts(), logf)
+	return buildCFMintDriverWithOpts(org, md, client, token, binary, gcpProjectID, poolSize, playbackSetupOpts(), traces, logf)
 }
 
 // Compile-time check: NewRepoPoolCFMintPreviews satisfies Factory.
@@ -102,13 +121,15 @@ func buildCFMintDriver(
 	poolSize int,
 	logf func(string, ...any),
 ) (Driver, error) {
-	return buildCFMintDriverWithOpts(org, md, client, token, binary, gcpProjectID, poolSize, common.DefaultGitHubSetupOpts(), logf)
+	return buildCFMintDriverWithOpts(org, md, client, token, binary, gcpProjectID, poolSize, common.DefaultGitHubSetupOpts(), traceStart{}, logf)
 }
 
 // buildCFMintDriverWithOpts is like buildCFMintDriver but accepts the
 // GitHubSetupOpts to install with, so a playback-runtime caller can
 // install repos with the dummy-playback runtime and its tracking-issue
-// hook instead of the normal dummy runtime.
+// hook instead of the normal dummy runtime. traces is the already
+// started trace collector (if any): it is attached to the returned
+// driver, or stopped when construction fails.
 func buildCFMintDriverWithOpts(
 	org string,
 	md mintDriver,
@@ -116,8 +137,14 @@ func buildCFMintDriverWithOpts(
 	token, binary, gcpProjectID string,
 	poolSize int,
 	setupOpts common.GitHubSetupOpts,
+	traces traceStart,
 	logf func(string, ...any),
-) (Driver, error) {
+) (d Driver, err error) {
+	defer func() {
+		if err != nil {
+			traces.abort()
+		}
+	}()
 	setupOpts.AppSet = envAppSet()
 	ctx := context.Background()
 	mintURL, err := md.Install(ctx, org)
@@ -137,11 +164,11 @@ func buildCFMintDriverWithOpts(
 	}
 
 	// Construct and return the composed driver.
-	d, err := newComposedDriver(org, md, ens, poolSize, logf)
+	d, err = newComposedDriver(org, md, ens, poolSize, logf)
 	if err != nil {
 		return nil, err
 	}
-	return withRateLimitReporter(withMintURL(d, mintURL), client), nil
+	return traces.attach(withRateLimitReporter(withMintURL(d, mintURL), client)), nil
 }
 
 // cfmintMintDriver deploys a CF Worker preview mint and uses the derived
@@ -264,6 +291,12 @@ func CFMintDeployArgs(alias, workerName string, cfg cfmintConfig) []string {
 		args = append(args, "--app-set", cfg.appSet)
 	}
 	args = appendStatusAuthArgs(args, cfg.statusGitHubGroup)
+	if cfg.traceEndpoint != "" {
+		args = append(args, "--otlp-traces-endpoint", cfg.traceEndpoint)
+		if cfg.traceHeadersFile != "" {
+			args = append(args, "--otlp-headers-file", cfg.traceHeadersFile)
+		}
+	}
 	return args
 }
 

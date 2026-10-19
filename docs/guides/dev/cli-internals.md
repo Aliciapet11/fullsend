@@ -69,7 +69,7 @@ fullsend
 │   │   ├── --gitlab-role-token role=token   #   Administrator-provided GitLab role PAT (repeatable)
 │   │   ├── --rotate-gitlab-roles            #   Force-rotate GitLab role credentials
 │   │   ├── --rotate-gitlab-role <name>      #   Rotate a specific GitLab role (repeatable)
-│   │   ├── --rotate-gitlab-trigger-token    #   Force-rotate the GitLab webhook fast-path trigger token
+│   │   ├── --rotate-gitlab-trigger-token    #   Force-rotate the Poller-owned webhook trigger token (rotates nothing on the account route; use --rotate-gitlab-trigger-account)
 │   │   ├── --rotate-gitlab-trigger-account  #   Replace the GitLab trigger-only account's key, push entry, and trigger token
 │   ├── uninstall    <repos...>              # Tear down fullsend from repos and remove from manifest
 │   │   ├── -f, --manifest <path>            #   Path to repos.yaml (default: repos.yaml)
@@ -684,6 +684,8 @@ fullsend-repo/                      (embedded template)
 | **Upstream-only** | No (layered) or yes with `--vendor` | Referenced directly or vendored at install | .github/actions/, .github/scripts/ |
 
 Runtime skips upstream fetch when `.defaults/action.yml` is present (vendored); layered installs sparse-checkout `fullsend-ai/fullsend@main` into `.defaults/`.
+
+This repository is itself a per-repo install: its `.github/workflows/fullsend.yaml` and `.github/workflows/prioritize.yml` must be byte-for-byte what `CollectPerRepoInstallFiles` renders from the templates with the default upstream ref and runner. `TestLivePerRepoScaffoldFilesMatchInstallRender` in `internal/scaffold` enforces this, so a template change is paired with a re-render of the live file in the same PR.
 
 ### File Mode Tracking
 

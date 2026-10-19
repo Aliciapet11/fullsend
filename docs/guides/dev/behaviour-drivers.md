@@ -61,6 +61,8 @@ The two CF mint drivers compute the mint's allowlists from the org and pool size
 
 Both CF mint drivers also deploy with `--status-auth oidc,github --status-github-group <org>/mint-status` (`install.MintStatusTeamSlug`), so members of the org's `mint-status` team can query the mint's status with a GitHub user token (see [Mint status team](e2e-testing.md#mint-status-team)). Every driver that builds on the shared pool driver, including RepoPoolExternalMint, reports its mint URL through the optional `install.MintURLReporter` interface. The [CLI mint status scenarios](behaviour-testing.md#cli-mint-status-scenarios) use both.
 
+When the [job-scoped trace collector](behaviour-testing.md#job-scoped-trace-collection) runs, RepoPoolCFMintPreviews starts it before the mint deploy and adds `--otlp-traces-endpoint` and `--otlp-headers-file` to the deploy, so the preview mint exports its spans to the same collector as the workflows. RepoPoolCFMintStage does not, because its durable mint is shared across runs.
+
 `Finalize` (RepoPoolCFMintPreviews) abandons the preview alias via `fullsend mint delete --platform=cloudflare` and reclaims any outstanding leases with an error. The RepoPoolCFMintStage driver's teardown is a no-op (the durable Worker persists across runs). The RepoPoolExternalMint driver's teardown is a no-op.
 
 ## Adding an SCM driver

@@ -82,6 +82,29 @@ When a custom domain is configured, the mint URL (`FULLSEND_MINT_URL`) uses the 
 
 To tear down a durable Worker with a custom domain, pass `--custom-domain` to `mint delete` so the CLI removes the domain binding before deleting the Worker.
 
+#### Tracing
+
+Pass an OTLP/HTTP traces destination to have the Worker export mint spans (see [Mint tracing](../guides/infrastructure/distributed-tracing.md#mint-tracing)):
+
+```bash
+chmod 600 otlp-headers   # one key=value per line, OTEL_EXPORTER_OTLP_HEADERS syntax
+fullsend mint deploy \
+  --platform cloudflare \
+  --otlp-traces-endpoint https://collector.example/v1/traces \
+  --otlp-headers-file otlp-headers
+```
+
+- `--otlp-traces-endpoint` is used verbatim. `--otlp-endpoint` is a base URL with `/v1/traces` appended, used only when `--otlp-traces-endpoint` is not set. This matches the `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT` precedence.
+- The endpoint and the deployment identity (`<worker-name>`, or `<worker-name>@<alias>` for previews) are compiled into the WASM binary. Changing the endpoint rebuilds and redeploys the Worker; a pre-staged `mintcore.wasm` is always rebuilt when an endpoint is set. Durable and preview mints can target different collectors.
+- Header values are never passed on the command line or compiled into the binary. `--otlp-headers-file` must be a regular file that is not readable by group or others (`chmod 600`). The CLI stores its content as a Worker secret: through `wrangler secret put` under a per-deploy name (`MINT_OTLP_HEADERS_<random>`) for durable deploys, and as the version-scoped `MINT_OTLP_HEADERS` secret (`--secrets-file`) for `--preview` deploys.
+- **The collector endpoint must use `https`.** `http://` endpoints are rejected, because the Worker sends the collector headers and the trace payloads to this URL.
+- **Endpoint and headers travel together:** a durable deploy that sets an endpoint must also pass `--otlp-headers-file`, or `--otlp-no-headers` for a collector that needs no authentication, so the authentication choice is always explicit.
+- **Per-deploy header secret:** every durable deploy stamps a unique secret name (`MINT_OTLP_HEADERS_<random>`) into the WASM build next to the endpoint. The build reads collector headers only from that secret, and the CLI stores the headers under that name after the Worker deploy. Because the endpoint and the secret name live in the same immutable build, the Worker that is live can never read headers that belong to a different endpoint, even if two deploys overlap.
+- **Collector rotation:** re-run `mint deploy` with the new endpoint and its `--otlp-headers-file` (or `--otlp-no-headers`). The CLI deploys the Worker stamped with the new endpoint and a fresh secret name, then stores the new headers under that name. Until that last step completes (or if it fails), the mint exports to the new endpoint without authentication; exports fail open, and the previous collector's credentials are never sent to the new endpoint. Re-running the deploy is safe. Secrets of earlier deploys are not deleted: remove stale `MINT_OTLP_HEADERS_*` secrets with `wrangler secret delete <name>` (list them with `wrangler secret list --name <worker-name>`). Preview versions do not inherit the durable Worker's secrets. A preview with an endpoint always binds `MINT_OTLP_HEADERS` explicitly, to the headers file content or, without `--otlp-headers-file`, to an empty value, so pass the file on every preview deploy that needs collector authentication.
+- **Concurrent durable deploys:** collector headers are safe against overlapping deploys (see above), but the role PEM secrets are still replaced by separate, unsynchronized steps, so avoid running durable deploys against the same Worker at the same time.
+- **Disable tracing:** redeploy without an endpoint flag. The mint then makes no export attempts. You can remove leftover `MINT_OTLP_HEADERS_*` secrets with `wrangler secret delete <name>`.
+- Export failures never affect token minting. GCP Cloud Function deploys do not support these flags yet and reject them. For the standalone mint, see [Standalone mint tracing](../guides/infrastructure/standalone-mint.md#tracing).
+
 Authentication (one of):
 - `CLOUDFLARE_API_TOKEN` env var (+ `CLOUDFLARE_ACCOUNT_ID`) — API token with Workers write permission
 - Wrangler OAuth session (`wrangler login`, then `wrangler whoami`) — when `CLOUDFLARE_API_TOKEN` is unset, the CLI falls back to the Wrangler login session. If `CLOUDFLARE_ACCOUNT_ID` is also unset, the CLI discovers the account from `wrangler whoami`.
@@ -120,6 +143,10 @@ Example: `--per-repo-wif-repos=` clears `PER_REPO_WIF_REPOS` without requiring `
 | `--workflow-host-repos` | | Comma-separated workflow host repos (Cloudflare only, sets `WORKFLOW_HOST_REPOS`). Omit to preserve existing; set to `""` to clear |
 | `--allowed-workflow-files` | | Comma-separated workflow file basenames (Cloudflare only, sets `ALLOWED_WORKFLOW_FILES`). Durable: omit to preserve existing binding; set to `""` to clear. Preview: defaults to `*` when omitted (all basenames allowed) |
 | `--custom-domain` | | Hostname to attach as a Workers Custom Domain (Cloudflare only, durable deploys only). Zone ID is resolved automatically. Example: `--custom-domain=mint.fullsend.sh` |
+| `--otlp-traces-endpoint` | | OTLP/HTTP traces URL compiled into the Worker, used verbatim (Cloudflare only). See [Tracing](#tracing) |
+| `--otlp-endpoint` | | OTLP/HTTP base URL; `/v1/traces` is appended. Ignored when `--otlp-traces-endpoint` is set (Cloudflare only) |
+| `--otlp-headers-file` | | `chmod 600` file with collector auth headers in `OTEL_EXPORTER_OTLP_HEADERS` syntax, stored as a Worker secret (`MINT_OTLP_HEADERS` for previews, `MINT_OTLP_HEADERS_<random>` for durable deploys) (Cloudflare only). Requires an endpoint flag. Required with an endpoint on durable deploys unless `--otlp-no-headers` is set |
+| `--otlp-no-headers` | `false` | The collector needs no auth headers; binds no collector headers to the new endpoint (Cloudflare only). Requires an endpoint flag; mutually exclusive with `--otlp-headers-file` |
 
 ### Required IAM roles (GCP)
 
