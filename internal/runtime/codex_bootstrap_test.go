@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -68,7 +69,9 @@ if [ "$2" = "exec" ]; then
       exit $? ;;
     "codex --version") echo "` + versionOutput + `"; exit 0 ;;
     "codex debug models --bundled") cat "${FULLSEND_TEST_CATALOG:-testdata/codex/models-bundled-0.159.3.json}"; exit 0 ;;
-    "command -v python3") echo "/usr/bin/python3"; exit 0 ;;
+    *"` + hookInterpreterSep + `"*) printf '%s` + hookInterpreterSep + `%s\n' /usr/bin/python3 /usr/local/bin:/usr/bin:/bin; exit 0 ;;
+    # What a plain PATH lookup finds in the fleet image; Bootstrap must not use it.
+    "command -v python3") echo "/sandbox/.venv/bin/python3"; exit 0 ;;
     *"sys.version_info"*) echo "${FULLSEND_TEST_PYVER:-3.12}"; exit 0 ;;
     *fullsend-env-sep*) printf '%s' "${FULLSEND_TEST_ENV_READ-|fullsend-env-sep|}"; exit 0 ;;
     cat\ *) f=$(printf '%s' "${last#cat }" | tr -d "'" | tr '/' '_'); cat '` + storeDir + `'/"$f"; exit $? ;;
@@ -487,36 +490,113 @@ func TestReadCodexManifest_ReportsAMissingFile(t *testing.T) {
 	assert.Contains(t, err.Error(), "was Bootstrap run?")
 }
 
-// TestCodexPreflightPython covers the resolution Bootstrap does on a shell the
-// agent has not touched, so hooks.json can name an absolute interpreter.
-func TestCodexPreflightPython(t *testing.T) {
-	t.Run("returns the absolute path", func(t *testing.T) {
-		fakeOpenshellCodex(t, filepath.Join(t.TempDir(), "log"), t.TempDir(), "codex-cli 0.152.1")
-		got, err := codexPreflightPython("sb")
+// fakeOpenshellHookProbe installs a fake openshell whose exec of the hook
+// interpreter probe prints probeOut on stdout and probeErr on stderr and
+// exits probeExit; the version check answers 3.12.
+func fakeOpenshellHookProbe(t *testing.T, probeOut, probeErr string, probeExit int) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "exec" ]; then
+  for last; do :; done
+  case "$last" in
+    *"` + hookInterpreterSep + `"*) printf '%s' '` + probeOut + `'; printf '%s' '` + probeErr + `' >&2; exit ` + strconv.Itoa(probeExit) + ` ;;
+    *sys.version_info*) echo 3.12; exit 0 ;;
+  esac
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestHookPreflightInterpreter covers the resolution Bootstrap does on a shell
+// the agent has not touched, so hooks.json can name an absolute interpreter and
+// a PATH from directories the agent cannot write.
+func TestHookPreflightInterpreter(t *testing.T) {
+	t.Run("returns the pinned interpreter and the trusted PATH", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "log")
+		fakeOpenshellCodex(t, logPath, t.TempDir(), "codex-cli 0.152.1")
+		python, path, err := hookPreflightInterpreter("sb")
 		require.NoError(t, err)
-		assert.Equal(t, "/usr/bin/python3", got)
+		assert.Equal(t, "/usr/bin/python3", python, "not the plain PATH lookup's answer")
+		assert.Equal(t, "/usr/local/bin:/usr/bin:/bin", path)
+		log, err := os.ReadFile(logPath)
+		require.NoError(t, err)
+		assert.Contains(t, string(log), envDataPin(), "the probe runs the launch's own pin")
+		assert.NotContains(t, string(log), "command -v python3")
+	})
+
+	t.Run("takes the last line", func(t *testing.T) {
+		fakeOpenshellHookProbe(t, "warning: something\n/usr/bin/python3.12"+hookInterpreterSep+"/usr/bin:/bin\n", "", 0)
+		python, path, err := hookPreflightInterpreter("sb")
+		require.NoError(t, err)
+		assert.Equal(t, "/usr/bin/python3.12", python)
+		assert.Equal(t, "/usr/bin:/bin", path)
 	})
 
 	t.Run("refuses a relative answer", func(t *testing.T) {
-		binDir := t.TempDir()
-		script := "#!/bin/sh\nif [ \"$2\" = \"exec\" ]; then echo 'python3'; fi\nexit 0\n"
-		require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
-		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-		_, err := codexPreflightPython("sb")
+		fakeOpenshellHookProbe(t, "python3"+hookInterpreterSep+"/usr/bin", "", 0)
+		_, _, err := hookPreflightInterpreter("sb")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not an absolute path")
 	})
 
 	t.Run("refuses a missing interpreter", func(t *testing.T) {
-		binDir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
-		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-		_, err := codexPreflightPython("sb")
+		fakeOpenshellHookProbe(t, "", "fullsend: python3 not found in a PATH directory the agent cannot write", 127)
+		_, _, err := hookPreflightInterpreter("sb")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not found in the sandbox image")
+		assert.Contains(t, err.Error(), "resolving python3 for the hooks")
+		assert.Contains(t, err.Error(), "exit 127")
+		assert.Contains(t, err.Error(), "python3 not found in a PATH directory the agent cannot write")
 	})
+
+	t.Run("refuses output without the separator", func(t *testing.T) {
+		fakeOpenshellHookProbe(t, "/usr/bin/python3\n", "", 0)
+		_, _, err := hookPreflightInterpreter("sb")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resolving python3 for the hooks")
+	})
+
+	t.Run("refuses an empty PATH", func(t *testing.T) {
+		fakeOpenshellHookProbe(t, "/usr/bin/python3"+hookInterpreterSep, "", 0)
+		_, _, err := hookPreflightInterpreter("sb")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resolving the PATH for the hooks")
+	})
+}
+
+// TestHookPreflightInterpreter_RealShell runs the probe in a real sh with an
+// agent-writable directory holding a python3 first on PATH: neither that
+// python3 nor that directory reaches the result.
+func TestHookPreflightInterpreter_RealShell(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("as root every directory is writable")
+	}
+	if err := exec.Command("/bin/sh", "-c", envDataPin()).Run(); err != nil {
+		t.Skip("no python3 in a non-writable PATH directory on this host")
+	}
+	writable := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(writable, "python3"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "exec" ]; then
+  for last; do :; done
+  case "$last" in
+    *sys.version_info*) echo 3.12; exit 0 ;;
+  esac
+  PATH='` + writable + `':"$PATH" exec /bin/sh -c "$last"
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	python, path, err := hookPreflightInterpreter("sb")
+	require.NoError(t, err)
+	assert.False(t, strings.HasPrefix(python, writable+"/"), python)
+	assert.NotContains(t, ":"+path+":", ":"+writable+":")
+	assert.NotContains(t, ":"+path+":", ":"+binDir+":")
 }
 
 func TestCodexPreflightPythonVersion(t *testing.T) {

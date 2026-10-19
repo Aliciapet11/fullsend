@@ -992,9 +992,10 @@ sys.exit(0)`)
 }
 
 // TestCodexAdapter_UsesThePinnedPathForChildren is the adapter half of the
-// PATH defence. The run command captures PATH before .env and exports it; the
-// adapter sets the children's PATH from that rather than from whatever it
-// inherits, so the protection does not rest on nothing having touched PATH in
+// PATH defence. The run command records the trusted PATH (the launch PATH
+// without the directories the agent can write) before .env and exports it;
+// the adapter sets the children's PATH from that rather than from whatever it
+// inherits or from codex's own PATH, so the protection does not rest on nothing having touched PATH in
 // between. Demonstrated in the sandbox image: with a fake `tirith` first on
 // PATH the chain returns 0 (neutered) without the pin and 2 (blocked) with it.
 func TestCodexAdapter_UsesThePinnedPathForChildren(t *testing.T) {
@@ -1011,7 +1012,9 @@ sys.exit(0)`)
 		codexHookDigestsEnv+"="+codexHookDigestsValue(h.digests),
 		// What a .env prepending a planted directory would leave behind.
 		"PATH=/planted/bin:"+os.Getenv("PATH"),
-		codexPathVar+"=/pinned/bin:/usr/bin",
+		// codex's own launch PATH, which keeps the agent-writable directories.
+		codexPathVar+"=/sandbox/.venv/bin:/pinned/bin:/usr/bin",
+		envDataTrustedPathVar+"=/pinned/bin:/usr/bin",
 	)
 	cmd.Stdin = strings.NewReader(string(payload))
 	require.NoError(t, cmd.Run())
@@ -1019,8 +1022,9 @@ sys.exit(0)`)
 	got, err := os.ReadFile(seen)
 	require.NoError(t, err)
 	assert.Equal(t, "/pinned/bin:/usr/bin", string(got),
-		"the child's PATH comes from the pinned value, not the inherited one")
+		"the child's PATH comes from the trusted value, not the inherited one or codex's own")
 	assert.NotContains(t, string(got), "/planted/bin")
+	assert.NotContains(t, string(got), "/sandbox/.venv")
 }
 
 // codexSuppressibleSecret is `go test` output the suppress stage condenses
