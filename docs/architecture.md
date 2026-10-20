@@ -67,7 +67,7 @@ sole supported installation model
 
 **Open questions:**
 
-- Do we adopt a 3rd party platform, use existing internal infrastructure, or build our own? The tenant manifest format is decided, while the source of truth, service, infrastructure, and poller/dispatch/runner boundary remain open ([ADR 0123](ADRs/0123-tenant-configuration-from-repos-yaml.md); see [agent-infrastructure.md](problems/agent-infrastructure.md)).
+- Do we adopt a 3rd party platform, use existing internal infrastructure, or build our own? The tenant manifest format is decided in [ADR 0123](ADRs/0123-tenant-configuration-from-repos-yaml.md), and the poll/run process lifecycle is decided in [ADR 0144](ADRs/0144-reuse-poll-and-entity-bound-run-processes.md); the source of truth, service, infrastructure, and invocation backend remain open (see [agent-infrastructure.md](problems/agent-infrastructure.md)).
 - Can different agent types (short-lived review vs. long-running code) run on different infrastructure?
 - Who in the org owns and operates this, and how does it relate to existing platform or CI ownership?
 - Should model and MCP (or other tool-protocol) traffic from agent runtimes go through a **shared gateway** for authentication, spend limits, allowlists, and telemetry? (See [landscape.md](landscape.md#agent-gateway). Authenticating model traffic to an inference gateway with the job's OIDC token is decided in [ADR 0137](ADRs/0137-inference-gateway-credential-route.md); spend limits, allowlists, telemetry and MCP traffic remain open.)
@@ -365,13 +365,15 @@ The existing design principle is that [the repo is the coordinator](problems/age
   operating on a `NormalizedEvent` struct
   ([ADR 0061](ADRs/0061-harness-cel-dispatch.md), partially superseded by
   [ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
-- Automatic runs are serialized per harness and event subject. Later events do
+- Automatic runs are serialized per harness, repository, and canonical entity. Later events do
   not cancel an active run. Each event still passes through authorization and
-  CEL routing; the execution platform coalesces matching events into one latest
-  pending run, and each run reconciles the subject's current state. Authority
-  over other comments and content discovered during reconciliation remains a
-  separate decision
-  ([ADR 0106](ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md)).
+  CEL routing; the execution platform coalesces matching events into one
+  pending follow-up, and each sandbox attempt reconciles the subject's current
+  state. A resident bound process may handle that follow-up without a new
+  platform execution. Authority over other comments and content discovered
+  during reconciliation remains a separate decision
+  ([ADR 0106](ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md),
+  partially superseded by [ADR 0144](ADRs/0144-reuse-poll-and-entity-bound-run-processes.md)).
 - Dispatch runs no follow-up stage after an agent. Every run publishes the
   `fullsend-<agent>` artifact, and users who want to act on a result chain
   their own workflow on the shim's `workflow_run` event
@@ -382,6 +384,15 @@ The existing design principle is that [the repo is the coordinator](problems/age
   via source-native write-then-verify locks, and feeds the same dispatch pipeline
   as webhooks ([ADR 0063](ADRs/0063-polling-based-work-discovery.md)). Initial
   scope is per-repo mode only.
+- Process lifecycle (target state): bound `fullsend run` and `fullsend poll`
+  support once, resident polling, and deadline-bounded polling. CI uses the
+  timed lifecycle when a job deadline is known and otherwise runs once;
+  non-CI defaults to resident polling. Timed processes also exit after an idle
+  period, and resident processes can accept authenticated wakeups. The
+  invocation layer preserves one active run per harness, repository, and
+  canonical entity; each sandbox attempt is fresh, and a resident run reports
+  results when it becomes idle. Current CLI and workflows remain one-shot
+  ([ADR 0144](ADRs/0144-reuse-poll-and-entity-bound-run-processes.md)).
 - Harness routing uses one CEL predicate over a required normalized entity and
   an optional prompting event. Webhooks provide low-latency candidates;
   `fullsend poll` and its input drivers enumerate and resolve scheduled
