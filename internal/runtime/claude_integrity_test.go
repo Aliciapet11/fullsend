@@ -104,7 +104,7 @@ func TestBuildRunCommand_HooksGuardPlacement(t *testing.T) {
 		guard := claudeHooksGuard(d, true)
 		want := "cd '/repo' && " + claudeBinaryPin() + " && " + guard + " && " + envSource +
 			" && unset -f claude test [ command cut wc sha256sum find echo && " + claudeLoaderEnvUnset +
-			" && " + guard + " && " + launch + " --print"
+			" && " + guard + " && " + hookEnvExports(nil) + " && " + launch + " --print"
 		assert.True(t, strings.HasPrefix(cmd, want), cmd)
 		assert.Greater(t, strings.Index(cmd, "unset LD_PRELOAD"), strings.Index(cmd, envSource),
 			"the LD_* unset must come after .env is sourced")
@@ -551,7 +551,11 @@ func TestInstallClaudeHooks_RecordsDigests(t *testing.T) {
 	require.True(t, ok)
 	hooksJSON, err := security.GenerateHooksConfigPinned(hooks, "/usr/bin/python3", "/usr/local/bin:/usr/bin:/bin")
 	require.NoError(t, err)
-	assert.Equal(t, claudeHookDigestsFor(hooks, hooksJSON), got)
+	want := claudeHookDigestsFor(hooks, hooksJSON)
+	// The stub answers the harness read with both values unset.
+	want.SecurityEnv = append(configHookEnv(hooks),
+		hookEnvPair{"FULLSEND_CANARY_TOKEN", ""}, hookEnvPair{"FULLSEND_TOOL_ALLOWLIST", ""})
+	assert.Equal(t, want, got)
 }
 
 func TestInstallClaudeHooks_NoDigestsOnFailure(t *testing.T) {

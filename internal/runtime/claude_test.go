@@ -772,6 +772,7 @@ func fakeOpenshellBootstrap(t *testing.T, logPath, sentinelPath string) {
 		"  case \"$last\" in\n" +
 		"    *'" + hookInterpreterSep + "'*) printf '%s' '/usr/bin/python3" + hookInterpreterSep + "/usr/local/bin:/usr/bin:/bin' ;;\n" +
 		"    *sys.version_info*) echo 3.12 ;;\n" +
+		"    " + hookEnvReadStubArm + "\n" +
 		"  esac\n" +
 		"fi\n" +
 		"exit 0\n"
@@ -1178,6 +1179,7 @@ func claudeHooksStubScript(logPath, failOn string) string {
   for last; do :; done
   case "$last" in
     ` + claudeHooksStubProbeArm + `
+    ` + hookEnvReadStubArm + `
     *sys.version_info*) echo 3.12 ;;
     # What a plain lookup and the raw sandbox PATH give in the fleet image;
     # Bootstrap must not use them.

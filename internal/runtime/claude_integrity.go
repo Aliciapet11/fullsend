@@ -56,6 +56,9 @@ type claudeHookDigests struct {
 	// of its embedded bytes. Non-nil once Bootstrap installed hooks, even when
 	// the harness disabled every individual hook.
 	HookScripts map[string]string
+	// SecurityEnv is the hook configuration Bootstrap recorded
+	// (bootstrapHookEnv), which the launch re-asserts after .env.
+	SecurityEnv []hookEnvPair
 }
 
 // claudeHookDigestsBySandbox maps a sandbox name to the digests Bootstrap

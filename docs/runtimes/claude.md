@@ -274,6 +274,13 @@ pinned. On gateway runs the cleared variables are also pinned in the inline `--s
 non-gateway runs that block is read by Claude Code itself, after launch. On every route, the egress profile and the endpoint-bound placeholder are what keep the
 credential on its host.
 
+**Sandbox hook settings come from the harness, not `.env`.** With sandbox
+hooks on, `TIRITH_FAIL_ON`, `TIRITH_REQUIRED`, `FULLSEND_EGRESS_ALLOWLIST`,
+`FULLSEND_CANARY_TOKEN` and `FULLSEND_TOOL_ALLOWLIST` are taken from the harness
+configuration at Bootstrap, before the first iteration. The launch sets them
+again after it reads `.env`, and unsets any of them the harness did not set. A
+value in `.env`, including one the agent wrote there, cannot change them.
+
 ## Behaviour differences worth knowing
 
 These are the places Claude Code differs from pi — useful when comparing a run across runtimes.

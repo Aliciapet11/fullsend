@@ -462,6 +462,24 @@ test("childEnv scrubs the provider credentials the child does not use", () => {
   assert.equal(base.FULLSEND_SUBAGENT_DEPTH, undefined, "the caller's env object is not mutated");
 });
 
+test("childEnv passes the hook settings the launch exported to every child", () => {
+  // The launch re-asserts these after .env (hookEnvExports in
+  // sandbox_hooks_env.go); a child's hook adapter reads them from here.
+  const hookEnv = {
+    TIRITH_FAIL_ON: "high",
+    TIRITH_REQUIRED: "1",
+    FULLSEND_EGRESS_ALLOWLIST: "api.github.com:443",
+    FULLSEND_CANARY_TOKEN: "canary-from-harness",
+    FULLSEND_TOOL_ALLOWLIST: "Bash,Read",
+  };
+  for (const spec of ["anthropic-vertex/claude-opus-4-6", "xai-vertex/xai/grok-4.6", "google-vertex/gemini-3.8-flash", "openai/gpt-5.6-luna"]) {
+    const env = childEnv({ PATH: "/usr/bin", ...hookEnv }, spec);
+    for (const [k, v] of Object.entries(hookEnv)) {
+      assert.equal(env[k], v, `${k} reaches a ${spec} child`);
+    }
+  }
+});
+
 test("run: success returns the child's final text, trimmed, and records usage", async () => {
   const { manifest } = fixture();
   const logs = [];

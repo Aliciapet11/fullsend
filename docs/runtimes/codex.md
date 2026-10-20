@@ -232,6 +232,13 @@ What a local codex run needs, beyond the guide:
   prints `no readlink that is a regular file in a PATH directory the agent cannot write`.
   With sandbox hooks on, that `python3` must also be 3.11 or newer; an older one fails Bootstrap
   with `hook interpreter ... needs at least 3.11`.
+- **Sandbox hook settings come from the harness, not `.env`.** With sandbox
+  hooks on, `TIRITH_FAIL_ON`, `TIRITH_REQUIRED`, `FULLSEND_EGRESS_ALLOWLIST`,
+  `FULLSEND_CANARY_TOKEN` and `FULLSEND_TOOL_ALLOWLIST` are taken from the
+  harness configuration at Bootstrap, before the first iteration. The launch
+  sets them again after it reads `.env`, and unsets any of them the harness did
+  not set. A value in `.env`, including one the agent wrote there, cannot change
+  them.
 - **`codex` and `node` come from directories the agent cannot write.** The
   launch pins the first `codex` in a `PATH` directory the sandbox user neither
   owns nor can write, judged by the file it resolves to and every directory

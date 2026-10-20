@@ -792,6 +792,13 @@ func buildRunCommandWithDigests(params RunParams, hookDigests claudeHookDigests)
 		preEnv = " && " + ClaudeRuntime{}.claudeGatewayPreEnv(gw)
 		postEnv = " && " + claudeGatewayPostEnv(gw)
 	}
+	if params.HooksSettingsPath != "" {
+		// The hook settings, re-asserted after the agent-writable .env from
+		// what Bootstrap recorded; a name the runner has no value for is
+		// unset. Digests from a missed lookup carry none, so every name is
+		// unset — and the guard fails closed anyway.
+		postEnv = " && " + hookEnvExports(hookDigests.SecurityEnv) + postEnv
+	}
 
 	parts := []string{
 		// The pin comes before the .env read (envDataLoad); `unset -f` is a
@@ -951,10 +958,18 @@ func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, ex
 		return fmt.Errorf("copying hooks.json to sandbox: %w", err)
 	}
 
+	// The hook settings, recorded while .env is still exactly what the
+	// runner wrote; the launch re-asserts them after .env (hookEnvExports).
+	securityEnv, err := bootstrapHookEnv(sandboxName, hooks)
+	if err != nil {
+		return err
+	}
 	if err := appendHookEnv(sandboxName, hooks); err != nil {
 		return err
 	}
-	recordClaudeHookDigests(sandboxName, claudeHookDigestsFor(hooks, hooksJSON))
+	digests := claudeHookDigestsFor(hooks, hooksJSON)
+	digests.SecurityEnv = securityEnv
+	recordClaudeHookDigests(sandboxName, digests)
 	return nil
 }
 

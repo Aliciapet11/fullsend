@@ -272,6 +272,13 @@ What a local pi run needs, beyond the guide:
 - **No permission system.** pi's posture is "run in a container". The sandbox, its egress policy and
   credential placeholders are the boundary ([ADR 0027](../ADRs/0027-allowed-and-disallowed-tools-for-agents.md));
   fullsend's hook adapter is defense-in-depth on top.
+- **Sandbox hook settings come from the harness, not `.env`.** With sandbox
+  hooks on, `TIRITH_FAIL_ON`, `TIRITH_REQUIRED`, `FULLSEND_EGRESS_ALLOWLIST`,
+  `FULLSEND_CANARY_TOKEN` and `FULLSEND_TOOL_ALLOWLIST` are taken from the
+  harness configuration at Bootstrap, before the first iteration. The launch
+  sets them again after it reads `.env`, and unsets any of them the harness did
+  not set. A value in `.env`, including one the agent wrote there, cannot change
+  them. The hook adapter and every sub-agent inherit those values.
 - **Reads `AGENTS.md` natively** — no `CLAUDE.md` bridge is injected.
 - **The agent body is appended** to pi's own system prompt rather than replacing it, so pi's default
   tool guidance stays. Claude Code's `--agent` replaces it.

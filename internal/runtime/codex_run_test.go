@@ -22,7 +22,7 @@ var testRunnerHeldDigests = codexRunnerHeldDigestSet{
 	ConfigTOML:  "aaaa000000000000000000000000000000000000000000000000000000000000",
 	HooksJSON:   "bbbb000000000000000000000000000000000000000000000000000000000000",
 	HookScripts: testCodexHookScripts(),
-	SecurityEnv: []codexEnvPair{
+	SecurityEnv: []hookEnvPair{
 		{"TIRITH_REQUIRED", "1"},
 		{"FULLSEND_EGRESS_ALLOWLIST", "api.github.com:443"},
 	},
@@ -777,7 +777,7 @@ func TestCodexSecurityEnv_PinsWhatTheRunnerKnows(t *testing.T) {
 			Tirith: &harness.TirithConfig{Enabled: &on, FailOn: "medium"},
 		}},
 	})
-	got := codexSecurityEnv(cfg)
+	got := configHookEnv(cfg)
 
 	keys := map[string]string{}
 	for _, p := range got {
@@ -786,15 +786,14 @@ func TestCodexSecurityEnv_PinsWhatTheRunnerKnows(t *testing.T) {
 	assert.Equal(t, "medium", keys["TIRITH_FAIL_ON"])
 
 	// FULLSEND_CANARY_TOKEN and FULLSEND_TOOL_ALLOWLIST come from the
-	// harness's own env/host_files, not from the hook config, so the runtime
-	// has no runner-side copy to re-export — the exposure Claude Code and pi
-	// have stays for those two, which the matrix says.
+	// harness's own env/host_files, not from the hook config, so Bootstrap
+	// reads them back from .env instead (readHarnessHookEnv).
 	assert.NotContains(t, keys, "FULLSEND_CANARY_TOKEN")
 	assert.NotContains(t, keys, "FULLSEND_TOOL_ALLOWLIST")
 
 	// Stable order, so the launch command does not churn between iterations.
 	for range 5 {
-		assert.Equal(t, got, codexSecurityEnv(cfg))
+		assert.Equal(t, got, configHookEnv(cfg))
 	}
 }
 

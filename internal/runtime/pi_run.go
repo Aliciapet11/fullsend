@@ -614,6 +614,16 @@ func buildPiRunCommand(params RunParams, m *piManifest, exts []piManifestExtensi
 		)
 		parts = append(parts, piGatewayEnvParts(gw)...)
 	}
+	if hooksEnabled {
+		// The hook settings, re-asserted last before the launch from what
+		// Bootstrap recorded, so neither .env nor a declared extension's env
+		// decides them; a name the runner has no value for is unset. Without
+		// a recorded entry (Bootstrap ran in another process) nothing is
+		// emitted, as for the manifest guard.
+		if env, ok := piHookEnv(params.SandboxName); ok {
+			parts = append(parts, "&& "+hookEnvExports(env))
+		}
+	}
 	parts = append(parts,
 		"&& "+cliLaunch(piBinaryVar, piNodeVar),
 		"--print",

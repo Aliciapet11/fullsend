@@ -455,14 +455,11 @@ func buildCodexRunCommand(params RunParams, model codexModel, effort string, hoo
 		parts = append(parts, "&& export "+codexSpawnDigestsEnv+"="+
 			shellQuote(codexSpawnDigestsValue(digests)))
 		// The hook scripts' own configuration, re-asserted from what the
-		// runner derived from the harness. appendHookEnv wrote the same values
-		// into the workspace .env at bootstrap, and that file is
-		// agent-writable: without this, iteration 1 could widen the SSRF
-		// allowlist or clear TIRITH_REQUIRED for iteration 2 and the hooks
-		// would read the agent's values. Reproduced before this was added.
-		for _, pair := range digests.SecurityEnv {
-			parts = append(parts, "&& export "+pair.Key+"="+shellQuote(pair.Value))
-		}
+		// runner recorded at Bootstrap (hookEnvExports): the workspace .env
+		// carries the same values and is agent-writable, so without this,
+		// iteration 1 could widen the SSRF allowlist or clear TIRITH_REQUIRED
+		// for iteration 2. A name the runner has no value for is unset.
+		parts = append(parts, "&& "+hookEnvExports(digests.SecurityEnv))
 	}
 	parts = append(parts,
 		"&& printf '%s' "+shellQuote(prompt)+" | "+cliLaunch(codexBinaryVar, codexNodeVar),
