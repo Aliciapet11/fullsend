@@ -422,7 +422,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
 				switch own {
 				case ownMine:
-					if a.recordLease(slot, l) {
+					if a.adoptLease(slot, l, "") {
 						a.logf("[slots] %s is our earlier ambiguous create; adopting it", slot)
 						return slot, client, nil
 					}
@@ -471,7 +471,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
 			switch own {
 			case ownMine:
-				if a.recordLease(slot, l) {
+				if a.adoptLease(slot, l, desc) {
 					a.logf("[slots] %s already existed after our create; adopting it", slot)
 					return slot, client, nil
 				}
@@ -500,7 +500,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
 			switch own {
 			case ownMine:
-				if a.recordLease(slot, l) {
+				if a.adoptLease(slot, l, desc) {
 					a.logf("[slots] %s was created despite create timeout; adopting it", slot)
 					return slot, client, nil
 				}
@@ -530,7 +530,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
 			switch own {
 			case ownMine:
-				if a.recordLease(slot, l) {
+				if a.adoptLease(slot, l, desc) {
 					a.logf("[slots] %s was created despite create error; adopting it: %v", slot, err)
 					return slot, client, nil
 				}
@@ -562,14 +562,28 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 	return Slot{}, nil, capErr
 }
 
-// recordLease stores the lease for slot, forgets the slot's pending
-// nonces (the name is ours now, so none of them can land), and logs the
-// claim. The check and the insert are atomic: it returns false and
-// changes nothing when the slot is already held, so of several Claims
-// adopting the same pending lease only one succeeds.
+// recordLease stores the lease of a repository this call just created.
+// It is adoptLease for a lease whose description is this call's own.
 func (a *slotAllocator) recordLease(slot Slot, l lease) bool {
+	return a.adoptLease(slot, l, l.description)
+}
+
+// adoptLease stores the lease for slot, forgets the slot's pending
+// nonces (the name is ours now, so none of them can land), and logs the
+// claim. The checks and the insert are atomic: it returns false and
+// changes nothing when the slot is already held, or when the lease's
+// description is neither fresh (the nonce this call created with, which
+// no other Claim can match) nor still pending for the slot. Adopting a
+// pending lease consumes its nonce, so of several Claims adopting the
+// same pending lease only the first succeeds, even if it has already
+// released the slot by the time another gets here.
+func (a *slotAllocator) adoptLease(slot Slot, l lease, fresh string) bool {
 	a.mu.Lock()
 	if _, held := a.held[slot]; held {
+		a.mu.Unlock()
+		return false
+	}
+	if l.description != fresh && !slices.Contains(a.pending[slot], l.description) {
 		a.mu.Unlock()
 		return false
 	}

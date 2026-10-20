@@ -275,10 +275,15 @@ type barrierClient struct {
 	arrived chan struct{}
 	release chan struct{}
 	want    int
+	// passthrough lets later GetRepo calls skip the barrier.
+	passthrough atomic.Bool
 }
 
 func (c *barrierClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Repository, error) {
 	r, err := c.orgClient.GetRepo(ctx, owner, repo)
+	if c.passthrough.Load() {
+		return r, err
+	}
 	c.arrived <- struct{}{}
 	select {
 	case <-c.release:
@@ -343,6 +348,67 @@ func TestSlotAllocator_ConcurrentClaimsAdoptPendingLeaseOnce(t *testing.T) {
 	assert.Equal(t, 1, won, "exactly one claim adopts the pending lease")
 	assert.Equal(t, 1, lost)
 	assert.Equal(t, []Slot{slot}, a.Held())
+	assert.Zero(t, bc.createCalls())
+}
+
+// TestSlotAllocator_DelayedAdoptionFailsAfterWinnerReleased pauses the
+// second adoption of a pending lease until the first claim has been
+// released: the slot is no longer held then, but the pending nonce was
+// consumed, so the late adoption must not return a lease for the repo
+// the winner already deleted.
+func TestSlotAllocator_DelayedAdoptionFailsAfterWinnerReleased(t *testing.T) {
+	layout := StagePoolLayout(1)
+	slot := layout.Slots()[0]
+	p := newFakePool(layout)
+	desc := newLeaseDescription()
+	p.fc.Repos = append(p.fc.Repos, forge.Repository{
+		ID: 5, Name: slot.Repo, FullName: slot.String(), Description: desc,
+	})
+	bc := &barrierClient{
+		orgClient: p.clients["halfsend"],
+		arrived:   make(chan struct{}, 2),
+		release:   make(chan struct{}),
+		want:      2,
+	}
+	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return bc, nil }, t.Logf)
+	require.NoError(t, err)
+	a.addPending(slot, desc)
+
+	type result struct {
+		slot Slot
+		err  error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			s, _, err := a.Claim(context.Background())
+			results <- result{s, err}
+		}()
+	}
+	for range bc.want {
+		select {
+		case <-bc.arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("both claims should reach the ownership lookup")
+		}
+	}
+
+	// Let one lookup finish: its claim adopts the lease and releases it.
+	bc.release <- struct{}{}
+	first := <-results
+	require.NoError(t, first.err)
+	require.Equal(t, slot, first.slot)
+	bc.passthrough.Store(true) // Release looks the repo up through the same client.
+	require.NoError(t, a.Release(context.Background(), slot))
+	require.Empty(t, a.Held())
+
+	// Only now does the second lookup finish.
+	bc.release <- struct{}{}
+	second := <-results
+	var capErr *CapacityError
+	require.ErrorAs(t, second.err, &capErr, "a delayed adoption must not claim a released slot")
+	assert.Equal(t, 1, capErr.Occupied)
+	assert.Empty(t, a.Held())
 	assert.Zero(t, bc.createCalls())
 }
 
