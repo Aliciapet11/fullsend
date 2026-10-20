@@ -148,7 +148,8 @@ fullsend
 │   │   ├── --title <string>                 #     Issue title
 │   │   ├── --body <string>                  #     Issue description (Markdown), or '-' for stdin
 │   │   ├── --type <id-or-name>              #     Jira issue type ID or name (required for Jira; Jira only)
-│   │   └── --parent <key>                   #     Jira parent issue key for sub-tasks (Jira only)
+│   │   ├── --parent <key>                   #     Jira parent issue key for sub-tasks (Jira only)
+│   │   └── --fullsend-dir <path>            #     .fullsend config directory (default --tracker from config.yaml)
 │   ├── post-comment                         #   Post or update a sticky comment on an issue
 │   │   ├── --tracker <tracker>              #     Tracker backend: github, gitlab, or jira
 │   │   ├── --project <project>              #     Project: owner/repo (GitHub/GitLab) or key (Jira)
