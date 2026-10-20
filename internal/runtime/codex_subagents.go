@@ -13,94 +13,54 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/sandbox"
 )
 
-// Native child accounting for the Codex runtime.
-//
-// A Codex child is a separate thread. Its tokens never reach the parent's
-// `exec --json` stream (turn.completed.usage excludes children — #6970, probe
-// of 2026-09-03), and codex records them only in that thread's rollout under
-// $CODEX_HOME/sessions/: the running total in `token_usage_record` lines
-// (`payload.thread_token_usage`, the stream's five usage fields plus
-// total_tokens), the model in the `turn_context` line, and the thread id in
-// the file name (rollout-<start time>-<thread id>.jsonl). Run reads those
-// lines back with one bounded command after codex exits and folds them into
-// RunMetrics, so metrics.json carries the children (#6970, transcripts and
-// usage).
-//
-// The fold covers the fields a per-model entry has: input, output,
-// cache-creation and cache-read tokens, and cost, which is 0 on codex. Child
-// reasoning tokens go to the run-level ReasoningTokens only, as on pi:
-// RunMetrics has no per-model reasoning field.
+// Native child accounting for the Codex runtime. A child's tokens never reach
+// the parent's `exec --json` stream; codex records them only in the child's
+// rollout under $CODEX_HOME/sessions/ (rollout-<start>-<thread id>.jsonl).
+// After codex exits, Run reads each child's model and usage from it and folds
+// them into RunMetrics. Child reasoning goes to the run total only, as on pi.
 
-// codexChildUsageMarker starts the line the read command prints before each
-// child's rollout lines, so the parser knows where one child's lines end and
-// the next child's begin. A rollout line that imitates it can only
-// misattribute that child's own lines.
+// codexChildUsageMarker starts the line printed before each child's rollout
+// lines. A rollout line that imitates it can only misattribute its own child.
 const codexChildUsageMarker = "fullsend-child"
 
-// codexChildUnreadableMarker starts the line the read command prints for a
-// child whose rollout it could not read, or that a failed search of the
-// sessions directory did not find. A rollout line that imitates it can only
-// add a warning and misattribute that child's own lines.
+// codexChildUnreadableMarker starts the line printed for a child whose
+// rollout fails test -r, or that a failed search did not find.
 const codexChildUnreadableMarker = "fullsend-unreadable"
 
-// codexChildUsageMaxBytes bounds the read. The sessions directory is
-// agent-writable, so an unbounded read is an unbounded allocation in the
-// runner (the reason piSubagentUsageMaxBytes exists). The command selects at
-// most two lines per child, so a real read is a few kilobytes.
+// codexChildUsageMaxBytes bounds the read: the sessions directory is
+// agent-writable. A real read is a few kilobytes.
 const codexChildUsageMaxBytes = 1 << 20
 
-// codexChildUsageMaxTokens is far above any counter a real thread reports. A
-// child whose record carries a counter past it is skipped, with a warning,
-// so under the bounded read the sums of the counters left cannot wrap the
-// run's figures. A counter past the int range does not decode, so its record
-// counts nothing, as a malformed line does.
+// codexChildUsageMaxTokens is far above any real counter. A child past it is
+// skipped with a warning, so planted counters cannot wrap the run's sums.
 const codexChildUsageMaxTokens = 1 << 40
 
-// codexChildUsageThreadID is the shape of a codex thread id (UUID text). A
-// child id comes off the stream and goes into a shell command, so nothing
-// else is accepted; shellQuote wraps it as well.
+// codexChildUsageThreadID is a codex thread id. Ids go into a shell command,
+// so nothing else is accepted.
 var codexChildUsageThreadID = regexp.MustCompile(`^[0-9a-f-]{36}$`)
 
 // codexChildUsage is what one child's rollout reported.
 type codexChildUsage struct {
 	ID string
-	// Model is turn_context.payload.model of the child's last turn, which is
-	// its own: a fork copies the parent's turn_context lines ahead of the
-	// child's. "" when the rollout has no turn_context.
+	// Model is from the last turn_context, the child's own (a fork copies
+	// the parent's ahead of it); "" when there is none.
 	Model string
-	// Usage is payload.thread_token_usage of the child's last
-	// token_usage_record: codex adds every completed response to it, and a
-	// context-window overflow does not reset it, so one record is the whole
-	// child.
+	// Usage is the thread total of the last token_usage_record.
 	Usage codexUsage
-	// HasUsage is false for a child with no token_usage_record, such as one
-	// that errored before its first response (the provider rejected its
-	// model in the 2026-09-29 paid probe); it contributes nothing, not even a
-	// request.
+	// HasUsage is false when the rollout has no record; such a child adds
+	// nothing, not even a request.
 	HasUsage bool
-	// Unreadable is set when the child's rollout failed `test -r`, or a
-	// failed search of the sessions directory did not find it; the fold
-	// reports it.
+	// Unreadable marks a rollout that failed test -r or a failed search.
 	Unreadable bool
 }
 
-// codexChildUsageReadCommand renders the one in-sandbox command that reads
-// the children's rollouts. For each id, sorted and once, it finds every
-// rollout named for the thread (codex writes one), prints a marker line,
-// then the rollout's last turn_context line and its last token_usage_record
-// line. The record and not the last token_count: codex writes a token_count
-// whose usage counters are zero when a request overflows the context window,
-// and writes it only after the response's tools finish, so a child cancelled
-// in between can lack one for its last response. A rollout that fails
-// `test -r`, or one a failed search of the sessions directory did not find
-// (a missing directory included), prints codexChildUnreadableMarker in its
-// place; a rollout missing from a directory searched without error prints
-// nothing, and a path outside the sessions directory (a planted file name
-// with a newline in it) is skipped. Two greps rather than a cat: a review
-// child's rollout is megabytes and the two lines are all the fold needs, so
-// the head -c bound is a safety net, not the usual limit. `command -p`
-// bypasses shell functions and uses the system PATH, as the launch guards
-// do.
+// codexChildUsageReadCommand renders the in-sandbox command that prints, per
+// child, a marker line, the rollout's last turn_context and its last
+// token_usage_record. The record, not token_count: codex zeroes token_count's
+// counters when a request overflows the context window. A rollout it cannot
+// read, or that a failed search cannot find, prints the unreadable marker;
+// one a clean search misses prints nothing; a path outside sessionsDir is
+// skipped; head -c bounds the output.
 func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error) {
 	ids = slices.Clone(ids)
 	slices.Sort(ids)
@@ -117,11 +77,9 @@ func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error
 		strings.Join(quoted, " "), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(codexChildUsageMarker), codexChildUsageMaxBytes), nil
 }
 
-// parseCodexChildUsage decodes the read command's output: a marker line per
-// child, then that child's turn_context and token_usage_record lines, or an
-// unreadable marker line for a child it could not read. A line before the
-// first marker belongs to nobody; a line that is not JSON (the head -c cut,
-// or something planted in the agent-writable directory) is skipped.
+// parseCodexChildUsage decodes the read command's output. Lines before the
+// first marker, and lines that do not decode (a cut, planted text, a counter
+// past the int range), are skipped.
 func parseCodexChildUsage(data []byte) []codexChildUsage {
 	var out []codexChildUsage
 	marker := []byte(codexChildUsageMarker + " ")
@@ -166,15 +124,10 @@ func parseCodexChildUsage(data []byte) []codexChildUsage {
 	return out
 }
 
-// codexChildIDs collects the thread ids of the children the parent spawned.
-// It is an io.Writer that Run feeds through a tee of the `exec --json`
-// stream: the parser's events carry no thread id (ToolUseEvent is a name and
-// a summary) and parseCodexStream's signature is shared with pi's, so the
-// ids are read here, one line at a time, from the completed spawn_agent
-// items (codexCollabToolCallItem). A spawn that failed made no thread.
-//
-// A final line with no newline is not scanned; in a codex stream the last
-// line is the terminal event, never an item.
+// codexChildIDs collects the thread ids of completed spawn_agent items from
+// a tee of the `exec --json` stream: the parser's events carry no thread id.
+// A final line without a newline is not scanned; in codex it is the terminal
+// event.
 type codexChildIDs struct {
 	IDs      []string
 	line     []byte
@@ -198,9 +151,8 @@ func (c *codexChildIDs) Write(p []byte) (int, error) {
 	}
 }
 
-// take appends to the pending line, dropping it once it reaches the
-// parser's own line bound (streamBufSize): parseCodexStream skips such a
-// line too.
+// take appends to the pending line and drops a line that reaches
+// streamBufSize, as parseCodexStream does.
 func (c *codexChildIDs) take(b []byte) {
 	if c.overlong || len(c.line)+len(b) >= streamBufSize {
 		c.overlong = true
@@ -211,7 +163,7 @@ func (c *codexChildIDs) take(b []byte) {
 }
 
 func (c *codexChildIDs) scan(line []byte) {
-	// Cheap pre-filter: almost no line of a stream names the tool.
+	// Pre-filter: few lines name the tool.
 	if !bytes.Contains(line, []byte("spawn_agent")) {
 		return
 	}
@@ -229,32 +181,14 @@ func (c *codexChildIDs) scan(line []byte) {
 	c.IDs = append(c.IDs, evt.Item.ReceiverThreadIDs...)
 }
 
-// foldCodexChildUsage adds the parent's own entry to m.PerModelUsage and,
-// when the parent spawned children, reads their rollouts with one bounded
-// sandbox command and folds each child's cumulative usage into the totals
-// and the breakdown. It returns how many child rollouts it folded (codex
-// writes one per thread). An error names what was not counted: a read that
-// did not happen or did not finish, a rollout that could not be read, or a
-// child skipped for a counter past codexChildUsageMaxTokens; the children it
-// did read stay folded. The caller reports it and keeps the run, because
-// losing the children's tokens must not fail an iteration that succeeded. No
-// sandbox command runs when childIDs is empty.
-//
-// The parent's entry is added first and always. Iterations are summed
-// (internal/cli aggregateRunMetrics), so an iteration that dispatched
-// nothing, or whose read failed, still has to be in the breakdown or the
-// run's per_model_usage stops summing to its totals across a retry.
-//
-// Requests: one for the parent iteration, one per child rollout folded (the
-// invocation-count semantics of the pi fold). A child with no
-// token_usage_record, or whose rollout is missing, recorded nothing and
-// contributes nothing. A child whose rollout names no model is bucketed
-// under piSubagentUnknownModel, as pi does for a record without one. Child
-// reasoning tokens go to the run-level total only. The figures come from an
-// agent-writable directory, so every counter is floored at zero, as pi's
-// fold clamps its records, and a child with a counter past
-// codexChildUsageMaxTokens is skipped and reported; both happen before
-// anything is added.
+// foldCodexChildUsage adds the parent's entry to m.PerModelUsage, always, so
+// the breakdown sums to the totals when iterations are summed. It then folds
+// each child's usage into the totals and the breakdown, one request per
+// rollout, and returns how many it folded. The error lists what was not
+// counted; the caller warns and keeps the run. No sandbox command runs
+// without child ids. A child with no model goes under piSubagentUnknownModel,
+// as on pi. The figures are agent-written, so counters are floored at zero
+// and a child past codexChildUsageMaxTokens is skipped.
 func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string, m *RunMetrics) (folded int, err error) {
 	per := m.PerModelUsage
 	if per == nil {
@@ -293,7 +227,7 @@ func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string,
 	if exitCode != 0 {
 		return 0, fmt.Errorf("reading the child rollouts: exited %d: %s", exitCode, strings.TrimSpace(sanitizeOutput(stderr)))
 	}
-	unreadable, implausible := 0, 0
+	unreadable, overMaxTokens := 0, 0
 	for _, child := range parseCodexChildUsage([]byte(stdout)) {
 		if child.Unreadable {
 			unreadable++
@@ -301,16 +235,15 @@ func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string,
 		if !child.HasUsage {
 			continue
 		}
-		// counters() floors only its two subtractions; the three raw fields
-		// are floored here.
+		// counters() floors only its subtractions; the raw fields are
+		// floored here.
 		c := child.Usage.counters()
 		reasoning, cacheWrite, cacheRead := nonNegative(c.Reasoning), nonNegative(c.CacheWrite), nonNegative(c.CacheRead)
 		if max(c.Input, c.Output, reasoning, cacheWrite, cacheRead) > codexChildUsageMaxTokens {
-			implausible++
+			overMaxTokens++
 			continue
 		}
-		// The model comes from an agent-writable rollout and becomes a
-		// metrics.json key, so it goes through the shared secret redactor.
+		// The model is agent-written and becomes a metrics.json key.
 		key := redactSummary(child.Model)
 		if key == "" {
 			key = piSubagentUnknownModel
@@ -333,8 +266,8 @@ func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string,
 	if unreadable > 0 {
 		lost = append(lost, fmt.Sprintf("%d child rollout(s) could not be read", unreadable))
 	}
-	if implausible > 0 {
-		lost = append(lost, fmt.Sprintf("%d child(ren) with a counter past %d not counted", implausible, codexChildUsageMaxTokens))
+	if overMaxTokens > 0 {
+		lost = append(lost, fmt.Sprintf("%d child(ren) with a counter past %d not counted", overMaxTokens, codexChildUsageMaxTokens))
 	}
 	if len(stdout) >= codexChildUsageMaxBytes {
 		lost = append(lost, fmt.Sprintf("cut at %d bytes; only the children before the cut are counted", codexChildUsageMaxBytes))

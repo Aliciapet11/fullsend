@@ -18,9 +18,7 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
-// The gate Run uses to decide that a delegating agent's breakdown must carry
-// the parent's entry even when it spawned nothing. It reads the runner-held
-// record only: the manifest is agent-writable and never authority.
+// delegating reads the runner-held role set only, never the manifest.
 func TestCodexRunnerHeldDigestSet_Delegating(t *testing.T) {
 	t.Parallel()
 
@@ -77,10 +75,8 @@ func writeCodexChildRollouts(t *testing.T, ids ...string) string {
 	return sessions
 }
 
-// runCodexChildUsageRead executes the read command under /bin/sh against a
-// local sessions directory and parses what it printed. The command is run,
-// not inspected: a Go-level assertion on its text would not catch a quoting
-// slip (the same reason codex_run_test.go executes the guards).
+// runCodexChildUsageRead runs the read command under /bin/sh, so a quoting
+// slip fails the test, and parses what it printed.
 func runCodexChildUsageRead(t *testing.T, sessions string, ids []string) []codexChildUsage {
 	t.Helper()
 	cmd, err := codexChildUsageReadCommand(sessions, ids)
@@ -142,10 +138,8 @@ func TestCodexChildUsageReadCommand_Executes(t *testing.T) {
 		"a child that errored before its first response has a model and no usage")
 }
 
-// The read takes the thread total of the last token_usage_record. The
-// token_count codex writes after a context-window overflow has its usage
-// counters at zero, and a rate-limit token_count before the first response
-// has no usage; neither is read.
+// The read takes the last record's thread total; a token_count is zeroed
+// after a context-window overflow and empty before the first response.
 func TestCodexChildUsageReadCommand_ReadsTheThreadTotal(t *testing.T) {
 	t.Parallel()
 
@@ -190,9 +184,8 @@ func TestCodexChildUsageReadCommand_NamesAForkedChildByItsOwnTurn(t *testing.T) 
 	}, got[0], "the child's model and record, not the parent's inherited turn_context or token_count")
 }
 
-// A planted rollout name with a newline in it splits into several "paths";
-// the read keeps only those under the sessions directory, so a file in the
-// working directory is never opened.
+// A planted file name with a newline splits into several paths; only those
+// under the sessions directory are opened.
 func TestCodexChildUsageReadCommand_SkipsPathsOutsideTheSessionsDirectory(t *testing.T) {
 	t.Parallel()
 
@@ -277,12 +270,10 @@ func TestCodexChildIDs_SkipsOverlongLine(t *testing.T) {
 	t.Parallel()
 
 	spawn := `{"type":"item.completed","item":{"id":"item_1","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"01a06300-0000-7000-8000-000000000050","receiver_thread_ids":["` + codexChildSameModelID + `"],"prompt":null,"agents_states":{},"status":"completed"}}`
-	// A completed spawn naming another child, padded past the bound: if the
-	// line were scanned, its receiver would be collected.
+	// A completed spawn padded past the bound.
 	overlong := `{"type":"item.completed","item":{"id":"item_0","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"01a06300-0000-7000-8000-000000000050","receiver_thread_ids":["` + codexChildOtherModelID + `"],"prompt":"` + strings.Repeat("a", streamBufSize) + `","agents_states":{},"status":"completed"}}`
 
-	// A line of exactly the bound is dropped too: parseCodexStream's reader
-	// cannot return it whole either.
+	// A line of exactly the bound is dropped too, as parseCodexStream drops it.
 	head := `{"type":"item.completed","item":{"id":"item_2","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"01a06300-0000-7000-8000-000000000050","receiver_thread_ids":["` + codexChildFailedID + `"],"prompt":"`
 	tail := `","agents_states":{},"status":"completed"}}`
 	exact := head + strings.Repeat("a", streamBufSize-len(head)-len(tail)) + tail
@@ -296,10 +287,8 @@ func TestCodexChildIDs_SkipsOverlongLine(t *testing.T) {
 	assert.Empty(t, c.line, "nothing pending after a newline")
 }
 
-// A failed child is visible in the stream and never fails the run: codex
-// exits 0 and completes the turn (paid probe, 2026-09-29), so the wait and
-// close items are the only trace. Pinned here because the delegation
-// instructions given to the parent depend on it.
+// A failed child shows only as failed wait and close items and never fails
+// the run.
 func TestParseCodexStream_FailedCollabItem(t *testing.T) {
 	t.Parallel()
 
@@ -327,14 +316,11 @@ func TestParseCodexStream_FailedCollabItem(t *testing.T) {
 	assert.Equal(t, 40590, result.CacheReadInputTokens)
 }
 
-// fakeOpenshellCodexChildren is the fake openshell for the fold and run-level
-// tests. It answers the manifest `cat` from storeDir (as fakeOpenshellCodex
-// does), streams streamFixture for the codex launch, and executes the
-// child-usage read command for real under sh with the sandbox sessions path
-// rewritten to sessionsDir, so the command text is exercised, not stubbed.
-// FULLSEND_TEST_CHILD_READ_FAIL makes that command exit 1, with
-// FULLSEND_TEST_CHILD_READ_STDERR appended to its stderr;
-// FULLSEND_TEST_CODEX_EXIT sets the launch's exit status.
+// fakeOpenshellCodexChildren answers the manifest cat from storeDir, streams
+// streamFixture for the launch, and runs the read command under sh against
+// sessionsDir. FULLSEND_TEST_CHILD_READ_FAIL makes the read exit 1 (with
+// FULLSEND_TEST_CHILD_READ_STDERR on stderr); FULLSEND_TEST_CODEX_EXIT sets
+// the launch's exit status.
 func fakeOpenshellCodexChildren(t *testing.T, logPath, storeDir, streamFixture, sessionsDir string) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -357,8 +343,7 @@ exit 0
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// codexParentMetrics is the parent's own iteration as the stream fixture
-// reports it (collab_spawn.ndjson, normalized).
+// codexParentMetrics is the parent's iteration in collab_spawn.ndjson.
 func codexParentMetrics(model string) *RunMetrics {
 	return &RunMetrics{Model: model, NumTurns: 1, InputTokens: 15, OutputTokens: 1140, ReasoningTokens: 291, CacheCreationInputTokens: 13618, CacheReadInputTokens: 40590}
 }
@@ -371,9 +356,8 @@ func codexTotalsOf(m *RunMetrics) codexTokenTotals {
 	return codexTokenTotals{m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CacheCreationInputTokens, m.CacheReadInputTokens}
 }
 
-// assertCodexUsageSumsToTotals is the invariant docs/cli/run.md states for
-// per_model_usage: the entries sum to the run totals for the five fields an
-// entry has. Reasoning is run-level only and outside it.
+// assertCodexUsageSumsToTotals checks that per_model_usage sums to the run
+// totals (docs/cli/run.md); reasoning is run-level only.
 func assertCodexUsageSumsToTotals(t *testing.T, m *RunMetrics) {
 	t.Helper()
 	var sum ModelUsage
@@ -387,12 +371,9 @@ func assertCodexUsageSumsToTotals(t *testing.T, m *RunMetrics) {
 	assert.Equal(t, m.TotalCostUSD, sum.CostUSD, "cost (0 on codex)")
 }
 
-// TestFoldCodexChildUsage is the arithmetic per fixture: the parent's entry,
-// then each child's last cumulative snapshot through codexUsage.counters(),
-// added exactly once. Numbers: parent 15/1140/291/13618/40590 (real, paid
-// probe); luna child 3/8/0/7378/0 (real); terra child 1000/200/100/2000/1000
-// (synthetic); the no-model child 50/5/0/0/0 (synthetic) under unknown; the
-// failed child nothing.
+// Per fixture: parent 15/1140/291/13618/40590, luna child 3/8/0/7378/0,
+// terra child 1000/200/100/2000/1000, no-model child 50/5/0/0/0 under
+// unknown, failed child nothing.
 func TestFoldCodexChildUsage(t *testing.T) {
 	r := CodexRuntime{}
 	parentOnly := ModelUsage{Requests: 1, InputTokens: 15, OutputTokens: 1140, CacheCreationInputTokens: 13618, CacheReadInputTokens: 40590}
@@ -447,9 +428,7 @@ func TestFoldCodexChildUsage(t *testing.T) {
 	}
 }
 
-// A planted negative counter cannot lower the run's figures: counters()
-// floors only its two subtractions, so the fold floors the three raw fields
-// (a wrap is TestFoldCodexChildUsage_SkipsImplausibleCounters).
+// A planted negative counter cannot lower the run's figures.
 func TestFoldCodexChildUsage_ClampsNegativeCounters(t *testing.T) {
 	sessions := writeCodexChildRollouts(t)
 	rollout := `{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}` + "\n" +
@@ -461,8 +440,7 @@ func TestFoldCodexChildUsage_ClampsNegativeCounters(t *testing.T) {
 	n, err := CodexRuntime{}.foldCodexChildUsage("sb", []string{codexChildSameModelID}, m)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
-	// Input is 10 - (-5000) - (-7000) = 12010 and output 20 - (-900) = 920:
-	// inflation is accepted, as on pi; nothing drops below the parent's figures.
+	// Input 10+5000+7000 and output 20+900: inflation is accepted, as on pi.
 	assert.Equal(t, codexTokenTotals{15 + 12010, 1140 + 920, 291, 13618, 40590}, codexTotalsOf(m))
 	assert.Equal(t, ModelUsage{Requests: 2, InputTokens: 15 + 12010, OutputTokens: 1140 + 920, CacheCreationInputTokens: 13618, CacheReadInputTokens: 40590},
 		m.PerModelUsage["gpt-5.6-luna"])
@@ -470,9 +448,7 @@ func TestFoldCodexChildUsage_ClampsNegativeCounters(t *testing.T) {
 }
 
 // A read cut at the bound is a warning; the children before the cut stay
-// folded and the ones past it are not counted. Each planted line stays under
-// the parser's own line limit, so only the head -c bound stops the third
-// child.
+// folded.
 func TestFoldCodexChildUsage_CutReadIsAWarning(t *testing.T) {
 	sessions := writeCodexChildRollouts(t, codexChildSameModelID)
 	day := filepath.Join(sessions, "2026", "09", "29")
@@ -491,9 +467,8 @@ func TestFoldCodexChildUsage_CutReadIsAWarning(t *testing.T) {
 	assertCodexUsageSumsToTotals(t, m)
 }
 
-// A rollout the read cannot open, or one a failed search of the sessions
-// directory does not find, is a warning; the children it did read stay
-// folded.
+// An unreadable rollout, or one a failed search misses, is a warning;
+// readable children stay folded.
 func TestFoldCodexChildUsage_UnreadableRolloutIsAWarning(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("file modes do not stop root")
@@ -532,8 +507,7 @@ func TestFoldCodexChildUsage_UnreadableRolloutIsAWarning(t *testing.T) {
 	}
 }
 
-// The child's model comes from an agent-writable rollout and becomes a
-// metrics.json key, so a credential planted there is redacted.
+// A credential planted as the child's model is redacted from the key.
 func TestFoldCodexChildUsage_RedactsThePlantedModel(t *testing.T) {
 	token := "ghp_" + strings.Repeat("A", 36)
 	sessions := writeCodexChildRollouts(t)
@@ -553,10 +527,9 @@ func TestFoldCodexChildUsage_RedactsThePlantedModel(t *testing.T) {
 	assertCodexUsageSumsToTotals(t, m)
 }
 
-// A counter no real thread reaches is skipped, with a warning, whichever
-// counter it is: two planted rollouts near MaxInt would otherwise wrap the
-// run's figures.
-func TestFoldCodexChildUsage_SkipsImplausibleCounters(t *testing.T) {
+// A child with any counter past codexChildUsageMaxTokens is skipped with a
+// warning.
+func TestFoldCodexChildUsage_SkipsCountersOverMaxTokens(t *testing.T) {
 	for _, field := range []string{"input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens"} {
 		t.Run(field, func(t *testing.T) {
 			sessions := writeCodexChildRollouts(t)
@@ -578,10 +551,8 @@ func TestFoldCodexChildUsage_SkipsImplausibleCounters(t *testing.T) {
 	}
 }
 
-// No child id, no sandbox command: PATH holds no openshell, so any exec
-// would fail to start. The parent's entry still lands in the breakdown
-// (a delegating agent that dispatched nothing), and a parent without a
-// model is bucketed as pi buckets a record without one.
+// No child id, no sandbox command (PATH has no openshell); the parent's
+// entry still lands, under unknown when it has no model.
 func TestFoldCodexChildUsage_NoChildrenNoSandbox(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
@@ -637,8 +608,7 @@ func TestFoldCodexChildUsage_ReadFailuresKeepTheParentEntry(t *testing.T) {
 	})
 }
 
-// sumCodexIterations adds iterations up as internal/cli aggregateRunMetrics
-// does.
+// sumCodexIterations sums iterations as internal/cli aggregateRunMetrics does.
 func sumCodexIterations(ms ...*RunMetrics) *RunMetrics {
 	sum := &RunMetrics{PerModelUsage: map[string]ModelUsage{}}
 	for _, m := range ms {
@@ -667,8 +637,7 @@ func TestFoldCodexChildUsage_TwoIterationsSumToTotals(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, n)
 
-	// The retry dispatched nothing; a delegating agent still folds, so its
-	// parent entry is in the breakdown.
+	// The retry dispatched nothing; its parent entry still lands.
 	second := &RunMetrics{Model: "gpt-5.6-luna", NumTurns: 1, InputTokens: 100, OutputTokens: 50, ReasoningTokens: 7, CacheCreationInputTokens: 20, CacheReadInputTokens: 30}
 	n, err = r.foldCodexChildUsage("sb", nil, second)
 	require.NoError(t, err)
@@ -683,11 +652,9 @@ func TestFoldCodexChildUsage_TwoIterationsSumToTotals(t *testing.T) {
 	assertCodexUsageSumsToTotals(t, sum)
 }
 
-// runCodexWithChildren runs CodexRuntime.Run against the fake with the given
-// stream fixture and a sessions tree holding the rollouts of the three
-// children the stream spawns, and returns the metrics, the exit code, the
-// printer output and the fake's argv log. delegating sets RoleFiles on the
-// runner-held digests (what Bootstrap records for a delegating agent).
+// runCodexWithChildren runs Run against the fake with the rollouts of the
+// three children the stream spawns; delegating sets RoleFiles on the
+// runner-held digests. It returns the metrics, exit code, output and argv log.
 func runCodexWithChildren(t *testing.T, streamFixture string, delegating bool) (*RunMetrics, int, string, string) {
 	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "openshell.log")
@@ -715,9 +682,7 @@ func runCodexWithChildren(t *testing.T, streamFixture string, delegating bool) (
 	return metrics, exit, out.String(), readFileString(t, logPath)
 }
 
-// A run that spawned: metrics.json carries the children. Digests without
-// RoleFiles here, so the spawn in the stream alone is what triggers the read
-// (the second half of the gate).
+// A spawn in the stream alone (no RoleFiles) triggers the read.
 func TestCodexRun_FoldsChildUsage(t *testing.T) {
 	metrics, exit, out, log := runCodexWithChildren(t, "collab_spawn.ndjson", false)
 
@@ -738,8 +703,8 @@ func TestCodexRun_FoldsChildUsage(t *testing.T) {
 	assert.NotContains(t, log, codexChildFailedSpawnID, "the failed spawn's receiver is never looked up")
 }
 
-// A delegating agent that dispatched nothing: the breakdown carries the
-// parent's entry and no sandbox command runs (the first half of the gate).
+// A delegating agent that spawned nothing gets the parent's entry and no
+// sandbox command.
 func TestCodexRun_DelegatingWithoutSpawnHasParentEntry(t *testing.T) {
 	metrics, exit, _, log := runCodexWithChildren(t, "basic_run.ndjson", true)
 
@@ -751,8 +716,7 @@ func TestCodexRun_DelegatingWithoutSpawnHasParentEntry(t *testing.T) {
 	assert.NotContains(t, log, codexChildUsageMarker, "no id, no sandbox command")
 }
 
-// The byte-equal invariant: a non-delegating agent whose stream reports no
-// spawn writes the same metrics.json as before.
+// A non-delegating agent with no spawn writes the same metrics.json as before.
 func TestCodexRun_NoSpawnNoBreakdown(t *testing.T) {
 	metrics, exit, _, log := runCodexWithChildren(t, "basic_run.ndjson", false)
 
@@ -765,7 +729,7 @@ func TestCodexRun_NoSpawnNoBreakdown(t *testing.T) {
 }
 
 // A failed read is a warning; the iteration keeps its exit code and the
-// parent's numbers, and the breakdown keeps the parent's entry.
+// parent's entry.
 func TestCodexRun_ChildReadFailureIsAWarning(t *testing.T) {
 	token := "ghp_" + strings.Repeat("B", 36)
 	t.Setenv("FULLSEND_TEST_CHILD_READ_FAIL", "1")
@@ -783,11 +747,8 @@ func TestCodexRun_ChildReadFailureIsAWarning(t *testing.T) {
 	assertCodexUsageSumsToTotals(t, metrics)
 }
 
-// A codex process that did not exit 0 (a failed or interrupted turn, a
-// timeout, a cancel) still has its children's rollouts read: codex writes a
-// child's usage record as each response completes, so what the children
-// recorded is kept, and the parent's entry is recorded too. With an exit-0
-// retry the breakdown still sums to the totals.
+// A non-zero codex exit still reads the children; with an exit-0 retry the
+// breakdown still sums to the totals.
 func TestCodexRun_NonZeroExitStillReadsTheChildren(t *testing.T) {
 	t.Setenv("FULLSEND_TEST_CODEX_EXIT", "137")
 	failed, exit, out, log := runCodexWithChildren(t, "collab_spawn.ndjson", true)

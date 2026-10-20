@@ -607,8 +607,6 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 		}
 	}
 
-	// Child thread ids come off a tee of the stream: the parser's events
-	// carry no thread id.
 	childIDs := &codexChildIDs{}
 	reader = io.TeeReader(reader, childIDs)
 
@@ -659,14 +657,9 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 			r.ConfigDir())
 	}
 
-	// The fold runs whatever the exit code. The parent's entry goes into the
-	// breakdown, so a retry keeps per_model_usage summing to the totals, and
-	// the children's rollouts are read: they are separate threads whose
-	// tokens never reached the stream just parsed, and codex writes a
-	// child's usage record as each response completes, so a failed,
-	// interrupted, cancelled or timed-out iteration keeps what its children
-	// recorded. A read failure costs the children's tokens, not the
-	// iteration.
+	// The fold runs whatever the exit code: codex writes a child's usage as
+	// each response completes, and the parent's entry keeps per_model_usage
+	// summing to the totals across a retry. A read failure is a warning.
 	if digests.delegating() || len(childIDs.IDs) > 0 {
 		n, ferr := r.foldCodexChildUsage(params.SandboxName, childIDs.IDs, metrics)
 		if ferr != nil {

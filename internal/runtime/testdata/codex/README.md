@@ -26,17 +26,13 @@ ARG exists run `CODEX_VERSION=0.152.1 ./regen.sh`.
 | `truncated.ndjson` | Killed mid-write — the last line stops mid-token and there is no terminal event. (The repo's `end-of-file-fixer` hook keeps a trailing newline after it; the line is still unparseable, which is what the fixture tests.) |
 | `unknown_types.ndjson` | An unknown top-level event type and an unknown item type: skipped, the run still completes. |
 | `second_turn_unfinished.ndjson` | A completed turn followed by a second `turn.started` that never finishes: the run is incomplete, not the first turn's success. |
-| `collab_spawn.ndjson` | Three completed `spawn_agent` items (one child each), one **failed** `spawn_agent` item whose receiver must not be counted as a child, `wait` and `close_agent` items for the errored child with `status: failed` inside a completed turn, and the real parent usage of the 2026-09-29 paid probe. Note: a spawn a PreToolUse hook denied emits no `collab_tool_call` item at all (seen in a mock run); the failed item here is hand-authored to pin the collector's status filter. |
+| `collab_spawn.ndjson` | Three completed `spawn_agent` items, one **failed** one whose receiver is not a child, failed `wait` and `close_agent` items for the errored child inside a completed turn, and the parent usage of the 2026-09-29 paid probe. A hook-denied spawn emits no item; the failed one is hand-authored to pin the status filter. |
 
 ## Child rollout fixtures (`child_usage_*.jsonl`)
 
-Inputs for `foldCodexChildUsage` (`internal/runtime/codex_subagents.go`), not for
-`parseCodexStream`: they are codex **rollouts** (`$CODEX_HOME/sessions/**/rollout-*.jsonl`, the
-underscored envelope of `codex_redact.go`), not the `exec --json` stream. Line types and fields
-were copied from the rollouts of the 0.157.0 paid probe of 2026-09-29, trimmed, with
-synthetic ids. The fold reads two lines per rollout: the last `turn_context` (its
-`payload.model`) and the last `token_usage_record` (its `payload.thread_token_usage`, cumulative for
-the thread and not reset when a request overflows the context window, unlike `token_count`).
+Codex **rollouts** (`$CODEX_HOME/sessions/**/rollout-*.jsonl`) for `foldCodexChildUsage`, not
+`exec --json` streams, modelled on the 0.157.0 paid probe of 2026-09-29, with synthetic ids. The fold reads each rollout's last `turn_context` (`payload.model`) and last
+`token_usage_record` (`payload.thread_token_usage`).
 
 | Fixture | Covers |
 |---|---|
