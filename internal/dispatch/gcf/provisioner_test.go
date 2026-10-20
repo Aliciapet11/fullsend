@@ -1404,7 +1404,8 @@ func TestBundleEmbeddedMintSource(t *testing.T) {
 	assert.Contains(t, names, "mintcore/status_github_stub.go")
 	assert.Contains(t, names, "mintcore/tracing.go")
 	assert.Contains(t, names, "trace_consts.go")
-	assert.Len(t, names, 27)
+	assert.Contains(t, names, "mintcore/bot_role.go")
+	assert.Len(t, names, 28)
 }
 
 func TestBundleEmbeddedMintSource_StampsVersion(t *testing.T) {
