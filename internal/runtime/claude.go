@@ -23,7 +23,7 @@ import (
 const claudeDebugLog = "claude-debug.log"
 
 // claudeBinaryVar holds the absolute path of the claude binary, resolved before
-// .env is sourced and marked read-only.
+// .env is read and marked read-only.
 const claudeBinaryVar = "FULLSEND_CLAUDE_BIN"
 
 // claudeBinaryPin is the POSIX sh fragment that records where claude is; see
@@ -789,11 +789,11 @@ func buildRunCommandWithDigests(params RunParams, hookDigests claudeHookDigests)
 	}
 
 	parts := []string{
-		// The pin comes before `. .env`; `unset -f` is a special builtin, which a
-		// function defined in .env (or an .env.d file it sources) cannot
-		// shadow, and the launch goes through the pinned path, which no
-		// function or alias can shadow either. With sandbox hooks the hooks
-		// guard runs on both sides of .env (claudeGuardedEnv).
+		// The pin comes before the .env read (envDataLoad); `unset -f` is a
+		// special builtin, which no function can shadow, and the launch goes
+		// through the pinned path, which no function or alias can shadow
+		// either. With sandbox hooks the hooks guard runs on both sides of
+		// .env (claudeGuardedEnv).
 		fmt.Sprintf("cd %s && %s%s && %s%s && \"$%s\"",
 			shellQuote(params.RepoDir), claudeBinaryPin(), preEnv,
 			claudeGuardedEnv(envFile, params.HooksSettingsPath != "", gw == nil, hookDigests),

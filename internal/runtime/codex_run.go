@@ -397,7 +397,8 @@ func buildCodexRunCommand(params RunParams, model codexModel, effort string, hoo
 		"&& "+codexConfigGuard(r, digests),
 		"&& "+codexModelsCacheRemoval(r),
 		"&& "+seed,
-		"&& . "+shellQuote(envFile),
+		// .env is read as data, never sourced (envDataLoad, #8498).
+		"&& "+envDataLoad(envFile, codexBinaryVar, codexPathVar),
 		// .env is agent-writable; re-pin the runner-owned config location
 		// after it so a rewritten .env cannot move codex's home out from
 		// under the guards.

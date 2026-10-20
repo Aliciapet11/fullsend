@@ -622,6 +622,9 @@ func TestCodexReadHarnessSecurityEnv(t *testing.T) {
 // the fake openshell above answers it without evaluating it, which is how
 // single-quoted references re-asserted the literal "${KEY:-}" text.
 func TestCodexReadHarnessSecurityEnvCmd(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
 	for name, tc := range map[string]struct{ env, want string }{
 		"both set":     {"export FULLSEND_CANARY_TOKEN='canary-abc'\nexport FULLSEND_TOOL_ALLOWLIST='Bash,Read'\n", "canary-abc|fullsend-env-sep|Bash,Read"},
 		"canary unset": {"export FULLSEND_TOOL_ALLOWLIST='Bash,Read'\n", "|fullsend-env-sep|Bash,Read"},
@@ -642,7 +645,9 @@ func TestCodexReadHarnessSecurityEnvCmd(t *testing.T) {
 		})
 	}
 
-	// A .env that cannot be sourced must fail the read, not pin empty values.
+	// .env is read as data, as at launch (#8574): a line the loader does not
+	// take is skipped, and the values around it are still read rather than
+	// pinned as unset.
 	for name, env := range map[string]string{
 		"syntax error": "export FULLSEND_CANARY_TOKEN='canary-abc'\nif then\n",
 		"failing last": "export FULLSEND_CANARY_TOKEN='canary-abc'\nfalse\n",
@@ -652,11 +657,30 @@ func TestCodexReadHarnessSecurityEnvCmd(t *testing.T) {
 			require.NoError(t, os.WriteFile(envFile, []byte(env), 0o600))
 			cmd := exec.Command("/bin/sh", "-c", codexReadHarnessSecurityEnvCmd(envFile))
 			cmd.Env = []string{"PATH=/usr/bin:/bin"}
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
 			out, err := cmd.Output()
-			require.Error(t, err)
-			assert.Empty(t, string(out))
+			require.NoError(t, err, stderr.String())
+			assert.Equal(t, strings.SplitN(env, "'", 3)[1]+codexEnvReadSeparator, string(out))
+			assert.Contains(t, stderr.String(), "line 2:", "the skipped line is reported by number")
 		})
 	}
+	// No .env line runs as shell during the read.
+	t.Run("shell constructs do not run", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := filepath.Join(dir, "pwned")
+		envFile := filepath.Join(dir, ".env")
+		require.NoError(t, os.WriteFile(envFile, []byte("touch "+marker+"\n"+
+			"export FULLSEND_TOOL_ALLOWLIST=$(touch "+marker+")\n"+
+			"printf() { touch "+marker+"; }\n"+
+			"export FULLSEND_TOOL_ALLOWLIST='Bash,Read'\n"), 0o600))
+		cmd := exec.Command("/bin/sh", "-c", codexReadHarnessSecurityEnvCmd(envFile))
+		cmd.Env = []string{"PATH=/usr/bin:/bin"}
+		out, err := cmd.Output()
+		require.NoError(t, err)
+		assert.Equal(t, codexEnvReadSeparator+"Bash,Read", string(out))
+		assert.NoFileExists(t, marker, "a construct from .env ran")
+	})
 	t.Run("missing file", func(t *testing.T) {
 		cmd := exec.Command("/bin/sh", "-c", codexReadHarnessSecurityEnvCmd(filepath.Join(t.TempDir(), ".env")))
 		cmd.Env = []string{"PATH=/usr/bin:/bin"}
@@ -701,7 +725,7 @@ func TestCodexBootstrap_PinsTheHarnessHookEnv(t *testing.T) {
 		RepoDir:           sandbox.SandboxWorkspace + "/repo",
 		HooksSettingsPath: r.codexHooksPath(),
 	}, codexModel{ID: "gpt-5-mini"}, "", true, held)
-	envAt := strings.Index(cmd, ". '"+sandbox.SandboxWorkspace+"/.env'")
+	envAt := strings.Index(cmd, codexEnvLoad)
 	require.Positive(t, envAt)
 	for key, value := range got {
 		at := strings.Index(cmd, "export "+key+"="+shellQuote(value))

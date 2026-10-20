@@ -200,7 +200,7 @@ func (b bootstrapClient) CreatePipelineSchedule(ctx context.Context, owner, repo
 // all is a verified empty inventory (ErrNotFound); any other failure to read
 // the inventory is returned so the caller stops instead of guessing.
 func (o *TriggerOwner) VerifiedPollerUserIDs(ctx context.Context, owner, repo string) ([]int, error) {
-	managed, err := o.ManagedPollerUserIDs(ctx, owner, repo)
+	managed, err := o.recordedPollerUserIDs(ctx, owner, repo)
 	if err != nil && !forge.IsNotFound(err) {
 		return nil, fmt.Errorf("resolving the Poller identity inventory: %w", err)
 	}
