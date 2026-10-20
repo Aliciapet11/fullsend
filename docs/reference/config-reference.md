@@ -226,13 +226,15 @@ restricts which orgs and repos agents may create issues in.
 
 When omitted, agents cannot create issues outside the repository they are
 running in. That repository is always allowed, so it does not need an
-entry. The default per-repo configuration generated without a preset lists
+entry. The default GitHub per-repo configuration generated without a preset lists
 both `fullsend-ai/fullsend` and `fullsend-ai/agents` in `allow_targets.repos`,
 so retro proposals and triage prerequisites can reach the platform or agent
 repository that owns the change. These are installation defaults, not an
 automatic grant for every repository in `allowed_remote_resources`.
+Fresh GitLab installations instead record an explicit empty `allow_targets`
+policy: cross-project targets must be configured for the GitLab host.
 Explicit `create_issues` settings and preset inheritance remain authoritative.
-Existing installations retain their permissions on upgrade; to opt in, add
+Existing installations retain their permissions on upgrade; on GitHub, to opt in, add
 `fullsend-ai/agents` to the existing target list in the managed repository’s
 `repos.yaml` configuration, or in `.fullsend/config.yaml` for an installation
 not managed through `fullsend repos`. Preserve any other targets you need.

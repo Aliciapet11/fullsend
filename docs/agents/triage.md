@@ -87,9 +87,11 @@ create_issues:
       - upstream-org/specific-repo
 ```
 
-**Defaults:** A fresh installation without a preset or explicit `create_issues`
+**Defaults:** A fresh GitHub installation without a preset or explicit `create_issues`
 setting permits `fullsend-ai/fullsend` and `fullsend-ai/agents` as upstream
-targets. The repository the agent runs in is always allowed, so it needs no
+targets. Fresh GitLab installations have an explicit empty cross-project
+allowlist; configure any additional projects on the GitLab host explicitly.
+The repository the agent runs in is always allowed, so it needs no
 entry. Existing installations retain their configured permissions on upgrade;
 see [migration guidance](../guides/getting-started/migrating-from-github-setup.md#permit-agent-improvement-proposals-on-existing-installations)
 to add the agents repository explicitly.

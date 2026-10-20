@@ -626,6 +626,10 @@ func BuildScaffoldFiles(cfg InstallConfig) ([]forge.TreeFile, error) {
 				perRepoCfg = overlay
 			default:
 				generated := config.NewPerRepoConfig(cfg.Roles, cfg.Owner+"/"+cfg.Repo)
+				if cfg.Forge == ForgeGitLab {
+					// GitHub upstream names are not destinations on the GitLab host.
+					generated.IssueCreationConfig().AllowTargets = config.AllowTargets{}
+				}
 				if cfg.Runtime != "" {
 					generated.SetRuntime(cfg.Runtime)
 				}
