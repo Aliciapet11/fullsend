@@ -322,9 +322,16 @@ func (r PiRuntime) Bootstrap(input BootstrapInput) error {
 		if err := installHookScripts(sandboxName, r.piHooksDir(), hooks); err != nil {
 			return err
 		}
+		// The hook settings, recorded while .env is still exactly what the
+		// runner wrote; the launch re-asserts them after .env.
+		securityEnv, err := bootstrapHookEnv(sandboxName, hooks)
+		if err != nil {
+			return err
+		}
 		if err := appendHookEnv(sandboxName, hooks); err != nil {
 			return err
 		}
+		recordPiHookEnv(sandboxName, securityEnv)
 		if err := uploadBytes(sandboxName, cfg+"/"+piHooksExtensionFile, piHooksExtensionJS); err != nil {
 			return fmt.Errorf("installing hook extension: %w", err)
 		}
@@ -406,6 +413,29 @@ func piManifestHash(sandboxName string) string {
 		}
 	}
 	return ""
+}
+
+// piHookEnvs carries the hook settings Bootstrap recorded (bootstrapHookEnv)
+// to Run through the same seam as piManifestHashes, so the launch re-asserts
+// them after the agent-writable .env. The hook adapter and every sub-agent
+// inherit the launch environment (childEnv copies it), so the one export
+// covers them all.
+var piHookEnvs sync.Map // sandboxName -> []hookEnvPair
+
+func recordPiHookEnv(sandboxName string, env []hookEnvPair) {
+	piHookEnvs.Store(sandboxName, env)
+}
+
+// piHookEnv returns the hook settings recorded for a sandbox, and false when
+// Bootstrap did not run in this process — the same case in which the
+// manifest guard is not emitted.
+func piHookEnv(sandboxName string) ([]hookEnvPair, bool) {
+	v, ok := piHookEnvs.Load(sandboxName)
+	if !ok {
+		return nil, false
+	}
+	env, ok := v.([]hookEnvPair)
+	return env, ok
 }
 
 // piBashAllowlistEnv selects how the extension treats a Bash(a,b) allowlist

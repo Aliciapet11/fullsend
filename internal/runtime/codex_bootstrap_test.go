@@ -679,11 +679,11 @@ func TestCodexBootstrap_RecordsRunnerHeldDigests(t *testing.T) {
 func TestCodexReadHarnessSecurityEnv(t *testing.T) {
 	t.Run("reads both values", func(t *testing.T) {
 		fakeOpenshellCodex(t, filepath.Join(t.TempDir(), "log"), t.TempDir(), "codex-cli 0.152.1")
-		t.Setenv("FULLSEND_TEST_ENV_READ", "canary-abc"+codexEnvReadSeparator+"Bash,Read")
+		t.Setenv("FULLSEND_TEST_ENV_READ", "canary-abc"+hookEnvReadSeparator+"Bash,Read")
 
-		got, err := codexReadHarnessSecurityEnv("sb")
+		got, err := readHarnessHookEnv("sb")
 		require.NoError(t, err)
-		assert.Equal(t, []codexEnvPair{
+		assert.Equal(t, []hookEnvPair{
 			{"FULLSEND_CANARY_TOKEN", "canary-abc"},
 			{"FULLSEND_TOOL_ALLOWLIST", "Bash,Read"},
 		}, got)
@@ -693,11 +693,11 @@ func TestCodexReadHarnessSecurityEnv(t *testing.T) {
 	// cannot widen the fail-closed empty set the harness left.
 	t.Run("pins an unset value as empty", func(t *testing.T) {
 		fakeOpenshellCodex(t, filepath.Join(t.TempDir(), "log"), t.TempDir(), "codex-cli 0.152.1")
-		t.Setenv("FULLSEND_TEST_ENV_READ", "canary-abc"+codexEnvReadSeparator)
+		t.Setenv("FULLSEND_TEST_ENV_READ", "canary-abc"+hookEnvReadSeparator)
 
-		got, err := codexReadHarnessSecurityEnv("sb")
+		got, err := readHarnessHookEnv("sb")
 		require.NoError(t, err)
-		assert.Equal(t, []codexEnvPair{
+		assert.Equal(t, []hookEnvPair{
 			{"FULLSEND_CANARY_TOKEN", "canary-abc"},
 			{"FULLSEND_TOOL_ALLOWLIST", ""},
 		}, got)
@@ -707,7 +707,7 @@ func TestCodexReadHarnessSecurityEnv(t *testing.T) {
 		fakeOpenshellCodex(t, filepath.Join(t.TempDir(), "log"), t.TempDir(), "codex-cli 0.152.1")
 		t.Setenv("FULLSEND_TEST_ENV_READ", "only-one-value")
 
-		_, err := codexReadHarnessSecurityEnv("sb")
+		_, err := readHarnessHookEnv("sb")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "expected 2 values")
 	})
@@ -732,7 +732,7 @@ func TestCodexReadHarnessSecurityEnvCmd(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			envFile := filepath.Join(t.TempDir(), ".env")
 			require.NoError(t, os.WriteFile(envFile, []byte(tc.env), 0o600))
-			cmd := exec.Command("/bin/sh", "-c", codexReadHarnessSecurityEnvCmd(envFile))
+			cmd := exec.Command("/bin/sh", "-c", readHarnessHookEnvCmd(envFile))
 			cmd.Env = []string{"PATH=/usr/bin:/bin"}
 			out, err := cmd.Output()
 			require.NoError(t, err)
@@ -750,13 +750,13 @@ func TestCodexReadHarnessSecurityEnvCmd(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			envFile := filepath.Join(t.TempDir(), ".env")
 			require.NoError(t, os.WriteFile(envFile, []byte(env), 0o600))
-			cmd := exec.Command("/bin/sh", "-c", codexReadHarnessSecurityEnvCmd(envFile))
+			cmd := exec.Command("/bin/sh", "-c", readHarnessHookEnvCmd(envFile))
 			cmd.Env = []string{"PATH=/usr/bin:/bin"}
 			var stderr strings.Builder
 			cmd.Stderr = &stderr
 			out, err := cmd.Output()
 			require.NoError(t, err, stderr.String())
-			assert.Equal(t, strings.SplitN(env, "'", 3)[1]+codexEnvReadSeparator, string(out))
+			assert.Equal(t, strings.SplitN(env, "'", 3)[1]+hookEnvReadSeparator, string(out))
 			assert.Contains(t, stderr.String(), "line 2:", "the skipped line is reported by number")
 		})
 	}
@@ -769,15 +769,15 @@ func TestCodexReadHarnessSecurityEnvCmd(t *testing.T) {
 			"export FULLSEND_TOOL_ALLOWLIST=$(touch "+marker+")\n"+
 			"printf() { touch "+marker+"; }\n"+
 			"export FULLSEND_TOOL_ALLOWLIST='Bash,Read'\n"), 0o600))
-		cmd := exec.Command("/bin/sh", "-c", codexReadHarnessSecurityEnvCmd(envFile))
+		cmd := exec.Command("/bin/sh", "-c", readHarnessHookEnvCmd(envFile))
 		cmd.Env = []string{"PATH=/usr/bin:/bin"}
 		out, err := cmd.Output()
 		require.NoError(t, err)
-		assert.Equal(t, codexEnvReadSeparator+"Bash,Read", string(out))
+		assert.Equal(t, hookEnvReadSeparator+"Bash,Read", string(out))
 		assert.NoFileExists(t, marker, "a construct from .env ran")
 	})
 	t.Run("missing file", func(t *testing.T) {
-		cmd := exec.Command("/bin/sh", "-c", codexReadHarnessSecurityEnvCmd(filepath.Join(t.TempDir(), ".env")))
+		cmd := exec.Command("/bin/sh", "-c", readHarnessHookEnvCmd(filepath.Join(t.TempDir(), ".env")))
 		cmd.Env = []string{"PATH=/usr/bin:/bin"}
 		out, err := cmd.Output()
 		require.Error(t, err)
@@ -791,7 +791,7 @@ func TestCodexReadHarnessSecurityEnvCmd(t *testing.T) {
 func TestCodexBootstrap_PinsTheHarnessHookEnv(t *testing.T) {
 	storeDir := t.TempDir()
 	fakeOpenshellCodex(t, filepath.Join(t.TempDir(), "log"), storeDir, "codex-cli 0.152.1")
-	t.Setenv("FULLSEND_TEST_ENV_READ", "canary-from-harness"+codexEnvReadSeparator+"Bash,Read")
+	t.Setenv("FULLSEND_TEST_ENV_READ", "canary-from-harness"+hookEnvReadSeparator+"Bash,Read")
 	forgetRunnerHeldDigests("sb")
 	t.Cleanup(func() { forgetRunnerHeldDigests("sb") })
 
