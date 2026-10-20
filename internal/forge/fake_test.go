@@ -805,6 +805,7 @@ func TestFakeClient_ErrorInjection(t *testing.T) {
 	}
 }
 
+// returnedError returns the error value from a fake method's packed results.
 func returnedError(results []any) error {
 	for _, result := range results {
 		if err, ok := result.(error); ok {
@@ -812,10 +813,6 @@ func returnedError(results []any) error {
 		}
 	}
 	return nil
-}
-
-func TestFakeClient_ErrorInjectionCoversAllMethods(t *testing.T) {
-	assertFakeClientCallsCoverAllMethods(t, fakeClientCalls(context.Background()), "error injection")
 }
 
 // newThreadSafetyFake seeds one shared "o/r" fixture so the readers and the
@@ -841,10 +838,11 @@ func newThreadSafetyFake() *FakeClient {
 	return fc
 }
 
-// fakeClientCalls holds one call per exported FakeClient method;
-// assertFakeClientCallsCoverAllMethods keeps it complete. Each call returns
-// its results so callers can read them: -race only flags a fake that hands out
-// its internal storage when the returned data is read.
+// fakeClientCalls holds one call per exported FakeClient method.
+// TestFakeClient_ErrorInjection and TestFakeClient_ThreadSafety execute it,
+// and TestFakeClient_CoversAllMethods keeps it complete. Each call returns its
+// results so callers can read them: -race only flags a fake that hands out its
+// internal storage when the returned data is read.
 func fakeClientCalls(ctx context.Context) map[string]func(fc *FakeClient) []any {
 	pack := func(v ...any) []any { return v }
 	return map[string]func(fc *FakeClient) []any{
@@ -1139,23 +1137,18 @@ func TestFakeClient_ThreadSafety(t *testing.T) {
 	wg.Wait()
 }
 
-// TestFakeClient_ThreadSafetyCoversAllMethods fails when an exported
-// FakeClient method (every forge.Client, GitHubExtensions, GitLabExtensions
-// and ProjectLeaser method) has no entry in fakeClientCalls, or when an
-// entry names a method that no longer exists.
-func TestFakeClient_ThreadSafetyCoversAllMethods(t *testing.T) {
-	assertFakeClientCallsCoverAllMethods(t, fakeClientCalls(context.Background()), "thread safety")
-}
-
-func assertFakeClientCallsCoverAllMethods(t *testing.T, calls map[string]func(fc *FakeClient) []any, purpose string) {
-	t.Helper()
-
+// TestFakeClient_CoversAllMethods fails when an exported FakeClient method
+// (every forge.Client, GitHubExtensions, GitLabExtensions and ProjectLeaser
+// method) has no entry in fakeClientCalls, or when an entry names a method
+// that no longer exists.
+func TestFakeClient_CoversAllMethods(t *testing.T) {
+	calls := fakeClientCalls(context.Background())
 	methods := reflect.TypeFor[*FakeClient]()
 	want := make(map[string]bool, methods.NumMethod())
 	for i := range methods.NumMethod() {
 		name := methods.Method(i).Name
 		want[name] = true
-		assert.Contains(t, calls, name, "add %s to fakeClientCalls so it has %s coverage", name, purpose)
+		assert.Contains(t, calls, name, "add %s to fakeClientCalls so error injection and thread safety tests cover it", name)
 	}
 	for name := range calls {
 		assert.True(t, want[name], "fakeClientCalls has an entry for %s, which is not a FakeClient method", name)
