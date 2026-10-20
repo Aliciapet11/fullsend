@@ -426,3 +426,156 @@ func TestSlotAllocator_LiveClientDeleteNotReplayedAfterServerError(t *testing.T)
 	require.NoError(t, a.Release(context.Background(), s))
 	assert.Equal(t, int32(1), deletes.Load(), "the ambiguous DELETE must not be replayed")
 }
+
+// rateLimitedDeleteServer serves one slot repo for the live client. Every
+// DELETE is rejected with the given rate-limit status (unless
+// okAfterFirst). replaced switches GET to another holder's repo.
+type rateLimitedDeleteServer struct {
+	status   int
+	body     string
+	deletes  atomic.Int32
+	replaced atomic.Bool
+	// okAfterFirst makes DELETEs after the first one succeed.
+	okAfterFirst bool
+}
+
+func (s *rateLimitedDeleteServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/orgs/halfsend/repos":
+		_, _ = w.Write([]byte("[]"))
+	case r.Method == http.MethodPost && r.URL.Path == "/orgs/halfsend/repos":
+		var body struct {
+			Description string `json:"description"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 1, "name": "test-repo-01", "full_name": "halfsend/test-repo-01", "description": body.Description,
+		})
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/halfsend/test-repo-01":
+		id, desc := 1, ""
+		if s.replaced.Load() {
+			id, desc = 2, SlotRepoDescription+leaseDescriptionSep+"another-holder"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": id, "name": "test-repo-01", "full_name": "halfsend/test-repo-01", "description": desc,
+		})
+	case r.Method == http.MethodDelete && r.URL.Path == "/repos/halfsend/test-repo-01":
+		if s.deletes.Add(1) > 1 && s.okAfterFirst {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(s.status)
+		_, _ = w.Write([]byte(s.body))
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// TestSlotAllocator_LiveClientRateLimitedDeleteRechecksOwnership checks
+// that when the live client waits out a 429 or rate-limit 403 on Release's
+// DELETE, and another holder's repo replaces the slot during the wait, the
+// DELETE is not resent.
+func TestSlotAllocator_LiveClientRateLimitedDeleteRechecksOwnership(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "429", status: http.StatusTooManyRequests, body: `{"message":"API rate limit exceeded"}`},
+		{name: "rate-limit 403", status: http.StatusForbidden, body: `{"message":"You have exceeded a secondary rate limit"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srvState := &rateLimitedDeleteServer{status: tt.status, body: tt.body}
+			srv := httptest.NewServer(srvState)
+			defer srv.Close()
+
+			// The client's rate-limit wait is where GC deletes and another
+			// holder recreates the slot.
+			client := gh.New("test-token").WithBaseURL(srv.URL).WithAfterFunc(func(time.Duration) <-chan time.Time {
+				srvState.replaced.Store(true)
+				ch := make(chan time.Time, 1)
+				ch <- time.Now()
+				return ch
+			})
+			a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
+			require.NoError(t, err)
+
+			s, _, err := a.Claim(context.Background())
+			require.NoError(t, err)
+			require.NoError(t, a.Release(context.Background(), s), "a replaced repo counts as already released")
+			assert.Equal(t, int32(1), srvState.deletes.Load(), "the DELETE must not be resent against another holder's repo")
+			assert.Empty(t, a.Held())
+		})
+	}
+}
+
+// TestSlotAllocator_LiveClientRateLimitedDeleteRetriesWhenStillOurs checks
+// that the ownership re-check lets the rate-limited DELETE be resent when
+// the slot repo is still this lease's.
+func TestSlotAllocator_LiveClientRateLimitedDeleteRetriesWhenStillOurs(t *testing.T) {
+	srvState := &rateLimitedDeleteServer{
+		status:       http.StatusTooManyRequests,
+		body:         `{"message":"API rate limit exceeded"}`,
+		okAfterFirst: true,
+	}
+	srv := httptest.NewServer(srvState)
+	defer srv.Close()
+
+	client := gh.New("test-token").WithBaseURL(srv.URL).WithAfterFunc(func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	})
+	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
+	require.NoError(t, err)
+
+	s, _, err := a.Claim(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, a.Release(context.Background(), s))
+	assert.Equal(t, int32(2), srvState.deletes.Load(), "the DELETE is resent once ownership is confirmed")
+}
+
+// TestSlotAllocator_ReleaseGuardLookupFailureDeletesNothing checks that a
+// failed ownership re-check after a rate-limit wait does not resend the
+// DELETE and reports the failure.
+func TestSlotAllocator_ReleaseGuardLookupFailureDeletesNothing(t *testing.T) {
+	var deletes, gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/orgs/halfsend/repos":
+			_, _ = w.Write([]byte("[]"))
+		case r.Method == http.MethodPost && r.URL.Path == "/orgs/halfsend/repos":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":1,"name":"test-repo-01","full_name":"halfsend/test-repo-01"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/halfsend/test-repo-01":
+			if gets.Add(1) == 1 {
+				_, _ = w.Write([]byte(`{"id":1,"name":"test-repo-01","full_name":"halfsend/test-repo-01"}`))
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/repos/halfsend/test-repo-01":
+			deletes.Add(1)
+			w.WriteHeader(http.StatusTooManyRequests)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.New("test-token").WithBaseURL(srv.URL).WithAfterFunc(func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	})
+	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
+	require.NoError(t, err)
+
+	s, _, err := a.Claim(context.Background())
+	require.NoError(t, err)
+	err = a.Release(context.Background(), s)
+	require.ErrorContains(t, err, "re-verifying repo after retry wait")
+	assert.Equal(t, int32(1), deletes.Load())
+}

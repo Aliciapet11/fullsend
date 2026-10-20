@@ -87,6 +87,11 @@ var claimCreateTimeout = 30 * time.Second
 // a *CapacityError carrying the per-reason breakdown.
 var ErrPoolCapacityExhausted = errors.New("behaviour pool capacity exhausted")
 
+// errSlotRepoReleased is returned by Release's retry guard when the
+// repository under the slot's name is gone or no longer this lease's, so
+// the DELETE must not be resent.
+var errSlotRepoReleased = errors.New("slot repo gone or no longer ours")
+
 // PoolLayout describes the pool's orgs and slots by numeric index.
 // Names are derived by PoolOrgName and PoolSlotName.
 type PoolLayout struct {
@@ -554,7 +559,10 @@ func (a *slotAllocator) Acquire(ctx context.Context) (Slot, forge.Client, error)
 // (by ID, else by the claim's description nonce): after an ambiguous
 // failure another allocator may already have recreated the name, and its
 // repository is never deleted. The check and the delete are not atomic;
-// the window is one API round trip. A deletion failure is returned unless
+// the window is one API round trip. When the client waits out a rate limit
+// before resending the DELETE, ownership is re-checked before the resend,
+// and a repository that is gone or replaced by then counts as already
+// released. A deletion failure is returned unless
 // a re-check shows the repository is gone or no longer ours; the
 // repository then still exists, so other allocators keep treating the
 // slot as occupied (it is left for GC) rather than reusing it. The
@@ -592,9 +600,28 @@ func (a *slotAllocator) Release(ctx context.Context, slot Slot) error {
 	// The live client must not replay this DELETE after a timeout or 5xx:
 	// the first attempt may have landed and the name may since have been
 	// recreated by another allocator. The identity re-check below decides
-	// what to do after such a failure.
-	err = client.DeleteRepo(gh.WithoutAmbiguousRetry(ctx), slot.Org, slot.Repo)
+	// what to do after such a failure. Rate-limit rejections are still
+	// retried after a wait, during which the name may also have been
+	// deleted and recreated (e.g. by GC), so the guard re-verifies
+	// ownership before every resend.
+	delCtx := gh.WithRetryGuard(gh.WithoutAmbiguousRetry(ctx), func(context.Context) error {
+		// Look up on the caller's ctx, not the guarded request context,
+		// so the lookup is not itself guarded.
+		gone, checkErr := a.repoGoneOrForeign(ctx, client, slot, l)
+		if checkErr != nil {
+			return fmt.Errorf("re-verifying repo after retry wait: %w", checkErr)
+		}
+		if gone {
+			return errSlotRepoReleased
+		}
+		return nil
+	})
+	err = client.DeleteRepo(delCtx, slot.Org, slot.Repo)
 	a.observeQuota(slot.Org, client)
+	if errors.Is(err, errSlotRepoReleased) {
+		a.logf("[slots] released %s (repo gone or replaced during retry wait; delete not resent)", slot)
+		return nil
+	}
 	if err != nil && !forge.IsNotFound(err) {
 		// The delete may have succeeded server-side with the response
 		// lost; re-check by identity instead of blindly re-sending it.
