@@ -433,3 +433,80 @@ func TestSlotAllocator_ThrottledCreateWithForeignRepoStillBacksOffOrg(t *testing
 	assert.Equal(t, 1, p.clients["halfsend"].createCalls(), "later slots in the throttled org are skipped")
 	assert.Empty(t, a.Held())
 }
+
+// TestSlotAllocator_ClearPendingKeepsNoncesRegisteredAfterSnapshot
+// registers a new pending nonce while another Claim's ownership lookup
+// is in flight: the lookup finds a foreign repo and clears only the
+// nonces it classified, so the late one stays pending.
+func TestSlotAllocator_ClearPendingKeepsNoncesRegisteredAfterSnapshot(t *testing.T) {
+	layout := StagePoolLayout(1)
+	slot := layout.Slots()[0]
+	p := newFakePool(layout)
+	p.fc.Repos = append(p.fc.Repos, forge.Repository{
+		ID: 5, Name: slot.Repo, FullName: slot.String(), Description: newLeaseDescription(),
+	})
+	bc := &barrierClient{
+		orgClient: p.clients["halfsend"],
+		arrived:   make(chan struct{}, 1),
+		release:   make(chan struct{}),
+		want:      1,
+	}
+	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return bc, nil }, t.Logf)
+	require.NoError(t, err)
+	first, late := newLeaseDescription(), newLeaseDescription()
+	a.addPending(slot, first)
+
+	errs := make(chan error, 1)
+	go func() {
+		_, _, err := a.Claim(context.Background())
+		errs <- err
+	}()
+	select {
+	case <-bc.arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the claim should reach the ownership lookup")
+	}
+	a.addPending(slot, late) // lands between the lookup's snapshot and clearPending
+	close(bc.release)
+
+	var capErr *CapacityError
+	require.ErrorAs(t, <-errs, &capErr)
+	assert.Equal(t, 1, capErr.Occupied)
+	assert.Equal(t, []string{late}, a.pendingFor(slot), "only the classified nonce is cleared")
+}
+
+// heldOnCreateClient marks the slot held under another lease while its
+// create is in flight, as a concurrent adoption of a stale entry would.
+type heldOnCreateClient struct {
+	*orgClient
+	a    *slotAllocator
+	slot Slot
+}
+
+func (c *heldOnCreateClient) CreateRepo(ctx context.Context, org, name, description string, private bool) (*forge.Repository, error) {
+	c.a.mu.Lock()
+	c.a.held[c.slot] = lease{client: c.orgClient, description: "stale-lease"}
+	c.a.mu.Unlock()
+	return c.orgClient.CreateRepo(ctx, org, name, description, private)
+}
+
+// TestSlotAllocator_CreateSuccessRejectedByHeldGuardIsNotAClaim covers a
+// successful create whose lease the held-slot guard rejects: Claim must
+// not report the slot as claimed, and must keep the existing lease.
+func TestSlotAllocator_CreateSuccessRejectedByHeldGuardIsNotAClaim(t *testing.T) {
+	layout := StagePoolLayout(1)
+	slot := layout.Slots()[0]
+	p := newFakePool(layout)
+	hc := &heldOnCreateClient{orgClient: p.clients["halfsend"], slot: slot}
+	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return hc, nil }, t.Logf)
+	require.NoError(t, err)
+	hc.a = a
+
+	_, _, err = a.Claim(context.Background())
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr, "a rejected lease must not be returned as a successful claim")
+	assert.Equal(t, 1, capErr.Occupied)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	assert.Equal(t, "stale-lease", a.held[slot].description, "the existing lease is left untouched")
+}

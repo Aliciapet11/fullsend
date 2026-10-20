@@ -428,7 +428,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 					}
 					// A concurrent Claim adopted it first: it is theirs.
 				case ownForeign:
-					a.clearPending(slot)
+					a.clearPending(slot, nonces)
 				case ownUnknown:
 					if ctx.Err() != nil {
 						return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
@@ -459,7 +459,15 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			if repo != nil {
 				l.repoID = repo.ID
 			}
-			a.recordLease(slot, l)
+			if !a.recordLease(slot, l) {
+				// The held-slot guard rejected the lease (the slot is
+				// held under another lease, e.g. its repo was deleted or
+				// renamed externally). The new repo has no lease, so it
+				// must not be returned as a claim; it is left for GC.
+				a.logf("[slots] %s was created but the slot is already held; not claiming it", slot)
+				capErr.Occupied++
+				continue
+			}
 			return slot, client, nil
 		}
 
@@ -478,7 +486,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				// A concurrent Claim adopted it first: it is theirs.
 				capErr.Occupied++
 			case ownForeign:
-				a.clearPending(slot)
+				a.clearPending(slot, nonces)
 				capErr.Occupied++
 			default:
 				// The repo exists but the lookup could not say whose it
@@ -508,7 +516,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				capErr.Occupied++
 				continue
 			case ownForeign:
-				a.clearPending(slot)
+				a.clearPending(slot, nonces)
 			default:
 				// The create may still land after this lookup.
 				a.addPending(slot, desc)
@@ -538,7 +546,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				capErr.Occupied++
 				continue
 			case ownForeign:
-				a.clearPending(slot)
+				a.clearPending(slot, nonces)
 				a.logf("[slots] %s create failed and the name is held by another lease: %v", slot, err)
 				capErr.Occupied++
 				if isBackoffError(err) {
@@ -610,14 +618,22 @@ func (a *slotAllocator) addPending(slot Slot, desc string) {
 	}
 }
 
-// clearPending forgets slot's pending lease descriptions once another
-// lease's repository holds the name: none of our creates can land while
-// it exists. A create landing after that repository is deleted is left
-// for GC.
-func (a *slotAllocator) clearPending(slot Slot) {
+// clearPending forgets the given pending lease descriptions of slot (the
+// ones a lookup just classified) once another lease's repository holds
+// the name: none of those creates can land while it exists. Nonces
+// registered after the lookup's snapshot stay pending. A create landing
+// after that repository is deleted is left for GC.
+func (a *slotAllocator) clearPending(slot Slot, descs []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	delete(a.pending, slot)
+	rest := slices.DeleteFunc(slices.Clone(a.pending[slot]), func(d string) bool {
+		return slices.Contains(descs, d)
+	})
+	if len(rest) == 0 {
+		delete(a.pending, slot)
+		return
+	}
+	a.pending[slot] = rest
 }
 
 // recordOrgError files a failed API call for slot's org under the
