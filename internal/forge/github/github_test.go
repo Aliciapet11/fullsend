@@ -2357,6 +2357,70 @@ func TestWithoutAmbiguousRetry_DoesNotRetryTimeout(t *testing.T) {
 	assert.Equal(t, int32(1), attempts.Load())
 }
 
+func TestWithRetryGuard_RunsBeforeEachResend(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{
+		token:     "test-token",
+		baseURL:   srv.URL,
+		http:      srv.Client(),
+		afterFunc: noWaitAfter,
+	}
+
+	var guardCalls int
+	ctx := WithRetryGuard(context.Background(), func(context.Context) error {
+		guardCalls++
+		return nil
+	})
+	require.NoError(t, client.DeleteRepo(ctx, "org", "repo"))
+	assert.Equal(t, int32(3), attempts.Load())
+	assert.Equal(t, 2, guardCalls, "the guard runs before each resend, not before the first attempt")
+}
+
+func TestWithRetryGuard_ErrorStopsResend(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "429", status: http.StatusTooManyRequests},
+		{name: "rate-limit 403", status: http.StatusForbidden, body: `{"message":"You have exceeded a secondary rate limit"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			client := &LiveClient{
+				token:     "test-token",
+				baseURL:   srv.URL,
+				http:      srv.Client(),
+				afterFunc: noWaitAfter,
+			}
+
+			stop := errors.New("target changed")
+			ctx := WithRetryGuard(context.Background(), func(context.Context) error { return stop })
+			err := client.DeleteRepo(ctx, "org", "repo")
+			require.ErrorIs(t, err, stop)
+			assert.Contains(t, err.Error(), "not retried")
+			assert.Equal(t, int32(1), attempts.Load(), "the request is not resent after the guard refuses")
+		})
+	}
+}
+
 func TestCreateFileOnBranch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "PUT", r.Method)

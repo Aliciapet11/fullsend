@@ -321,6 +321,32 @@ func ambiguousRetryDisabled(ctx context.Context) bool {
 	return v
 }
 
+type retryGuardKey struct{}
+
+// WithRetryGuard returns a context under which the client calls guard
+// after every retry wait (including rate-limit waits) and before resending
+// the request. A non-nil error from guard stops the retry: the request is
+// not resent and that error is returned, wrapped. Use it for requests
+// whose target may change while the client waits, such as deleting a
+// repository by name that another party may have deleted and recreated.
+// guard receives the request context; requests it makes on that context
+// are subject to the same guard, so it should use its own context.
+func WithRetryGuard(ctx context.Context, guard func(context.Context) error) context.Context {
+	return context.WithValue(ctx, retryGuardKey{}, guard)
+}
+
+// checkRetryGuard runs the WithRetryGuard guard on ctx, if any.
+func checkRetryGuard(ctx context.Context, method, path string) error {
+	guard, _ := ctx.Value(retryGuardKey{}).(func(context.Context) error)
+	if guard == nil {
+		return nil
+	}
+	if err := guard(ctx); err != nil {
+		return fmt.Errorf("%s %s: not retried: %w", method, path, err)
+	}
+	return nil
+}
+
 // requestHeader is one extra header to set on a do() request. Only
 // getConditional uses this today (If-None-Match); it exists as a variadic
 // option rather than a new do() overload so the other 28 call sites
@@ -357,6 +383,11 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 	}
 
 	for attempt := range maxRetries {
+		if attempt > 0 {
+			if err := checkRetryGuard(ctx, method, path); err != nil {
+				return nil, err
+			}
+		}
 		var reqBody io.Reader
 		if open != nil {
 			rc, err := open()
