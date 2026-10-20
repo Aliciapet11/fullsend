@@ -142,6 +142,17 @@
     },
     {
       "customType": "regex",
+      "description": "Track the OpenShell tag in the gateway configuration link of the customizing agents guide (migrating proxy and certificate settings), so the link follows the pin in the same openshell group PR instead of pointing at a tag the pinned gateway does not match (#3373).",
+      "managerFilePatterns": ["/^docs/guides/user/customizing-agents\\.md$/"],
+      "matchStrings": [
+        "github\\.com/NVIDIA/OpenShell/blob/v(?<currentValue>\\d+\\.\\d+\\.\\d+)/"
+      ],
+      "depNameTemplate": "NVIDIA/OpenShell",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
       "description": "Track the gcloud CLI version pin in the runner image. GCLOUD_SHA256_{AMD64,ARM64} must be refreshed manually from https://cloud.google.com/sdk/docs/install — the runner-image PR build fails on checksum mismatch until they are.",
       "managerFilePatterns": ["/^images/runner/Containerfile$/"],
       "matchStrings": [
