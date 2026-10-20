@@ -803,7 +803,7 @@ If the `[[ratelimits]]` section is removed from `wrangler.toml`, the Worker logs
 
 `POST /v1/bot-role` resolves a bot login to a registered role for dispatch authorization ([ADR 0107](../../ADRs/0107-bot-identity-resolution-for-dispatch-authorization.md)). Callers authenticate with the same OIDC token as `/v1/token`.
 
-- **Canonical role.** The `bot_role` in a recognized response is the canonical role of the matching GitHub App. When several allowed roles share one App ID (for example `fix` reuses the `coder` App), the lexicographically first role name is returned, so `fix` resolves to `coder`. Treat this tie-break as a stable contract: renaming a role or registering a new role that sorts earlier for a shared App changes the `bot_role` the endpoint returns.
+- **Canonical role.** The `role` field of a recognized response (`{"outcome": "recognized", "role": "review"}`) is the canonical role of the matching GitHub App; the dispatch adapter surfaces it as `actor.bot_role` in the normalized event. When several allowed roles share one App ID (for example `fix` reuses the `coder` App), the lexicographically first role name is returned, so `fix` resolves to `coder`. Treat this tie-break as a stable contract: renaming a role or registering a new role that sorts earlier for a shared App changes the `role` the endpoint returns.
 - **Rate limiting.** The Worker rate limiter described above also covers `POST /v1/bot-role`, with a separate counter per path, because each authenticated call makes outbound GitHub API requests.
 
 ## See Also
