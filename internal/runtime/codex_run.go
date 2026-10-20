@@ -385,13 +385,11 @@ func buildCodexRunCommand(params RunParams, model codexModel, effort string, hoo
 	parts := []string{"cd " + shellQuote(params.RepoDir)}
 	parts = append(parts,
 		"&& "+codexBinaryPin(),
-		// PATH is captured before .env and restored after it. The hook scripts
-		// resolve their tools by name — tirith_check.py runs a bare `tirith` —
-		// so a .env that prepends a directory holding a fake `tirith` that
-		// exits 0 neuters the whole PreToolUse chain while every digest stays
-		// green. Reproduced before this was added. `readonly` means a .env
-		// that assigns the same name aborts the sourcing shell under a POSIX
-		// sh rather than winning.
+		// PATH is captured before .env and restored after it for codex
+		// itself, so a .env cannot change the PATH codex runs with; the hook
+		// children take envDataTrustedPathVar instead. `readonly` means a
+		// .env that assigns the same name aborts the sourcing shell under a
+		// POSIX sh rather than winning.
 		"&& readonly "+codexPathVar+`="$PATH"`,
 		"&& "+codexAssetGuard(r, hooksEnabled, digests),
 		"&& "+codexConfigGuard(r, digests),
@@ -406,10 +404,10 @@ func buildCodexRunCommand(params RunParams, model codexModel, effort string, hoo
 		// Restored for codex itself. The hook adapter sets its children's
 		// PATH from envDataTrustedPathVar instead: the same launch PATH,
 		// recorded read-only before .env by envDataLoad, without the
-		// directories the agent can write. Both are exported from values that
+		// directories the agent can write. It is exported from a value that
 		// never passed through .env, rather than trusting whatever PATH the
 		// adapter happens to inherit.
-		"&& export PATH=\"$"+codexPathVar+"\" && export "+codexPathVar+" "+envDataTrustedPathVar,
+		"&& export PATH=\"$"+codexPathVar+"\" && export "+envDataTrustedPathVar,
 		"&& export "+codexRuntimeEnv+"=codex",
 		// NODE_* would load code into npm's codex launcher; PYTHON* would do
 		// the same to the hook adapter's interpreter, which `-I` in hooks.json

@@ -191,6 +191,11 @@ func TestCodexRuntimeBootstrap_InstallsHooksWiringAndAdapter(t *testing.T) {
 	require.NoError(t, json.Unmarshal(storedUpload(t, storeDir, r.codexHooksPath()), &hooksJSON))
 	assert.NotEmpty(t, hooksJSON.Hooks[string(security.HookPhasePreToolUse)])
 	assert.NotEmpty(t, hooksJSON.Hooks[string(security.HookPhasePostToolUse)])
+	// Every hook command starts with the pinned interpreter, not the plain
+	// PATH lookup's venv python3.
+	rawHooks := string(storedUpload(t, storeDir, r.codexHooksPath()))
+	assert.Contains(t, rawHooks, "/usr/bin/python3 -I ")
+	assert.NotContains(t, rawHooks, "/sandbox/.venv")
 
 	var m codexManifest
 	require.NoError(t, json.Unmarshal(storedUpload(t, storeDir, r.codexManifestPath()), &m))
@@ -525,6 +530,16 @@ func TestHookPreflightInterpreter(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(log), envDataPin(), "the probe runs the launch's own pin")
 		assert.NotContains(t, string(log), "command -v python3")
+	})
+
+	// The version floor runs on the pinned interpreter, so an older protected
+	// python3 fails Bootstrap even when a newer one sits in the venv.
+	t.Run("refuses a pinned interpreter below the floor", func(t *testing.T) {
+		fakeOpenshellCodex(t, filepath.Join(t.TempDir(), "log"), t.TempDir(), "codex-cli 0.152.1")
+		t.Setenv("FULLSEND_TEST_PYVER", "3.8")
+		_, _, err := hookPreflightInterpreter("sb")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "3.11")
 	})
 
 	t.Run("takes the last line", func(t *testing.T) {

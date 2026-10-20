@@ -237,10 +237,8 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 	// on argv: on a retry iteration it carries the previous failure's text.
 	assert.Contains(t, cmd, "printf '%s' '"+DefaultAgentPrompt+"' | \"$FULLSEND_CODEX_BIN\"")
 
-	// PATH is captured before .env and restored after it: the hook scripts
-	// resolve their tools by name (tirith_check.py runs a bare `tirith`), so a
-	// .env that prepends a fake one would neuter the chain with every digest
-	// green. Reproduced before the pin was added.
+	// PATH is captured before .env and restored after it for codex itself;
+	// the hook children take the trusted PATH exported below.
 	pinAt := strings.Index(cmd, `readonly FULLSEND_CODEX_PATH="$PATH"`)
 	envAt := strings.Index(cmd, codexEnvLoad)
 	restoreAt := strings.Index(cmd, `export PATH="$FULLSEND_CODEX_PATH"`)
@@ -253,7 +251,7 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 	// records read-only before .env (inside codexEnvLoad); it is exported
 	// after .env and before codex starts, and nothing unsets it.
 	trustedAt := strings.Index(cmd, codexEnvLoad)
-	exportAt := strings.Index(cmd, "export "+codexPathVar+" "+envDataTrustedPathVar)
+	exportAt := strings.Index(cmd, "export "+envDataTrustedPathVar)
 	execAt := strings.Index(cmd, `| "$FULLSEND_CODEX_BIN"`)
 	require.Positive(t, trustedAt)
 	require.Positive(t, exportAt)
