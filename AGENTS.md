@@ -11,6 +11,11 @@ Fullsend is a platform for fully autonomous agentic development for Git-hosted o
 - The security threat model (threat priority: external injection > insider > drift > supply chain) should inform all other documents.
 - Keep core problem documents organization-agnostic. Organization-specific details belong in `docs/problems/applied/<org-name>/`.
 - The target audience for problem documents is any contributor community considering autonomous agents — keep language accessible and avoid presuming solutions.
+- When writing or editing Markdown, wrap prose at about 80 columns so diffs
+  show only the changed lines. Leave table rows, fenced code blocks, headings,
+  and long URLs unwrapped. Do not rewrap whole existing documents; rewrap only
+  the paragraphs you are already editing. See
+  [Documentation § Line wrapping](docs/contributing/documentation.md#line-wrapping).
 - Always stage your changes before running `make lint` and fix any failures. Pre-commit only checks staged files — without staging first, it stashes your work and finds nothing to lint.
 - When invoking the fullsend CLI from this checkout, **prefer** `go run ./cmd/fullsend …` from the repo root. Do **not** use a `fullsend` binary from mise, `$PATH`, `go install`, or another checkout — those often lag this tree. A stale CLI once rewrote hosted-mint `ALLOWED_ROLES` during enrollment (dropping `e2e`/`fix`) and broke e2e. Details: [Go Code](docs/contributing/go-code.md#running-the-fullsend-cli).
 - You **must** read and follow [COMMITS.md](COMMITS.md) when writing or reviewing commit messages and PR titles. Getting the prefix right is not optional — GoReleaser uses PR titles to build release notes. Breaking changes **must** carry the `!` suffix in both commit messages and PR titles; a missing `!` is an important-severity review finding.
@@ -57,4 +62,4 @@ Detailed guidance lives in `docs/contributing/` and topic-specific guides under 
 | [Vouch System](docs/contributing/vouch-system.md) | Working with the contributor vouch gate or PR workflows |
 | [Tier Conventions](docs/contributing/tier-conventions.md) | Using the term "tier" in code or docs — covers the three distinct tier contexts |
 | [CI Workflows](docs/contributing/ci-workflows.md) | Adding or modifying GitHub Actions workflows under `.github/workflows/`, adding secrets to `pull_request_target` jobs, or reviewing refactors across inline-step, reusable-workflow, and composite-action boundaries for context-variable scoping |
-| [Documentation](docs/contributing/documentation.md) | Adding, removing, renaming, or changing CLI commands, flags, configuration variables, or environment variables — covers cross-reference of CLI command groups to all documentation touchpoints |
+| [Documentation](docs/contributing/documentation.md) | Writing or editing Markdown prose (line wrapping rule), or adding, removing, renaming, or changing CLI commands, flags, configuration variables, or environment variables — covers cross-reference of CLI command groups to all documentation touchpoints |
