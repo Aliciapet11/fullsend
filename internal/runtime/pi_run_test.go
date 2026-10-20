@@ -1063,6 +1063,57 @@ func TestBuildPiRunCommand_LoaderEnvHygiene(t *testing.T) {
 	assert.Equal(t, "1", env["KEPT"])
 }
 
+// TestBuildPiRunCommand_LoaderEnvHygieneRuns runs the built pi launch under
+// /bin/sh with a stub pi that prints its environment: the dynamic-loader and
+// shell startup variables set in .env, an .env.d file and iteration.env never
+// reach pi, while an ordinary export does.
+func TestBuildPiRunCommand_LoaderEnvHygieneRuns(t *testing.T) {
+	t.Setenv("FULLSEND_PI_MODEL", "")
+	t.Setenv(piProviderEnv, "")
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	if err := exec.Command("sh", "-c", "command -p sha256sum /dev/null >/dev/null && command -p cut -d' ' -f1 /dev/null").Run(); err != nil {
+		t.Skip("sha256sum/cut not on the default PATH (stock macOS); the sandbox image has coreutils")
+	}
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	cfg := filepath.Join(root, "pi-config")
+	bin := filepath.Join(root, "bin")
+	for _, d := range []string{filepath.Join(ws, "repo"), filepath.Join(ws, ".env.d"), filepath.Join(ws, ".fullsend"), cfg, bin} {
+		require.NoError(t, os.MkdirAll(d, 0o755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(cfg, piEditRepairExtensionFile), piEditRepairExtensionJS, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "pi"), []byte("#!/bin/sh\necho PI_RAN\nenv\n"), 0o755))
+	write := func(rel, content string) {
+		require.NoError(t, os.WriteFile(filepath.Join(ws, rel), []byte(content), 0o644))
+	}
+	write(".env", "export LD_PRELOAD=/tmp/x.so\nLD_LIBRARY_PATH=/tmp/lib\nexport LD_LIBRARY_PATH\nexport KEPT=1\n"+
+		strings.Join(envDataControlLines(ws), "\n")+"\n")
+	write(".env.d/a.env", "export LD_AUDIT=/tmp/audit.so\nexport BASH_ENV=/tmp/rc\nexport FROM_ENVD=1\n")
+	write(".fullsend/iteration.env", "ENV=/tmp/rc\nexport ENV\nexport FROM_ITERATION=1\n")
+
+	params := piTestParams()
+	params.Model = "anthropic/claude-opus"
+	cmd := buildPiRunCommand(params, &piManifest{AgentName: "triage", Model: "opus"}, nil, "")
+	cmd = strings.ReplaceAll(cmd, sandbox.SandboxWorkspace, ws)
+	cmd = strings.ReplaceAll(cmd, PiRuntime{}.ConfigDir(), cfg)
+	c := exec.Command("/bin/sh", "-c", cmd)
+	c.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + root}
+	out, err := c.CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.Contains(t, string(out), "PI_RAN\n")
+	lines := strings.Split(string(out), "\n")
+	for _, want := range []string{"KEPT=1", "FROM_ENVD=1", "FROM_ITERATION=1"} {
+		assert.Contains(t, lines, want, "the .env, .env.d and iteration.env reads ran")
+	}
+	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV"} {
+		for _, line := range lines {
+			assert.False(t, strings.HasPrefix(line, name+"="), "%s from .env reaches pi: %q", name, line)
+		}
+	}
+}
+
 // --- Vertex fallback tests (#7026) ---
 
 func TestIsVertexModelUnavailable(t *testing.T) {

@@ -203,10 +203,21 @@ func (f *claudeGuardFixture) assertRefused(t *testing.T, mentions string) {
 	assert.Contains(t, out, mentions)
 }
 
+// skipUnlessShellUnsetsBracket skips a test that runs a launch containing
+// `unset -f [` when /bin/sh rejects that: bash 3.2, macOS's /bin/sh, returns
+// 1 ("not a valid identifier"). dash, bash 5 and the sandbox shell return 0.
+func skipUnlessShellUnsetsBracket(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("/bin/sh", "-c", "unset -f [").Run(); err != nil {
+		t.Skip("/bin/sh rejects `unset -f [` (bash 3.2 on macOS); the sandbox shell accepts it")
+	}
+}
+
 // TestClaudeLaunch_RefusesHooksChangedBetweenIterations runs the real launch
 // command under /bin/sh: iteration 1 starts claude, the agent then changes a
 // file, and iteration 2 must stop before claude runs.
 func TestClaudeLaunch_RefusesHooksChangedBetweenIterations(t *testing.T) {
+	skipUnlessShellUnsetsBracket(t)
 	const hooksJSONMsg = "hooks.json is not the file fullsend wrote"
 	const scriptsMsg = "hook scripts are not the set fullsend installed"
 

@@ -430,7 +430,8 @@ When you need a directory outside `/sandbox/workspace/bin` on the `PATH`
 3. At startup the sandbox reads every `*.env` file under
    `/sandbox/workspace/.env.d/`, picking up your PATH addition. Claude, codex
    and pi launches read these files as data, not shell: write plain
-   `export NAME=value` lines (see
+   `export NAME=value` lines, one assignment per line and without
+   `${NAME:-default}` (see
    [`.env.d` host files](../../reference/harness-reference.md)).
 
 On Claude and pi runs, after the `.env.d` files are read, the runner puts

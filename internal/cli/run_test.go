@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -4732,9 +4733,19 @@ func TestEnvDataControlLinesMatchRunner(t *testing.T) {
 	t.Parallel()
 	lines := append(runnerPathLines(), harnessEnvLines(&harness.Harness{})...)
 	want := agentruntime.EnvDataControlLines()
-	assert.Equal(t, []string{runnerPathCaptureLine(), harnessEnvLines(&harness.Harness{})[0], runnerPathRestoreLine(), iterationEnvSourceLine()}, want)
+	require.Len(t, want, 4)
+	assert.Equal(t, runnerPathCaptureLine(), want[0])
+	assert.Equal(t, "for f in /sandbox/workspace/.env.d/*.env; do [ -f \"$f\" ] && . \"$f\"; done", want[1])
+	assert.Equal(t, runnerPathRestoreLine(), want[2])
+	assert.Equal(t, iterationEnvSourceLine(), want[3])
+	// Each line appears in what bootstrapEnv writes, in the loader's order,
+	// wherever the runner places it.
+	prev := -1
 	for _, line := range want {
-		assert.Contains(t, lines, line)
+		idx := slices.Index(lines, line)
+		require.GreaterOrEqual(t, idx, 0, "the runner does not write %q", line)
+		assert.Greater(t, idx, prev, "%q is out of order", line)
+		prev = idx
 	}
 }
 
