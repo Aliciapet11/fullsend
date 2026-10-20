@@ -43,13 +43,16 @@ the host.
 
 - `ci-local` passes no host environment variables, SSH agent or credential
   files from outside the checkout into the container. Podman's own
-  configuration still applies, though: the default mounts in `mounts.conf`
-  (on RHEL, the host's subscription certificates under `/run/secrets`) and
-  any `env` or `env_host = true` setting in `containers.conf`. `ci-local`
-  can't turn these off portably: the remote Podman client used on macOS has
-  no `--env-host` flag, and there is no flag to replace the default-mounts
-  file. `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on
-  CI. No host proxy settings, which can carry credentials, reach builds or
+  configuration could add some: any `env` or `env_host = true` setting in
+  `containers.conf`, and the default mounts in `mounts.conf` (on RHEL, the
+  host's subscription certificates under `/run/secrets`). With a local
+  Podman, `ci-local` turns these off for its builds and runs: it points
+  `CONTAINERS_CONF_OVERRIDE` at a file that sets `env_host = false` and
+  `env = []` (replacing any override you set), and passes
+  `--default-mounts-file=/dev/null`. A remote Podman client (macOS, Windows)
+  sends none of its own `env` settings and has no default-mounts flag; there
+  only the Podman machine's configuration applies, and nothing from the
+  host's. `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on CI. No host proxy settings, which can carry credentials, reach builds or
   containers either. Podman builds and runs with `--http-proxy=false`, so host
   `HTTP(S)_PROXY` values are not copied in. Docker would inject any `proxies`
   set in `~/.docker/config.json`, so `ci-local` sets every proxy variable

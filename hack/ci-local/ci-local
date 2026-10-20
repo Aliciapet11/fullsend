@@ -65,9 +65,10 @@ Isolation: ci-local passes no host environment variables, SSH agent or
 credential files from outside the checkout into the container, and no host
 proxy settings: Podman builds and runs with --http-proxy=false, and Docker's
 ~/.docker/config.json proxies are overridden with empty values. Podman's own
-configuration still applies: default mounts from mounts.conf (on RHEL, the
-host's subscription certificates under /run/secrets) and any env or env_host
-setting in containers.conf. Only the checkout (including
+containers.conf env and env_host settings and mounts.conf default mounts (on
+RHEL, the host's subscription certificates under /run/secrets) are turned
+off for a local Podman; with a remote client (macOS, Windows) only the
+Podman machine's own configuration applies. Only the checkout (including
 gitignored files), its .git directory and cache volumes are mounted,
 read-write. GH_TOKEN/GITHUB_TOKEN are empty, as on CI. This keeps host
 secrets out; it is not a sandbox against the code under test. The download
@@ -180,8 +181,32 @@ noproxy_args() {
 build_image() {
   local noproxy=() a
   while IFS= read -r a; do noproxy+=("$a"); done < <(noproxy_args --build-arg)
-  "$ENGINE" build ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "$@" "${BUILD_ARGS[@]}" \
+  "$ENGINE" ${PODMAN_GLOBAL[@]+"${PODMAN_GLOBAL[@]}"} build ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "$@" "${BUILD_ARGS[@]}" \
     -f "$SCRIPT_DIR/Containerfile" -t "$IMAGE" "$SCRIPT_DIR"
+}
+
+# Podman's own configuration can add host variables (containers.conf env and
+# env_host) and host files (mounts.conf; on RHEL, the subscription
+# certificates under /run/secrets) to every build and run. A local Podman
+# reads both on the host, so turn them off: an override file that Podman
+# reads last, and the hidden --default-mounts-file flag (containers.conf's
+# default_mounts_file is ignored). A remote client (macOS, Windows,
+# CONTAINER_HOST) has no such flag and sends none of its own env settings;
+# only the Podman machine's configuration applies there.
+# shortcut: replaces a CONTAINERS_CONF_OVERRIDE the user set (Podman takes one), merge it if anyone needs that.
+PODMAN_GLOBAL=()
+podman_isolation() {
+  [ "$(basename "$ENGINE")" = podman ] || return 0
+  local remote cache="$HOME/.cache/ci-local" f
+  remote=$("$ENGINE" info --format '{{.Host.ServiceIsRemote}}') || die "cannot query $ENGINE; is it running?"
+  [ "$remote" = false ] || return 0
+  mkdir -p "$cache" || die "cannot create $cache"
+  printf '[containers]\nenv_host = false\nenv = []\n' > "$cache/containers-override.$$" ||
+    die "cannot write the Podman override file in $cache"
+  f=$(write_once "$cache/containers-override.$$" "$cache/containers-override") ||
+    die "cannot write the Podman override file in $cache"
+  export CONTAINERS_CONF_OVERRIDE=$f
+  PODMAN_GLOBAL=(--default-mounts-file=/dev/null)
 }
 
 # SELinux hosts (Fedora, RHEL) block bind mounts unless relabelled with :z.
@@ -409,7 +434,7 @@ run_in() {
       { echo "ci-local: could not open up the Docker volumes for uid $(id -u)" >&2; return 1; }
   fi
   # safe.directory: the mounts show a host owner; trust only those two repos.
-  "$ENGINE" run --rm "${tty[@]}" ${PLATFORM:+--platform "$PLATFORM"} \
+  "$ENGINE" ${PODMAN_GLOBAL[@]+"${PODMAN_GLOBAL[@]}"} run --rm "${tty[@]}" ${PLATFORM:+--platform "$PLATFORM"} \
     "${users[@]}" "${noproxy[@]}" ${DNS[@]+"${DNS[@]}"} -e HOME=/home/runner "${mounts[@]}" "$IMAGE" \
     bash -c 'git config --global --add safe.directory /src; git config --global --add safe.directory /gitcommon; git config --global commit.gpgsign false; '"$1"
 }
@@ -460,6 +485,7 @@ if [ "$1" != build-image ] && [ "$1" != shell ] && [ "$1" != clean ]; then
 fi
 
 resolve_versions
+podman_isolation
 if [ "$1" = build-image ]; then build_image --no-cache; exit; fi
 if [ "$1" = clean ]; then clean; exit; fi
 "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1 || build_image

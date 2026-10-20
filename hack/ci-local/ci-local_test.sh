@@ -39,9 +39,15 @@ write_engine() {
   cat > "${dir}/$1" <<'STUB'
 #!/usr/bin/env bash
 { echo CALL; printf 'ARG %s\n' "$@"; } >> "${ENGINE_LOG}"
+# Podman's override file per call, as "<subcommand> <path>".
+while [ "${1#--}" != "$1" ]; do shift; done
+echo "$1 ${CONTAINERS_CONF_OVERRIDE:-}" >> "${ENGINE_LOG}.env"
 case "$1" in
   image) exit "${STUB_IMAGE_RC:-0}" ;;
-  info) echo "${STUB_OS:-}"; exit 0 ;;
+  # STUB_REMOTE: what `podman info` reports as Host.ServiceIsRemote; STUB_INFO_RC fails that query.
+  info)
+    case "$*" in *ServiceIsRemote*) echo "${STUB_REMOTE:-false}"; exit "${STUB_INFO_RC:-0}" ;; esac
+    echo "${STUB_OS:-}"; exit 0 ;;
   # clean: STUB_IMAGES/STUB_VOLUMES are the listings; STUB_BUSY is refused as in use.
   # STUB_LIST_RC fails both listings, as a stopped engine does.
   images) printf '%s\n' "${STUB_IMAGES:-}"; exit "${STUB_LIST_RC:-0}" ;;
@@ -119,7 +125,7 @@ add_ci_config "${REPO}"
 run_ci_local() { # engine, then ci-local args; sets RC and OUT
   local engine=$1
   shift
-  : > "${ENGINE_LOG}"
+  : > "${ENGINE_LOG}"; : > "${ENGINE_LOG}.env"
   set +e
   OUT=$(CI_LOCAL_ENGINE="${engine}" "${CI_LOCAL}" -C "${REPO}" "$@" 2>&1)
   RC=$?
@@ -968,6 +974,45 @@ if [ "${RC}" -ne 0 ] && [ -z "$(removed)" ] && grep -q 'cannot list images; is .
   pass "clean: a failed listing (engine stopped) exits non-zero and removes nothing"
 else
   fail "clean with failed listing: rc=${RC} removed=[$(removed)] out=[${OUT}]"
+fi
+
+# #8479: a local Podman builds and runs with no containers.conf env or
+# env_host and no mounts.conf default mounts. A remote client has neither the
+# flag nor its own env settings applied; Docker has no such configuration.
+override_of() { sed -n "s/^$1 //p" "${ENGINE_LOG}.env" | sort -u; }
+STUB_IMAGE_RC=1 run_ci_local "${PODMAN}" go-vet
+OVR=$(override_of run)
+if [ "${RC}" -eq 0 ] && [ "$(last_build_args | head -1)" = --default-mounts-file=/dev/null ] &&
+  [ "$(last_run_args | head -1)" = --default-mounts-file=/dev/null ] &&
+  [ -n "${OVR}" ] && [ "$(override_of build)" = "${OVR}" ] &&
+  [ "$(cat "${OVR}")" = "$(printf '[containers]\nenv_host = false\nenv = []')" ]; then
+  pass "local podman: builds and runs get no default mounts and no containers.conf env"
+else
+  fail "local podman isolation: rc=${RC} override=[${OVR}] build=[$(last_build_args | head -1)] run=[$(last_run_args | head -1)]"
+fi
+CONTAINERS_CONF_OVERRIDE="${WORK}/user-override.conf" run_ci_local "${PODMAN}" go-vet
+if [ "$(override_of run)" = "${OVR}" ]; then
+  pass "local podman: a user-set CONTAINERS_CONF_OVERRIDE is replaced"
+else
+  fail "user override kept: [$(override_of run)]"
+fi
+STUB_IMAGE_RC=1 STUB_REMOTE=true run_ci_local "${PODMAN}" go-vet
+if [ "${RC}" -eq 0 ] && ! grep -q -- '--default-mounts-file' "${ENGINE_LOG}" && [ -z "$(override_of run)" ]; then
+  pass "remote podman: no --default-mounts-file (the remote client has none) and no override"
+else
+  fail "remote podman: rc=${RC} override=[$(override_of run)] log: $(tr '\n' ' ' < "${ENGINE_LOG}")"
+fi
+STUB_IMAGE_RC=1 run_ci_local "${DOCKER}" go-vet
+if [ "${RC}" -eq 0 ] && ! grep -qE -- '--default-mounts-file|ServiceIsRemote' "${ENGINE_LOG}" && [ -z "$(override_of run)" ]; then
+  pass "docker: no podman isolation flags or queries"
+else
+  fail "docker got podman isolation: $(tr '\n' ' ' < "${ENGINE_LOG}")"
+fi
+STUB_INFO_RC=125 run_ci_local "${PODMAN}" go-vet
+if [ "${RC}" -ne 0 ] && grep -q 'cannot query .*podman; is it running?' <<< "${OUT}" && ! grep -qxE 'ARG (run|build)' "${ENGINE_LOG}"; then
+  pass "podman: a failed remote/local query stops before any build or run"
+else
+  fail "failed podman info: rc=${RC} out=[${OUT}]"
 fi
 
 if [ "${FAILURES}" -ne 0 ]; then
