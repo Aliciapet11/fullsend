@@ -45,9 +45,11 @@
 // shows the default non-UUID README until the creating commit lands, and a
 // legacy runner that reads it deletes it as invalid and recreates the lock.
 // create rechecks the repository ID right before committing and does not
-// join a replaced lock, but the check and the commit are separate requests
-// and the platform offers no commit conditional on the repository ID, so a
-// replacement inside that single round trip remains possible.
+// join a replaced lock, and repeats the check after every wait inside the
+// commit (init-race, rate-limit and stale-head retries). The platform
+// offers no commit conditional on the repository ID, so a replacement
+// between the check and the next request, or among the few requests the
+// commit sends back to back, remains possible.
 //
 // Remove this bridge once no suite runner built from a branch that still
 // calls e2etest.AcquireOrg can start, that is when every open PR branch
@@ -318,9 +320,27 @@ func (b *sharedOrgLock) create(ctx context.Context, client forge.Client, org str
 	// lands after another runner joined would answer with a stale-head error
 	// and be retried against the new head, overwriting that holder's entry
 	// with the creator-only state. abandonInit decides from holders.json.
-	commitCtx, cancelCommit := b.bound(gh.WithoutAmbiguousRetry(ctx))
+	//
+	// CommitFiles reads the repository, branch head, commit and tree by name,
+	// and waits and retries between and within those requests (init races,
+	// rate limits, stale heads). The guard repeats the repository ID check
+	// after every such wait, so a replacement during a wait stops the
+	// commit rather than letting it read the replacement's head. Requests
+	// issued back to back, with no wait between them, remain unguarded.
+	commitBase := gh.WithoutAmbiguousRetry(ctx)
+	if repo != nil && repo.ID != 0 {
+		commitBase = gh.WithRetryGuard(commitBase, func(context.Context) error {
+			return b.checkLockID(ctx, client, org, repo.ID)
+		})
+	}
+	commitCtx, cancelCommit := b.bound(commitBase)
 	_, err = client.CommitFiles(commitCtx, org, e2etest.LockRepo, "create shared e2e lock", files)
 	cancelCommit()
+	if errors.Is(err, errLockReplaced) {
+		// The lock now belongs to another runner; do not touch it.
+		b.logf("[e2e-lock] %s/%s was replaced while initialising it; not joining it", org, e2etest.LockRepo)
+		return nil, errLockCreateRace
+	}
 	if err != nil {
 		b.abandonInit(ctx, client, m)
 		return nil, fmt.Errorf("initialising shared lock %s/%s: %w", org, e2etest.LockRepo, err)

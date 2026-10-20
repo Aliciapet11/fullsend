@@ -2562,6 +2562,50 @@ func TestWithRetryGuard_ErrorStopsResend(t *testing.T) {
 	}
 }
 
+func TestWithRetryGuard_StopsCommitFilesRetryWaits(t *testing.T) {
+	// Every request after the repo read answers 404 (init race), so
+	// CommitFiles waits and would retry the branch-ref read.
+	var refReads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo":
+			_, _ = w.Write([]byte(`{"default_branch":"main"}`))
+		default:
+			refReads.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{token: "test-token", baseURL: srv.URL, http: srv.Client(), afterFunc: noWaitAfter}
+
+	var guardCalls int
+	stop := errors.New("target replaced")
+	ctx := WithRetryGuard(context.Background(), func(context.Context) error {
+		guardCalls++
+		return stop
+	})
+	_, err := client.CommitFiles(ctx, "org", "repo", "msg", []forge.TreeFile{{Path: "a", Content: []byte("a")}})
+	require.ErrorIs(t, err, stop)
+	assert.Equal(t, 1, guardCalls, "the guard runs after the first repo-race wait")
+	assert.Equal(t, int32(1), refReads.Load(), "no branch-ref read follows a refused guard")
+}
+
+func TestWithRetryGuard_StopsCommitRetryDelay(t *testing.T) {
+	c := &LiveClient{afterFunc: noWaitAfter}
+	stop := errors.New("target replaced")
+	ctx := WithRetryGuard(context.Background(), func(context.Context) error { return stop })
+
+	var runs int
+	_, err := retryCommitOp(ctx, c, "commit", func() (bool, error) {
+		runs++
+		return false, forge.ErrNonFastForward
+	})
+	require.ErrorIs(t, err, stop)
+	assert.Equal(t, 1, runs, "the op is not rerun after the guard refuses")
+}
+
 func TestCreateFileOnBranch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "PUT", r.Method)

@@ -1116,6 +1116,70 @@ func TestSharedOrgLock_InitDoesNotPublishIntoReplacedLock(t *testing.T) {
 	assert.True(t, forge.IsNotFound(err), "no holder state may be published into the legacy lock")
 }
 
+// liveCommitClient sends the lock repository's initial CommitFiles through
+// a live client against a stand-in server, so the client's own waits run.
+type liveCommitClient struct {
+	*orgClient
+	live *gh.LiveClient
+}
+
+func (c *liveCommitClient) CommitFiles(ctx context.Context, owner, repo, message string, files []forge.TreeFile) (bool, error) {
+	if repo == e2etest.LockRepo {
+		return c.live.CommitFiles(ctx, owner, repo, message, files)
+	}
+	return c.orgClient.CommitFiles(ctx, owner, repo, message, files)
+}
+
+func TestSharedOrgLock_InitCommitStopsWhenLockReplacedDuringRetryWait(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	legacyRun := uuid.NewString()
+
+	// The lock repository's branch ref is not readable yet (auto-init
+	// race), so the live client waits and would retry the read, now seeing
+	// whatever repository holds the name.
+	var otherRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/"+bridgeOrg+"/"+e2etest.LockRepo {
+			_, _ = w.Write([]byte(`{"default_branch":"main"}`))
+			return
+		}
+		otherRequests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	swapped := false
+	live := gh.New("test-token").WithBaseURL(srv.URL).WithAfterFunc(func(time.Duration) <-chan time.Time {
+		if !swapped {
+			swapped = true
+			// A legacy runner deletes the fresh lock as invalid and
+			// recreates it with its own run ID during the wait.
+			require.NoError(t, p.fc.DeleteRepo(ctx, bridgeOrg, e2etest.LockRepo))
+			_, err := p.fc.CreateRepo(ctx, bridgeOrg, e2etest.LockRepo, "", false)
+			require.NoError(t, err)
+			require.NoError(t, p.fc.CreateOrUpdateFile(ctx, bridgeOrg, e2etest.LockRepo, sharedLockReadmePath, "acquire lock", []byte(legacyRun)))
+		}
+		ch := make(chan time.Time, 1)
+		ch <- time.Time{}
+		return ch
+	})
+	client := &liveCommitClient{orgClient: p.clients[bridgeOrg], live: live}
+
+	b := newSharedOrgLock(t.Logf, time.Now)
+	m, reason, err := b.join(ctx, client, bridgeOrg)
+	require.NoError(t, err)
+	assert.Nil(t, m, "a runner must not join a lock that was replaced during the commit's wait")
+	assert.NotEmpty(t, reason)
+	assert.Equal(t, int32(1), otherRequests.Load(), "the ref read is not retried against the replacement")
+
+	assert.Equal(t, legacyRun, lockReadme(t, p.fc, bridgeOrg), "the legacy runner's lock is untouched")
+	_, err = p.fc.GetFileContent(ctx, bridgeOrg, e2etest.LockRepo, sharedLockHoldersPath)
+	assert.True(t, forge.IsNotFound(err), "no holder state may be published into the replacement")
+}
+
 // lockDeleteServer is a live-API stand-in for deleting the e2e-lock
 // repository: DELETE is rate-limited; the repository ID changes once the
 // client's rate-limit wait has elapsed.

@@ -352,10 +352,12 @@ each holder ran and warn at 25 minutes and beyond 30 minutes.
 A second, narrower window exists while a lock is created. The new repository
 briefly shows the default non-UUID README, which a legacy runner deletes as
 invalid before recreating the lock with its own run ID. The allocator rechecks
-the repository ID right before its initial commit and does not join a lock
-that was replaced. The check and the commit are separate requests, and the
-platform has no commit conditional on the repository ID, so a replacement
-between those two requests can still let both suites use the org.
+the repository ID right before its initial commit, and again after every wait
+inside that commit (repository-initialisation, rate-limit and stale-head
+retries, which can add up to several seconds), and does not join a lock that
+was replaced. The platform has no commit conditional on the repository ID, so
+a replacement between a check and the next request, or among the requests the
+commit sends back to back, can still let both suites use the org.
 
 **Removal:** Delete the bridge (and the shared files in `e2e-lock`) once no
 runner can still take the exclusive lock. That means every open PR branch

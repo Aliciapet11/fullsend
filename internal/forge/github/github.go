@@ -324,9 +324,10 @@ func ambiguousRetryDisabled(ctx context.Context) bool {
 type retryGuardKey struct{}
 
 // WithRetryGuard returns a context under which the client calls guard
-// after every retry wait (including rate-limit waits) and before resending
-// the request. A non-nil error from guard stops the retry: the request is
-// not resent and that error is returned, wrapped. Use it for requests
+// after every retry wait (including rate-limit waits, repository-race
+// waits and commit-retry delays) and before resending the request or
+// rerunning the operation. A non-nil error from guard stops the retry:
+// nothing is resent and that error is returned, wrapped. Use it for requests
 // whose target may change while the client waits, such as deleting a
 // repository by name that another party may have deleted and recreated.
 // guard receives the request context; requests it makes on that context
@@ -1363,6 +1364,10 @@ func (c *LiveClient) retryOnRepoRaceIf(ctx context.Context, label string, transi
 			case <-ctx.Done():
 				return ctx.Err()
 			}
+			// The target may have changed during the wait.
+			if err := checkRetryGuard(ctx, "retry", label); err != nil {
+				return err
+			}
 		}
 	}
 	return fmt.Errorf("%s: %w (after %d attempts)", label, lastErr, attempts)
@@ -1481,6 +1486,12 @@ func retryCommitOp[T any](ctx context.Context, c *LiveClient, label string, op f
 				var zero T
 				return zero, ctx.Err()
 			case <-c.afterFunc(jitter):
+			}
+			// The op rereads the branch head, so a target replaced since
+			// the last attempt would be written to instead of rejected.
+			if guardErr := checkRetryGuard(ctx, "retry", label); guardErr != nil {
+				var zero T
+				return zero, guardErr
 			}
 			log.Printf("retrying %s (attempt %d/%d): %v", label, attempt+1, maxAttempts, err)
 		}
