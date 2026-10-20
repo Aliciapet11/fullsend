@@ -614,6 +614,9 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 		}
 	}
 
+	childIDs := &codexChildIDs{}
+	reader = io.TeeReader(reader, childIDs)
+
 	handler := params.OnEvent
 	if handler == nil {
 		renderer := NewEventRenderer(printer)
@@ -659,6 +662,24 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 		return exitCode, fmt.Errorf(
 			"codex config.toml in %s no longer pins the run-scoped provider endpoint, its auth command, or leaves the project untrusted; refusing to run because any of those can redirect or replace the runner's credential (did the agent write there between iterations?)",
 			r.ConfigDir())
+	}
+
+	// The fold runs whatever the exit code: codex writes a child's usage as
+	// each response completes, and the parent's entry keeps per_model_usage
+	// summing to the totals across a retry. A read failure is a warning.
+	if digests.delegating() || len(childIDs.IDs) > 0 {
+		n, ferr := r.foldCodexChildUsage(params.SandboxName, childIDs.IDs, metrics)
+		if ferr != nil {
+			printer.StepWarn("Sub-agent usage not fully counted: " + redactSummary(sanitizeOutput(ferr.Error())))
+		}
+		if n > 0 {
+			printer.StepInfo(fmt.Sprintf("%d sub-agent thread(s) folded into the run metrics", n))
+		}
+		// At the budget or on a cancel OpenShell kills nothing, so codex's
+		// children can record more after the read.
+		if len(childIDs.IDs) > 0 && (ctx.Err() != nil || exitCode == 124 || exitCode == -1) {
+			printer.StepWarn("Sub-agent usage may be undercounted: codex was stopped, and its children can record more after the read")
+		}
 	}
 
 	if exitCode == 0 && lastResult != nil && lastResult.IsError {
