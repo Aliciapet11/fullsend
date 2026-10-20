@@ -81,6 +81,51 @@ func TestDiagnoseGitLabTriggerAccount_ScheduleOwnershipAfterActivation(t *testin
 	assert.Equal(t, GitLabTriggerStateReady, e2.diagnose(e2.f, trigBranch).State)
 }
 
+// Install refuses to adopt a managed schedule whose owner is not a verified
+// installer Maintainer, so status must not tell the operator that re-running it
+// repairs the drift.
+func TestDiagnoseGitLabTriggerAccount_ScheduleOwnershipGuidance(t *testing.T) {
+	ctx := context.Background()
+	spec := trigSpec(t, trigSlashDesc)
+	setup := func(owner int64) (*trigEnv, int64) {
+		e := newTrigEnv()
+		e.readyActive(t)
+		id := e.adminSchedule(t, spec.Description, trigBranch, spec.Cron, true)
+		for i := range e.state.PipelineSchedules[trigOwner+"/"+trigRepo] {
+			if e.state.PipelineSchedules[trigOwner+"/"+trigRepo][i].ID == id {
+				e.state.PipelineSchedules[trigOwner+"/"+trigRepo][i].OwnerID = owner
+			}
+		}
+		return e, id
+	}
+
+	e, _ := setup(77)
+	e.f.members[77] = forge.GitLabAccessLevelDeveloper
+	got := e.diagnose(e.f, trigBranch)
+	assert.Equal(t, GitLabTriggerStateDrifted, got.State)
+	require.Len(t, got.Reasons, 1)
+	assert.Contains(t, got.Reasons[0], "owned by user 77")
+	assert.Contains(t, got.Reasons[0], "install refuses to adopt it")
+	assert.Contains(t, got.Reasons[0], "administrator must remove or reassign")
+	assert.NotContains(t, got.Reasons[0], "move it to the trigger account")
+	_, err := ConvergeGitLabTriggerSchedules(ctx, e.opts())
+	require.ErrorContains(t, err, "refusing adoption", "status guidance agrees with convergence")
+
+	// A Maintainer other than the installer is adoptable.
+	e, _ = setup(78)
+	e.f.members[78] = forge.GitLabAccessLevelMaintainer
+	got = e.diagnose(e.f, trigBranch)
+	require.Len(t, got.Reasons, 1)
+	assert.Contains(t, got.Reasons[0], "re-run repos install to move it")
+
+	// A failed installer lookup is reported as unverified, not as adoptable.
+	e, _ = setup(79)
+	e.f.fail["GetAuthenticatedUserID"] = true
+	got = e.diagnose(e.f, trigBranch)
+	require.Len(t, got.Reasons, 1)
+	assert.Contains(t, got.Reasons[0], "could not verify the installer")
+}
+
 func TestDiagnoseGitLabTriggerAccount_ReadyAndDrift(t *testing.T) {
 	e := newTrigEnv()
 	res, err := ConvergeGitLabTriggerAccount(context.Background(), e.opts())

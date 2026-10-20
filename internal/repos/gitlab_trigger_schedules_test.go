@@ -1194,6 +1194,23 @@ func TestRotateGitLabTriggerAccount_DeferredRetirementMovesSchedulesToNewAccount
 		assert.Equal(t, GitLabTriggerStateReady, e.diagnose(e.f, trigBranch).State)
 	})
 
+	// A retired generation whose account no longer carries its recorded name is
+	// not fullsend's to touch: the move fails closed, like the hand-back.
+	t.Run("renamed or missing retired account fails closed", func(t *testing.T) {
+		e, o, oldAcct, _ := setup(t)
+		a := e.f.accounts[oldAcct]
+		a.Name = "renamed"
+		e.f.accounts[oldAcct] = a
+		_, err := ConvergeGitLabTriggerSchedules(ctx, o)
+		require.ErrorContains(t, err, "does not carry the recorded trigger account name")
+		assert.Len(t, e.ownedBy(t, oldAcct), 2, "the retired account keeps its schedules")
+
+		delete(e.f.accounts, oldAcct)
+		_, err = ConvergeGitLabTriggerSchedules(ctx, o)
+		require.ErrorContains(t, err, "was not found")
+		assert.Len(t, e.ownedBy(t, oldAcct), 2, "the retired account keeps its schedules")
+	})
+
 	// An interrupted move left the replacement account's schedule next to the
 	// retired generation's original; the original is removed.
 	t.Run("interrupted move keeps the replacement", func(t *testing.T) {

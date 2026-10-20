@@ -855,7 +855,9 @@ fails, a ledger-only `ready` is reported as `unreadable` drift instead.
 variable drift and an unfinished retirement of a previous generation. While
 the dispatch activation is recorded, a managed polling schedule that the
 trigger account does not own (it runs with its owner's permissions) is
-reported as drift until `repos install` moves it. States
+reported as drift until `repos install` moves it. When its owner is not a
+retired generation or a verified installer Maintainer, install refuses to adopt
+it, and an administrator must remove or reassign it first. States
 other than `not-installed`, `deferred`, and `ready` add `gitlab-trigger-account`
 drift.
 

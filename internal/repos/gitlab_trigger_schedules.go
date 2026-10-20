@@ -226,6 +226,28 @@ func (op *gitLabTriggerAccountOp) recordedGenerationOwner(id int64) bool {
 	return false
 }
 
+// verifyRetiredScheduleOwner confirms that a schedule owner recorded as a
+// retired generation is that generation's nonce-named account, as
+// releaseOwnedSchedules does before it touches the account's schedules. It
+// fails closed on a renamed, missing, or unreadable account.
+func (op *gitLabTriggerAccountOp) verifyRetiredScheduleOwner(ctx context.Context, id int64) error {
+	for i := range op.st.Retired {
+		if int64(op.st.Retired[i].AccountID) != id {
+			continue
+		}
+		gen := &gitLabTriggerAccountOp{opts: op.opts, st: op.st.Retired[i], exists: true, retired: true}
+		_, found, err := gen.findOwnedAccount(ctx)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("retired GitLab trigger account %d was not found; refusing to move its managed polling schedules", id)
+		}
+		return nil
+	}
+	return fmt.Errorf("schedule owner %d is not a recorded retired trigger account generation; refusing to move its managed polling schedules", id)
+}
+
 // installerScheduleOwner accepts the current installer and another current
 // project Maintainer who could have installed these exact-name managed
 // schedules before a credential change. Unknown owners, Developers, and
@@ -438,7 +460,12 @@ func (op *gitLabTriggerAccountOp) planAccountSchedules(ctx context.Context) ([]a
 					// repair). It moves straight to the current account:
 					// retirement would otherwise hand it to the installer after
 					// this stage ran, leaving it installer-owned until another
-					// install (#8602).
+					// install (#8602). Like the hand-back, it only touches the
+					// schedules of a generation whose nonce-named account is
+					// verified.
+					if err := op.verifyRetiredScheduleOwner(ctx, s.OwnerID); err != nil {
+						return nil, nil, nil, err
+					}
 					others = append(others, s)
 					continue
 				}
