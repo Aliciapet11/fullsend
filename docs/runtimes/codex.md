@@ -220,6 +220,16 @@ What a local codex run needs, beyond the guide:
   loads as instructions. Only the root file is read, cut at 32 KiB: nested `AGENTS.md` files and
   `AGENTS.override.md` are not, and a symlinked `AGENTS.md` is skipped. No `CLAUDE.md` bridge is
   injected.
+- **`.env` is read as data, not run.** The launch parses the sandbox `.env` with a `python3` resolved
+  before anything the agent wrote (`-I -S`) and evals only the single-quoted `[export ]NAME='value'`
+  lines that parser prints, so no line of `.env` executes as shell. Only `NAME=value`, `export NAME` and comments are taken;
+  anything else is ignored with a warning naming the file and line. `LD_PRELOAD`,
+  `LD_LIBRARY_PATH`, `LD_AUDIT`, every `PYTHON*` variable, `BASH_ENV`, `ENV`, `IFS` and the launch's own read-only
+  pins are never taken from `.env` (#8498). The sandbox image needs `python3` for this, in a
+  `PATH` directory the sandbox user neither owns nor can write; without one the launch fails with
+  `python3 not found in a PATH directory the agent cannot write` (exit 127).
+  It also needs `readlink` there as a regular file, not a symlink; without one the launch also
+  prints `no readlink that is a regular file in a PATH directory the agent cannot write`.
 - **The repository's own `.codex/` config is never loaded.** fullsend pins the cloned repo's
   project trust to untrusted, so `.codex/config.toml` and `.codex/hooks.json` (model, instructions,
   MCP servers, hooks) never apply. A target repo cannot change how the agent runs.

@@ -118,6 +118,10 @@ example above.
 
 ## Behaviour differences worth knowing
 
+- **`.env` is still sourced as shell.** Claude Code, codex and pi read the agent-writable
+  `/sandbox/workspace/.env` and its `.env.d/*.env` files as data (#8498); OpenCode still sources
+  them, so a line there runs as shell at launch. See the agent-writable `.env` row in the
+  [security feature matrix](../contributing/runtime-implementation.md) (#8574).
 - **Bash allowlists are not enforced.** `Bash(gh:*)` in the agent's `tools:` becomes plain `bash`,
   with a warning. To restrict commands, give `bash` a pattern map in the policy
   (`"bash": {"*": "deny", "gh *": "allow"}`). An agent that declares Bash gets that same map.

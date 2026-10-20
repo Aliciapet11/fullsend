@@ -379,7 +379,7 @@ Install-time administration and runtime access are separate. Creating webhooks a
 
 Developer (30) access also depends on the default branch's protection settings: the poller creates pipelines via the API (`CreatePipeline`), which requires merge or push access to the protected default branch (see [ADR 0067](../ADRs/0067-gitlab-cron-polling-event-dispatch.md)). GitLab's default "Protected" preset grants Developers merge access, so this works out of the box. When a repo restricts both merge and push to Maintainers (or otherwise excludes Developer), `repos install` grants the Poller's identity — its project service account or project-access-token user (`fullsend-poller`), or the owner of a supplied Poller credential — merge access, not push, on the protected default branch so the poller can create pipelines without widening Developer-class merge policy. If that grant is not possible (no poller token user id, or the GitLab API rejects the protection update), install fails closed with a remediation error instead of leaving dispatch silently broken. `repos status` reports `protected-ref-pipeline` drift when that access is later removed or tightened. If the permission gap reappears anyway, a `CreatePipeline` 403 now fails the poll cycle after persisting retry state (the event is retried, then dropped after three failures) rather than reporting a healthy cycle with nothing dispatched.
 
-Install and converge also provision `FULLSEND_DISPATCH_SECRET` (a masked, protected CI/CD variable used to HMAC-sign dispatch variables and poller state) and create two unprotected poll-state branches (`fullsend-poll-state-slash` and `fullsend-poll-state-events`) holding an initial signed `state.json`. Existing `FULLSEND_LAST_POLL_AT_*` / `FULLSEND_LABEL_STATE` / `FULLSEND_DISPATCHED_KEYS_*` / `FULLSEND_FAILED_KEYS_*` values are migrated into those documents when present; otherwise each branch is seeded with an empty signed baseline. Already-written branch state is left untouched. After migrating, converge deletes any still-present retired poll-state CI/CD variables; they are treated as known-retired by the orphan detector (no warnings) and are not re-seeded on install.
+Install and converge also provision `FULLSEND_DISPATCH_SECRET` (a masked, protected CI/CD variable used to HMAC-sign dispatch variables and poller state) and create two unprotected poll-state branches (`fullsend-poll-state-slash` and `fullsend-poll-state-events`) holding an initial signed `state.json`. Existing `FULLSEND_LAST_POLL_AT_*` / `FULLSEND_LABEL_STATE` / `FULLSEND_DISPATCHED_KEYS_*` / `FULLSEND_FAILED_KEYS_*` values are migrated into those documents when present; otherwise each branch is seeded with an empty signed baseline (the events branch also records an initial issue-open recovery cutoff timestamp). Already-written branch state is left untouched. After migrating, converge deletes any still-present retired poll-state CI/CD variables; they are treated as known-retired by the orphan detector (no warnings) and are not re-seeded on install.
 
 On free-tier or Community Edition instances where project access tokens are not available, enroll each required role with a personal access token using `--gitlab-role-token`. Declare the project in `repos.yaml` first (`fullsend repos set gitlab.url <url>`, then `fullsend repos set 'gitlab.repos["group/project"]' '{}'`):
 
@@ -587,9 +587,18 @@ Developer and verifies it, and revokes the bootstrap credential. It then
 records that the trigger may be distributed, stores the trigger secret, and
 creates or updates the webhook. Only after both succeed does it publish the
 replacement runtime credential and cut over. The previous Poller stays at
-Developer as the retiring generation until it is retired
-([#8244](https://github.com/fullsend-ai/fullsend/issues/8244)); until then a
-forced trigger rotation defers and keeps the existing fast path. The current Poller
+Developer as the retiring generation. A later install retires it once the
+24-hour rotation grace after the cutover has elapsed and no unfinished job runs
+as it ([#8244](https://github.com/fullsend-ai/fullsend/issues/8244)).
+Retirement revokes the triggers that account owns, revokes its credentials,
+deletes the account, confirms the deletion by listing again, and clears
+`retiring_user_id`. It leaves any merge grant on the protected default branch
+in place and reports it for operator review, because fullsend does not record
+who created a per-user grant. A step that fails leaves the record for the next install to
+retry, and never stops install from repairing the webhook. A trigger whose owner
+GitLab omits is revoked only when it is a managed webhook trigger no webhook
+uses; otherwise install names it so an operator can revoke it. Until retirement completes, a forced trigger rotation defers and keeps
+the existing fast path, so at most one old/new Poller pair exists. The current Poller
 keeps polling throughout, so polling and in-flight jobs that authenticate as it
 are not interrupted. If the trigger request, its verification, or the final
 checks fail, install publishes nothing and quarantines the generation, which

@@ -432,10 +432,10 @@ func buildPiRunCommand(params RunParams, m *piManifest, exts []piManifestExtensi
 		(agentEnabled && len(m.Agent.ProviderModels[piGatewayProvider]) > 0))
 
 	parts := []string{"cd " + shellQuote(params.RepoDir)}
-	// Resolve the pi binary before the agent-writable .env is sourced and
-	// make the name read-only: .env could otherwise define a pi() function
-	// or put its own pi first on PATH and run agent code after the guards,
-	// and a readonly assignment attempt aborts the sourcing shell instead.
+	// Resolve the pi binary before the agent-writable .env is read and
+	// make the name read-only: .env could otherwise put its own pi first on
+	// PATH and run agent code after the guards, and the .env read drops an
+	// assignment to the pinned name (envDataLoad's extra drop names).
 	// The launch below uses the path, which no function or alias can shadow.
 	parts = append(parts, "&& "+piBinaryPin())
 	if hooksEnabled {
@@ -484,7 +484,9 @@ func buildPiRunCommand(params RunParams, m *piManifest, exts []piManifestExtensi
 		)
 	}
 	parts = append(parts,
-		"&& . "+shellQuote(envFile),
+		// .env is read as data, never sourced (envDataLoad, #8498); that
+		// also drops LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT (#7580).
+		"&& "+envDataLoad(envFile, piBinaryVar),
 		// First thing after the agent-writable .env, on every provider
 		// path: clear the variables that steer the module loaders pi runs
 		// under. JITI_ALIAS alone swaps the file behind an `-e` path
@@ -700,12 +702,12 @@ const piManifestEnv = "FULLSEND_PI_MANIFEST"
 const piManifestSumEnv = "FULLSEND_PI_MANIFEST_SHA256"
 
 // piBinaryVar holds the absolute path of the pi binary, resolved before
-// .env is sourced and marked read-only.
+// .env is read and marked read-only.
 const piBinaryVar = "FULLSEND_PI_BIN"
 
 // piLoaderEnvNames are the environment variables that steer the module
 // loaders pi starts under, cleared right after the agent-writable .env is
-// sourced on every provider path.
+// read on every provider path.
 //
 // NODE_OPTIONS and NODE_PATH run code inside the node process before pi's
 // own entry point does. The JITI_* family is jiti's, the loader pi imports
@@ -733,10 +735,10 @@ var piLoaderEnvNames = []string{
 }
 
 // piLoaderEnvUnset is the POSIX sh fragment that clears piLoaderEnvNames.
-// It is emitted immediately after `. .env`, next to the other post-.env
-// hygiene: `unset` is a special builtin, so a function a sourced file
-// defined cannot stand in for it, and clearing the names before the
-// runtime's own exports means JITI_FS_CACHE=false is the last word.
+// It is emitted immediately after the .env read (envDataLoad), next to the
+// other post-.env hygiene: `unset` is a special builtin, so no function can
+// stand in for it, and clearing the names before the runtime's own exports
+// means JITI_FS_CACHE=false is the last word.
 func piLoaderEnvUnset() string {
 	return "unset " + strings.Join(piLoaderEnvNames, " ")
 }

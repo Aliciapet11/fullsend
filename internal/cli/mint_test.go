@@ -236,7 +236,7 @@ func TestRunMintDeployGCP_SkipDeployReportsCommitResolution(t *testing.T) {
 	require.NoError(t, err)
 	oldStdout := os.Stdout
 	os.Stdout = w
-	deployErr := runMintDeployGCP(context.Background(), "my-project-id", "us-central1", t.TempDir(), true, false, "", "", nil, false, gcf.StatusGitHubAuth{})
+	deployErr := runMintDeployGCP(context.Background(), "my-project-id", "us-central1", t.TempDir(), true, false, "", "", nil, false, gcf.StatusGitHubAuth{}, mintTracingConfig{})
 	require.NoError(t, w.Close())
 	os.Stdout = oldStdout
 	require.NoError(t, deployErr)
@@ -249,6 +249,8 @@ func TestRunMintDeployGCP_SkipDeployReportsCommitResolution(t *testing.T) {
 	assert.Contains(t, out, "Version:")
 	assert.Contains(t, out, "Commit:")
 	assert.Contains(t, out, "Deployment complete")
+	assert.Contains(t, out, "Tracing: unchanged")
+	assert.NotContains(t, out, "Tracing: disabled")
 }
 
 func TestMintDeployCmd_DryRunShowsResolvedSource(t *testing.T) {
