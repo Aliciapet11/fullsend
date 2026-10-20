@@ -349,6 +349,14 @@ repositories. The admission window reduces this risk but does not rule it
 out. Join logs record the lock age at admission. Leave logs record how long
 each holder ran and warn at 25 minutes and beyond 30 minutes.
 
+A second, narrower window exists while a lock is created. The new repository
+briefly shows the default non-UUID README, which a legacy runner deletes as
+invalid before recreating the lock with its own run ID. The allocator rechecks
+the repository ID right before its initial commit and does not join a lock
+that was replaced. The check and the commit are separate requests, and the
+platform has no commit conditional on the repository ID, so a replacement
+between those two requests can still let both suites use the org.
+
 **Removal:** Delete the bridge (and the shared files in `e2e-lock`) once no
 runner can still take the exclusive lock. That means every open PR branch
 and the merge queue contain the allocator wiring, and the last legacy run

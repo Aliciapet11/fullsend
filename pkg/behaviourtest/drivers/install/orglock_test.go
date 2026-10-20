@@ -1070,6 +1070,52 @@ func TestSharedOrgLock_JoinBindsRepositoryIDToState(t *testing.T) {
 	assert.Equal(t, readLockState(t, p.fc, bridgeOrg).Generation, m.generation)
 }
 
+// swapAfterLockCreateClient lets a legacy runner replace a freshly created
+// lock repository right after CreateRepo returns: it sees the default
+// non-UUID README, deletes the repository as invalid, and recreates the lock
+// with its own run ID.
+type swapAfterLockCreateClient struct {
+	*orgClient
+	fc        *forge.FakeClient
+	legacyRun string
+}
+
+func (c *swapAfterLockCreateClient) CreateRepo(ctx context.Context, org, name, description string, private bool) (*forge.Repository, error) {
+	repo, err := c.orgClient.CreateRepo(ctx, org, name, description, private)
+	if err != nil || name != e2etest.LockRepo {
+		return repo, err
+	}
+	if err := c.fc.DeleteRepo(ctx, org, name); err != nil {
+		return nil, err
+	}
+	if _, err := c.fc.CreateRepo(ctx, org, name, description, false); err != nil {
+		return nil, err
+	}
+	if err := c.fc.CreateOrUpdateFile(ctx, org, name, sharedLockReadmePath, "acquire lock", []byte(c.legacyRun)); err != nil {
+		return nil, err
+	}
+	return repo, nil
+}
+
+func TestSharedOrgLock_InitDoesNotPublishIntoReplacedLock(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	swap := &swapAfterLockCreateClient{orgClient: p.clients[bridgeOrg], fc: p.fc, legacyRun: uuid.NewString()}
+
+	b := newSharedOrgLock(t.Logf, time.Now)
+	m, reason, err := b.join(ctx, swap, bridgeOrg)
+	require.NoError(t, err)
+	assert.Nil(t, m, "a runner must not join a lock a legacy runner now owns")
+	assert.NotEmpty(t, reason)
+
+	assert.Equal(t, swap.legacyRun, lockReadme(t, p.fc, bridgeOrg), "the legacy runner's lock is untouched")
+	_, err = p.fc.GetFileContent(ctx, bridgeOrg, e2etest.LockRepo, sharedLockMarkerPath)
+	assert.True(t, forge.IsNotFound(err), "no shared flag may be published into the legacy lock")
+	_, err = p.fc.GetFileContent(ctx, bridgeOrg, e2etest.LockRepo, sharedLockHoldersPath)
+	assert.True(t, forge.IsNotFound(err), "no holder state may be published into the legacy lock")
+}
+
 // lockDeleteServer is a live-API stand-in for deleting the e2e-lock
 // repository: DELETE is rate-limited; the repository ID changes once the
 // client's rate-limit wait has elapsed.

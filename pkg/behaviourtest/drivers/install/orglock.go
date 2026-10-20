@@ -41,6 +41,14 @@
 // same 30-minute reclaim, so a crashed holder cannot close an org for
 // good once legacy runners are gone.
 //
+// Initialization has one more window: a freshly created lock repository
+// shows the default non-UUID README until the creating commit lands, and a
+// legacy runner that reads it deletes it as invalid and recreates the lock.
+// create rechecks the repository ID right before committing and does not
+// join a replaced lock, but the check and the commit are separate requests
+// and the platform offers no commit conditional on the repository ID, so a
+// replacement inside that single round trip remains possible.
+//
 // Remove this bridge once no suite runner built from a branch that still
 // calls e2etest.AcquireOrg can start, that is when every open PR branch
 // and the merge queue contain the allocator wiring and the last legacy
@@ -285,6 +293,26 @@ func (b *sharedOrgLock) create(ctx context.Context, client forge.Client, org str
 		{Path: sharedLockReadmePath, Content: []byte(m.generation)},
 		{Path: sharedLockMarkerPath, Content: []byte(sharedLockMarker + "\n")},
 		{Path: sharedLockHoldersPath, Content: data},
+	}
+	// A fresh repository shows the default non-UUID README, which a legacy
+	// runner deletes as invalid before recreating the lock with its own run
+	// ID. CommitFiles finds the repository by name and would then publish
+	// shared admission into that replacement. Do not commit unless the name
+	// still resolves to the repository created above; otherwise the lock
+	// belongs to another runner and this one does not join it.
+	if repo != nil && repo.ID != 0 {
+		checkCtx, cancelCheck := b.bound(ctx)
+		cur, checkErr := client.GetRepo(checkCtx, org, e2etest.LockRepo)
+		cancelCheck()
+		switch {
+		case forge.IsNotFound(checkErr):
+			return nil, errLockCreateRace
+		case checkErr != nil:
+			return nil, fmt.Errorf("rereading %s/%s before initialising it: %w", org, e2etest.LockRepo, checkErr)
+		case cur.ID != repo.ID:
+			b.logf("[e2e-lock] %s/%s was replaced during initialisation (id %d, created %d); not joining it", org, e2etest.LockRepo, cur.ID, repo.ID)
+			return nil, errLockCreateRace
+		}
 	}
 	// The commit is not replayed after an ambiguous failure: a resend that
 	// lands after another runner joined would answer with a stale-head error
