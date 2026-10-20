@@ -498,6 +498,11 @@ func TestPiRuntimeRun_SecurityOnButManifestWithoutHooksFailsFast(t *testing.T) {
 	require.NoError(t, PiRuntime{}.Bootstrap(bootstrapInput{
 		sandboxName: "sb", agentPath: writeAgentFile(t, testAgentDef), agentName: "triage",
 	}))
+	// Hook settings recorded as a hooks Bootstrap would, so Run reaches the
+	// manifest check (TestPiRuntimeRun_RefusesWithoutRecordedHookEnv covers
+	// the missing record).
+	recordPiHookEnv("sb", nil)
+	t.Cleanup(func() { piHookEnvs.Delete("sb") })
 	exit, err := PiRuntime{}.Run(context.Background(), RunParams{
 		SandboxName: "sb", RepoDir: "/r", Timeout: 30 * time.Second, HooksSettingsPath: "/sandbox/claude-config/hooks.json",
 		OnEvent: func(AgentEvent) {},

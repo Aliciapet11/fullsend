@@ -617,9 +617,9 @@ func buildPiRunCommand(params RunParams, m *piManifest, exts []piManifestExtensi
 	if hooksEnabled {
 		// The hook settings, re-asserted last before the launch from what
 		// Bootstrap recorded, so neither .env nor a declared extension's env
-		// decides them; a name the runner has no value for is unset. Without
-		// a recorded entry (Bootstrap ran in another process) nothing is
-		// emitted, as for the manifest guard.
+		// decides them; a name the runner has no value for is unset. Run
+		// refuses to start without a recorded entry, so the command built
+		// without one (tests) carries none.
 		if env, ok := piHookEnv(params.SandboxName); ok {
 			parts = append(parts, "&& "+hookEnvExports(env))
 		}
@@ -1130,6 +1130,17 @@ func piFallbackLoop(chain []string, timeout time.Duration, now func() time.Time,
 // (piFallbackChain), and the whole chain shares params.Timeout. Pinned
 // explicit ids (provider/id or bare catalog ids) never fall back (#7026).
 func (r PiRuntime) Run(ctx context.Context, params RunParams, printer *ui.Printer, start time.Time, metrics *RunMetrics) (int, error) {
+	// The hook settings are runner-held for the same reason as Claude Code's
+	// and codex's digests: a miss means Bootstrap did not install the hooks
+	// in this process, and the launch would leave them to the agent-writable
+	// .env.
+	if params.HooksSettingsPath != "" {
+		if _, ok := piHookEnv(params.SandboxName); !ok {
+			return -1, fmt.Errorf(
+				"no runner-held hook settings for sandbox %s: PiRuntime.Run with sandbox hooks enabled requires Bootstrap to have installed them in the same process (internal/cli/run.go does), because they cannot be read back from the agent-writable .env",
+				params.SandboxName)
+		}
+	}
 	m, err := readPiManifest(params.SandboxName, r.piManifestPath())
 	if err != nil {
 		return -1, err

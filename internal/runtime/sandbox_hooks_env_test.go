@@ -1,11 +1,13 @@
 package runtime
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,6 +15,7 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/harness"
 	"github.com/fullsend-ai/fullsend/internal/sandbox"
 	"github.com/fullsend-ai/fullsend/internal/security"
+	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
 // hookEnvReadStubArm is the case arm a stub openshell uses to answer
@@ -335,4 +338,18 @@ func TestPiRuntimeBootstrap_RecordsHookEnv(t *testing.T) {
 	require.Error(t, PiRuntime{}.Bootstrap(in))
 	_, ok = piHookEnv("pi-hook-env")
 	assert.False(t, ok)
+}
+
+// TestPiRuntimeRun_RefusesWithoutRecordedHookEnv: with sandbox hooks on,
+// Run refuses to start pi when Bootstrap recorded no hook settings in this
+// process, as Claude Code and codex refuse without their runner-held
+// digests, rather than leaving the settings to .env.
+func TestPiRuntimeRun_RefusesWithoutRecordedHookEnv(t *testing.T) {
+	exit, err := PiRuntime{}.Run(context.Background(), RunParams{
+		SandboxName: "hook-env-pi-not-bootstrapped", RepoDir: "/r", Timeout: 30 * time.Second,
+		HooksSettingsPath: "/sandbox/claude-config/hooks.json",
+		OnEvent:           func(AgentEvent) {},
+	}, ui.New(os.Stderr), time.Now(), &RunMetrics{})
+	assert.Equal(t, -1, exit)
+	require.ErrorContains(t, err, "no runner-held hook settings for sandbox hook-env-pi-not-bootstrapped")
 }

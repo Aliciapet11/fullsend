@@ -1392,8 +1392,9 @@ the SSRF allowlist, clear `TIRITH_REQUIRED` or delete the canary token for itera
 re-exports each of the five the runner has a value for after `.env`, and unsets the rest, so a
 value only `.env` carries never reaches the hooks. The mechanism is runtime-neutral
 (`internal/runtime/sandbox_hooks_env.go`: `bootstrapHookEnv` at Bootstrap, `hookEnvExports` in the
-launch), and the Claude Code and pi launches use it the same way. The first three come from `SandboxHookConfig`; the harness pair has
-no typed runner-side copy, so Bootstrap reads it back from `.env` — which at that point is still
+launch), and the Claude Code and pi launches use it the same way. The first three come from
+`SandboxHookConfig`; the harness pair has no typed runner-side copy, so Bootstrap reads it back
+from `.env` — which at that point is still
 exactly what the runner wrote, since no agent iteration has run — and records it beside the
 digests. Reading it in `Run` instead would read whatever the previous iteration left behind, which
 is the exposure being closed.
