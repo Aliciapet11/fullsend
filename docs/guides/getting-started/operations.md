@@ -299,7 +299,7 @@ Local `fullsend poll` / `fullsend run --forge gitlab` against a private-CA insta
 
 ### Sandbox hosts
 
-OpenShell sandboxes do **not** inherit `CI_SERVER_TLS_CA_FILE`. That path is job-local and must not be treated as available inside the sandbox or on a remote gateway host. Agent-controlled TLS environment overrides (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`) stay blocked.
+OpenShell sandboxes do **not** inherit `CI_SERVER_TLS_CA_FILE`. That path is job-local and must not be treated as available inside the sandbox or on a remote gateway host. Agent-controlled TLS environment overrides (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`) stay blocked; see [Migrating proxy and certificate settings](../user/customizing-agents.md#migrating-proxy-and-certificate-settings) for where those settings go instead.
 
 The OpenShell supervisor reads a fixed list of system CA paths in the sandbox container to build upstream trust (GitLab, registries, inference) and the bundle handed to sandboxed processes. Administrators provision that trust on the **sandbox host**, independently of the job container:
 
