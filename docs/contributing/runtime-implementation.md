@@ -159,7 +159,7 @@ How the shared PostToolUse chain reaches each runtime — the three sanitizer ro
 - **OpenCode:** not wired yet; the plugin adapter is owned by unbound-force#515. Until it lands, OpenCode is limited to read-only agents.
 - **OpenCode runner-held environment:** Bootstrap reads the pristine harness-delivered
   `OPENCODE_CONFIG_CONTENT` and `GOOGLE_APPLICATION_CREDENTIALS` values before any agent iteration,
-  stores them on the runner keyed by sandbox name, and Run restores them after sourcing the
+  stores them on the runner keyed by sandbox name, and Run restores them after reading the
   agent-writable `.env`. A missing entry fails closed. This requires Bootstrap and Run to share the
   same one-shot CLI process; a future long-lived runner must evict state when each sandbox finishes.
 - **OpenCode agent permissions and reset:** OpenCode evaluates agent-level permission rules after
@@ -169,7 +169,7 @@ How the shared PostToolUse chain reaches each runtime — the three sanitizer ro
   is rejected, since Go and `JSON.parse` would read it differently. Before every iteration Run
   removes the agent, tool, command, plugin and config overrides from the config dir, the
   user-level config dirs, a cached `models.json` and `auth.json` (`openCodeOverridePaths`), then
-  re-uploads the agent and re-runs `opencode debug agent`. After sourcing the agent-writable
+  re-uploads the agent and re-runs `opencode debug agent`. After reading the agent-writable
   `.env`, the run prelude repeats the reset and fails with exit 98 if the agent file's SHA-256
   changed. A `Falling back to default agent` warning (stderr, or the debug log under `--debug`)
   fails the iteration. `skills/` stays writable until #7824.

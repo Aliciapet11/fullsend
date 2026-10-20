@@ -5699,10 +5699,11 @@ func buildScanContextCommand(repoDir, traceID string) string {
 	inameExpr := strings.Join(inames, " -o ")
 
 	// Read .env as data for the run's environment, as the launch does
-	// (EnvDataLoad, #8574): no .env or .env.d line runs as shell, so none
-	// can stand in for find or the scan. The scanner is the binary
-	// bootstrapCommon uploaded, named by its absolute path so the version
-	// that runs matches the runner whatever PATH .env ends up with.
+	// (EnvDataLoad, #8574): no .env or .env.d line runs as shell. A PATH
+	// assignment in .env is still taken, so find is resolved under whatever
+	// PATH .env leaves behind; only the scanner is pinned. The scanner is
+	// the binary bootstrapCommon uploaded, named by its absolute path so the
+	// version that runs matches the runner whatever PATH .env ends up with.
 	envFile := sandbox.SandboxWorkspace + "/.env"
 	scanner := sandbox.SandboxWorkspace + "/bin/fullsend"
 
