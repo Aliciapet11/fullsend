@@ -2273,6 +2273,7 @@ func TestRateLimitBackoffInterrupted_KeepsRetryAfterAndContextError(t *testing.T
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, context.DeadlineExceeded))
 	assert.True(t, IsRateLimitError(err))
+	assert.False(t, forge.IsTransient(err))
 	d, ok := RetryAfterFromError(err)
 	require.True(t, ok)
 	assert.Equal(t, 600*time.Second, d)
@@ -2772,11 +2773,14 @@ func TestAPIError_IsTransient(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		code int
-		want bool
+		name  string
+		code  int
+		cause error
+		want  bool
 	}{
 		{name: "429 rate limit", code: 429, want: true},
+		{name: "429 backoff interrupted by cancellation", code: 429, cause: context.Canceled, want: false},
+		{name: "429 backoff interrupted by deadline", code: 429, cause: context.DeadlineExceeded, want: false},
 		{name: "500 internal server error", code: 500, want: true},
 		{name: "502 bad gateway", code: 502, want: true},
 		{name: "503 service unavailable", code: 503, want: true},
@@ -2790,8 +2794,9 @@ func TestAPIError_IsTransient(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := &APIError{StatusCode: tt.code, Message: http.StatusText(tt.code)}
+			err := &APIError{StatusCode: tt.code, Message: http.StatusText(tt.code), cause: tt.cause}
 			assert.Equal(t, tt.want, err.IsTransient())
+			assert.Equal(t, tt.want, forge.IsTransient(err))
 		})
 	}
 }
