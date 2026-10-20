@@ -489,8 +489,11 @@ The sandbox has two key directories that map to Claude Code's config levels (plu
     ├── .env                            Environment variables (read as data before claude)
     ├── .env.d/                         Additional env files (host_files expand)
     │
-    │   claude is resolved on PATH before .env and launched by that path
-    │   (FULLSEND_CLAUDE_BIN), like codex and pi. .env puts workspace/bin
+    │   claude is resolved on the trusted PATH before .env (the first one
+    │   the agent cannot write, binaryPin) and launched by that path
+    │   (FULLSEND_CLAUDE_BIN), like codex, pi and opencode; a
+    │   #!/usr/bin/env node CLI runs through a node pinned the same way
+    │   (codex's npm launcher and pi). .env puts workspace/bin
     │   last on PATH and restores the runner's PATH in front after .env.d
     │   (what claude and pi run under; codex restores its pre-.env PATH;
     │   the Claude Code and codex hooks run under the trusted PATH);

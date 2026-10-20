@@ -15,8 +15,8 @@ import (
 // piEnvLoad, codexEnvLoad and openCodeEnvLoad are the .env reads the pi,
 // codex and OpenCode launches emit where they used to source the file.
 var (
-	piEnvLoad       = envDataLoad(sandbox.SandboxWorkspace+"/.env", piBinaryVar, piHookPythonEnv, piHookPathEnv)
-	codexEnvLoad    = envDataLoad(sandbox.SandboxWorkspace+"/.env", codexBinaryVar, codexPathVar)
+	piEnvLoad       = envDataLoad(sandbox.SandboxWorkspace+"/.env", piBinaryVar, piNodeVar, piHookPythonEnv, piHookPathEnv)
+	codexEnvLoad    = envDataLoad(sandbox.SandboxWorkspace+"/.env", codexBinaryVar, codexNodeVar, codexPathVar)
 	openCodeEnvLoad = envDataLoad(sandbox.SandboxWorkspace+"/.env", openCodeEnvDataDrop...)
 )
 
@@ -54,7 +54,7 @@ func (f envDataFixture) load(t *testing.T, tail string, extraDrop ...string) (st
 // added to the launch environment; a PATH in extraEnv replaces the default.
 func (f envDataFixture) loadIn(t *testing.T, dir string, extraEnv []string, tail string, extraDrop ...string) (string, string, error) {
 	t.Helper()
-	cmd := exec.Command("/bin/sh", "-c", envDataLoadWith(f.envFile, envDataControlLines(f.ws), extraDrop)+" && "+tail)
+	cmd := exec.Command("/bin/sh", "-c", envDataTrustedPin()+" && "+envDataLoadWith(f.envFile, envDataControlLines(f.ws), extraDrop)+" && "+tail)
 	cmd.Dir = dir
 	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=/home/agent"}, extraEnv...)
 	var stdout, stderr strings.Builder
@@ -666,8 +666,10 @@ func TestEnvDataPin_TrustedPathIsPhysicalAndIsolated(t *testing.T) {
 
 // The runner's in-sandbox probes read .env with the launch loader and drop
 // only the shared names: the probe shell pins nothing read-only (#8574).
+// With no CLI pin in front, the probe records the trusted PATH itself.
 func TestEnvDataLoad_ProbeFragment(t *testing.T) {
-	assert.Equal(t, envDataLoad("/sandbox/workspace/.env"), EnvDataLoad("/sandbox/workspace/.env"))
+	assert.Equal(t, envDataTrustedPin()+" && "+envDataLoad("/sandbox/workspace/.env"), EnvDataLoad("/sandbox/workspace/.env"))
+	assert.Equal(t, 1, strings.Count(EnvDataLoad("/sandbox/workspace/.env"), "readonly "+envDataTrustedPathVar+"="))
 }
 
 // As root nothing is protected, so the trusted PATH keeps the launch PATH
@@ -682,13 +684,18 @@ func TestEnvDataTrustedPath_RootDropsRelativeEntries(t *testing.T) {
 	assert.Equal(t, "/usr/bin:/bin", string(out))
 }
 
-// The fragment pins python3 before reading .env and runs it isolated.
+// The fragment pins python3 before reading .env and runs it isolated. The
+// trusted PATH it pins with is the one the launch's CLI pin recorded, so
+// the fragment itself never records it again (a second `readonly` of the
+// name aborts dash).
 func TestEnvDataLoad_Shape(t *testing.T) {
 	frag := envDataLoad("/sandbox/workspace/.env", "FULLSEND_X_BIN")
-	assert.True(t, strings.HasPrefix(frag, envDataPin()+" && "), frag)
+	assert.True(t, strings.HasPrefix(frag, envDataBinaryPin(envDataPythonVar, "python3")+" && "), frag)
+	assert.NotContains(t, frag, "readonly "+envDataTrustedPathVar+"=")
+	assert.NotContains(t, frag, "readonly "+envDataReadlinkVar+"=")
 	assert.Contains(t, frag, `"$`+envDataPythonVar+`" -I -S -c `)
 	assert.Contains(t, frag, `eval "$`+envDataExportsVar+`" && unset `+envDataExportsVar)
-	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHON* BASH_ENV ENV IFS "+envDataPythonVar+" "+envDataExportsVar+" "+envDataTrustedPathVar+" FULLSEND_X_BIN'")
+	assert.Contains(t, frag, "'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHON* BASH_ENV ENV IFS "+envDataPythonVar+" "+envDataExportsVar+" "+envDataTrustedPathVar+" "+envDataReadlinkVar+" FULLSEND_X_BIN'")
 	assert.NotContains(t, frag, ". /sandbox/workspace/.env")
 	assert.NotContains(t, frag, "  ", "the launch commands are checked for double spaces")
 	for _, line := range EnvDataControlLines() {

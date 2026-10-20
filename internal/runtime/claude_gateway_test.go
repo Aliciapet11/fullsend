@@ -334,7 +334,7 @@ func gatewayLaunch(t *testing.T, sb, envBody string) (string, string, error) {
 	cmd := buildRunCommand(RunParams{SandboxName: sb, AgentBaseName: "agent", RepoDir: tmp, Model: "gateway/m"})
 	cmd = strings.Replace(cmd, sandbox.SandboxWorkspace+"/.env", envFile, 1)
 	cmd = strings.ReplaceAll(cmd, sandbox.SandboxClaudeConfig, cfgDir)
-	c := exec.Command("/bin/sh", "-c", cmd)
+	c := exec.Command("/bin/sh", "-c", protectedDirsShell(t, binDir)+cmd)
 	c.Env = []string{
 		"PATH=" + binDir + ":/usr/bin:/bin",
 		"HOME=" + tmp,
@@ -429,7 +429,7 @@ func TestBuildRunCommand_GatewayPlaceholderRequired(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(binDir, "claude"), []byte("#!/bin/sh\necho REAL-CLAUDE\n"), 0o755))
 		cmd := buildRunCommand(RunParams{SandboxName: sb, AgentBaseName: "agent", RepoDir: tmp, Model: "gateway/m"})
 		cmd = strings.ReplaceAll(cmd, sandbox.SandboxClaudeConfig, filepath.Join(tmp, "cfg"))
-		c := exec.Command("/bin/sh", "-c", cmd)
+		c := exec.Command("/bin/sh", "-c", protectedDirsShell(t, binDir)+cmd)
 		c.Env = []string{"PATH=" + binDir + ":/usr/bin:/bin", "INFERENCE_GATEWAY_API_KEY=eyJhbGciOi.eyJzdWIiOi.sig"}
 		out, err := c.CombinedOutput()
 		var exitErr *exec.ExitError
@@ -528,7 +528,7 @@ func TestBuildRunCommand_GatewayInlineSettingsArgv(t *testing.T) {
 	cmd := buildRunCommand(RunParams{SandboxName: sb, AgentBaseName: "agent", RepoDir: tmp, Model: "gateway/m", HooksSettingsPath: "/sandbox/claude-config/hooks.json"})
 	cmd = strings.Replace(cmd, sandbox.SandboxWorkspace+"/.env", envFile, 1)
 	cmd = strings.ReplaceAll(cmd, sandbox.SandboxClaudeConfig, filepath.Join(tmp, "claude-config"))
-	c := exec.Command("/bin/sh", "-c", cmd)
+	c := exec.Command("/bin/sh", "-c", protectedDirsShell(t, binDir)+cmd)
 	c.Env = []string{"PATH=" + binDir + ":/usr/bin:/bin", "HOME=" + tmp, "INFERENCE_GATEWAY_API_KEY=" + gatewayTestPlaceholder}
 	out, err := c.CombinedOutput()
 	require.NoError(t, err, string(out))

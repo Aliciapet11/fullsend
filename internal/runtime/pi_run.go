@@ -486,7 +486,7 @@ func buildPiRunCommand(params RunParams, m *piManifest, exts []piManifestExtensi
 	parts = append(parts,
 		// .env is read as data, never sourced (envDataLoad, #8498); that
 		// also drops LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT (#7580).
-		"&& "+envDataLoad(envFile, piBinaryVar, piHookPythonEnv, piHookPathEnv),
+		"&& "+envDataLoad(envFile, piBinaryVar, piNodeVar, piHookPythonEnv, piHookPathEnv),
 		// First thing after the agent-writable .env, on every provider
 		// path: clear the variables that steer the module loaders pi runs
 		// under. JITI_ALIAS alone swaps the file behind an `-e` path
@@ -613,7 +613,7 @@ func buildPiRunCommand(params RunParams, m *piManifest, exts []piManifestExtensi
 		parts = append(parts, piGatewayEnvParts(gw)...)
 	}
 	parts = append(parts,
-		`&& "$`+piBinaryVar+`"`,
+		"&& "+cliLaunch(piBinaryVar, piNodeVar),
 		"--print",
 		"--mode json",
 		"--no-approve",
@@ -709,6 +709,10 @@ const piManifestSumEnv = "FULLSEND_PI_MANIFEST_SHA256"
 // .env is read and marked read-only.
 const piBinaryVar = "FULLSEND_PI_BIN"
 
+// piNodeVar holds the node that starts pi: pi's CLI is a
+// `#!/usr/bin/env node` script, so binaryPin pins node by the same rule.
+const piNodeVar = "FULLSEND_PI_NODE"
+
 // piHookPythonEnv hands fullsend-hooks.js the interpreter it runs every hook
 // script with: the absolute python3 envDataLoad pinned before anything the
 // agent wrote was read (#8577). A bare `python3` in the adapter would be
@@ -779,7 +783,7 @@ func piLoaderEnvUnset() string {
 // piBinaryPin is the POSIX sh fragment that records where pi is; see
 // binaryPin for why it holds.
 func piBinaryPin() string {
-	return binaryPin(piBinaryVar, "pi")
+	return binaryPin(piBinaryVar, piNodeVar, "pi")
 }
 
 // piPlaceholderPrefix is the namespace of OpenShell gateway placeholders,

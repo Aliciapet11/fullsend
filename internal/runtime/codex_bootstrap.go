@@ -520,7 +520,7 @@ func codexReadHarnessSecurityEnvCmd(envFile string) string {
 		refs = append(refs, fmt.Sprintf("${%s:-}", key))
 	}
 	return fmt.Sprintf(`%s && printf '%%s' "%s"`,
-		envDataLoad(envFile), strings.Join(refs, codexEnvReadSeparator))
+		EnvDataLoad(envFile), strings.Join(refs, codexEnvReadSeparator))
 }
 
 // codexReadHarnessSecurityEnv reads the harness-supplied hook variables from

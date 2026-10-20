@@ -241,6 +241,15 @@ What a local pi run needs, beyond the guide:
   It also needs `readlink` there as a regular file, not a symlink; without one the launch also
   prints `no readlink that is a regular file in a PATH directory the agent cannot write`. The
   fullsend sandbox image ships both.
+- **`pi` and `node` in directories the agent cannot write** — the launch pins
+  the first `pi` in a `PATH` directory the sandbox user neither owns nor can
+  write, judged by the file it resolves to and every directory above that
+  file. pi's CLI is a `#!/usr/bin/env node` script, so the launch also pins
+  `node` by the same rule and starts pi with it. It does not let `env` look
+  `node` up on the `PATH` left after `.env` is read. A `pi` or `node` found
+  only through an agent-writable directory, or a symlink into one, fails the
+  launch with `pi not found in a PATH directory the agent cannot write` or
+  `node not found in a PATH directory the agent cannot write` (exit 127).
 - **Platforms** — verified end to end on macOS Apple Silicon (podman machine, Homebrew `openshell`)
   and Fedora with rootless Podman; the guide's platform notes apply unchanged.
 - **`review` and `retro`** run their real sub-agent roster through the `Agent` tool; the children

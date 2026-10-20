@@ -367,7 +367,7 @@ func TestBuildPiRunCommand_Extensions(t *testing.T) {
 
 	// env: exported right before pi, after the runtime's own exports, keys
 	// sorted within an extension; values shell-quoted.
-	envExports := `&& export FFF_MULTIGREP='1' && export FFF_ROOT='/sandbox/work space' && "$FULLSEND_PI_BIN" --print`
+	envExports := `&& export FFF_MULTIGREP='1' && export FFF_ROOT='/sandbox/work space' && ` + cliLaunch(piBinaryVar, piNodeVar) + ` --print`
 	assert.Contains(t, cmd, envExports, cmd)
 	assert.Less(t, strings.Index(cmd, `export GOOGLE_CLOUD_PROJECT=`), strings.Index(cmd, "export FFF_MULTIGREP="), "runtime exports come first")
 

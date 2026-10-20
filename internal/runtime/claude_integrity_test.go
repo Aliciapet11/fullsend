@@ -85,11 +85,12 @@ func TestClaudeHookDigestsFor(t *testing.T) {
 func TestBuildRunCommand_HooksGuardPlacement(t *testing.T) {
 	t.Parallel()
 
-	envSource := envDataLoad(sandbox.SandboxWorkspace+"/.env", claudeBinaryVar, claudeGatewayPlaceholderVar)
+	envSource := envDataLoad(sandbox.SandboxWorkspace+"/.env", claudeBinaryVar, claudeNodeVar, claudeGatewayPlaceholderVar)
+	launch := cliLaunch(claudeBinaryVar, claudeNodeVar)
 
 	t.Run("hooks disabled leaves the launch unchanged", func(t *testing.T) {
 		cmd := buildRunCommand(RunParams{AgentBaseName: "agent", RepoDir: "/repo"})
-		assert.True(t, strings.HasPrefix(cmd, "cd '/repo' && "+claudeBinaryPin()+" && "+envSource+" && unset -f claude && "+claudeLoaderEnvUnset+" && \"$"+claudeBinaryVar+"\" --print"), cmd)
+		assert.True(t, strings.HasPrefix(cmd, "cd '/repo' && "+claudeBinaryPin()+" && "+envSource+" && unset -f claude && "+claudeLoaderEnvUnset+" && "+launch+" --print"), cmd)
 		assert.NotContains(t, cmd, "sha256sum")
 	})
 
@@ -103,7 +104,7 @@ func TestBuildRunCommand_HooksGuardPlacement(t *testing.T) {
 		guard := claudeHooksGuard(d, true)
 		want := "cd '/repo' && " + claudeBinaryPin() + " && " + guard + " && " + envSource +
 			" && unset -f claude test [ command cut wc sha256sum find echo && " + claudeLoaderEnvUnset +
-			" && " + guard + " && \"$" + claudeBinaryVar + "\" --print"
+			" && " + guard + " && " + launch + " --print"
 		assert.True(t, strings.HasPrefix(cmd, want), cmd)
 		assert.Greater(t, strings.Index(cmd, "unset LD_PRELOAD"), strings.Index(cmd, envSource),
 			"the LD_* unset must come after .env is sourced")
@@ -180,7 +181,7 @@ func (f *claudeGuardFixture) launch(t *testing.T, d claudeHookDigests) (string, 
 	}, d)
 	cmd = strings.ReplaceAll(cmd, sandbox.SandboxWorkspace+"/.env", f.envFile)
 	cmd = strings.ReplaceAll(cmd, sandbox.SandboxClaudeConfig, f.configDir)
-	c := exec.Command("/bin/sh", "-c", cmd)
+	c := exec.Command("/bin/sh", "-c", protectedDirsShell(t, f.binDir)+cmd)
 	c.Env = append(os.Environ(), "PATH="+f.binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	c.Env = append(c.Env, f.extraEnv...)
 	out, err := c.CombinedOutput()

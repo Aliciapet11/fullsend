@@ -31,6 +31,10 @@ const codexConfigTamperedExit = 98
 // .env is sourced and marked read-only.
 const codexBinaryVar = "FULLSEND_CODEX_BIN"
 
+// codexNodeVar holds the node that starts codex: `codex` on PATH is npm's
+// `#!/usr/bin/env node` launcher, so binaryPin pins node by the same rule.
+const codexNodeVar = "FULLSEND_CODEX_NODE"
+
 // codexRuntimeEnv tells skills running inside the sandbox which runtime they
 // are on, so a skill can take a runtime-specific path deliberately.
 const codexRuntimeEnv = "FULLSEND_RUNTIME"
@@ -210,9 +214,10 @@ func translateCodexModel(model string, gateway bool) (codexModel, error) {
 // binaryPin for why it holds. The launch below uses the path, which no
 // function or alias can shadow. This matters more on codex than on pi:
 // `codex` on PATH is npm's node launcher, so a planted shim would run before
-// the native binary ever starts.
+// the native binary ever starts, and the node that runs the launcher is
+// pinned with it.
 func codexBinaryPin() string {
-	return binaryPin(codexBinaryVar, "codex")
+	return binaryPin(codexBinaryVar, codexNodeVar, "codex")
 }
 
 // codexAssetGuard is the POSIX sh fragment run before codex: the runner-owned
@@ -396,14 +401,14 @@ func buildCodexRunCommand(params RunParams, model codexModel, effort string, hoo
 		"&& "+codexModelsCacheRemoval(r),
 		"&& "+seed,
 		// .env is read as data, never sourced (envDataLoad, #8498).
-		"&& "+envDataLoad(envFile, codexBinaryVar, codexPathVar),
+		"&& "+envDataLoad(envFile, codexBinaryVar, codexNodeVar, codexPathVar),
 		// .env is agent-writable; re-pin the runner-owned config location
 		// after it so a rewritten .env cannot move codex's home out from
 		// under the guards.
 		"&& "+strings.Join(r.EnvExports(), " && "),
 		// Restored for codex itself. The hook adapter sets its children's
 		// PATH from envDataTrustedPathVar instead: the same launch PATH,
-		// recorded read-only before .env by envDataLoad, without the
+		// recorded read-only before .env by codexBinaryPin, without the
 		// directories the agent can write. It is exported from a value that
 		// never passed through .env, rather than trusting whatever PATH the
 		// adapter happens to inherit.
@@ -460,7 +465,7 @@ func buildCodexRunCommand(params RunParams, model codexModel, effort string, hoo
 		}
 	}
 	parts = append(parts,
-		"&& printf '%s' "+shellQuote(prompt)+` | "$`+codexBinaryVar+`"`,
+		"&& printf '%s' "+shellQuote(prompt)+" | "+cliLaunch(codexBinaryVar, codexNodeVar),
 		"exec",
 		"--json",
 		"--skip-git-repo-check",

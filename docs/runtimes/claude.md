@@ -245,7 +245,18 @@ hooks, in a `PATH` directory the sandbox user neither owns nor can write (a virt
 `readlink` there as a regular file, not a symlink; without one the launch also prints
 `no readlink that is a regular file in a PATH directory the agent cannot write`. With sandbox
 hooks on, that `python3` must also be 3.11 or newer; an older one fails Bootstrap with
-`hook interpreter ... needs at least 3.11`. The fullsend sandbox image ships both. `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
+`hook interpreter ... needs at least 3.11`. The fullsend sandbox image ships both.
+
+The `claude` CLI is held to the same rule. The launch pins the first `claude`
+in a `PATH` directory the sandbox user neither owns nor can write, judged by
+the file it resolves to and every directory above that file. A `claude` found
+only through an agent-writable directory, or a symlink into one, fails the
+launch with `claude not found in a PATH directory the agent cannot write`
+(exit 127). If `claude` is a `#!/usr/bin/env node` script rather than a binary,
+`node` must sit in such a directory too. The launch then starts the script with
+that `node`, and without one it fails with
+`node not found in a PATH directory the agent cannot write` (exit 127). In the
+fullsend sandbox image `claude` is a binary. `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
 the agent wrote there between iterations. The rest of the environment, including provider
 credentials, comes from the sandbox.
 

@@ -102,7 +102,7 @@ func TestBuildPiRunCommand_Basic(t *testing.T) {
 
 	// The guard runs before the agent-writable .env is sourced; the
 	// runner-owned locations are re-pinned right after it.
-	assert.True(t, strings.HasPrefix(cmd, `cd '/sandbox/workspace/repo' && `+piBinaryPin()+` && `+piHooksGuard("/sandbox/pi-config/fullsend-hooks.js", "/sandbox/pi-config/fullsend-manifest.json")+` && `+piEnvLoad+` && `+piLoaderEnvUnset()+` && `+strings.Join(PiRuntime{}.EnvExports(), " && ")+` && export FULLSEND_PI_MANIFEST='/sandbox/pi-config/fullsend-manifest.json' && export FULLSEND_PI_HOOK_PYTHON="$FULLSEND_ENV_PYTHON" && export FULLSEND_PI_HOOK_PATH="$FULLSEND_TRUSTED_PATH" && export FULLSEND_RUNTIME=pi && export GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}" && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_VERTEX_BASE_URL && export GOOGLE_CLOUD_PROJECT="${ANTHROPIC_VERTEX_PROJECT_ID:-$GOOGLE_CLOUD_PROJECT}" && "$FULLSEND_PI_BIN" --print --mode json`), cmd)
+	assert.True(t, strings.HasPrefix(cmd, `cd '/sandbox/workspace/repo' && `+piBinaryPin()+` && `+piHooksGuard("/sandbox/pi-config/fullsend-hooks.js", "/sandbox/pi-config/fullsend-manifest.json")+` && `+piEnvLoad+` && `+piLoaderEnvUnset()+` && `+strings.Join(PiRuntime{}.EnvExports(), " && ")+` && export FULLSEND_PI_MANIFEST='/sandbox/pi-config/fullsend-manifest.json' && export FULLSEND_PI_HOOK_PYTHON="$FULLSEND_ENV_PYTHON" && export FULLSEND_PI_HOOK_PATH="$FULLSEND_TRUSTED_PATH" && export FULLSEND_RUNTIME=pi && export GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}" && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_VERTEX_BASE_URL && export GOOGLE_CLOUD_PROJECT="${ANTHROPIC_VERTEX_PROJECT_ID:-$GOOGLE_CLOUD_PROJECT}" && `+cliLaunch(piBinaryVar, piNodeVar)+` --print --mode json`), cmd)
 	// Gemini on Vertex needs GOOGLE_CLOUD_LOCATION; the fleet exports the
 	// region as CLOUD_ML_REGION, so it is mirrored after .env is sourced.
 	assert.Contains(t, cmd, `&& export GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION:-$CLOUD_ML_REGION}"`)
@@ -127,7 +127,7 @@ func TestBuildPiRunCommand_Basic(t *testing.T) {
 	// project is pinned to the variable Claude Code on Vertex uses.
 	unsetIdx := strings.Index(cmd, "&& unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_VERTEX_BASE_URL")
 	envIdx := strings.Index(cmd, piEnvLoad)
-	piIdx := strings.Index(cmd, `&& "$FULLSEND_PI_BIN" `)
+	piIdx := strings.Index(cmd, "&& "+cliLaunch(piBinaryVar, piNodeVar)+" ")
 	assert.True(t, unsetIdx > envIdx && unsetIdx < piIdx, "unset runs after sourcing .env and before pi: %s", cmd)
 	assert.Contains(t, cmd, `&& export GOOGLE_CLOUD_PROJECT="${ANTHROPIC_VERTEX_PROJECT_ID:-$GOOGLE_CLOUD_PROJECT}"`)
 
@@ -378,13 +378,15 @@ func TestBuildPiRunCommand_HookPythonPinned(t *testing.T) {
 	export := strings.Index(cmd, "&& "+piHookPythonExport()+" &&")
 	require.Positive(t, export, "the pinned interpreter is exported for the hook adapter")
 	assert.Greater(t, export, envSource, "after .env, which cannot then clear it")
-	assert.Less(t, export, strings.Index(cmd, `&& "$`+piBinaryVar+`" --print`), "before pi starts")
+	launch := strings.Index(cmd, "&& "+cliLaunch(piBinaryVar, piNodeVar)+" --print")
+	require.Positive(t, launch)
+	assert.Less(t, export, launch, "before pi starts")
 
 	assert.Contains(t, piEnvLoad, " "+piHookPathEnv+"'", "the loader drops the hook PATH name too")
 	pathExport := strings.Index(cmd, "&& "+piHookPathExport()+" &&")
 	require.Positive(t, pathExport, "the trusted PATH is exported for the hook adapter")
 	assert.Greater(t, pathExport, envSource)
-	assert.Less(t, pathExport, strings.Index(cmd, `&& "$`+piBinaryVar+`" --print`))
+	assert.Less(t, pathExport, launch)
 }
 
 // TestPiHookPythonExport_IgnoresEnv checks that the exported value is the
@@ -566,7 +568,7 @@ func TestBuildPiRunCommand_OpenAI(t *testing.T) {
 	assert.Less(t, strings.Index(cmd, "&& unset -f test command grep tr sed printf pi"), secondGuard, "unset -f precedes the second guard")
 	assert.Greater(t, strings.Index(cmd, "&& unset -f test command grep tr sed printf pi"), envIdx, "unset -f after .env sourced")
 	assert.Less(t, strings.Index(cmd, "&& "+piBinaryPin()), envIdx, "the pi binary is pinned before .env")
-	assert.Contains(t, cmd, `&& "$FULLSEND_PI_BIN" --print`, "pi is launched by its pinned path")
+	assert.Contains(t, cmd, "&& "+cliLaunch(piBinaryVar, piNodeVar)+" --print", "pi is launched by its pinned path")
 	seedIdx := strings.Index(cmd, "&& "+PiOpenAIAuthSeed(PiRuntime{}.ConfigDir()))
 	assert.Less(t, seedIdx, envIdx, "auth.json is seeded before .env can touch OPENAI_API_KEY")
 	assert.Greater(t, seedIdx, firstGuard, "after the first guard")
@@ -619,7 +621,7 @@ func TestPiBinaryPin(t *testing.T) {
 	launch := func(envBody string) (string, error) {
 		env := filepath.Join(t.TempDir(), ".env")
 		require.NoError(t, os.WriteFile(env, []byte(envBody), 0o644))
-		cmd := exec.Command("sh", "-c", piBinaryPin()+" && . "+shellQuote(env)+` && unset -f pi && "$`+piBinaryVar+`"`)
+		cmd := exec.Command("sh", "-c", protectedDirsShell(t, bin)+piBinaryPin()+" && . "+shellQuote(env)+` && unset -f pi && `+cliLaunch(piBinaryVar, piNodeVar))
 		cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
@@ -1149,7 +1151,7 @@ func TestBuildPiRunCommand_LoaderEnvHygieneRuns(t *testing.T) {
 	cmd := buildPiRunCommand(params, &piManifest{AgentName: "triage", Model: "opus"}, nil, "")
 	cmd = strings.ReplaceAll(cmd, sandbox.SandboxWorkspace, ws)
 	cmd = strings.ReplaceAll(cmd, PiRuntime{}.ConfigDir(), cfg)
-	c := exec.Command("/bin/sh", "-c", cmd)
+	c := exec.Command("/bin/sh", "-c", protectedDirsShell(t, bin)+cmd)
 	c.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + root}
 	out, err := c.CombinedOutput()
 	require.NoError(t, err, string(out))
