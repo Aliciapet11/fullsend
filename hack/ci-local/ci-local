@@ -3,10 +3,19 @@
 # the GitHub Actions ubuntu-24.04 runner. See `ci-local help`.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# CDPATH='' here and for -C: with CDPATH set, cd prints the directory it found,
+# and $() would capture it.
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE=${CI_LOCAL_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
 PLATFORM=""
-REPO=$PWD
+# checkout_root DIR: the top of the git checkout containing DIR (so ci-local
+# also runs from, or -C names, a subdirectory), or DIR itself outside one.
+checkout_root() {
+  local cdup
+  cdup=$(git -C "$1" rev-parse --show-cdup 2>/dev/null) || cdup=
+  CDPATH='' cd -- "$1/$cdup" && pwd
+}
+REPO=$(checkout_root .)
 
 usage() {
   cat <<'EOF'
@@ -36,13 +45,14 @@ Targets (each maps to the command CI or the Makefile runs):
   shell          interactive shell in the container
   build-image    rebuild the image, re-resolving floating versions (Node 22.x, Python 3.x, uv) to latest
   clean          remove old ci-local images (all but the current one; --amd64 for the amd64
-                 ones) and the pre-per-checkout node_modules volumes; caches are kept
+                 ones) and the node_modules volumes of checkouts that no longer exist;
+                 caches are kept
 
 Not supported: behaviour-test / playback-test (need a real GitHub org, OIDC
 mint and secrets) and check-gateway-doc-configs (runs a container itself).
 
 Options:
-  -C REPO   repository or worktree to test (default: current directory)
+  -C REPO   repository or worktree to test (default: the one containing the current directory)
   --amd64   run linux/amd64 like GitHub's runners (emulated on Apple silicon; slow;
             needs Rosetta, e.g. Docker Desktop: uv segfaults under QEMU)
 
@@ -72,7 +82,7 @@ while [ $# -gt 0 ]; do
   case $1 in
   -C)
     [ $# -ge 2 ] || { echo "ci-local: -C needs a directory (see ci-local help)" >&2; exit 2; }
-    REPO=$(cd "$2" && pwd); shift 2 ;;
+    REPO=$(checkout_root "$2"); shift 2 ;;
   --amd64) PLATFORM=linux/amd64; shift ;;
   -h|--help|help) usage; exit 0 ;;
   *) break ;;
@@ -100,6 +110,19 @@ die() { echo "ci-local: $*" >&2; exit 1; }
 # short_hash: first 12 hex chars of the SHA256 of stdin.
 short_hash() {
   if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi | cut -c1-12
+}
+
+# write_once TMP PREFIX: move TMP to PREFIX-<hash of its content> unless that
+# file exists, and print its path. It never replaces a file: another run may
+# have it bind-mounted, and Docker Desktop shows a replaced one as deleted.
+# shortcut: one small file per distinct content is left in the cache; prune it if it ever grows.
+write_once() {
+  local f
+  f="$2-$(short_hash < "$1")" || { rm -f "$1"; return 1; }
+  # ln, not mv: it fails instead of replacing a file another run created.
+  ln "$1" "$f" 2>/dev/null || [ -e "$f" ] || { rm -f "$1"; return 1; }
+  rm -f "$1"
+  printf '%s\n' "$f"
 }
 # Per-checkout id, so state that must not be shared between checkouts or
 # worktrees (node_modules, the worktree .git pointer) never collides.
@@ -151,7 +174,8 @@ noproxy_args() {
 }
 
 # build-image passes --no-cache so floating versions (Node 22.x, Python 3.x,
-# uv) are re-resolved to their latest releases, as CI's setup actions do.
+# uv) are re-resolved to their newest releases. CI's setup actions take the
+# runner toolcache's match instead (no check-latest), so patches can differ.
 # The proxy build args are not in BUILD_ARGS, so they never change the tag.
 build_image() {
   local noproxy=() a
@@ -176,16 +200,39 @@ user_args() {
 mount_args() {
   local args=(-v "$REPO:/src$Z")
   if [ -f "$REPO/.git" ]; then
-    # A git worktree: its .git file points at an absolute host path the
-    # container cannot see. Mount the shared git dir at /gitcommon and
-    # overlay .git with a pointer to it.
-    local common wt
-    common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)
-    wt=$(basename "$(git -C "$REPO" rev-parse --path-format=absolute --git-dir)")
-    local ptr="$HOME/.cache/ci-local/gitfile-$REPO_ID"
-    mkdir -p "$(dirname "$ptr")"
-    echo "gitdir: /gitcommon/worktrees/$wt" > "$ptr"
-    args+=(-v "$common:/gitcommon$Z" -v "$ptr:/src/.git:ro${Z:+,z}")
+    # A .git file points at a host path the container cannot see. Mount the
+    # shared git dir at /gitcommon and overlay .git with a pointer into it.
+    # Each step checks itself: run_in calls this with || (set -e is off).
+    local common gitdir
+    common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir) || return 1
+    gitdir=$(git -C "$REPO" rev-parse --path-format=absolute --git-dir) || return 1
+    # The pointer and config copy go through write_once: another run on this
+    # checkout may have the previous ones bind-mounted.
+    local cache="$HOME/.cache/ci-local" ptr line
+    mkdir -p "$cache" || return 1
+    args+=(-v "$common:/gitcommon$Z")
+    if [ "$gitdir" = "$common" ]; then
+      # A submodule (or --separate-git-dir) checkout. Its core.worktree is
+      # relative to the host layout, so mount a copy of the config without
+      # it: git then takes the directory holding .git (/src) as the work
+      # tree. Not GIT_WORK_TREE: every git in the container would inherit
+      # it, and `git clone` in the docs target would fail.
+      local cfg="$cache/gitconfig-$REPO_ID"
+      cp "$common/config" "$cfg.$$" || return 1
+      # Exit 5: no core.worktree to unset.
+      git config -f "$cfg.$$" --unset-all core.worktree || [ $? -eq 5 ] || { rm -f "$cfg.$$"; return 1; }
+      cfg=$(write_once "$cfg.$$" "$cfg") || return 1
+      line="gitdir: /gitcommon"
+      args+=(-v "$cfg:/gitcommon/config:ro${Z:+,z}")
+    elif [ "$(dirname "$gitdir")" = "$common/worktrees" ]; then
+      line="gitdir: /gitcommon/worktrees/$(basename "$gitdir")"
+    else
+      echo "ci-local: unsupported .git layout in $REPO (git dir $gitdir, common dir $common)" >&2
+      return 1
+    fi
+    echo "$line" > "$cache/gitfile-$REPO_ID.$$" &&
+      ptr=$(write_once "$cache/gitfile-$REPO_ID.$$" "$cache/gitfile-$REPO_ID") || return 1
+    args+=(-v "$ptr:/src/.git:ro${Z:+,z}")
   fi
   # NUL-separated: host paths may contain newlines (read with read -d '').
   printf '%s\0' "${args[@]}"
@@ -209,6 +256,20 @@ volume_args() {
   printf '%s\0' "${args[@]}"
 }
 
+# The node_modules volumes are created up front, labelled with their checkout's
+# path, so clean can remove those whose checkout is gone (a volume that -v
+# creates carries no labels). Inspected again after a failed create: another
+# run may have just made it, and Podman fails where Docker succeeds then.
+create_nm_volumes() {
+  local v
+  for v in nm-root nm-workersrc; do
+    v=fullsend-ci-local${ARCH_TAG}-$v-$REPO_ID
+    "$ENGINE" volume inspect "$v" >/dev/null 2>&1 ||
+      "$ENGINE" volume create --label "fullsend-ci-local.checkout=$REPO" "$v" >/dev/null 2>&1 ||
+      "$ENGINE" volume inspect "$v" >/dev/null 2>&1 || { echo "ci-local: cannot create volume $v" >&2; return 1; }
+  done
+}
+
 target_cmd() {
   case $1 in
   go-test) echo 'make go-test' ;;
@@ -216,7 +277,7 @@ target_cmd() {
   go-modules) echo 'set -e; for m in cmd/mint internal/mint; do echo "==> $m"; (cd $m && go test -race ./...); done; echo "==> cmd/mint-wasm (build)"; (cd cmd/mint-wasm && GOOS=js GOARCH=wasm go build -o /dev/null .)' ;;
   go-vet) echo 'make go-vet' ;;
   # gofmt's own failure (e.g. a parse error) must fail the target, not read as "clean".
-  go-fmt) echo 'out=$(gofmt -l .) || { echo "gofmt: failed to run"; exit 1; }; out=$(grep -v "/node_modules/" <<< "$out" || true); [ -z "$out" ] || { echo "unformatted:"; echo "$out"; exit 1; }; echo "gofmt: clean"' ;;
+  go-fmt) echo 'out=$(gofmt -l .) || { echo "gofmt: failed to run"; exit 1; }; out=$(grep -vE "(^|/)node_modules/" <<< "$out" || true); [ -z "$out" ] || { echo "unformatted:"; echo "$out"; exit 1; }; echo "gofmt: clean"' ;;
   go-build) echo 'make go-build' ;;
   coverage) cat <<'EOF'
 set -e
@@ -230,9 +291,12 @@ changed=$(git diff --name-only "$base" -- '*.go' ':!*_test.go')
 untracked=$(git ls-files --others --exclude-standard -- '*.go' ':!*_test.go')
 files=$(printf '%s\n' $changed $untracked | sort -u)
 for f in $files; do
-  # coverage.out lines: <pkg>/<file>:<range> <statements> <hit-count>
-  awk -v f="github.com/fullsend-ai/fullsend/$f:" 'index($0,f)==1 {s+=$2; if ($3>0) c+=$2}
-    END {if (s>0) printf "  %6.1f%%  %s (%d stmts)\n", 100*c/s, substr(f,1,length(f)-1), s}' coverage.out
+  # coverage.out lines: <pkg>/<file>:<range> <statements> <hit-count>. Counted once
+  # per block, covered if any run hit it: make go-test merges two profiles
+  # (default and -tags github) that both cover internal/mintcore.
+  awk -v f="github.com/fullsend-ai/fullsend/$f:" 'index($0,f)==1 {n[$1]=$2; if ($3>0) h[$1]=1}
+    END {for (b in n) {s+=n[b]; if (b in h) c+=n[b]}
+      if (s>0) printf "  %6.1f%%  %s (%d stmts)\n", 100*c/s, substr(f,1,length(f)-1), s}' coverage.out
 done
 EOF
     ;;
@@ -246,8 +310,9 @@ EOF
   # pipefail: if make itself cannot run, fail instead of counting zero failures.
   # Each failed suite is one "make: [<file>:<line>: <target>] ... (ignored)" line:
   # "Error N" when the recipe fails, or the signal (Killed, Terminated, ...) when
-  # its shell is killed.
-  script-test) echo 'set -o pipefail; make -i script-test 2>&1 | tee "${TMPDIR:-/tmp}/st.log" || { echo "script-test: make did not run"; exit 1; }; n=$(grep -cE "^make(\[[0-9]+\])?: \[[^]]+\] .+ \(ignored\)$" "${TMPDIR:-/tmp}/st.log" || true); echo "script-test: ${n} suite(s) failed"; [ "$n" -eq 0 ]' ;;
+  # its shell is killed. Not anchored at line start: a suite whose output lacks
+  # a trailing newline puts make's line right after it.
+  script-test) echo 'set -o pipefail; make -i script-test 2>&1 | tee "${TMPDIR:-/tmp}/st.log" || { echo "script-test: make did not run"; exit 1; }; n=$(grep -cE "make(\[[0-9]+\])?: \[[^]]+\] .+ \(ignored\)$" "${TMPDIR:-/tmp}/st.log" || true); echo "script-test: ${n} suite(s) failed"; [ "$n" -eq 0 ]' ;;
   web) echo 'npm ci --no-audit --no-fund && npm test' ;;
   mint-cf) echo 'make mint-cf-worker-test' ;;
   # mvb runs `git fetch --tags --force` in the source repo, so build from a
@@ -324,6 +389,9 @@ run_in() {
   local tty=(-i)
   [ -t 0 ] && [ -t 1 ] && tty=(-it)
   local mounts=() users=() noproxy=()
+  # Once directly: a process substitution's exit status is lost (bash 3.2 has no wait $! for it).
+  mount_args > /dev/null || return 1
+  create_nm_volumes || return 1
   while IFS= read -r -d '' m; do mounts+=("$m"); done < <(mount_args)
   while IFS= read -r u; do users+=("$u"); done < <(user_args)
   while IFS= read -r a; do noproxy+=("$a"); done < <(noproxy_args -e)
@@ -347,9 +415,11 @@ run_in() {
 }
 
 # clean: remove this platform's ci-local images except the current one, and
-# the node_modules volumes from before they were per checkout. Only images
-# carrying the fullsend-ci-local label and only those two exact volume names
-# are candidates. Never forced: the engine refuses to remove anything a
+# its node_modules volumes whose checkout no longer exists: per-checkout ones
+# whose label names a path that is gone, unlabelled per-checkout ones (from
+# before the label; the next run reinstalls node_modules), and the shared
+# ones from before they were per checkout. Only images carrying the
+# fullsend-ci-local label and only volumes with those names are candidates. Never forced: the engine refuses to remove anything a
 # running container (e.g. a ci-local run in another worktree) still uses,
 # and that is reported as kept. Both listings are taken before anything is
 # removed, so a stopped engine fails here instead of reporting success.
@@ -366,10 +436,18 @@ clean() {
     if "$ENGINE" rmi "$name" >/dev/null 2>&1; then echo "removed image $name"
     else echo "kept image $name (in use, or the engine refused)"; fi
   done <<< "$imgs"
-  for v in nm-root nm-workersrc; do
-    v=fullsend-ci-local${ARCH_TAG}-$v
-    grep -qx "$v" <<< "$vols" || continue
-    if "$ENGINE" volume rm "$v" >/dev/null 2>&1; then echo "removed volume $v"
+  local path why
+  for v in $(grep -E "^fullsend-ci-local${ARCH_TAG}-nm-(root|workersrc)(-[0-9a-f]{12})?\$" <<< "$vols" || true); do
+    case $v in
+    *-root|*-workersrc) why="shared, from before per-checkout volumes" ;;
+    *)
+      path=$("$ENGINE" volume inspect --format '{{index .Labels "fullsend-ci-local.checkout"}}' "$v") ||
+        { echo "kept volume $v (cannot inspect it)"; continue; }
+      if [ -z "$path" ]; then why="no checkout label, from an older ci-local"
+      elif [ -d "$path" ]; then continue
+      else why="checkout $path is gone"; fi ;;
+    esac
+    if "$ENGINE" volume rm "$v" >/dev/null 2>&1; then echo "removed volume $v ($why)"
     else echo "kept volume $v (in use, or the engine refused)"; fi
   done
   echo "current image: $IMAGE (kept)"

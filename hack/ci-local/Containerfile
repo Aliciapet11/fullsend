@@ -45,22 +45,31 @@ RUN chmod 0755 /usr/local/bin/fetch /usr/local/bin/sumof
 
 # Go (actions/setup-go, go-version-file: go.mod): the newest stable release
 # matching go.mod's `go` line ("1.26.5" exactly, or "1.26" -> newest 1.26.x).
+# Each download is its own step, not piped: sh has no pipefail, so a failed
+# curl would read as "no release matches" (here and for Node below).
 RUN set -e; \
-    line=$(curl -sSfL --proto '=https' --proto-redir '=https' "https://go.dev/dl/?mode=json&include=all" | jq -r --arg v "go${GO_VERSION}" --arg a "${TARGETARCH}" \
-      '[.[] | select(.stable) | select(.version == $v or (.version | startswith($v + "."))) | .files[] | select(.os == "linux" and .arch == $a and .kind == "archive")][0] // empty | "\(.filename) \(.sha256)"'); \
+    curl -sSfL --proto '=https' --proto-redir '=https' "https://go.dev/dl/?mode=json&include=all" -o /tmp/go.json; \
+    line=$(jq -r --arg v "go${GO_VERSION}" --arg a "${TARGETARCH}" \
+      '[.[] | select(.stable) | select(.version == $v or (.version | startswith($v + "."))) | .files[] | select(.os == "linux" and .arch == $a and .kind == "archive")][0] // empty | "\(.filename) \(.sha256)"' /tmp/go.json); \
+    rm /tmp/go.json; \
     [ -n "$line" ] || { echo "no Go release matches go ${GO_VERSION}" >&2; exit 1; }; \
     fetch "https://go.dev/dl/${line% *}" "${line#* }"; \
     tar -xzf /tmp/dl -C /usr/local; rm /tmp/dl
 
 # Node (actions/setup-node, node-version from lint.yml): an exact x.y.z, or the
-# newest release of that major line. Checksum from the release's SHASUMS256.txt.
+# newest release of that major line. Checksum from the release's SHASUMS256.txt,
+# downloaded once: name and checksum come from the same copy, and the tarball
+# from its version's directory, so a release published meanwhile (moving
+# latest-vN.x) cannot split them.
 RUN set -e; \
     case "$TARGETARCH" in amd64) a=x64 ;; *) a=$TARGETARCH ;; esac; \
     case "$NODE_VERSION" in *.*.*) base="https://nodejs.org/dist/v${NODE_VERSION}" ;; *) base="https://nodejs.org/dist/latest-v${NODE_VERSION%%.*}.x" ;; esac; \
-    name=$(curl -sSfL --proto '=https' --proto-redir '=https' "$base/SHASUMS256.txt" | awk -v a="-linux-$a.tar.xz" 'index($2, a) && $2 ~ /^node-v/ {print $2; exit}'); \
+    curl -sSfL --proto '=https' --proto-redir '=https' "$base/SHASUMS256.txt" -o /tmp/node.sums; \
+    name=$(awk -v a="-linux-$a.tar.xz" 'index($2, a) && $2 ~ /^node-v/ {print $2; exit}' /tmp/node.sums); \
     [ -n "$name" ] || { echo "no Node $NODE_VERSION tarball for linux-$a" >&2; exit 1; }; \
-    fetch "$base/$name" "$(sumof "$base/SHASUMS256.txt" "$name")"; \
-    tar -xJf /tmp/dl -C /usr/local --strip-components=1; rm /tmp/dl
+    v=${name#node-}; v=${v%%-linux-*}; \
+    fetch "https://nodejs.org/dist/$v/$name" "$(sumof file:///tmp/node.sums "$name")"; \
+    tar -xJf /tmp/dl -C /usr/local --strip-components=1; rm /tmp/dl /tmp/node.sums
 
 # uv (astral-sh/setup-uv, unpinned in lint.yml: the latest release), then
 # Python and the pip packages from lint.yml's `uv pip install --system` step.
@@ -107,7 +116,9 @@ ENV PATH=/opt/venv/bin:/usr/local/go/bin:/home/runner/go/bin:$PATH \
 # resolve as on the hosted runner. Podman's --userns=keep-id adds its own
 # entry, so it passes neither. A user already holding the uid (the base
 # image's ubuntu, uid 1000) is removed; an existing gid (macOS staff, 20) is
-# reused. HOME stays world-writable for any other uid.
+# reused. HOME and ~/.cache stay world-writable for any other uid: the cache
+# volumes mount under ~/.cache, and without it in the image the engine
+# creates it root-owned, so tools could not add their own cache directories.
 ARG RUNNER_UID=
 ARG RUNNER_GID=
 RUN set -e; \
@@ -118,6 +129,7 @@ RUN set -e; \
     else \
       useradd -m runner; \
     fi; \
-    chmod 1777 /home/runner
+    mkdir -p /home/runner/.cache; \
+    chmod 1777 /home/runner /home/runner/.cache
 USER runner
 WORKDIR /src

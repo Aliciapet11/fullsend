@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci-local_test.sh — Tests for hack/ci-local/ci-local against a stub container
 # engine: target validation, fail-closed targets, engine argv (isolation,
-# user mapping, SELinux labels), git worktree mounts, and reading tool versions
+# user mapping, SELinux labels), git worktree and submodule mounts, and reading tool versions
 # from the checkout's go.mod and lint.yml (#8479).
 #
 # Run from the repo root:
@@ -48,6 +48,13 @@ case "$1" in
   rmi) [ "$2" != "${STUB_BUSY:-}" ]; exit ;;
   volume)
     [ "$2" = ls ] && { printf '%s\n' "${STUB_VOLUMES:-}"; exit "${STUB_LIST_RC:-0}"; }
+    # inspect: STUB_VOLUME_MISSING=1 says no volume exists; --format prints the
+    # checkout label from STUB_VOLUME_LABELS ("<volume> <path>" lines).
+    if [ "$2" = inspect ]; then
+      [ "${STUB_VOLUME_MISSING:-0}" = 1 ] && exit 1
+      [ "$3" != --format ] || awk -v v="${*: -1}" '$1 == v {sub(/^[^ ]+ /, ""); print}' <<< "${STUB_VOLUME_LABELS:-}"
+      exit 0
+    fi
     [ "$2" != rm ] || [ "$3" != "${STUB_BUSY:-}" ]; exit ;;
   build) exit 0 ;;
   run)
@@ -90,6 +97,11 @@ last_build_args() {
   awk '/^CALL$/{n++} {a[n]=a[n] $0 "\n"} END{for(i=n;i>0;i--) if (a[i] ~ /\nARG build\n/) {printf "%s", a[i]; exit}}' "${ENGINE_LOG}" |
     sed -n 's/^ARG //p'
 }
+
+# Host side of the last run's mount at $1 (e.g. /src/.git:ro).
+mounted() { last_run_args | sed -n "s|:$1\$||p"; }
+# Cache file prefix for checkout $2: mount_args names them <prefix>-<content hash>.
+cache_prefix() { echo "${HOME}/.cache/ci-local/$1-$(printf '%s' "$2" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)-"; }
 
 # Test checkouts carry the real CI config, so a lint.yml change that ci-local
 # can no longer parse fails this suite in the same PR.
@@ -267,6 +279,15 @@ else
   fail "helper change did not change the tag: ${T_BEFORE} / ${T_SUMOF} / ${T_FETCH}"
 fi
 
+# --- Containerfile: build-time downloads are never piped into a parser ---
+# sh has no pipefail, so `curl ... | jq` would turn a failed download into a
+# misleading "no release matches".
+if ! grep -nE 'curl [^|]*\|' "${SCRIPT_DIR}/Containerfile"; then
+  pass "Containerfile: no curl output piped into a parser"
+else
+  fail "Containerfile pipes curl output (a failed download would be hidden)"
+fi
+
 # --- sumof: checksum-file formats (local file:// URLs, no network) ---
 SUMS="${WORK}/sums"
 mkdir -p "${SUMS}"
@@ -293,15 +314,19 @@ fi
 
 # sumof: a malformed checksum in the file, and a failed download, each fail with their own error.
 printf 'zz%s  tool-linux.tar.gz\n' "$(printf 'a%.0s' {1..62})" > "${SUMS}/bad-hex.txt"
+# Uppercase too: a bracket range like [a-f] matches it under some locales (macOS en_US.UTF-8).
+printf '%s  tool-linux.tar.gz\n' "$(printf 'A%.0s' {1..64})" > "${SUMS}/upper-hex.txt"
 set +e
 bad_out=$("${SCRIPT_DIR}/sumof" "file://${SUMS}/bad-hex.txt" tool-linux.tar.gz 2>&1); rc_bad=$?
+upper_out=$("${SCRIPT_DIR}/sumof" "file://${SUMS}/upper-hex.txt" tool-linux.tar.gz 2>&1); rc_upper=$?
 dl_out=$("${SCRIPT_DIR}/sumof" "file://${SUMS}/does-not-exist.txt" tool-linux.tar.gz 2>&1); rc_dl=$?
 set -e
 if [ "${rc_bad}" -ne 0 ] && grep -q 'malformed checksum' <<< "${bad_out}" &&
+  [ "${rc_upper}" -ne 0 ] && grep -q 'malformed checksum' <<< "${upper_out}" &&
   [ "${rc_dl}" -ne 0 ] && grep -q '^curl: ' <<< "${dl_out}" && ! grep -q 'no checksum' <<< "${dl_out}"; then
-  pass "sumof rejects a malformed checksum and reports a failed download as such"
+  pass "sumof rejects a malformed (or uppercase) checksum and reports a failed download as such"
 else
-  fail "sumof malformed/download: bad rc=${rc_bad} [${bad_out}] download rc=${rc_dl} [${dl_out}]"
+  fail "sumof malformed/download: bad rc=${rc_bad} [${bad_out}] upper rc=${rc_upper} [${upper_out}] download rc=${rc_dl} [${dl_out}]"
 fi
 
 # fetch: a checksum that isn't 64 lowercase hex characters is rejected before any download.
@@ -348,12 +373,15 @@ echo "make: [Makefile:3: script-test] Error 1 (ignored)"
 echo "make[1]: [sub.mk:9: inner] Error 2 (ignored)"
 # GNU make 4.3's line when a recipe's own shell is killed by a signal.
 echo "make: [Makefile:5: script-test] Killed (ignored)"
+# A suite whose output lacks a trailing newline: make's line follows it directly.
+printf 'suite d: FAIL'
+echo "make: [Makefile:7: script-test] Error 1 (ignored)"
 exit 0
 SHIM
 chmod +x "${SHIMS}/make"
 PATH="${SHIMS}:${PATH}" STUB_EXEC=1 run_ci_local "${PODMAN}" script-test
 if [ "${RC}" -ne 0 ] && grep -q 'suite c ok' <<< "${OUT}" &&
-  grep -q 'script-test: 4 suite(s) failed' <<< "${OUT}"; then
+  grep -q 'script-test: 5 suite(s) failed' <<< "${OUT}"; then
   pass "script-test runs every suite and counts make's (ignored) error and signal lines"
 else
   fail "script-test failure reporting: rc=${RC} out=${OUT}"
@@ -382,6 +410,19 @@ if [ "${RC}" -ne 0 ] && grep -q 'gofmt: failed to run' <<< "${OUT}" && ! grep -q
   pass "go-fmt fails when gofmt itself fails (no stdout), not 'clean'"
 else
   fail "go-fmt with failing gofmt must FAIL: rc=${RC} out=${OUT}"
+fi
+
+# go-fmt ignores npm packages' .go files in both node_modules volumes; gofmt -l .
+# prints the top-level one without a leading slash.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" node_modules/flatted/flatted.go internal/dispatch/cf/workersrc/node_modules/x/y.go ${GOFMT_EXTRA:-}\n' > "${SHIMS}/gofmt"
+PATH="${SHIMS}:${PATH}" STUB_EXEC=1 run_ci_local "${PODMAN}" go-fmt
+RC_NM=${RC} OUT_NM=${OUT}
+GOFMT_EXTRA=internal/cli/bad.go PATH="${SHIMS}:${PATH}" STUB_EXEC=1 run_ci_local "${PODMAN}" go-fmt
+if [ "${RC_NM}" -eq 0 ] && grep -q 'gofmt: clean' <<< "${OUT_NM}" &&
+  [ "${RC}" -ne 0 ] && grep -qx 'internal/cli/bad.go' <<< "${OUT}" && ! grep -q 'node_modules/' <<< "${OUT}"; then
+  pass "go-fmt ignores both node_modules directories, and still reports the checkout's files"
+else
+  fail "go-fmt node_modules filter: nm rc=${RC_NM} [${OUT_NM}] extra rc=${RC} [${OUT}]"
 fi
 
 # coverage: make go-test succeeds, but the base-branch diff fails.
@@ -444,7 +485,56 @@ if [ "${RC}" -eq 0 ] && [ "${reported}" = "committed.go staged.go unstaged.go un
 else
   fail "coverage files: rc=${RC} reported=[${reported}] out=[${OUT}]"
 fi
+
+# coverage counts each block once, covered if any profile hit it: make go-test
+# merges two profiles that both cover internal/mintcore.
+cat > "${SHIMS}/make" <<'SHIM'
+#!/usr/bin/env bash
+{ echo "mode: atomic"
+  echo "github.com/fullsend-ai/fullsend/committed.go:1.1,2.2 2 0"
+  echo "github.com/fullsend-ai/fullsend/committed.go:3.1,4.2 2 0"
+  echo "github.com/fullsend-ai/fullsend/committed.go:1.1,2.2 2 3"
+  echo "github.com/fullsend-ai/fullsend/committed.go:3.1,4.2 2 0"; } > coverage.out
+SHIM
+chmod +x "${SHIMS}/make"
+run_in_repo "${COV}" "${PODMAN}" coverage
+if [ "${RC}" -eq 0 ] && grep -qE '^ +50\.0%  github.com/fullsend-ai/fullsend/committed.go \(4 stmts\)$' <<< "${OUT}"; then
+  pass "coverage counts a block in both merged profiles once"
+else
+  fail "coverage with merged profiles: rc=${RC} out=[${OUT}]"
+fi
 rm -f "${SHIMS}/make"
+
+# Without -C, ci-local tests the checkout containing the current directory,
+# or the current directory outside a git checkout.
+mkdir -p "${COV}/sub/dir"
+RC_SUB=0 RC_PLAIN=0
+(cd "${COV}/sub/dir" && CI_LOCAL_ENGINE="${PODMAN}" "${CI_LOCAL}" go-vet > /dev/null 2>&1) || RC_SUB=$?
+ARGS_SUB=$(last_run_args)
+(cd "${WORK}/repo" && CI_LOCAL_ENGINE="${PODMAN}" "${CI_LOCAL}" go-vet > /dev/null 2>&1) || RC_PLAIN=$?
+ARGS_PLAIN=$(last_run_args)
+RC_C=0
+(cd "${WORK}" && CI_LOCAL_ENGINE="${PODMAN}" "${CI_LOCAL}" -C cov-repo/sub/dir go-vet > /dev/null 2>&1) || RC_C=$?
+ARGS_C=$(last_run_args)
+if [ "${RC_SUB}" -eq 0 ] && grep -qx "${COV}:/src" <<< "${ARGS_SUB}" &&
+  [ "${RC_PLAIN}" -eq 0 ] && grep -qx "${WORK}/repo:/src" <<< "${ARGS_PLAIN}" &&
+  [ "${RC_C}" -eq 0 ] && grep -qx "${COV}:/src" <<< "${ARGS_C}"; then
+  pass "the checkout containing the current directory, or -C's directory, is tested (or the directory itself)"
+else
+  fail "default checkout: sub rc=${RC_SUB} [$(grep ':/src$' <<< "${ARGS_SUB}")] plain rc=${RC_PLAIN} [$(grep ':/src$' <<< "${ARGS_PLAIN}")] -C rc=${RC_C} [$(grep ':/src$' <<< "${ARGS_C}")]"
+fi
+
+# With CDPATH set, cd prints the directory it found there; -C must not capture
+# that. -C resolves against the current directory only, as git -C does.
+RC=0
+# The script itself is started by a relative path too, for its own directory lookup.
+ln -sfn "${SCRIPT_DIR}" "${WORK}/ci-local-dir"
+(cd "${WORK}" && CDPATH="${WORK}" CI_LOCAL_ENGINE="${PODMAN}" ci-local-dir/ci-local -C cov-repo go-vet > /dev/null 2>&1) || RC=$?
+if [ "${RC}" -eq 0 ] && grep -qx "${COV}:/src" <<< "$(last_run_args)"; then
+  pass "-C with a relative directory found through CDPATH"
+else
+  fail "-C through CDPATH: rc=${RC} [$(last_run_args | grep ':/src$')]"
+fi
 
 # lint and lint-all install node_modules only when staged docs/.vitepress files need
 # lint-staged (which lints staged files, even under --all-files) and it is missing.
@@ -664,13 +754,78 @@ REPO="${WORK}/wt"
 run_ci_local "${PODMAN}" go-vet
 ARGS=$(last_run_args)
 COMMON=$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir)
-PTR="${HOME}/.cache/ci-local/gitfile-$(printf '%s' "${REPO}" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)"
-if grep -qx "${COMMON}:/gitcommon" <<< "${ARGS}" && grep -qx "${PTR}:/src/.git:ro" <<< "${ARGS}" &&
+PTR=$(mounted /src/.git:ro)
+if grep -qx "${COMMON}:/gitcommon" <<< "${ARGS}" && [[ "${PTR}" == "$(cache_prefix gitfile "${REPO}")"* ]] &&
   [ "$(cat "${PTR}")" = "gitdir: /gitcommon/worktrees/wt" ]; then
   pass "worktree: git common dir at /gitcommon and .git overlaid with a pointer"
 else
   fail "worktree mounts: ${ARGS}"
 fi
+
+# A submodule's git dir is its common dir, with a host-relative core.worktree;
+# --separate-git-dir is the same layout without core.worktree.
+git -C "${MAIN}" -c protocol.file.allow=always submodule add -q "${MAIN}" sub
+add_ci_config "${MAIN}/sub"
+git init -q --separate-git-dir "${WORK}/sep.git" "${WORK}/sep"
+add_ci_config "${WORK}/sep"
+for REPO in "${MAIN}/sub" "${WORK}/sep"; do
+  run_ci_local "${PODMAN}" go-vet
+  ARGS=$(last_run_args)
+  COMMON=$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir)
+  PTR=$(mounted /src/.git:ro) CFG=$(mounted /gitcommon/config:ro)
+  # The copy keeps the rest of the config; the host config is never changed.
+  if [ "${RC}" -eq 0 ] && grep -qx "${COMMON}:/gitcommon" <<< "${ARGS}" &&
+    [[ "${PTR}" == "$(cache_prefix gitfile "${REPO}")"* ]] && [[ "${CFG}" == "$(cache_prefix gitconfig "${REPO}")"* ]] &&
+    [ "$(cat "${PTR}")" = "gitdir: /gitcommon" ] && ! git config -f "${CFG}" core.worktree > /dev/null &&
+    [ "$(git config -f "${CFG}" core.bare)" = false ] &&
+    { [ "${REPO}" != "${MAIN}/sub" ] || git config -f "${COMMON}/config" core.worktree > /dev/null; } &&
+    ! grep -q GIT_WORK_TREE <<< "${ARGS}"; then
+    pass "$(basename "${REPO}"): git dir at /gitcommon, its config mounted without core.worktree"
+  else
+    fail "$(basename "${REPO}") mounts: rc=${RC} ${ARGS}"
+  fi
+done
+
+# Another run may have the pointer and config copy bind-mounted, and Docker
+# Desktop shows a replaced file as deleted: a rerun reuses the same files, and
+# a changed config gets a new one, leaving the old one as it was.
+REPO="${MAIN}/sub"
+run_ci_local "${PODMAN}" go-vet
+PTR1=$(mounted /src/.git:ro) CFG1=$(mounted /gitcommon/config:ro)
+# Hard links pin the first run's files, as that run's bind mounts would.
+ln -f "${PTR1}" "${WORK}/ptr1"; ln -f "${CFG1}" "${WORK}/cfg1"
+CFG1_BODY=$(cat "${CFG1}")
+run_ci_local "${PODMAN}" go-vet
+PTR2=$(mounted /src/.git:ro) CFG2=$(mounted /gitcommon/config:ro)
+git -C "${REPO}" config ci-local.test changed
+run_ci_local "${PODMAN}" go-vet
+PTR3=$(mounted /src/.git:ro) CFG3=$(mounted /gitcommon/config:ro)
+git -C "${REPO}" config --unset ci-local.test
+if [ "${RC}" -eq 0 ] && [ "${PTR2}" -ef "${WORK}/ptr1" ] && [ "${CFG2}" -ef "${WORK}/cfg1" ] && [ "${PTR3}" -ef "${WORK}/ptr1" ] &&
+  [ "${CFG3}" != "${CFG1}" ] && [ "${CFG1}" -ef "${WORK}/cfg1" ] && [ "$(cat "${CFG1}")" = "${CFG1_BODY}" ] &&
+  [ "$(git config -f "${CFG3}" ci-local.test)" = changed ] &&
+  ! compgen -G "${HOME}/.cache/ci-local/*.[0-9]*" > /dev/null; then
+  pass "a rerun reuses the .git pointer and config copy; a changed config gets a new file"
+else
+  fail "pointer/config reuse: rc=${RC} ptr=[${PTR1} ${PTR2} ${PTR3}] cfg=[${CFG1} ${CFG2} ${CFG3}] cache=[$(cd "${HOME}/.cache/ci-local" && echo *)]"
+fi
+
+# Any other .git file layout fails before a container starts, instead of a bad pointer.
+ODD="${WORK}/odd"
+mkdir -p "${ODD}"
+add_ci_config "${ODD}"
+cp -R "${MAIN}/.git/worktrees/wt" "${WORK}/odd-admin"
+printf '%s\n' "$(git -C "${MAIN}" rev-parse --path-format=absolute --git-common-dir)" > "${WORK}/odd-admin/commondir"
+printf '%s\n' "${ODD}/.git" > "${WORK}/odd-admin/gitdir"
+echo "gitdir: ${WORK}/odd-admin" > "${ODD}/.git"
+REPO="${ODD}"
+run_ci_local "${PODMAN}" go-vet
+if [ "${RC}" -ne 0 ] && grep -q 'unsupported .git layout' <<< "${OUT}" && ! grep -qx 'ARG run' "${ENGINE_LOG}"; then
+  pass "an unsupported .git layout fails without starting a container"
+else
+  fail "unsupported .git layout: rc=${RC} out=[${OUT}]"
+fi
+REPO="${WORK}/wt"
 
 # A newline in the checkout path stays inside one -v argument, not a new engine option.
 NL_REPO="${WORK}/new"$'\n'"line"
@@ -743,11 +898,27 @@ else
   fail "no host resolver: [$(dns_of)]"
 fi
 
-# --- clean: old labelled images and unsuffixed node_modules volumes only, never forced ---
+# --- node_modules volumes: created up front, labelled with the checkout path ---
+STUB_VOLUME_MISSING=1 run_ci_local "${PODMAN}" go-vet
+creates=$(awk '/^CALL$/{n++} {a[n]=a[n] $0 " "} END{for(i=1;i<=n;i++) if (a[i] ~ /^CALL ARG volume ARG create /) print a[i]}' "${ENGINE_LOG}")
+first_run=$( { grep -nx 'ARG run' "${ENGINE_LOG}" || true; } | head -1 | cut -d: -f1)
+last_create=$( { grep -nx 'ARG create' "${ENGINE_LOG}" || true; } | tail -1 | cut -d: -f1)
+ID=$(printf '%s' "${REPO}" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)
+run_ci_local "${PODMAN}" go-vet
+if [ "$(wc -l <<< "${creates}" | tr -d ' ')" -eq 2 ] &&
+  grep -qF "ARG --label ARG fullsend-ci-local.checkout=${REPO} ARG fullsend-ci-local-nm-root-${ID} " <<< "${creates}" &&
+  grep -qF "ARG --label ARG fullsend-ci-local.checkout=${REPO} ARG fullsend-ci-local-nm-workersrc-${ID} " <<< "${creates}" &&
+  [ "${last_create:-999999}" -lt "${first_run:-0}" ] && ! grep -qx 'ARG create' "${ENGINE_LOG}"; then
+  pass "node_modules volumes are created before the run, labelled with the checkout path, and only when missing"
+else
+  fail "node_modules volume creation: creates=[${creates}] last_create=${last_create} first_run=${first_run}"
+fi
+
+# --- clean: old labelled images and node_modules volumes of gone checkouts only, never forced ---
 run_ci_local "${PODMAN}" go-vet
 CUR=$(last_run_args | grep -m1 -E '^fullsend-ci-local:')
 removed() { awk '/^CALL$/{n++} {a[n]=a[n] $0 " "} END{for(i=1;i<=n;i++) if (a[i] ~ /^CALL ARG (rmi|volume ARG rm) /) print a[i]}' "${ENGINE_LOG}" |
-  sed -E 's/^CALL ARG (rmi|volume ARG rm) ARG //; s/ $//' | sort | tr '\n' ' '; }
+  sed -E 's/^CALL ARG (rmi|volume ARG rm) ARG //; s/ $//' | LC_ALL=C sort | tr '\n' ' '; }
 STUB_IMAGES="aaa111 localhost/${CUR}
 bbb222 localhost/fullsend-ci-local:0ldtag000000
 ccc333 <none>:<none>
@@ -755,23 +926,37 @@ ddd444 localhost/fullsend-ci-local-amd64:0ldtag000000
 eee555 localhost/fullsend-ci-local:busytag00000" \
 STUB_VOLUMES="fullsend-ci-local-nm-root
 fullsend-ci-local-nm-root-0123456789ab
+fullsend-ci-local-nm-workersrc-0123456789ab
+fullsend-ci-local-nm-root-aaaaaaaaaaaa
+fullsend-ci-local-nm-workersrc-bbbbbbbbbbbb
 fullsend-ci-local-nm-workersrc
 fullsend-ci-local-go
-fullsend-ci-local-amd64-nm-root" \
+fullsend-ci-local-amd64-nm-root
+fullsend-ci-local-amd64-nm-root-cccccccccccc" \
+STUB_VOLUME_LABELS="fullsend-ci-local-nm-root-0123456789ab ${WORK}
+fullsend-ci-local-nm-workersrc-0123456789ab ${WORK}
+fullsend-ci-local-nm-root-aaaaaaaaaaaa ${WORK}/gone dir
+fullsend-ci-local-amd64-nm-root-cccccccccccc ${WORK}/gone" \
 STUB_BUSY="fullsend-ci-local:busytag00000" run_ci_local "${PODMAN}" clean
 if [ "${RC}" -eq 0 ] && [ -n "${CUR}" ] &&
-  [ "$(removed)" = "ccc333 fullsend-ci-local-nm-root fullsend-ci-local-nm-workersrc fullsend-ci-local:0ldtag000000 fullsend-ci-local:busytag00000 " ] &&
+  [ "$(removed)" = "ccc333 fullsend-ci-local-nm-root fullsend-ci-local-nm-root-aaaaaaaaaaaa fullsend-ci-local-nm-workersrc fullsend-ci-local-nm-workersrc-bbbbbbbbbbbb fullsend-ci-local:0ldtag000000 fullsend-ci-local:busytag00000 " ] &&
+  grep -qF "removed volume fullsend-ci-local-nm-root-aaaaaaaaaaaa (checkout ${WORK}/gone dir is gone)" <<< "${OUT}" &&
+  grep -qF "removed volume fullsend-ci-local-nm-workersrc-bbbbbbbbbbbb (no checkout label" <<< "${OUT}" &&
   grep -q "kept image fullsend-ci-local:busytag00000 (in use" <<< "${OUT}" &&
   ! grep -qE 'ARG (-f|--force)$' "${ENGINE_LOG}" && ! grep -qxE 'ARG (run|build)' "${ENGINE_LOG}"; then
-  pass "clean: removes old/untagged images and unsuffixed node_modules volumes; keeps current, amd64, per-checkout, caches; never forced"
+  pass "clean: removes old/untagged images and node_modules volumes of gone, unlabelled or shared checkouts; keeps current, amd64, live checkouts, caches; never forced"
 else
   fail "clean: rc=${RC} current=[${CUR}] removed=[$(removed)] out=[${OUT}]"
 fi
 STUB_IMAGES="ddd444 localhost/fullsend-ci-local-amd64:0ldtag000000
 bbb222 localhost/fullsend-ci-local:0ldtag000000" \
 STUB_VOLUMES="fullsend-ci-local-nm-root
-fullsend-ci-local-amd64-nm-root" run_ci_local "${PODMAN}" --amd64 clean
-if [ "$(removed)" = "fullsend-ci-local-amd64-nm-root fullsend-ci-local-amd64:0ldtag000000 " ]; then
+fullsend-ci-local-nm-root-aaaaaaaaaaaa
+fullsend-ci-local-amd64-nm-root
+fullsend-ci-local-amd64-nm-root-cccccccccccc" \
+STUB_VOLUME_LABELS="fullsend-ci-local-nm-root-aaaaaaaaaaaa ${WORK}/gone
+fullsend-ci-local-amd64-nm-root-cccccccccccc ${WORK}/gone" run_ci_local "${PODMAN}" --amd64 clean
+if [ "$(removed)" = "fullsend-ci-local-amd64-nm-root fullsend-ci-local-amd64-nm-root-cccccccccccc fullsend-ci-local-amd64:0ldtag000000 " ]; then
   pass "clean --amd64: only the amd64 images and volumes"
 else
   fail "clean --amd64: removed=[$(removed)]"

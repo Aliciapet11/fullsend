@@ -5,7 +5,7 @@ set -eu
 [ $# -eq 2 ] || { echo "usage: fetch URL SHA256" >&2; exit 2; }
 # Exactly 64 lowercase hex characters: anything else (a backslash escape, a
 # newline) could forge the sha256sum -c record below and skip the check.
-case $2 in *[!0-9a-f]*) bad=yes ;; *) bad=no ;; esac
+case $2 in *[!0123456789abcdef]*) bad=yes ;; *) bad=no ;; esac
 if [ "$bad" = yes ] || [ ${#2} -ne 64 ]; then
   echo "fetch: not a SHA-256 digest: $2" >&2; exit 2
 fi

@@ -61,7 +61,23 @@ the host.
   such as `.env.local`, so tested code can read them, as it can on the host.
 - The checkout and its `.git` directory are mounted read-write (`lint`
   writes the git index), so tested code could change git config or hooks that
-  a later host-side git command runs. Again, the same as on the host.
+  a later host-side git command runs. Again, the same as on the host. In a
+  submodule or `--separate-git-dir` checkout, the git config is instead a
+  read-only copy without `core.worktree`, whose relative path only works on
+  the host. A git command in the container that writes repo config (`git
+  config`, `git remote add`, `git submodule init`) fails there with "could
+  not write config file"; no current target or `script-test` suite does
+  this. With Docker Desktop, changing that config on the host during a
+  run (`git config`, `git push -u`) replaces the copy with the host's own
+  config in the container, so git fails there until the next run. Nested
+  submodules initialized inside such a checkout keep their host paths, so
+  git commands inside them fail in the container.
+- In a worktree or submodule checkout, the whole shared git dir is mounted,
+  and the paths of the host's other worktrees don't exist in the container.
+  Git there treats them as deleted: `git worktree prune` removes their
+  records at once, and `git gc` once they're older than
+  `gc.worktreePruneExpire` (3 months by default). The host worktree then
+  has to be added again; `git worktree lock` protects one.
 - The download caches (Go modules and `go/bin`, Go build, pre-commit, uv,
   npm) are **shared by every checkout and persist between runs**, and they
   hold programs that later runs execute. `/home/runner/go/bin` also comes
@@ -145,10 +161,14 @@ update `resolve_versions` in that PR. This replaces the "comment in each
 place" suggested in #8479: CI enforces the link, so `lint.yml` doesn't need a
 note that could go stale.
 
-Floating versions (`"3.14"` → newest 3.14.x, `"22"` → newest 22.x, uv) resolve
-to the newest release when the image is built, as CI's setup actions do.
-`hack/ci-local/ci-local build-image` rebuilds without cache to pick up new
-patch releases.
+Floating versions (`"3.14"` → 3.14.x, `"22"` → 22.x, uv) resolve to the
+newest matching release when the image is built. CI can run an older patch:
+`actions/setup-python` and `actions/setup-node` run without `check-latest`, so
+they take the match already in the runner's toolcache (listed in the
+[runner-images README](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md)).
+Python also comes from a different build: uv's python-build-standalone here,
+actions/python-versions in CI. `hack/ci-local/ci-local build-image` rebuilds
+without cache to pick up new patch releases.
 
 On amd64, lychee and pinact are verified against the SHA256s that `lint.yml`
 pins. `lint.yml` pins no arm64 checksums, so on arm64 (Apple silicon) they,
@@ -158,8 +178,12 @@ file from the same release.
 Each version set leaves its own image behind. `hack/ci-local/ci-local clean`
 removes every `ci-local` image except the current one for this checkout (add
 `--amd64` for the amd64 images). A checkout with different tool versions
-rebuilds its image on its next run. It also removes the unsuffixed
-`node_modules` volumes left by older versions of `ci-local`. It removes
+rebuilds its image on its next run. It also removes the `node_modules`
+volumes of checkouts that no longer exist: each per-checkout volume is
+labelled with its checkout's path, and is removed once that path is gone.
+Volumes from older versions of `ci-local` (unsuffixed, or without the label)
+are removed too; the next run in a live checkout reinstalls its
+`node_modules`. It removes
 nothing by force: an image or volume that a running container uses, such as a
 `ci-local` run in another worktree, is kept and reported. It never touches the
 download caches or other images. To remove
