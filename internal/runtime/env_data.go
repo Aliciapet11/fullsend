@@ -179,6 +179,11 @@ func EnvDataLoad(envFile string) string {
 	return envDataLoad(envFile)
 }
 
+// EnvDataTrustedPathVar names the read-only trusted PATH EnvDataLoad records
+// before .env is read. A probe runs its own tools with it, so a PATH that
+// .env sets cannot choose them.
+const EnvDataTrustedPathVar = envDataTrustedPathVar
+
 // envDataLoadWith is envDataLoad with the control lines given, so tests can
 // point the .env.d and iteration.env paths at a temporary workspace.
 func envDataLoadWith(envFile string, control []string, extraDrop []string) string {

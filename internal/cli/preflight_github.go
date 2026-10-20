@@ -80,12 +80,15 @@ func checkSandboxGitHubConnectivity(sandboxName string, printer *ui.Printer) (*p
 	// warnings (file and line number) are discarded: they would otherwise
 	// land in the output diagnosePreflightGitHubFailure matches for 401/404.
 	envLoad := "{ " + agentruntime.EnvDataLoad(sandbox.SandboxWorkspace+"/.env") + "; } 2>/dev/null"
+	// gh is looked up and run with the trusted PATH recorded before .env, so
+	// a PATH that .env sets cannot choose it.
+	trustedPath := `PATH="$` + agentruntime.EnvDataTrustedPathVar + `"`
 
 	// First check whether GH_TOKEN is set and gh is available. If neither is
 	// present the agent does not need GitHub API access — skip silently.
 	probeCmd := envLoad + "; " +
 		"if [ -z \"${GH_TOKEN:-}\" ]; then echo NOTOKEN; exit 0; fi; " +
-		"if ! command -v gh >/dev/null 2>&1; then echo NOGH; exit 0; fi; " +
+		"if ! (" + trustedPath + "; command -v gh) >/dev/null 2>&1; then echo NOGH; exit 0; fi; " +
 		"echo OK"
 
 	stdout, _, exitCode, err := preflightGitHubExec(sandboxName, probeCmd, 10*time.Second)
@@ -102,7 +105,7 @@ func checkSandboxGitHubConnectivity(sandboxName string, printer *ui.Printer) (*p
 
 	// GH_TOKEN is set and gh is available — test actual connectivity.
 	// Use /rate_limit as the lightest authenticated endpoint.
-	checkCmd := envLoad + " && gh api /rate_limit --silent 2>&1"
+	checkCmd := envLoad + " && " + trustedPath + " gh api /rate_limit --silent 2>&1"
 	maxAttempts := len(preflightGitHubRetryDelays) + 1
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {

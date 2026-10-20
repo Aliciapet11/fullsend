@@ -107,7 +107,8 @@ func TestCheckSandboxGitHubConnectivity_ReadsEnvAsData(t *testing.T) {
 	require.Len(t, cmds, 2)
 	load := "{ " + agentruntime.EnvDataLoad("/sandbox/workspace/.env") + "; } 2>/dev/null"
 	assert.True(t, strings.HasPrefix(cmds[0], load+"; "), cmds[0])
-	assert.True(t, strings.HasPrefix(cmds[1], load+" && gh api /rate_limit"), cmds[1])
+	assert.True(t, strings.HasPrefix(cmds[1], load+` && PATH="$FULLSEND_TRUSTED_PATH" gh api /rate_limit`), cmds[1])
+	assert.Contains(t, cmds[0], `(PATH="$FULLSEND_TRUSTED_PATH"; command -v gh)`, "gh is looked up on the trusted PATH")
 	for _, cmd := range cmds {
 		assert.NotContains(t, cmd, ". /sandbox/workspace/.env")
 	}

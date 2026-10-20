@@ -5699,17 +5699,17 @@ func buildScanContextCommand(repoDir, traceID string) string {
 	inameExpr := strings.Join(inames, " -o ")
 
 	// Read .env as data for the run's environment, as the launch does
-	// (EnvDataLoad, #8574): no .env or .env.d line runs as shell. A PATH
-	// assignment in .env is still taken, so find is resolved under whatever
-	// PATH .env leaves behind; only the scanner is pinned. The scanner is
-	// the binary bootstrapCommon uploaded, named by its absolute path so the
-	// version that runs matches the runner whatever PATH .env ends up with.
+	// (EnvDataLoad, #8574): no .env or .env.d line runs as shell. find runs
+	// with the trusted PATH recorded before .env, so a PATH that .env sets
+	// cannot choose it. The scanner is the binary bootstrapCommon uploaded,
+	// named by its absolute path so the version that runs matches the
+	// runner.
 	envFile := sandbox.SandboxWorkspace + "/.env"
 	scanner := sandbox.SandboxWorkspace + "/bin/fullsend"
 
 	return fmt.Sprintf(
-		"%s && FULLSEND_TRACE_ID='%s' find '%s' -maxdepth %d -type f \\( %s \\) -exec %s scan context {} +",
-		agentruntime.EnvDataLoad(envFile), traceID, escapedDir, maxContextScanDepth, inameExpr, scanner,
+		"%s && FULLSEND_TRACE_ID='%s' PATH=\"$%s\" find '%s' -maxdepth %d -type f \\( %s \\) -exec %s scan context {} +",
+		agentruntime.EnvDataLoad(envFile), traceID, agentruntime.EnvDataTrustedPathVar, escapedDir, maxContextScanDepth, inameExpr, scanner,
 	)
 }
 
