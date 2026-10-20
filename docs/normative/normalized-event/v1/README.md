@@ -452,7 +452,22 @@ mapped:
 | `issue` | `open`/`reopen` | `opened`/`reopened` | issue exists and `state == "opened"` |
 | `issue` | `close` | `closed` | issue exists and `state == "closed"` |
 | `issue` | `update` + `changes.labels` | `label_changed` (one per label diffed) | each named label present (add) / absent (remove) as claimed |
-| `issue` | `update` (other) | — | **uncheckable as a unit → MUST fail closed** |
+| `issue` | `update` (other) | — (ignored, non-routable) | none; claims no transition → MUST be ignored: no re-fetch, no dispatch, no state write, job succeeds |
+
+An **ignored** event and a **rejected** event are different outcomes. The
+`issue`/`update` (other) row covers a bare issue update with no
+`changes.labels` key, such as a title, description, or assignee edit. It
+claims no transition, so there is nothing to validate and nothing to route.
+The adapter MUST record it as ignored and MUST NOT dispatch, write poll
+state, or fail the dispatcher job. It SHOULD log an explicit no-op message.
+A **rejected** event names a transition that the re-fetch contradicts or
+cannot check. This includes every `update` that carries `changes.labels`:
+a diff that does not resolve to discrete add/remove pairs, a label entry
+without a `title`, a claimed end state the re-fetched labels contradict, or
+a failed actor or resource-label-event binding. A rejected event MUST fail
+closed: the job fails and nothing is dispatched. The presence of
+`changes.labels` decides which outcome applies, not whether its contents
+are well formed.
 
 **Dispatch stack and implementation status.** The webhook event builder
 (`BuildWebhookEvents` in `internal/poll/webhook.go`, [#7770](https://github.com/fullsend-ai/fullsend/issues/7770))
@@ -472,8 +487,11 @@ unset. `fullsend poll --input-driver gitlab-webhook` requires an explicit
 normative: when a pin is unavailable the driver MUST fail closed, never fall
 back to an overridable variable. Shipping did not close snapshot-consistent
 replay, which remains a residual risk (see below). Current builder behavior,
-all of it fail-closed:
+all of it fail-closed except the ignored bare issue update:
 
+- A bare issue `update` (no `changes.labels`) is ignored. The builder
+  returns no events and no error, and the dispatcher job logs a no-op and
+  succeeds. A bare `merge_request` `update` still fails closed.
 - Rows whose actor has no event-time evidence in the re-fetch are rejected:
   `merge_request`/`reopen` and `issue`/`reopen`, which need resource state
   events.
@@ -486,9 +504,11 @@ all of it fail-closed:
 
 The `MUST fail closed` cells above have **no implementer-defined extension
 point**: an `update` action that is not resolved by a row in this table MUST
-fail closed. Any future named sub-check (e.g. draft→ready for `marked_ready`)
-MUST be added as an **explicit row in this spec**, not invented at
-implementation time. The `merge_request`/`close` row requires the current
+fail closed. The `issue`/`update` (other) row resolves the bare issue update
+as ignored. That is the only ignored row, and an implementation MUST NOT
+extend it to other actions or object kinds. Any future named sub-check (e.g.
+draft→ready for `marked_ready`) MUST be added as an **explicit row in this
+spec**, not invented at implementation time. The `merge_request`/`close` row requires the current
 `state == "closed"` in addition to the timestamps because GitLab can leave a
 stale `closed_at` on a reopened MR; the production poller already guards on
 `state == "closed"` for the same reason (`internal/poll/events.go`), and

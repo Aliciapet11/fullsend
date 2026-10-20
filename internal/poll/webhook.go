@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -35,7 +36,9 @@ import (
 // Poller's project-pinned GitLabClient. Every API call uses p.owner and
 // p.repo plus positive integer IDs; no URL, host, or path_with_namespace
 // in the payload is ever read. Any action the re-fetch contradicts, or
-// that it cannot check, fails closed.
+// that it cannot check, fails closed. The one exception is a bare issue
+// update (no changes.labels), which claims no transition and is ignored
+// as non-routable (see webhookIssueEvents).
 //
 // The payload's contents are untrusted and are never logged.
 
@@ -375,6 +378,12 @@ func (p *Poller) webhookMergeRequestEvent(ctx context.Context, payload webhookPa
 
 // webhookIssueEvents handles object_kind "issue" per the normative
 // table, including the per-label fan-out for update + changes.labels.
+//
+// A bare update (no changes.labels: a title, description or assignee
+// edit, for example) is not a routable transition. It is ignored rather
+// than rejected: no events, no error, no re-fetch, so the dispatcher job
+// succeeds without dispatching. An update that claims label changes
+// still goes through every label check and fails closed on any of them.
 func (p *Poller) webhookIssueEvents(ctx context.Context, payload webhookPayload) ([]RoutableEvent, error) {
 	attrs := payload.ObjectAttributes
 	if attrs.IID <= 0 {
@@ -387,7 +396,8 @@ func (p *Poller) webhookIssueEvents(ctx context.Context, payload webhookPayload)
 		return nil, errors.New("issue reopen has no event-time actor evidence")
 	case "update":
 		if payload.Changes.Labels == nil {
-			return nil, errors.New("issue update without changes.labels is uncheckable")
+			log.Printf("webhook: ignoring issue #%d update without changes.labels: not a routable transition, nothing dispatched", attrs.IID)
+			return nil, nil
 		}
 		var err error
 		diffs, err = diffWebhookLabels(payload.Changes.Labels.Previous, payload.Changes.Labels.Current)
