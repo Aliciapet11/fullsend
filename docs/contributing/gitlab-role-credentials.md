@@ -1463,9 +1463,11 @@ version pins without matching upstream templates are rejected before writes.
 Agent input bridges explicitly disable expansion, and poll-job links are
 logged only after creator/HMAC authentication.
 The webhook fast-path's `TRIGGER_PAYLOAD` classification
-and the `CI_JOB_TOKEN` running-job identity pin are still open,
-live-GitLab-only ship gates tracked in ADR 0125 (Caveats). Flip the env
-var to `enforced` fleet-wide only after those close. Poll jobs
+and the `CI_JOB_TOKEN` running-job identity pin are implemented, but live
+GitLab validation is still partial: see
+[GitLab webhook validation status](../normative/normalized-event/v1/README.md#gitlab-webhook-validation-status)
+and ADR 0125 (Caveats). Flip the env var to `enforced` fleet-wide only after
+the remaining live-validation gates close. Poll jobs
 resolve `FULLSEND_GITLAB_POLLER_TOKEN` once, after the schedule-only pin.
 The Go CLI then overrides `GITLAB_TOKEN` / `PUSH_TOKEN` from the
 registered role credential; nothing restores `FULLSEND_FORGE_TOKEN`.
