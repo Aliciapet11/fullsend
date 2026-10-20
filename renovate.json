@@ -77,6 +77,16 @@
       }
     },
     {
+      "description": "After a Go toolchain bump in the code and runner images, fetch and update GO_SHA256_{AMD64,ARM64} in both Containerfiles from https://go.dev/dl/?mode=json&include=all (#8617)",
+      "matchDatasources": ["golang-version"],
+      "matchPackageNames": ["golang"],
+      "postUpgradeTasks": {
+        "commands": ["bash scripts/renovate/update-go-checksums.sh"],
+        "fileFilters": ["images/code/Containerfile", "images/runner/Containerfile"],
+        "executionMode": "branch"
+      }
+    },
+    {
       "description": "pi releases ~weekly minors and has changed its --mode json wire shape within a minor before (0.84.0); require manual review so the stream parser fixtures (#6464) are re-verified before a pin bump lands, even for patch/pin updates",
       "matchPackageNames": ["@earendil-works/pi-coding-agent"],
       "automerge": false
@@ -143,7 +153,7 @@
     },
     {
       "customType": "regex",
-      "description": "Track the Go toolchain version pin baked into the code and runner sandbox images (images/code/Containerfile and images/runner/Containerfile, which must stay in sync per their own comments). GO_SHA256_{AMD64,ARM64} in both files must be refreshed manually from https://go.dev/dl/?mode=json — the image build fails on checksum mismatch until they are.",
+      "description": "Track the Go toolchain version pin baked into the code and runner sandbox images (images/code/Containerfile and images/runner/Containerfile, which must stay in sync per their own comments). GO_SHA256_{AMD64,ARM64} in both files are updated automatically by postUpgradeTasks (scripts/renovate/update-go-checksums.sh).",
       "managerFilePatterns": [
         "/^images/code/Containerfile$/",
         "/^images/runner/Containerfile$/"
