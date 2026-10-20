@@ -362,9 +362,67 @@ commit sends back to back, can still let both suites use the org.
 **Removal:** Delete the bridge (and the shared files in `e2e-lock`) once no
 runner can still take the exclusive lock. That means every open PR branch
 and the merge queue contain the allocator wiring, and the last legacy run
-has finished or been reclaimed. Repo-slot GC
-([#8621](https://github.com/fullsend-ai/fullsend/issues/8621)) must use its
-own persistent coordination repository, not this temporary lock.
+has finished or been reclaimed. Repo-slot GC (below) uses its own persistent
+coordination repository, not this temporary lock.
+
+### Repo-slot GC
+
+A runner that crashes, or whose release fails, leaves its `test-repo-NN`
+repository behind, and every allocator treats that slot as occupied. The
+allocator reclaims such slots itself
+([`slotgc.go`](../../../pkg/behaviourtest/drivers/install/slotgc.go),
+[#8621](https://github.com/fullsend-ai/fullsend/issues/8621)). DEV and the
+single unsuffixed STAGE org use the same code path.
+
+- **Trigger.** A claim pass that leases nothing counts, per org, the slots it
+  found occupied by another lease's repository. When an org reaches two full
+  passes' worth (2 × slots per org, 24 for a 12-slot org), the pass collects
+  that org before it reports no capacity, and the count starts again. An org
+  inside a rate-limit window is not collected, or probed, until the window
+  ends. When GC frees a slot, `Acquire` claims again without waiting for the
+  next poll.
+- **Candidates.** GC inspects only the slot names derived from the pool
+  layout. It reclaims a repository only when the description is the
+  test-ownership marker (`fullsend behaviour test slot lease=` plus a 32-digit
+  hex nonce) and the repository ID and creation time are known. The repository
+  must also not be archived and must be at least **1 hour** old. Anything
+  else, including a failed or throttled lookup, stays occupied. The reason
+  appears in the capacity error and in the `[slots] gc` log lines.
+- **Age bound.** The hour is the 45-minute limit of the suites that hold
+  leases plus a 15-minute margin. That limit is the Makefile `go test -timeout
+  45m` and the `timeout-minutes: 45` of the `behaviour` and `playback` jobs in
+  `e2e.yml`. The first panics the test binary and the second kills the runner,
+  so a slot repository, which never outlives the process that claimed it,
+  cannot be live after 45 minutes. A Godog context deadline would not stop a
+  step, so it is not the bound. The margin covers requests still in flight
+  when a job is killed, and clock skew. `TestSlotReclaimAgeCoversJobLimits`
+  fails if either limit rises above 45 minutes. Raise the bound in
+  `slotgc.go` together with them, and do not run the suites with a longer or
+  disabled `-timeout` against shared orgs.
+- **One collector per org.** The lease is `collector-lease.json` in the
+  org's persistent `behaviour-slot-gc` repository. It changes only through
+  `forge.Client.UpdateFileIfMatch`. A collector skips the org while another
+  collector's lease is unexpired, or within 5 minutes after the last
+  collection ended. It scans the slots read-only, and only when it finds a
+  candidate does it take a 10-minute lease conditional on the SHA it read. A
+  collector that loses that write does nothing.
+- **Before each delete,** the collector rereads the lease. It acts only
+  while the file is still exactly what it wrote and more than 4 minutes of
+  the lease remain. It then rereads the repository and deletes only if the
+  ID, description and creation time are unchanged. The delete is not resent
+  after an ambiguous failure. Before a resend after a rate-limit wait, both
+  checks run again. Release is conditional on the SHA the collector wrote, so
+  a collector whose lease was taken over can neither use nor release its
+  successor's lease. A crashed collector's lease is taken over once it
+  expires.
+- **Diagnostics.** `CapacityError` carries `Reclaimed` and a per-org `GC`
+  outcome, and `GCDiagnostics()` returns the last outcome per org, next to
+  `QuotaDiagnostics()`.
+
+**Residual risk:** GitHub deletes repositories by name only, so the final
+identity check and the delete are one round trip apart. A collector paused
+for longer than its 4-minute safety margin inside that window could still
+delete a repository recreated after a successor reclaimed the slot.
 
 ### Job-scoped trace collection
 

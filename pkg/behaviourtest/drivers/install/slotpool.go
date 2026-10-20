@@ -6,11 +6,12 @@
 // skipped and never reset or deleted. Each org installation's GitHub
 // rate-limit headers gate further claims there until the reported reset.
 //
-// This file provides the allocation layer only. Wiring it into the
-// behaviour and playback suite runners (replacing exclusive org
-// acquisition) and in-driver GC of crashed leases are follow-ups. Until
-// legacy runners that take the exclusive e2e-lock have drained, each
-// lease also holds the org's e2e-lock in shared mode (orglock.go).
+// This file provides the allocation layer. Wiring it into the behaviour
+// and playback suite runners (replacing exclusive org acquisition) is a
+// follow-up. Slots left behind by crashed runners are reclaimed from the
+// claim path by the GC in slotgc.go. Until legacy runners that take the
+// exclusive e2e-lock have drained, each lease also holds the org's
+// e2e-lock in shared mode (orglock.go).
 //
 // The existing ensurer (ensure.go: ensureRepoExists → deleteBlockingRepo
 // and resetRepo) deletes or resets existing test-repo-NN repos under the
@@ -216,6 +217,16 @@ type CapacityError struct {
 	// LockExcluded maps orgs whose e2e-lock did not admit a new holder
 	// (legacy lock, shared lock too old or closing) to the reason.
 	LockExcluded map[string]string
+	// Reclaimed counts slots freed by GC at the end of the pass (see
+	// slotgc.go); Acquire retries at once when it is positive.
+	Reclaimed int
+	// GC maps each org GC ran on (or deferred) at the end of the pass to
+	// its outcome: what was reclaimed, what was left occupied and why.
+	GC map[string]string
+
+	// occupiedByOrg counts, per org, the slots found occupied by another
+	// lease's repository; it feeds the GC threshold.
+	occupiedByOrg map[string]int
 }
 
 func (e *CapacityError) Error() string {
@@ -242,6 +253,17 @@ func (e *CapacityError) Error() string {
 		}
 		parts = append(parts, "e2e-lock: "+strings.Join(items, ", "))
 	}
+	if e.Reclaimed > 0 {
+		parts = append(parts, fmt.Sprintf("%d slot(s) reclaimed by gc", e.Reclaimed))
+	}
+	if len(e.GC) > 0 {
+		orgs := sortedKeys(e.GC)
+		items := make([]string, 0, len(orgs))
+		for _, org := range orgs {
+			items = append(items, fmt.Sprintf("%s (%s)", org, e.GC[org]))
+		}
+		parts = append(parts, "gc: "+strings.Join(items, ", "))
+	}
 	return fmt.Sprintf("%v: %s", ErrPoolCapacityExhausted, strings.Join(parts, "; "))
 }
 
@@ -261,6 +283,8 @@ type slotAllocator struct {
 	// orgLock is the shared e2e-lock bridge to legacy suite runners
 	// (orglock.go); nil disables it.
 	orgLock *sharedOrgLock
+	// gc reclaims abandoned slot repos (slotgc.go); nil disables it.
+	gc *slotCollector
 
 	mu           sync.Mutex
 	held         map[Slot]lease
@@ -272,6 +296,12 @@ type slotAllocator struct {
 	// passes re-check these nonces so a create that landed (including one
 	// landing after the lookup) is adopted rather than leaked.
 	pending map[Slot][]string
+	// occupiedSeen counts each org's occupied claims since its last GC
+	// attempt; gcRunning marks orgs being collected; gcReports holds each
+	// org's last GC outcome (slotgc.go).
+	occupiedSeen map[string]int
+	gcRunning    map[string]bool
+	gcReports    map[string]string
 }
 
 // ownership is what findOwn learned about the repository under a slot's
@@ -346,6 +376,10 @@ func newSlotAllocator(layout PoolLayout, clientFor OrgClientFunc, logf func(stri
 		blockedUntil: make(map[string]time.Time),
 		quota:        make(map[string]forge.RateLimit),
 		pending:      make(map[Slot][]string),
+		occupiedSeen: make(map[string]int),
+		gcRunning:    make(map[string]bool),
+		gcReports:    make(map[string]string),
+		gc:           newSlotCollector(),
 	}
 	a.orgLock = newSharedOrgLock(logf, func() time.Time { return a.now() })
 	a.orgLock.timeout = func() time.Duration { return claimCreateTimeout }
@@ -492,7 +526,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 					continue
 				}
 			}
-			capErr.Occupied++
+			capErr.noteOccupied(slot.Org)
 			continue
 		}
 
@@ -561,7 +595,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				capErr.Occupied++
 			case ownForeign:
 				a.clearPending(slot, nonces)
-				capErr.Occupied++
+				capErr.noteOccupied(slot.Org)
 			default:
 				// The repo exists but the lookup could not say whose it
 				// is: it may be ours, so it is unknown, not occupied, and
@@ -626,7 +660,7 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			case ownForeign:
 				a.clearPending(slot, nonces)
 				a.logf("[slots] %s create failed and the name is held by another lease: %v", slot, err)
-				capErr.Occupied++
+				capErr.noteOccupied(slot.Org)
 				if isBackoffError(err) {
 					// The create error still says the org is throttling;
 					// the foreign repo must not hide it.
@@ -645,6 +679,9 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			}
 		}
 	}
+	// Nothing could be leased: collect orgs whose occupied claims crossed
+	// the GC threshold, so a slot freed here is claimable on the next pass.
+	a.collectAfterPass(ctx, clients, capErr)
 	return Slot{}, nil, capErr
 }
 
@@ -825,14 +862,20 @@ func (a *slotAllocator) findOwn(ctx context.Context, client forge.Client, slot S
 }
 
 // Acquire repeats Claim until a slot is leased or ctx ends, waiting
-// slotClaimPoll between passes that found no capacity. Errors other
-// than capacity exhaustion are returned immediately. On cancellation
-// the last capacity error is joined to the context error.
+// slotClaimPoll between passes that found no capacity, except after a pass
+// whose GC reclaimed slots. Errors other than capacity exhaustion are
+// returned immediately. On cancellation the last capacity error is joined
+// to the context error.
 func (a *slotAllocator) Acquire(ctx context.Context) (Slot, forge.Client, error) {
 	for {
 		slot, client, err := a.Claim(ctx)
 		if err == nil || !errors.Is(err, ErrPoolCapacityExhausted) {
 			return slot, client, err
+		}
+		var capErr *CapacityError
+		if errors.As(err, &capErr) && capErr.Reclaimed > 0 {
+			a.logf("[slots] gc reclaimed %d slot(s), retrying now: %v", capErr.Reclaimed, err)
+			continue
 		}
 		a.logf("[slots] no capacity, retrying in %v: %v", slotClaimPoll, err)
 		select {

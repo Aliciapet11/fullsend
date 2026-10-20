@@ -143,13 +143,14 @@ func (p *fakePool) exists(t *testing.T, s Slot) bool {
 func testLayout() PoolLayout { return PoolLayout{FirstOrgIndex: 1, OrgCount: 3, SlotsPerOrg: 4} }
 
 // newTestAllocator returns an allocator without the shared e2e-lock
-// bridge, so slot-leasing tests see only slot repo calls. orglock_test.go
-// covers the bridge.
+// bridge or slot GC, so slot-leasing tests see only slot repo calls.
+// orglock_test.go covers the bridge and slotgc_test.go covers GC.
 func newTestAllocator(t *testing.T, layout PoolLayout, p *fakePool) *slotAllocator {
 	t.Helper()
 	a, err := newSlotAllocator(layout, p.clientFor, t.Logf)
 	require.NoError(t, err)
 	a.orgLock = nil
+	a.gc = nil
 	return a
 }
 
