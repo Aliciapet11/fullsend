@@ -266,3 +266,104 @@ func TestSlotAllocator_CreateErrorWithoutOwnRepo(t *testing.T) {
 		assert.Len(t, a.pendingFor(layout.Slots()[0]), 1, "the create of unknown outcome is re-checked later")
 	})
 }
+
+// barrierClient holds every GetRepo until want callers are inside it, so
+// concurrent ownership lookups for one slot are deterministically
+// interleaved.
+type barrierClient struct {
+	*orgClient
+	arrived chan struct{}
+	release chan struct{}
+	want    int
+}
+
+func (c *barrierClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Repository, error) {
+	r, err := c.orgClient.GetRepo(ctx, owner, repo)
+	c.arrived <- struct{}{}
+	select {
+	case <-c.release:
+	case <-time.After(5 * time.Second):
+		return nil, errors.New("barrier timed out")
+	}
+	return r, err
+}
+
+func TestSlotAllocator_ConcurrentClaimsAdoptPendingLeaseOnce(t *testing.T) {
+	layout := StagePoolLayout(1)
+	slot := layout.Slots()[0]
+	p := newFakePool(layout)
+	desc := newLeaseDescription()
+	p.fc.Repos = append(p.fc.Repos, forge.Repository{
+		ID: 5, Name: slot.Repo, FullName: slot.String(), Description: desc,
+	})
+	bc := &barrierClient{
+		orgClient: p.clients["halfsend"],
+		arrived:   make(chan struct{}, 2),
+		release:   make(chan struct{}),
+		want:      2,
+	}
+	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return bc, nil }, t.Logf)
+	require.NoError(t, err)
+	a.addPending(slot, desc)
+
+	type result struct {
+		slot Slot
+		err  error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			s, _, err := a.Claim(context.Background())
+			results <- result{s, err}
+		}()
+	}
+	// Both claims are inside their ownership lookup before either records.
+	for range bc.want {
+		select {
+		case <-bc.arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("both claims should reach the ownership lookup")
+		}
+	}
+	close(bc.release)
+
+	var won, lost int
+	for range 2 {
+		r := <-results
+		if r.err == nil {
+			won++
+			assert.Equal(t, slot, r.slot)
+			continue
+		}
+		lost++
+		var capErr *CapacityError
+		require.ErrorAs(t, r.err, &capErr)
+		assert.Equal(t, 1, capErr.Occupied, "the loser sees the slot as taken")
+	}
+	assert.Equal(t, 1, won, "exactly one claim adopts the pending lease")
+	assert.Equal(t, 1, lost)
+	assert.Equal(t, []Slot{slot}, a.Held())
+	assert.Zero(t, bc.createCalls())
+}
+
+func TestSlotAllocator_ThrottledCreateWithForeignRepoStillBacksOffOrg(t *testing.T) {
+	layout := StagePoolLayout(2)
+	slots := layout.Slots()
+	p := newFakePool(layout)
+	// Not visible to the listing hint (as an archived repo), so the create
+	// is what runs into it.
+	p.fc.CreatedRepos = append(p.fc.CreatedRepos, forge.Repository{
+		ID: 7, Name: slots[0].Repo, FullName: slots[0].String(), Description: newLeaseDescription(),
+	})
+	p.clients["halfsend"].createErr = &gh.APIError{StatusCode: http.StatusTooManyRequests, Message: "too many"}
+	a := newTestAllocator(t, layout, p)
+	a.shuffle = func([]Slot) {}
+
+	_, _, err := a.Claim(context.Background())
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	assert.Contains(t, capErr.RateLimited, "halfsend", "the create's rate limit is not hidden by the foreign repo")
+	assert.Equal(t, 1, capErr.Occupied)
+	assert.Equal(t, 1, p.clients["halfsend"].createCalls(), "later slots in the throttled org are skipped")
+	assert.Empty(t, a.Held())
+}

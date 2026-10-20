@@ -258,13 +258,14 @@ type slotAllocator struct {
 type ownership int
 
 const (
-	// ownMine: the repository carries one of our lease nonces.
+	// ownMine indicates the repository carries one of our lease nonces.
 	ownMine ownership = iota
-	// ownForeign: a repository exists and carries none of our nonces.
+	// ownForeign indicates a repository exists and carries none of our
+	// nonces.
 	ownForeign
-	// ownAbsent: no repository exists under the name.
+	// ownAbsent indicates no repository exists under the name.
 	ownAbsent
-	// ownUnknown: the lookup failed.
+	// ownUnknown indicates the lookup failed.
 	ownUnknown
 )
 
@@ -421,9 +422,11 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
 				switch own {
 				case ownMine:
-					a.logf("[slots] %s is our earlier ambiguous create; adopting it", slot)
-					a.recordLease(slot, l)
-					return slot, client, nil
+					if a.recordLease(slot, l) {
+						a.logf("[slots] %s is our earlier ambiguous create; adopting it", slot)
+						return slot, client, nil
+					}
+					// A concurrent Claim adopted it first: it is theirs.
 				case ownForeign:
 					a.clearPending(slot)
 				case ownUnknown:
@@ -468,9 +471,12 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
 			switch own {
 			case ownMine:
-				a.logf("[slots] %s already existed after our create; adopting it", slot)
-				a.recordLease(slot, l)
-				return slot, client, nil
+				if a.recordLease(slot, l) {
+					a.logf("[slots] %s already existed after our create; adopting it", slot)
+					return slot, client, nil
+				}
+				// A concurrent Claim adopted it first: it is theirs.
+				capErr.Occupied++
 			case ownForeign:
 				a.clearPending(slot)
 				capErr.Occupied++
@@ -494,9 +500,13 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
 			switch own {
 			case ownMine:
-				a.logf("[slots] %s was created despite create timeout; adopting it", slot)
-				a.recordLease(slot, l)
-				return slot, client, nil
+				if a.recordLease(slot, l) {
+					a.logf("[slots] %s was created despite create timeout; adopting it", slot)
+					return slot, client, nil
+				}
+				// A concurrent Claim adopted it first: it is theirs.
+				capErr.Occupied++
+				continue
 			case ownForeign:
 				a.clearPending(slot)
 			default:
@@ -520,13 +530,22 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
 			switch own {
 			case ownMine:
-				a.logf("[slots] %s was created despite create error; adopting it: %v", slot, err)
-				a.recordLease(slot, l)
-				return slot, client, nil
+				if a.recordLease(slot, l) {
+					a.logf("[slots] %s was created despite create error; adopting it: %v", slot, err)
+					return slot, client, nil
+				}
+				// A concurrent Claim adopted it first: it is theirs.
+				capErr.Occupied++
+				continue
 			case ownForeign:
 				a.clearPending(slot)
 				a.logf("[slots] %s create failed and the name is held by another lease: %v", slot, err)
 				capErr.Occupied++
+				if isBackoffError(err) {
+					// The create error still says the org is throttling;
+					// the foreign repo must not hide it.
+					a.recordOrgError(slot, client, err, capErr)
+				}
 				continue
 			}
 			// The create may still land after this lookup.
@@ -545,13 +564,20 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 
 // recordLease stores the lease for slot, forgets the slot's pending
 // nonces (the name is ours now, so none of them can land), and logs the
-// claim.
-func (a *slotAllocator) recordLease(slot Slot, l lease) {
+// claim. The check and the insert are atomic: it returns false and
+// changes nothing when the slot is already held, so of several Claims
+// adopting the same pending lease only one succeeds.
+func (a *slotAllocator) recordLease(slot Slot, l lease) bool {
 	a.mu.Lock()
+	if _, held := a.held[slot]; held {
+		a.mu.Unlock()
+		return false
+	}
 	a.held[slot] = l
 	delete(a.pending, slot)
 	a.mu.Unlock()
 	a.logf("[slots] claimed %s (%s)", slot, a.quotaSummary(slot.Org))
+	return true
 }
 
 // pendingFor returns a copy of slot's pending lease descriptions.
