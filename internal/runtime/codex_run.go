@@ -669,6 +669,11 @@ func (r CodexRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pri
 		if n > 0 {
 			printer.StepInfo(fmt.Sprintf("%d sub-agent thread(s) folded into the run metrics", n))
 		}
+		// At the budget or on a cancel OpenShell kills nothing, so codex's
+		// children can record more after the read.
+		if len(childIDs.IDs) > 0 && (ctx.Err() != nil || exitCode == 124 || exitCode == -1) {
+			printer.StepWarn("Sub-agent usage may be undercounted: codex was stopped, and its children can record more after the read")
+		}
 	}
 
 	if exitCode == 0 && lastResult != nil && lastResult.IsError {

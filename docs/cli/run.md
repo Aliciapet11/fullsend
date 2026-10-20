@@ -180,8 +180,9 @@ differences in the last bullet.
   there. `requests` counts one per child rollout that reported usage (codex writes one per thread);
   `wait`, `send_input` and `close_agent` calls add none, and a child that errored before its first
   response has no usage and adds no `requests`. A codex iteration that exits non-zero, after a
-  failed or interrupted turn, a cancel or a timeout, still counts what its children recorded: codex
-  writes a child's usage as each response completes.
+  failed or interrupted turn, a cancel or a timeout, still counts what its children had recorded
+  when the runner read them: codex writes a child's usage as each response completes. After a
+  cancel or a timeout the run warns that usage recorded after the read is not counted.
 
 ## Budget and deadline
 

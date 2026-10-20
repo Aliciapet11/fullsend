@@ -42,21 +42,24 @@ var codexChildUsageThreadID = regexp.MustCompile(`^[0-9a-f-]{36}$`)
 // codexChildUsage is what one child's rollout reported.
 type codexChildUsage struct {
 	ID string
-	// Model is from the last turn_context, the child's own (a fork copies
-	// the parent's ahead of it); "" when there is none.
+	// Model is from the last turn_context that decodes, the child's own (a
+	// fork copies the parent's ahead of it); "" when there is none.
 	Model string
-	// Usage is the thread total of the last token_usage_record.
+	// Usage is the thread total of the last token_usage_record that decodes.
 	Usage codexUsage
 	// HasUsage is false when the rollout has no record; such a child adds
 	// nothing, not even a request.
 	HasUsage bool
 	// Unreadable marks a rollout that failed test -r or a failed search.
 	Unreadable bool
+	// BadLine marks a line that did not decode (torn, cut or planted).
+	BadLine bool
 }
 
 // codexChildUsageReadCommand renders the in-sandbox command that prints, per
-// child, a marker line, the rollout's last turn_context and its last
-// token_usage_record. The record, not token_count: codex zeroes token_count's
+// child, a marker line, the rollout's last two turn_context and last two
+// token_usage_record lines: the parser keeps the last that decodes, so a torn
+// last line falls back to the one before it. The record, not token_count: codex zeroes token_count's
 // counters when a request overflows the context window. A rollout it cannot
 // read, or that a failed search cannot find, prints the unreadable marker;
 // one a clean search misses prints nothing; a path outside sessionsDir is
@@ -73,7 +76,7 @@ func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error
 		quoted = append(quoted, shellQuote(id))
 	}
 	return fmt.Sprintf(
-		`for id in %s; do files=$(command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null) || [ -n "$files" ] || printf '%%s %%s\n' %s "$id"; printf '%%s\n' "$files" | while IFS= read -r f; do case $f in %s/*) ;; *) continue ;; esac; if [ ! -r "$f" ]; then printf '%%s %%s\n' %s "$id"; continue; fi; printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p tail -n 1; command -p grep -a -e '"type":"token_usage_record"' -- "$f" 2>/dev/null | command -p tail -n 1; done; done | command -p head -c %d`,
+		`for id in %s; do files=$(command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null) || [ -n "$files" ] || printf '%%s %%s\n' %s "$id"; printf '%%s\n' "$files" | while IFS= read -r f; do case $f in %s/*) ;; *) continue ;; esac; if [ ! -r "$f" ]; then printf '%%s %%s\n' %s "$id"; continue; fi; printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p tail -n 2; command -p grep -a -e '"type":"token_usage_record"' -- "$f" 2>/dev/null | command -p tail -n 2; done; done | command -p head -c %d`,
 		strings.Join(quoted, " "), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(codexChildUsageMarker), codexChildUsageMaxBytes), nil
 }
 
@@ -109,10 +112,11 @@ func parseCodexChildUsage(data []byte) []codexChildUsage {
 				Thread codexUsage `json:"thread_token_usage"`
 			} `json:"payload"`
 		}
+		cur := &out[len(out)-1]
 		if json.Unmarshal(line, &env) != nil {
+			cur.BadLine = true
 			continue
 		}
-		cur := &out[len(out)-1]
 		switch {
 		case env.Type == "turn_context":
 			cur.Model = strings.TrimSpace(env.Payload.Model)
@@ -220,17 +224,21 @@ func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string,
 	if err != nil {
 		return 0, err
 	}
+	// A read that fails still folds whatever stdout came back.
+	var lost []string
 	stdout, stderr, exitCode, err := sandbox.Exec(sandboxName, cmd, 10*time.Second)
 	if err != nil {
-		return 0, fmt.Errorf("reading the child rollouts: %w", err)
+		lost = append(lost, err.Error())
+	} else if exitCode != 0 {
+		lost = append(lost, fmt.Sprintf("exited %d: %s", exitCode, strings.TrimSpace(sanitizeOutput(stderr))))
 	}
-	if exitCode != 0 {
-		return 0, fmt.Errorf("reading the child rollouts: exited %d: %s", exitCode, strings.TrimSpace(sanitizeOutput(stderr)))
-	}
-	unreadable, overMaxTokens := 0, 0
+	unreadable, overMaxTokens, badLines := 0, 0, 0
 	for _, child := range parseCodexChildUsage([]byte(stdout)) {
 		if child.Unreadable {
 			unreadable++
+		}
+		if child.BadLine {
+			badLines++
 		}
 		if !child.HasUsage {
 			continue
@@ -262,15 +270,17 @@ func (r CodexRuntime) foldCodexChildUsage(sandboxName string, childIDs []string,
 		m.CacheReadInputTokens += cacheRead
 		folded++
 	}
-	var lost []string
 	if unreadable > 0 {
 		lost = append(lost, fmt.Sprintf("%d child rollout(s) could not be read", unreadable))
+	}
+	if badLines > 0 {
+		lost = append(lost, fmt.Sprintf("%d child rollout(s) had a line that did not decode", badLines))
 	}
 	if overMaxTokens > 0 {
 		lost = append(lost, fmt.Sprintf("%d child(ren) with a counter past %d not counted", overMaxTokens, codexChildUsageMaxTokens))
 	}
 	if len(stdout) >= codexChildUsageMaxBytes {
-		lost = append(lost, fmt.Sprintf("cut at %d bytes; only the children before the cut are counted", codexChildUsageMaxBytes))
+		lost = append(lost, fmt.Sprintf("cut at %d bytes; children at and past the cut are not fully counted", codexChildUsageMaxBytes))
 	}
 	if len(lost) > 0 {
 		return folded, fmt.Errorf("reading the child rollouts: %s", strings.Join(lost, "; "))

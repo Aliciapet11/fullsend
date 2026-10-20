@@ -171,6 +171,22 @@ func TestCodexChildUsageReadCommand_ReadsTheThreadTotal(t *testing.T) {
 	}, got[0], "the last record's thread total, not the zeroed token_count after it")
 }
 
+// A codex killed mid-write leaves a torn last line; the record before it
+// still counts.
+func TestCodexChildUsageReadCommand_FallsBackPastATornRecord(t *testing.T) {
+	t.Parallel()
+
+	rollout := `{"type":"turn_context","payload":{"model":"gpt-5.6-luna"}}` + "\n" +
+		`{"type":"token_usage_record","payload":{"thread_token_usage":{"input_tokens":30,"output_tokens":3}}}` + "\n" +
+		`{"type":"token_usage_record","payload":{"thread_token_usage":{"input_tok`
+	sessions := writeCodexChildRollouts(t)
+	require.NoError(t, os.WriteFile(filepath.Join(sessions, "2026", "09", "29", "rollout-2026-09-29T15-46-38-"+codexChildSameModelID+".jsonl"), []byte(rollout), 0o644))
+
+	got := runCodexChildUsageRead(t, sessions, []string{codexChildSameModelID})
+	require.Len(t, got, 1)
+	assert.Equal(t, codexChildUsage{ID: codexChildSameModelID, Model: "gpt-5.6-luna", HasUsage: true, Usage: codexUsage{InputTokens: 30, OutputTokens: 3}, BadLine: true}, got[0])
+}
+
 // A forked child's rollout starts with the parent's turn_context lines; the
 // read names the child by its own, the last.
 func TestCodexChildUsageReadCommand_NamesAForkedChildByItsOwnTurn(t *testing.T) {
@@ -235,11 +251,11 @@ func TestParseCodexChildUsage(t *testing.T) {
 
 	got := parseCodexChildUsage([]byte(data))
 	require.Len(t, got, 3)
-	assert.Equal(t, codexChildUsage{ID: codexChildSameModelID, Model: "gpt-5.6-sol", HasUsage: true, Usage: codexUsage{InputTokens: 20, OutputTokens: 2}},
-		got[0], "the last turn_context names the model, the last record wins, a malformed line is skipped")
+	assert.Equal(t, codexChildUsage{ID: codexChildSameModelID, Model: "gpt-5.6-sol", HasUsage: true, Usage: codexUsage{InputTokens: 20, OutputTokens: 2}, BadLine: true},
+		got[0], "the last turn_context names the model, the last record wins, a malformed line is skipped and flagged")
 	assert.Equal(t, codexChildUsage{ID: codexChildOtherModelID, HasUsage: true, Usage: codexUsage{InputTokens: 5, OutputTokens: 5}},
 		got[1], "no turn_context: the model stays empty and the fold buckets it")
-	assert.Equal(t, codexChildUsage{ID: codexChildFailedID, Model: "gpt-5.6-terra"},
+	assert.Equal(t, codexChildUsage{ID: codexChildFailedID, Model: "gpt-5.6-terra", BadLine: true},
 		got[2], "a truncated last line (the head -c cut) is not usage")
 	assert.Empty(t, parseCodexChildUsage(nil))
 }
@@ -318,9 +334,10 @@ func TestParseCodexStream_FailedCollabItem(t *testing.T) {
 
 // fakeOpenshellCodexChildren answers the manifest cat from storeDir, streams
 // streamFixture for the launch, and runs the read command under sh against
-// sessionsDir. FULLSEND_TEST_CHILD_READ_FAIL makes the read exit 1 (with
-// FULLSEND_TEST_CHILD_READ_STDERR on stderr); FULLSEND_TEST_CODEX_EXIT sets
-// the launch's exit status.
+// sessionsDir. FULLSEND_TEST_CHILD_READ_FAIL=1 makes the read exit 1 (with
+// FULLSEND_TEST_CHILD_READ_STDERR on stderr), =after makes it time out after
+// printing; FULLSEND_TEST_CODEX_EXIT sets the launch's exit status (killed:
+// SIGKILL, as the budget's context kill ends it).
 func fakeOpenshellCodexChildren(t *testing.T, logPath, storeDir, streamFixture, sessionsDir string) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -330,10 +347,12 @@ if [ "$2" = "exec" ]; then
   for last; do :; done
   case "$last" in
     cat\ *) f=$(printf '%s' "${last#cat }" | tr -d "'" | tr '/' '_'); cat '` + storeDir + `'/"$f"; exit $? ;;
-    *"exec --json"*) cat '` + streamFixture + `'; exit "${FULLSEND_TEST_CODEX_EXIT:-0}" ;;
+    *"exec --json"*) cat '` + streamFixture + `'; [ "${FULLSEND_TEST_CODEX_EXIT:-}" = killed ] && kill -9 $$; exit "${FULLSEND_TEST_CODEX_EXIT:-0}" ;;
     *` + codexChildUsageMarker + `*)
-      if [ -n "${FULLSEND_TEST_CHILD_READ_FAIL:-}" ]; then echo "fake openshell: refusing the rollout read${FULLSEND_TEST_CHILD_READ_STDERR:+ $FULLSEND_TEST_CHILD_READ_STDERR}" >&2; exit 1; fi
-      sh -c "$(printf '%s' "$last" | sed 's#` + CodexRuntime{}.codexSessionsDir() + `#` + sessionsDir + `#g')"; exit $? ;;
+      if [ "${FULLSEND_TEST_CHILD_READ_FAIL:-}" = 1 ]; then echo "fake openshell: refusing the rollout read${FULLSEND_TEST_CHILD_READ_STDERR:+ $FULLSEND_TEST_CHILD_READ_STDERR}" >&2; exit 1; fi
+      sh -c "$(printf '%s' "$last" | sed 's#` + CodexRuntime{}.codexSessionsDir() + `#` + sessionsDir + `#g')"; rc=$?
+      if [ "${FULLSEND_TEST_CHILD_READ_FAIL:-}" = after ]; then exit 124; fi
+      exit $rc ;;
   esac
   exit 0
 fi
@@ -461,6 +480,7 @@ func TestFoldCodexChildUsage_CutReadIsAWarning(t *testing.T) {
 	n, err := CodexRuntime{}.foldCodexChildUsage("sb", []string{codexChildSameModelID, codexChildOtherModelID, codexChildFailedID}, m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cut at")
+	assert.Contains(t, err.Error(), "had a line that did not decode", "the cut line is reported too")
 	assert.Equal(t, 1, n, "the child before the cut")
 	assert.NotContains(t, m.PerModelUsage, "gpt-5.6-terra", "the child past the cut")
 	assert.Equal(t, 2, m.PerModelUsage["gpt-5.6-luna"].Requests)
@@ -593,6 +613,19 @@ func TestFoldCodexChildUsage_ReadFailuresKeepTheParentEntry(t *testing.T) {
 		assert.Contains(t, err.Error(), "reading the child rollouts")
 		assert.Equal(t, parentOnly, m.PerModelUsage)
 		assert.Equal(t, codexTokenTotals{15, 1140, 291, 13618, 40590}, codexTotalsOf(m), "totals untouched")
+	})
+
+	t.Run("a timed-out read folds the stdout that came back", func(t *testing.T) {
+		sessions := writeCodexChildRollouts(t, codexChildSameModelID)
+		fakeOpenshellCodexChildren(t, filepath.Join(t.TempDir(), "openshell.log"), t.TempDir(), "", sessions)
+		t.Setenv("FULLSEND_TEST_CHILD_READ_FAIL", "after")
+		m := codexParentMetrics("gpt-5.6-luna")
+		n, err := r.foldCodexChildUsage("sb", []string{codexChildSameModelID}, m)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "timed out")
+		assert.Equal(t, 1, n)
+		assert.Equal(t, 2, m.PerModelUsage["gpt-5.6-luna"].Requests)
+		assertCodexUsageSumsToTotals(t, m)
 	})
 
 	t.Run("the read command exits non-zero", func(t *testing.T) {
@@ -767,4 +800,21 @@ func TestCodexRun_NonZeroExitStillReadsTheChildren(t *testing.T) {
 	retry, exit, _, _ := runCodexWithChildren(t, "collab_spawn.ndjson", true)
 	require.Equal(t, 0, exit)
 	assertCodexUsageSumsToTotals(t, sumCodexIterations(failed, retry))
+	assert.NotContains(t, out, "may be undercounted", "codex exited on its own; its children were done")
+}
+
+// A codex stopped at the budget (the context kill, -1, or openshell's own
+// timeout, 124) may still be running; the run says the children's later
+// usage is not counted.
+func TestCodexRun_BudgetStopWarnsOfLaterChildUsage(t *testing.T) {
+	for exitEnv, want := range map[string]int{"killed": -1, "124": 124} {
+		t.Run(exitEnv, func(t *testing.T) {
+			t.Setenv("FULLSEND_TEST_CODEX_EXIT", exitEnv)
+			_, exit, out, _ := runCodexWithChildren(t, "collab_spawn.ndjson", false)
+
+			assert.Equal(t, want, exit)
+			assert.Contains(t, out, "2 sub-agent thread(s) folded into the run metrics")
+			assert.Contains(t, out, "! Sub-agent usage may be undercounted: codex was stopped")
+		})
+	}
 }
