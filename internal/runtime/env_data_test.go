@@ -663,6 +663,18 @@ func TestEnvDataPin_TrustedPathIsPhysicalAndIsolated(t *testing.T) {
 	assert.NotContains(t, string(out), "x:.")
 }
 
+// As root nothing is protected, so the trusted PATH keeps the launch PATH
+// but still leaves out relative and empty entries, which the hook adapters
+// refuse. A `test` function makes the launch look like root.
+func TestEnvDataTrustedPath_RootDropsRelativeEntries(t *testing.T) {
+	root := `test() { if [ "$1" = -O ] && [ "$2" = / ]; then return 0; fi; command test "$@"; }; `
+	cmd := exec.Command("/bin/sh", "-c", root+envDataTrustedPath()+` && printf '%s' "$`+envDataTrustedPathVar+`"`)
+	cmd.Env = []string{"PATH=.::/usr/bin:bin:/nonexistent-fullsend:/bin:"}
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	assert.Equal(t, "/usr/bin:/bin", string(out))
+}
+
 // The fragment pins python3 before reading .env and runs it isolated.
 func TestEnvDataLoad_Shape(t *testing.T) {
 	frag := envDataLoad("/sandbox/workspace/.env", "FULLSEND_X_BIN")

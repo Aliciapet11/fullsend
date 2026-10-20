@@ -119,11 +119,12 @@ const envDataWritableAncestor = `while :; do if test -w "$p" || test -O "$p"; th
 // is left out, as it would split. A directory is left out when the agent
 // user owns it or can write it, or any directory above it. When
 // the launch runs as the owner of / (root), nothing could be protected, so
-// the PATH is kept as is.
+// only relative and empty entries and missing directories are left out.
 func envDataTrustedPath() string {
-	return `{ readonly ` + envDataTrustedPathVar + `="$(if test -O /; then printf '%s' "$PATH"; else IFS=:; set -f; s=; ` +
-		`for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; d="$(cd -P "$d" 2>/dev/null && pwd -P)" || continue; case $d in (*:*) continue ;; esac; p=$d; ` + envDataWritableAncestor + `; ` +
-		`if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done; fi)"; }`
+	return `{ readonly ` + envDataTrustedPathVar + `="$(IFS=:; set -f; s=; ` +
+		`for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; if ! test -O /; then ` +
+		`d="$(cd -P "$d" 2>/dev/null && pwd -P)" || continue; case $d in (*:*) continue ;; esac; p=$d; ` + envDataWritableAncestor + `; fi; ` +
+		`if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done)"; }`
 }
 
 // envDataReadlink finds the readlink the interpreter lookup runs, held to

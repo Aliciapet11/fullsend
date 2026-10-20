@@ -93,7 +93,7 @@ SPAWN_DIGESTS_ENV = "FULLSEND_CODEX_SPAWN_DIGESTS"
 
 # The launch PATH recorded before the agent-writable .env was read, without the
 # directories the agent can write. See _child_env.
-PINNED_PATH_ENV = "FULLSEND_TRUSTED_PATH"
+TRUSTED_PATH_ENV = "FULLSEND_TRUSTED_PATH"
 
 # Bound one script run, so a wedged stage cannot consume the budget of the
 # ones after it.
@@ -223,7 +223,7 @@ def trusted_path() -> str | None:
     empty or relative entry would search the working directory). The run
     command always sets it before codex starts, so None means the launch was
     not the one fullsend built; run_script then blocks."""
-    value = os.environ.get(PINNED_PATH_ENV, "")
+    value = os.environ.get(TRUSTED_PATH_ENV, "")
     if not value or not all(d.startswith("/") for d in value.split(":")):
         return None
     return value
@@ -502,7 +502,7 @@ def run_script(script: str, payload: dict[str, Any]) -> dict[str, Any]:
     if trusted_path() is None:
         return {
             "block": True,
-            "reason": f"fullsend: {PINNED_PATH_ENV} is missing or malformed, so hook "
+            "reason": f"fullsend: {TRUSTED_PATH_ENV} is missing or malformed, so hook "
             f"{script} has no trusted PATH to run with (fail closed)",
             "output": None,
         }
