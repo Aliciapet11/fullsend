@@ -227,9 +227,15 @@ func (e *APIError) Error() string {
 
 // IsTransient reports whether the API error represents a transient
 // failure that may succeed on retry: server errors (500–504) and
-// rate limits (429). This method satisfies the transientReporter
-// interface used by forge.IsTransient.
+// rate limits (429). An error whose rate-limit backoff was cut short by
+// the caller's context (cause set) is not transient: retrying after the
+// context was cancelled or its deadline passed would defy caller intent.
+// This method satisfies the transientReporter interface used by
+// forge.IsTransient.
 func (e *APIError) IsTransient() bool {
+	if e.cause != nil {
+		return false
+	}
 	return e.StatusCode == http.StatusTooManyRequests ||
 		(e.StatusCode >= 500 && e.StatusCode <= 504)
 }
