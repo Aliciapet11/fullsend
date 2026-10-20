@@ -515,8 +515,12 @@ func (f *FakeClient) CreateRepo(_ context.Context, org, name, description string
 	}
 
 	r := Repository{
+		// Created plus deleted never decreases and grows by one per
+		// create, so a recreated name gets a fresh ID.
+		ID:            int64(1000 + len(f.CreatedRepos) + len(f.DeletedRepos)),
 		Name:          name,
 		FullName:      fullName,
+		Description:   description,
 		DefaultBranch: "main",
 		Private:       private,
 	}

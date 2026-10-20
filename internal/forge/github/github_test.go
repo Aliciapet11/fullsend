@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,8 +114,10 @@ func TestCreateRepo(t *testing.T) {
 
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
+			"id":             int64(4242),
 			"name":           "new-repo",
 			"full_name":      "myorg/new-repo",
+			"description":    "A repo",
 			"default_branch": "main",
 			"private":        true,
 		})
@@ -124,9 +127,29 @@ func TestCreateRepo(t *testing.T) {
 	client := newTestClient(t, srv)
 	repo, err := client.CreateRepo(context.Background(), "myorg", "new-repo", "A repo", true)
 	require.NoError(t, err)
+	assert.Equal(t, int64(4242), repo.ID)
+	assert.Equal(t, "A repo", repo.Description)
 	assert.Equal(t, "new-repo", repo.Name)
 	assert.Equal(t, "myorg/new-repo", repo.FullName)
 	assert.True(t, repo.Private)
+}
+
+func TestGetRepo_ReportsIDAndDescription(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/myorg/slot", r.URL.Path)
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":          int64(99),
+			"name":        "slot",
+			"full_name":   "myorg/slot",
+			"description": "lease marker",
+		})
+	}))
+	defer srv.Close()
+
+	repo, err := newTestClient(t, srv).GetRepo(context.Background(), "myorg", "slot")
+	require.NoError(t, err)
+	assert.Equal(t, int64(99), repo.ID)
+	assert.Equal(t, "lease marker", repo.Description)
 }
 
 func TestDeleteRepo(t *testing.T) {
@@ -2193,6 +2216,144 @@ func TestSecondaryRateLimit_RetriedWithoutRetryAfterHeader(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "test-repo", repo.Name)
 	assert.Equal(t, 3, attempts, "should have retried twice before succeeding")
+}
+
+func TestRateLimitError_CarriesUncappedRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"message": "You have exceeded a secondary rate limit"})
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{
+		token:     "test-token",
+		baseURL:   srv.URL,
+		http:      srv.Client(),
+		afterFunc: noWaitAfter,
+	}
+
+	_, err := client.CreateRepo(context.Background(), "org", "test-repo", "desc", false)
+	require.Error(t, err)
+	assert.True(t, IsRateLimitError(err))
+	d, ok := RetryAfterFromError(err)
+	require.True(t, ok)
+	assert.Equal(t, 600*time.Second, d, "Retry-After beyond the client's wait cap is still reported")
+}
+
+func TestRetryAfterFromError_Absent(t *testing.T) {
+	_, ok := RetryAfterFromError(&APIError{StatusCode: http.StatusForbidden, Message: "rate limit"})
+	assert.False(t, ok)
+	_, ok = RetryAfterFromError(errors.New("other"))
+	assert.False(t, ok)
+	d, ok := RetryAfterFromError(fmt.Errorf("wrapped: %w", &APIError{StatusCode: http.StatusTooManyRequests, RetryAfter: 90 * time.Second}))
+	assert.True(t, ok)
+	assert.Equal(t, 90*time.Second, d)
+}
+
+func TestRateLimitBackoffInterrupted_KeepsRetryAfterAndContextError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"message": "API rate limit exceeded"})
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{
+		token:   "test-token",
+		baseURL: srv.URL,
+		http:    srv.Client(),
+		// A wait that never fires, so only the context ends the backoff.
+		afterFunc: func(time.Duration) <-chan time.Time { return nil },
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := client.CreateRepo(ctx, "org", "test-repo", "desc", false)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded))
+	assert.True(t, IsRateLimitError(err))
+	d, ok := RetryAfterFromError(err)
+	require.True(t, ok)
+	assert.Equal(t, 600*time.Second, d)
+}
+
+func TestRateLimitBackoffInterrupted_HeaderlessLeavesRetryAfterUnset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"message": "API rate limit exceeded"})
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{
+		token:   "test-token",
+		baseURL: srv.URL,
+		http:    srv.Client(),
+		// A wait that never fires, so only the context ends the backoff.
+		afterFunc: func(time.Duration) <-chan time.Time { return nil },
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := client.CreateRepo(ctx, "org", "test-repo", "desc", false)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded))
+	assert.True(t, IsRateLimitError(err))
+	// The client's own backoff delay is not a server deadline, so callers
+	// must see no Retry-After and apply their own default window.
+	_, ok := RetryAfterFromError(err)
+	assert.False(t, ok)
+}
+
+func TestWithoutAmbiguousRetry_DoesNotRetryServerError(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{
+		token:     "test-token",
+		baseURL:   srv.URL,
+		http:      srv.Client(),
+		afterFunc: noWaitAfter,
+	}
+
+	err := client.DeleteRepo(WithoutAmbiguousRetry(context.Background()), "org", "repo")
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+	assert.Equal(t, int32(1), attempts.Load())
+
+	// Without the option the same failure is retried.
+	attempts.Store(0)
+	err = client.DeleteRepo(context.Background(), "org", "repo")
+	require.Error(t, err)
+	assert.Equal(t, int32(maxRetries), attempts.Load())
+}
+
+func TestWithoutAmbiguousRetry_DoesNotRetryTimeout(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		time.Sleep(200 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	httpClient := srv.Client()
+	httpClient.Timeout = 50 * time.Millisecond
+	client := &LiveClient{
+		token:     "test-token",
+		baseURL:   srv.URL,
+		http:      httpClient,
+		afterFunc: noWaitAfter,
+	}
+
+	err := client.DeleteRepo(WithoutAmbiguousRetry(context.Background()), "org", "repo")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not retried")
+	assert.Equal(t, int32(1), attempts.Load())
 }
 
 func TestCreateFileOnBranch(t *testing.T) {
