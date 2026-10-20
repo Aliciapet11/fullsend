@@ -1,0 +1,895 @@
+package install
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/fullsend-ai/fullsend/internal/e2etest"
+	"github.com/fullsend-ai/fullsend/internal/forge"
+	gh "github.com/fullsend-ai/fullsend/internal/forge/github"
+)
+
+// These tests drive the shared e2e-lock bridge through the slot allocator
+// (Claim and Release) against one shared fake forge. A "legacy runner"
+// takes and releases the lock exactly as e2etest's AcquireOrg and
+// ReleaseLock do: CreateRepo of e2e-lock, then README.md set to its run ID.
+
+const bridgeOrg = "halfsend"
+
+// testClock is a settable clock for allocators and their lock bridge.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newTestClock(at time.Time) *testClock { return &testClock{now: at} }
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) Set(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = at
+}
+
+// logRecorder collects log lines.
+type logRecorder struct {
+	t     *testing.T
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *logRecorder) logf(format string, args ...any) {
+	r.t.Helper()
+	line := fmt.Sprintf(format, args...)
+	r.mu.Lock()
+	r.lines = append(r.lines, line)
+	r.mu.Unlock()
+	r.t.Log(line)
+}
+
+func (r *logRecorder) contains(sub string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.lines {
+		if strings.Contains(l, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// newBridgeAllocator returns an allocator with the bridge enabled, slots
+// tried in index order, and the given clock (real time when nil).
+func newBridgeAllocator(t *testing.T, layout PoolLayout, clientFor OrgClientFunc, clock *testClock) *slotAllocator {
+	t.Helper()
+	a, err := newSlotAllocator(layout, clientFor, t.Logf)
+	require.NoError(t, err)
+	require.NotNil(t, a.orgLock, "the bridge is on by default")
+	a.shuffle = func([]Slot) {}
+	if clock != nil {
+		a.now = clock.Now
+	}
+	return a
+}
+
+// legacyAcquire takes org's lock the way e2etest.AcquireOrg does. It
+// reports false when the lock repo already exists.
+func legacyAcquire(t *testing.T, client forge.Client, org string) (string, bool) {
+	t.Helper()
+	ctx := context.Background()
+	runID := uuid.NewString()
+	_, err := client.CreateRepo(ctx, org, e2etest.LockRepo, "E2E test lock — do not delete manually", false)
+	if forge.IsAlreadyExists(err) {
+		return "", false
+	}
+	require.NoError(t, err)
+	require.NoError(t, client.CreateOrUpdateFile(ctx, org, e2etest.LockRepo, "README.md", "acquire lock", []byte(runID)))
+	return runID, true
+}
+
+func lockExists(t *testing.T, fc *forge.FakeClient, org string) bool {
+	t.Helper()
+	_, err := fc.GetRepo(context.Background(), org, e2etest.LockRepo)
+	if forge.IsNotFound(err) {
+		return false
+	}
+	require.NoError(t, err)
+	return true
+}
+
+func lockReadme(t *testing.T, fc *forge.FakeClient, org string) string {
+	t.Helper()
+	data, err := fc.GetFileContent(context.Background(), org, e2etest.LockRepo, "README.md")
+	require.NoError(t, err)
+	return string(data)
+}
+
+func readLockState(t *testing.T, fc *forge.FakeClient, org string) sharedLockState {
+	t.Helper()
+	b := newSharedOrgLock(t.Logf, time.Now)
+	state, _, err := b.readState(context.Background(), fc, org)
+	require.NoError(t, err)
+	return state
+}
+
+func lockCreatedAt(t *testing.T, fc *forge.FakeClient, org string) time.Time {
+	t.Helper()
+	repo, err := fc.GetRepo(context.Background(), org, e2etest.LockRepo)
+	require.NoError(t, err)
+	require.False(t, repo.CreatedAt.IsZero())
+	return repo.CreatedAt
+}
+
+func TestSharedOrgLock_LegacyLockExcludesNewRunners(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	runID, ok := legacyAcquire(t, p.fc, bridgeOrg)
+	require.True(t, ok)
+
+	a := newBridgeAllocator(t, layout, p.clientFor, nil)
+	_, _, err := a.Claim(ctx)
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	assert.Contains(t, capErr.LockExcluded[bridgeOrg], "exclusive")
+	assert.Contains(t, err.Error(), "e2e-lock: halfsend (held by an exclusive")
+	assert.False(t, p.exists(t, Slot{Org: bridgeOrg, Repo: "test-repo-01"}), "no slot repo under a legacy lock")
+	assert.Equal(t, runID, lockReadme(t, p.fc, bridgeOrg), "the legacy lock is untouched")
+
+	e2etest.ReleaseLock(ctx, p.fc, bridgeOrg, runID, t)
+	require.False(t, lockExists(t, p.fc, bridgeOrg))
+
+	slot, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, Slot{Org: bridgeOrg, Repo: "test-repo-01"}, slot)
+	state := readLockState(t, p.fc, bridgeOrg)
+	assert.Len(t, state.Holders, 1)
+	assert.Equal(t, state.Generation, lockReadme(t, p.fc, bridgeOrg))
+}
+
+func TestSharedOrgLock_AdmitsNewHoldersAndExcludesLegacy(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(4)
+	p := newFakePool(layout)
+	a := newBridgeAllocator(t, layout, p.clientFor, nil)
+	b := newBridgeAllocator(t, layout, p.clientFor, nil)
+
+	s1, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+	s2, _, err := b.Claim(ctx)
+	require.NoError(t, err)
+	assert.NotEqual(t, s1, s2)
+
+	state := readLockState(t, p.fc, bridgeOrg)
+	assert.Len(t, state.Holders, 2)
+	assert.False(t, state.Closed)
+	readme := lockReadme(t, p.fc, bridgeOrg)
+	_, parseErr := uuid.Parse(readme)
+	require.NoError(t, parseErr, "README.md must stay a UUID so legacy acquireLock does not delete it as invalid")
+	assert.Equal(t, state.Generation, readme)
+	marker, err := p.fc.GetFileContent(ctx, bridgeOrg, e2etest.LockRepo, sharedLockMarkerPath)
+	require.NoError(t, err)
+	assert.Equal(t, sharedLockMarker, strings.TrimSpace(string(marker)))
+
+	// A legacy runner neither acquires nor releases the shared lock.
+	_, ok := legacyAcquire(t, p.fc, bridgeOrg)
+	assert.False(t, ok, "legacy runners see the shared lock as held")
+	e2etest.ReleaseLock(ctx, p.fc, bridgeOrg, uuid.NewString(), t)
+	require.True(t, lockExists(t, p.fc, bridgeOrg))
+
+	require.NoError(t, a.Release(ctx, s1))
+	require.True(t, lockExists(t, p.fc, bridgeOrg), "a holder remains")
+	assert.Len(t, readLockState(t, p.fc, bridgeOrg).Holders, 1)
+
+	require.NoError(t, b.Release(ctx, s2))
+	assert.False(t, lockExists(t, p.fc, bridgeOrg), "the last holder deletes the lock")
+	assert.False(t, p.exists(t, s1))
+	assert.False(t, p.exists(t, s2))
+
+	_, ok = legacyAcquire(t, p.fc, bridgeOrg)
+	assert.True(t, ok, "legacy runners can take the org once the shared lock is gone")
+}
+
+func TestSharedOrgLock_ConcurrentHoldersAreNeverLost(t *testing.T) {
+	old := slotClaimPoll
+	slotClaimPoll = time.Millisecond
+	t.Cleanup(func() { slotClaimPoll = old })
+
+	ctx := context.Background()
+	const runners = 6
+	layout := StagePoolLayout(runners)
+	p := newFakePool(layout)
+	allocs := make([]*slotAllocator, runners)
+	for i := range allocs {
+		allocs[i] = newBridgeAllocator(t, layout, p.clientFor, nil)
+	}
+
+	slots := make([]Slot, runners)
+	var wg sync.WaitGroup
+	for i, a := range allocs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, _, err := a.Acquire(ctx)
+			assert.NoError(t, err)
+			slots[i] = s
+		}()
+	}
+	wg.Wait()
+	require.Len(t, readLockState(t, p.fc, bridgeOrg).Holders, runners, "every admitted holder is recorded")
+
+	for i, a := range allocs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			assert.NoError(t, a.Release(ctx, slots[i]))
+		}()
+	}
+	wg.Wait()
+	assert.False(t, lockExists(t, p.fc, bridgeOrg), "the lock is deleted once every holder left")
+}
+
+// hookClient runs a hook once before the first UpdateFileIfMatch whose
+// content matches.
+type hookClient struct {
+	*orgClient
+	mu    sync.Mutex
+	match func(content []byte) bool
+	hook  func()
+}
+
+func (c *hookClient) UpdateFileIfMatch(ctx context.Context, owner, repo, path, message string, content []byte, expectedSHA string) error {
+	c.mu.Lock()
+	hook := c.hook
+	if hook != nil && c.match(content) {
+		c.hook = nil
+	} else {
+		hook = nil
+	}
+	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return c.orgClient.UpdateFileIfMatch(ctx, owner, repo, path, message, content, expectedSHA)
+}
+
+func closingWrite(content []byte) bool { return strings.Contains(string(content), `"closed":true`) }
+
+func TestSharedOrgLock_JoinDuringFinalReleaseKeepsLiveHolder(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	hooked := &hookClient{orgClient: p.clients[bridgeOrg]}
+	a := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return hooked, nil }, nil)
+	b := newBridgeAllocator(t, layout, p.clientFor, nil)
+
+	s1, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+	generation := readLockState(t, p.fc, bridgeOrg).Generation
+
+	// b joins after a read the state but before a's closing write lands.
+	var s2 Slot
+	hooked.match = closingWrite
+	hooked.hook = func() {
+		var joinErr error
+		s2, _, joinErr = b.Claim(ctx)
+		require.NoError(t, joinErr)
+	}
+	require.NoError(t, a.Release(ctx, s1))
+
+	require.True(t, lockExists(t, p.fc, bridgeOrg), "the final release must not delete a lock with a live holder")
+	state := readLockState(t, p.fc, bridgeOrg)
+	assert.Equal(t, generation, state.Generation)
+	assert.Len(t, state.Holders, 1)
+	assert.False(t, state.Closed)
+
+	require.NoError(t, b.Release(ctx, s2))
+	assert.False(t, lockExists(t, p.fc, bridgeOrg))
+}
+
+func TestSharedOrgLock_JoinAfterClosingWriteDoesNotJoinDeletedLock(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	a := newBridgeAllocator(t, layout, p.clientFor, nil)
+	hooked := &hookClient{orgClient: p.clients[bridgeOrg]}
+	b := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return hooked, nil }, nil)
+
+	s1, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+	first := readLockState(t, p.fc, bridgeOrg).Generation
+
+	// a's final release closes and deletes the lock after b read the
+	// state but before b's join write.
+	hooked.match = func([]byte) bool { return true }
+	hooked.hook = func() { require.NoError(t, a.Release(ctx, s1)) }
+	s2, _, err := b.Claim(ctx)
+	require.NoError(t, err)
+
+	state := readLockState(t, p.fc, bridgeOrg)
+	assert.NotEqual(t, first, state.Generation, "b must hold a new lock, not the deleted one")
+	assert.Len(t, state.Holders, 1)
+
+	require.NoError(t, b.Release(ctx, s2))
+	assert.False(t, lockExists(t, p.fc, bridgeOrg))
+}
+
+func TestSharedOrgLock_LateReleaseKeepsReplacementLock(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+
+	t.Run("legacy lock", func(t *testing.T) {
+		p := newFakePool(layout)
+		a := newBridgeAllocator(t, layout, p.clientFor, nil)
+		s1, _, err := a.Claim(ctx)
+		require.NoError(t, err)
+
+		// A legacy runner reclaims the lock (as after 30 minutes).
+		require.NoError(t, p.fc.DeleteRepo(ctx, bridgeOrg, e2etest.LockRepo))
+		runID, ok := legacyAcquire(t, p.fc, bridgeOrg)
+		require.True(t, ok)
+
+		require.NoError(t, a.Release(ctx, s1))
+		require.True(t, lockExists(t, p.fc, bridgeOrg), "a late release must not delete the legacy lock")
+		assert.Equal(t, runID, lockReadme(t, p.fc, bridgeOrg))
+		assert.False(t, p.exists(t, s1))
+	})
+
+	t.Run("stale shared lock reclaimed by a new runner", func(t *testing.T) {
+		p := newFakePool(layout)
+		start := time.Now()
+		clockA := newTestClock(start)
+		clockB := newTestClock(start)
+		a := newBridgeAllocator(t, layout, p.clientFor, clockA)
+		b := newBridgeAllocator(t, layout, p.clientFor, clockB)
+		logs := &logRecorder{t: t}
+		a.orgLock.logf = logs.logf
+
+		s1, _, err := a.Claim(ctx)
+		require.NoError(t, err)
+		first := readLockState(t, p.fc, bridgeOrg).Generation
+
+		// b finds the lock past the legacy stale age, reclaims it, and
+		// holds a replacement generation.
+		clockB.Set(lockCreatedAt(t, p.fc, bridgeOrg).Add(e2etest.StaleLockTimeout + time.Minute))
+		s2, _, err := b.Claim(ctx)
+		require.NoError(t, err)
+		replacement := readLockState(t, p.fc, bridgeOrg)
+		require.NotEqual(t, first, replacement.Generation)
+
+		clockA.Set(start.Add(e2etest.StaleLockTimeout + 2*time.Minute))
+		require.NoError(t, a.Release(ctx, s1))
+		assert.True(t, logs.contains("beyond the 30m0s legacy reclaim age"))
+		require.True(t, lockExists(t, p.fc, bridgeOrg), "a late release must not delete the replacement lock")
+		assert.Equal(t, replacement, readLockState(t, p.fc, bridgeOrg))
+
+		require.NoError(t, b.Release(ctx, s2))
+		assert.False(t, lockExists(t, p.fc, bridgeOrg))
+	})
+}
+
+func TestSharedOrgLock_AdmissionWindow(t *testing.T) {
+	ctx := context.Background()
+	layout := PoolLayout{FirstOrgIndex: 1, OrgCount: 2, SlotsPerOrg: 3}
+	p := newFakePool(layout)
+	a := newBridgeAllocator(t, layout, p.clientFor, nil)
+	first, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "halfsend-01", first.Org)
+	created := lockCreatedAt(t, p.fc, "halfsend-01")
+
+	// Just inside the window: joins the same org and logs the lock age.
+	clockB := newTestClock(created.Add(sharedLockAdmissionWindow - time.Second))
+	b := newBridgeAllocator(t, layout, p.clientFor, clockB)
+	logs := &logRecorder{t: t}
+	b.orgLock.logf = logs.logf
+	s, _, err := b.Claim(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "halfsend-01", s.Org)
+	assert.True(t, logs.contains("lock age at admission: 14m59s"))
+
+	// At the window: seeks another org.
+	clockC := newTestClock(created.Add(sharedLockAdmissionWindow))
+	c := newBridgeAllocator(t, layout, p.clientFor, clockC)
+	s, _, err = c.Claim(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "halfsend-02", s.Org)
+
+	// With no other org, the claim reports why the org was skipped.
+	single := StagePoolLayout(2)
+	ps := newFakePool(single)
+	d := newBridgeAllocator(t, single, ps.clientFor, nil)
+	_, _, err = d.Claim(ctx)
+	require.NoError(t, err)
+	e := newBridgeAllocator(t, single, ps.clientFor, newTestClock(lockCreatedAt(t, ps.fc, bridgeOrg).Add(16*time.Minute)))
+	_, _, err = e.Claim(ctx)
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	assert.Contains(t, capErr.LockExcluded[bridgeOrg], "past the 15m0s admission window")
+}
+
+func TestSharedOrgLock_LeaveLogsLongHolders(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	start := time.Now()
+	clock := newTestClock(start)
+	a := newBridgeAllocator(t, layout, p.clientFor, clock)
+	logs := &logRecorder{t: t}
+	a.orgLock.logf = logs.logf
+
+	s, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+	clock.Set(start.Add(26 * time.Minute))
+	require.NoError(t, a.Release(ctx, s))
+	assert.True(t, logs.contains("ran 26m0s, near the 30m0s legacy reclaim age"))
+
+	s, _, err = a.Claim(ctx)
+	require.NoError(t, err)
+	clock.Set(clock.Now().Add(5 * time.Minute))
+	require.NoError(t, a.Release(ctx, s))
+	assert.True(t, logs.contains("leaving shared lock on halfsend after 5m0s (scenario plus cleanup)"))
+}
+
+func TestSharedOrgLock_UnusedAdmissionIsReturned(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	// The listing fails, so the claim probes by create and finds the slot
+	// occupied only after joining the lock.
+	p.fc.Errors = map[string]error{"ListOrgRepos": errors.New("listing down")}
+	p.fc.Repos = append(p.fc.Repos, forge.Repository{Name: "test-repo-01", FullName: bridgeOrg + "/test-repo-01"})
+	a := newBridgeAllocator(t, layout, p.clientFor, nil)
+
+	_, _, err := a.Claim(ctx)
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	assert.Equal(t, 1, capErr.Occupied)
+	assert.False(t, lockExists(t, p.fc, bridgeOrg), "the holder that got no lease left and deleted the lock")
+	assert.True(t, p.exists(t, Slot{Org: bridgeOrg, Repo: "test-repo-01"}))
+}
+
+func TestSharedOrgLock_CancelledClaimLeavesLock(t *testing.T) {
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hooked := &cancelOnSlotCreate{orgClient: p.clients[bridgeOrg], cancel: cancel}
+	a := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return hooked, nil }, nil)
+
+	_, _, err := a.Claim(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, lockExists(t, p.fc, bridgeOrg), "a cancelled claim still returns its holder")
+}
+
+// cancelOnSlotCreate cancels the claim while creating a slot repo.
+type cancelOnSlotCreate struct {
+	*orgClient
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnSlotCreate) CreateRepo(ctx context.Context, org, name, description string, private bool) (*forge.Repository, error) {
+	if name == e2etest.LockRepo {
+		return c.orgClient.CreateRepo(ctx, org, name, description, private)
+	}
+	c.cancel()
+	return nil, ctx.Err()
+}
+
+func TestSharedOrgLock_JoinFailures(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(1)
+	boom := errors.New("boom")
+
+	t.Run("lock lookup failure fails the org", func(t *testing.T) {
+		p := newFakePool(layout)
+		p.fc.Errors = map[string]error{"GetRepo": boom}
+		a := newBridgeAllocator(t, layout, p.clientFor, nil)
+		_, _, err := a.Claim(ctx)
+		var capErr *CapacityError
+		require.ErrorAs(t, err, &capErr)
+		require.ErrorIs(t, capErr.Failed[bridgeOrg], boom)
+	})
+
+	t.Run("failed initialisation removes the half-made lock", func(t *testing.T) {
+		p := newFakePool(layout)
+		p.fc.Errors = map[string]error{"CommitFiles": boom}
+		a := newBridgeAllocator(t, layout, p.clientFor, nil)
+		_, _, err := a.Claim(ctx)
+		var capErr *CapacityError
+		require.ErrorAs(t, err, &capErr)
+		require.ErrorIs(t, capErr.Failed[bridgeOrg], boom)
+		assert.False(t, lockExists(t, p.fc, bridgeOrg))
+		assert.False(t, p.exists(t, Slot{Org: bridgeOrg, Repo: "test-repo-01"}))
+	})
+
+	t.Run("shared lock of unknown age is not joined", func(t *testing.T) {
+		p := newFakePool(layout)
+		seed := newBridgeAllocator(t, StagePoolLayout(2), p.clientFor, nil)
+		_, _, err := seed.Claim(ctx)
+		require.NoError(t, err)
+		a := newBridgeAllocator(t, StagePoolLayout(2), func(context.Context, string) (forge.Client, error) {
+			return noCreatedAtClient{p.clients[bridgeOrg]}, nil
+		}, nil)
+		_, _, err = a.Claim(ctx)
+		var capErr *CapacityError
+		require.ErrorAs(t, err, &capErr)
+		assert.Contains(t, capErr.LockExcluded[bridgeOrg], "age unknown")
+	})
+
+	t.Run("closing lock is not joined", func(t *testing.T) {
+		p := newFakePool(layout)
+		seed := newBridgeAllocator(t, StagePoolLayout(2), p.clientFor, nil)
+		_, _, err := seed.Claim(ctx)
+		require.NoError(t, err)
+		state := readLockState(t, p.fc, bridgeOrg)
+		state.Closed = true
+		require.NoError(t, p.fc.CreateOrUpdateFile(ctx, bridgeOrg, e2etest.LockRepo, sharedLockHoldersPath, "close", mustJSON(t, state)))
+		a := newBridgeAllocator(t, StagePoolLayout(2), p.clientFor, nil)
+		_, _, err = a.Claim(ctx)
+		var capErr *CapacityError
+		require.ErrorAs(t, err, &capErr)
+		assert.Contains(t, capErr.LockExcluded[bridgeOrg], "closing")
+	})
+
+	t.Run("flag without holder state is not joined", func(t *testing.T) {
+		p := newFakePool(layout)
+		seed := newBridgeAllocator(t, StagePoolLayout(2), p.clientFor, nil)
+		_, _, err := seed.Claim(ctx)
+		require.NoError(t, err)
+		require.NoError(t, p.fc.DeleteFile(ctx, bridgeOrg, e2etest.LockRepo, sharedLockHoldersPath, "drop"))
+		a := newBridgeAllocator(t, StagePoolLayout(2), p.clientFor, nil)
+		_, _, err = a.Claim(ctx)
+		var capErr *CapacityError
+		require.ErrorAs(t, err, &capErr)
+		assert.Contains(t, capErr.LockExcluded[bridgeOrg], "no holder state")
+	})
+}
+
+func TestSharedOrgLock_ReleaseReportsLeaveFailure(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	a := newBridgeAllocator(t, layout, p.clientFor, nil)
+	s, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+
+	boom := errors.New("boom")
+	p.fc.GetFileContentErrors = map[string]error{bridgeOrg + "/" + e2etest.LockRepo + "/" + sharedLockHoldersPath: boom}
+	err = a.Release(ctx, s)
+	require.ErrorIs(t, err, boom)
+	assert.Contains(t, err.Error(), "leaving shared e2e-lock")
+	assert.False(t, p.exists(t, s), "the slot repo is still deleted")
+}
+
+// noCreatedAtClient hides repository creation times, like a forge that
+// does not report them.
+type noCreatedAtClient struct{ *orgClient }
+
+func (c noCreatedAtClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Repository, error) {
+	r, err := c.orgClient.GetRepo(ctx, owner, repo)
+	if r != nil {
+		r.CreatedAt = time.Time{}
+	}
+	return r, err
+}
+
+func mustJSON(t *testing.T, state sharedLockState) []byte {
+	t.Helper()
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	return data
+}
+
+func TestSharedOrgLock_NewRunnerReclaimsStaleLegacyLock(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	runID, ok := legacyAcquire(t, p.fc, bridgeOrg)
+	require.True(t, ok)
+
+	a := newBridgeAllocator(t, layout, p.clientFor, newTestClock(lockCreatedAt(t, p.fc, bridgeOrg).Add(e2etest.StaleLockTimeout+time.Second)))
+	s, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+	assert.NotEqual(t, runID, lockReadme(t, p.fc, bridgeOrg), "the stale legacy lock was replaced")
+	assert.Len(t, readLockState(t, p.fc, bridgeOrg).Holders, 1)
+	require.NoError(t, a.Release(ctx, s))
+	assert.False(t, lockExists(t, p.fc, bridgeOrg))
+}
+
+func TestSharedOrgLock_CorruptStateFailsOrg(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	seed := newBridgeAllocator(t, layout, p.clientFor, nil)
+	_, _, err := seed.Claim(ctx)
+	require.NoError(t, err)
+	require.NoError(t, p.fc.CreateOrUpdateFile(ctx, bridgeOrg, e2etest.LockRepo, sharedLockHoldersPath, "corrupt", []byte("{")))
+
+	a := newBridgeAllocator(t, layout, p.clientFor, nil)
+	_, _, err = a.Claim(ctx)
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	require.Error(t, capErr.Failed[bridgeOrg])
+	assert.Contains(t, capErr.Failed[bridgeOrg].Error(), "decoding")
+}
+
+func TestSharedOrgLock_UnknownFlagIsExclusive(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	seed := newBridgeAllocator(t, layout, p.clientFor, nil)
+	_, _, err := seed.Claim(ctx)
+	require.NoError(t, err)
+	require.NoError(t, p.fc.CreateOrUpdateFile(ctx, bridgeOrg, e2etest.LockRepo, sharedLockMarkerPath, "flag", []byte("something else")))
+
+	a := newBridgeAllocator(t, layout, p.clientFor, nil)
+	_, _, err = a.Claim(ctx)
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	assert.Contains(t, capErr.LockExcluded[bridgeOrg], "exclusive")
+}
+
+func TestSharedOrgLock_DeleteIfIDChecksIdentity(t *testing.T) {
+	ctx := context.Background()
+	fc := forge.NewFakeClient()
+	b := newSharedOrgLock(t.Logf, time.Now)
+
+	deleted, err := b.deleteIfID(ctx, fc, bridgeOrg, 1)
+	require.NoError(t, err)
+	assert.False(t, deleted, "nothing to delete")
+
+	repo, err := fc.CreateRepo(ctx, bridgeOrg, e2etest.LockRepo, "lock", false)
+	require.NoError(t, err)
+	deleted, err = b.deleteIfID(ctx, fc, bridgeOrg, repo.ID+1)
+	require.NoError(t, err)
+	assert.False(t, deleted, "a different repository is never deleted")
+	require.True(t, lockExists(t, fc, bridgeOrg))
+
+	deleted, err = b.deleteIfID(ctx, fc, bridgeOrg, repo.ID)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, lockExists(t, fc, bridgeOrg))
+
+	assert.Equal(t, "abc", truncateID("abc"))
+}
+
+// afterCallClient runs a hook once after a matching call has landed on the
+// forge and before its result reaches the caller, and can then replace the
+// result with an error, as a response lost in transit.
+type afterCallClient struct {
+	*orgClient
+	mu sync.Mutex
+	// afterCommit runs after the lock repository's initial CommitFiles
+	// landed; the commit then reports commitErr.
+	afterCommit func()
+	commitErr   error
+	// afterClose runs after a closing holders.json write landed.
+	afterClose func()
+}
+
+func (c *afterCallClient) CommitFiles(ctx context.Context, owner, repo, message string, files []forge.TreeFile) (bool, error) {
+	changed, err := c.orgClient.CommitFiles(ctx, owner, repo, message, files)
+	c.mu.Lock()
+	hook, hookErr := c.afterCommit, c.commitErr
+	c.afterCommit = nil
+	c.mu.Unlock()
+	if err == nil && repo == e2etest.LockRepo && hook != nil {
+		hook()
+		return false, hookErr
+	}
+	return changed, err
+}
+
+func (c *afterCallClient) UpdateFileIfMatch(ctx context.Context, owner, repo, path, message string, content []byte, expectedSHA string) error {
+	err := c.orgClient.UpdateFileIfMatch(ctx, owner, repo, path, message, content, expectedSHA)
+	if err != nil || !closingWrite(content) {
+		return err
+	}
+	c.mu.Lock()
+	hook := c.afterClose
+	c.afterClose = nil
+	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return nil
+}
+
+func TestSharedOrgLock_InitErrorAfterPublishKeepsJoinedHolder(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	hooked := &afterCallClient{orgClient: p.clients[bridgeOrg], commitErr: errors.New("response lost")}
+	a := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return hooked, nil }, nil)
+	b := newBridgeAllocator(t, layout, p.clientFor, nil)
+
+	// The initial commit lands, another runner joins that generation, and
+	// only then does a's CommitFiles report an error.
+	var s2 Slot
+	hooked.afterCommit = func() {
+		var joinErr error
+		s2, _, joinErr = b.Claim(ctx)
+		require.NoError(t, joinErr)
+	}
+	_, _, err := a.Claim(ctx)
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	require.Error(t, capErr.Failed[bridgeOrg])
+
+	require.True(t, lockExists(t, p.fc, bridgeOrg), "a live holder keeps the lock")
+	state := readLockState(t, p.fc, bridgeOrg)
+	assert.Len(t, state.Holders, 1, "only the creator's holder was removed")
+	assert.False(t, state.Closed)
+	assert.Equal(t, state.Generation, lockReadme(t, p.fc, bridgeOrg))
+	assert.True(t, p.exists(t, s2))
+
+	require.NoError(t, b.Release(ctx, s2))
+	assert.False(t, lockExists(t, p.fc, bridgeOrg), "the last holder deletes the lock")
+}
+
+func TestSharedOrgLock_InitErrorAfterPublishDeletesUnusedLock(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	hooked := &afterCallClient{orgClient: p.clients[bridgeOrg], commitErr: errors.New("response lost")}
+	hooked.afterCommit = func() {}
+	a := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return hooked, nil }, nil)
+
+	_, _, err := a.Claim(ctx)
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	require.Error(t, capErr.Failed[bridgeOrg])
+	assert.False(t, lockExists(t, p.fc, bridgeOrg), "a published lock nobody joined is closed and deleted")
+}
+
+func TestSharedOrgLock_ReplacementAfterClosingWriteIsKept(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	hooked := &afterCallClient{orgClient: p.clients[bridgeOrg]}
+	a := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return hooked, nil }, nil)
+	b := newBridgeAllocator(t, layout, p.clientFor, nil)
+
+	s1, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+	first := readLockState(t, p.fc, bridgeOrg).Generation
+
+	// After a's closing write lands and before a deletes the lock, a stale
+	// reclaimer replaces it and b joins the replacement.
+	var s2 Slot
+	hooked.afterClose = func() {
+		require.NoError(t, p.fc.DeleteRepo(ctx, bridgeOrg, e2etest.LockRepo))
+		var joinErr error
+		s2, _, joinErr = b.Claim(ctx)
+		require.NoError(t, joinErr)
+	}
+	require.NoError(t, a.Release(ctx, s1))
+
+	require.True(t, lockExists(t, p.fc, bridgeOrg), "a must not delete the replacement lock")
+	state := readLockState(t, p.fc, bridgeOrg)
+	assert.NotEqual(t, first, state.Generation)
+	assert.Len(t, state.Holders, 1)
+	assert.False(t, state.Closed)
+
+	require.NoError(t, b.Release(ctx, s2))
+	assert.False(t, lockExists(t, p.fc, bridgeOrg))
+}
+
+func TestSharedOrgLock_ClosedLockWithUnknownIDIsLeftForReclaim(t *testing.T) {
+	ctx := context.Background()
+	p := newFakePool(StagePoolLayout(1))
+	logs := &logRecorder{t: t}
+	b := newSharedOrgLock(logs.logf, time.Now)
+	_, err := p.fc.CreateRepo(ctx, bridgeOrg, e2etest.LockRepo, "lock", false)
+	require.NoError(t, err)
+
+	require.NoError(t, b.deleteClosed(ctx, p.fc, &orgLockMembership{org: bridgeOrg, generation: "g"}))
+	assert.True(t, lockExists(t, p.fc, bridgeOrg))
+	assert.True(t, logs.contains("no recorded repository ID"))
+}
+
+// blockingLockLookupClient makes the e2e-lock repository lookup wait for
+// its context and then fail the way the live client does when a deadline
+// cuts a rate-limit backoff short: a rate-limit error carrying the
+// Retry-After wait that also matches the context error.
+type blockingLockLookupClient struct {
+	*orgClient
+	retryAfter time.Duration
+}
+
+func (c *blockingLockLookupClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Repository, error) {
+	if repo != e2etest.LockRepo {
+		return c.orgClient.GetRepo(ctx, owner, repo)
+	}
+	<-ctx.Done()
+	return nil, fmt.Errorf("%w: %w", ctx.Err(), &gh.APIError{StatusCode: http.StatusTooManyRequests, Message: "rate limit", RetryAfter: c.retryAfter})
+}
+
+func TestSharedOrgLock_ThrottledLockOperationMovesClaimToAnotherOrg(t *testing.T) {
+	shortCreateTimeout(t, 20*time.Millisecond)
+	layout := PoolLayout{FirstOrgIndex: 1, OrgCount: 2, SlotsPerOrg: 1}
+	p := newFakePool(layout)
+	clock := newTestClock(time.Now())
+	throttled := &blockingLockLookupClient{orgClient: p.clients["halfsend-01"], retryAfter: 5 * time.Minute}
+	a := newBridgeAllocator(t, layout, func(_ context.Context, org string) (forge.Client, error) {
+		if org == "halfsend-01" {
+			return throttled, nil
+		}
+		return p.clients[org], nil
+	}, clock)
+
+	start := time.Now()
+	s, _, err := a.Claim(context.Background())
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 10*time.Second)
+	assert.Equal(t, "halfsend-02", s.Org, "a throttled lock lookup moves the claim to another org")
+
+	// The org stays closed for the Retry-After wait the interrupted call
+	// was honouring, not the default window.
+	_, _, err = a.Claim(context.Background())
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	assert.Equal(t, clock.Now().Add(5*time.Minute), capErr.RateLimited["halfsend-01"])
+}
+
+// probeRetryClient issues a probe request through a live client against a
+// server that always answers 502, using the context CommitFiles received,
+// and records how many times the client sent it. A context that disables
+// ambiguous retries yields one send.
+type probeRetryClient struct {
+	*orgClient
+	probe    *gh.LiveClient
+	attempts *atomic.Int32
+}
+
+func (c *probeRetryClient) CommitFiles(ctx context.Context, owner, repo, message string, files []forge.TreeFile) (bool, error) {
+	if repo == e2etest.LockRepo {
+		_ = c.probe.DeleteRepo(ctx, owner, "probe")
+	}
+	return c.orgClient.CommitFiles(ctx, owner, repo, message, files)
+}
+
+func TestSharedOrgLock_InitCommitIsNotResentAfterAmbiguousFailure(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	instant := func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- time.Time{}
+		return ch
+	}
+	probe := gh.New("test-token").WithBaseURL(srv.URL).WithAfterFunc(instant)
+
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	probed := &probeRetryClient{orgClient: p.clients[bridgeOrg], probe: probe, attempts: &attempts}
+	a := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return probed, nil }, nil)
+
+	_, _, err := a.Claim(context.Background())
+	require.NoError(t, err)
+	// A resend after a 5xx could land after another runner joined and be
+	// retried against the new head, overwriting that holder's entry.
+	assert.Equal(t, int32(1), attempts.Load(), "the initialisation commit must not be resent after an ambiguous failure")
+}

@@ -89,6 +89,7 @@ func TestSlotAllocator_LiveClientAdoptsOwnRepoAfterUndecodableCreateResponse(t *
 	client := gh.New("test-token").WithBaseURL(srv.URL)
 	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 
 	s, _, err := a.Claim(context.Background())
 	require.NoError(t, err, "the repo our create made is adopted despite the undecodable response")
@@ -309,6 +310,7 @@ func TestSlotAllocator_ConcurrentClaimsAdoptPendingLeaseOnce(t *testing.T) {
 	}
 	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return bc, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 	a.addPending(slot, desc)
 
 	type result struct {
@@ -372,6 +374,7 @@ func TestSlotAllocator_DelayedAdoptionFailsAfterWinnerReleased(t *testing.T) {
 	}
 	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return bc, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 	a.addPending(slot, desc)
 
 	type result struct {

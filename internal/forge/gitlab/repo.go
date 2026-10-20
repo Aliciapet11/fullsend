@@ -682,6 +682,13 @@ func (c *LiveClient) GetFileContent(ctx context.Context, owner, repo, path strin
 	return c.GetFileContentAtRef(ctx, owner, repo, path, "HEAD")
 }
 
+// UpdateFileIfMatch is not supported on GitLab: its file API has no
+// blob-SHA precondition. The only caller, the GitHub behaviour-test org
+// lock bridge, never runs against GitLab.
+func (c *LiveClient) UpdateFileIfMatch(_ context.Context, _, _, _, _ string, _ []byte, _ string) error {
+	return fmt.Errorf("conditional file update: %w", forge.ErrNotSupported)
+}
+
 func (c *LiveClient) GetFileContentAtRef(ctx context.Context, owner, repo, path, ref string) ([]byte, error) {
 	proj := projectPath(owner, repo)
 	apiPath := fmt.Sprintf("/projects/%s/repository/files/%s?ref=%s",

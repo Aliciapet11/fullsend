@@ -867,6 +867,9 @@ func fakeClientCalls(ctx context.Context) map[string]func(fc *FakeClient) []any 
 		"GetFileContent": func(fc *FakeClient) []any { return pack(fc.GetFileContent(ctx, "o", "r", "p")) },
 		"DeleteFile":     func(fc *FakeClient) []any { return pack(fc.DeleteFile(ctx, "o", "r", "gone", "m")) },
 		"DeleteFiles":    func(fc *FakeClient) []any { return pack(fc.DeleteFiles(ctx, "o", "r", "m", []string{"gone"})) },
+		"UpdateFileIfMatch": func(fc *FakeClient) []any {
+			return pack(fc.UpdateFileIfMatch(ctx, "o", "r", "p", "m", []byte("data"), GitBlobSHA([]byte("content"))))
+		},
 		"ListDirectoryContents": func(fc *FakeClient) []any {
 			return pack(fc.ListDirectoryContents(ctx, "o", "r", "p", "main", false))
 		},
@@ -1153,6 +1156,39 @@ func TestFakeClient_CoversAllMethods(t *testing.T) {
 	for name := range calls {
 		assert.True(t, want[name], "fakeClientCalls has an entry for %s, which is not a FakeClient method", name)
 	}
+}
+
+func TestFakeClient_UpdateFileIfMatch(t *testing.T) {
+	ctx := context.Background()
+	fc := NewFakeClient()
+
+	require.NoError(t, fc.UpdateFileIfMatch(ctx, "o", "r", "s.json", "create", []byte("v1"), ""))
+	err := fc.UpdateFileIfMatch(ctx, "o", "r", "s.json", "create again", []byte("x"), "")
+	require.True(t, IsConflict(err), "create over an existing file: %v", err)
+
+	read, err := fc.GetFileContent(ctx, "o", "r", "s.json")
+	require.NoError(t, err)
+	stale := GitBlobSHA(read)
+	require.NoError(t, fc.UpdateFileIfMatch(ctx, "o", "r", "s.json", "update", []byte("v2"), stale))
+
+	err = fc.UpdateFileIfMatch(ctx, "o", "r", "s.json", "stale", []byte("v3"), stale)
+	require.True(t, IsConflict(err), "stale SHA: %v", err)
+	got, err := fc.GetFileContent(ctx, "o", "r", "s.json")
+	require.NoError(t, err)
+	assert.Equal(t, "v2", string(got), "a conflicting write leaves the file unchanged")
+
+	err = fc.UpdateFileIfMatch(ctx, "o", "r", "missing.json", "update", []byte("v"), stale)
+	require.True(t, IsConflict(err), "update of a missing file: %v", err)
+
+	injected := errors.New("injected")
+	fc.Errors = map[string]error{"UpdateFileIfMatch": injected}
+	require.ErrorIs(t, fc.UpdateFileIfMatch(ctx, "o", "r", "s.json", "m", []byte("v"), ""), injected)
+}
+
+func TestGitBlobSHA(t *testing.T) {
+	// git hash-object of an empty file and of "hello\n".
+	assert.Equal(t, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391", GitBlobSHA(nil))
+	assert.Equal(t, "ce013625030ba8dba906f756967f9e9ca394464a", GitBlobSHA([]byte("hello\n")))
 }
 
 func TestFakeClient_FindExistingFork(t *testing.T) {

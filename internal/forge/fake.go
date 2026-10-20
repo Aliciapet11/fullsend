@@ -523,6 +523,7 @@ func (f *FakeClient) CreateRepo(_ context.Context, org, name, description string
 		Description:   description,
 		DefaultBranch: "main",
 		Private:       private,
+		CreatedAt:     time.Now(),
 	}
 	f.CreatedRepos = append(f.CreatedRepos, r)
 	return &r, nil
@@ -759,6 +760,43 @@ func (f *FakeClient) GetFileContent(_ context.Context, owner, repo, path string)
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
 	return slices.Clone(data), nil
+}
+
+// UpdateFileIfMatch writes content only when the stored file's blob SHA
+// equals expectedSHA (or, for an empty expectedSHA, when no file exists).
+// Otherwise it returns ErrConflict and leaves the file unchanged.
+func (f *FakeClient) UpdateFileIfMatch(_ context.Context, owner, repo, path, message string, content []byte, expectedSHA string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if e := f.err("UpdateFileIfMatch"); e != nil {
+		return e
+	}
+
+	key := owner + "/" + repo + "/" + path
+	current, exists := f.FileContents[key]
+	switch {
+	case expectedSHA == "" && exists:
+		return fmt.Errorf("%w: %s already exists", ErrConflict, key)
+	case expectedSHA != "" && !exists:
+		return fmt.Errorf("%w: %s does not exist", ErrConflict, key)
+	case expectedSHA != "" && GitBlobSHA(current) != expectedSHA:
+		return fmt.Errorf("%w: %s does not match %s", ErrConflict, key, expectedSHA)
+	}
+
+	stored := slices.Clone(content)
+	f.CreatedFiles = append(f.CreatedFiles, FileRecord{
+		Owner:   owner,
+		Repo:    repo,
+		Path:    path,
+		Message: message,
+		Content: stored,
+	})
+	if f.FileContents == nil {
+		f.FileContents = make(map[string][]byte)
+	}
+	f.FileContents[key] = stored
+	return nil
 }
 
 func (f *FakeClient) DeleteFile(_ context.Context, owner, repo, path, message string) error {
