@@ -24,7 +24,8 @@ import (
 const codexChildUsageMarker = "fullsend-child"
 
 // codexChildUnreadableMarker starts the line printed for a child whose
-// rollout fails test -r, or that a failed search did not find.
+// rollout fails test -r, that a failed search did not find, or that has more
+// than one rollout.
 const codexChildUnreadableMarker = "fullsend-unreadable"
 
 // codexChildUsageMaxBytes bounds the read: the sessions directory is
@@ -50,7 +51,8 @@ type codexChildUsage struct {
 	// HasUsage is false when the rollout has no record; such a child adds
 	// nothing, not even a request.
 	HasUsage bool
-	// Unreadable marks a rollout that failed test -r or a failed search.
+	// Unreadable marks a rollout that failed test -r, a failed search, or an
+	// id with more than one rollout.
 	Unreadable bool
 	// BadLine marks a line that did not decode (torn, cut or planted).
 	BadLine bool
@@ -61,7 +63,9 @@ type codexChildUsage struct {
 // token_usage_record lines: the parser keeps the last that decodes, so a torn
 // last line falls back to the one before it. The record, not token_count: codex zeroes token_count's
 // counters when a request overflows the context window. A rollout it cannot
-// read, or that a failed search cannot find, prints the unreadable marker;
+// read, or that a failed search cannot find, prints the unreadable marker,
+// and so does an id with more than one rollout (codex writes one; copies are
+// planted), whose copies all go uncounted;
 // one a clean search misses prints nothing; a path outside sessionsDir is
 // skipped; head -c bounds the output.
 func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error) {
@@ -76,8 +80,8 @@ func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error
 		quoted = append(quoted, shellQuote(id))
 	}
 	return fmt.Sprintf(
-		`for id in %s; do files=$(command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null) || [ -n "$files" ] || printf '%%s %%s\n' %s "$id"; printf '%%s\n' "$files" | while IFS= read -r f; do case $f in %s/*) ;; *) continue ;; esac; if [ ! -r "$f" ]; then printf '%%s %%s\n' %s "$id"; continue; fi; printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p tail -n 2; command -p grep -a -e '"type":"token_usage_record"' -- "$f" 2>/dev/null | command -p tail -n 2; done; done | command -p head -c %d`,
-		strings.Join(quoted, " "), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(codexChildUsageMarker), codexChildUsageMaxBytes), nil
+		`for id in %s; do files=$(command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null) || [ -n "$files" ] || printf '%%s %%s\n' %s "$id"; if [ "$(printf '%%s\n' "$files" | command -p grep -c .)" -gt 1 ]; then printf '%%s %%s\n' %s "$id"; continue; fi; printf '%%s\n' "$files" | while IFS= read -r f; do case $f in %s/*) ;; *) continue ;; esac; if [ ! -r "$f" ]; then printf '%%s %%s\n' %s "$id"; continue; fi; printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p tail -n 2; command -p grep -a -e '"type":"token_usage_record"' -- "$f" 2>/dev/null | command -p tail -n 2; done; done | command -p head -c %d`,
+		strings.Join(quoted, " "), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(codexChildUnreadableMarker), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(codexChildUsageMarker), codexChildUsageMaxBytes), nil
 }
 
 // parseCodexChildUsage decodes the read command's output. Lines before the

@@ -527,6 +527,25 @@ func TestFoldCodexChildUsage_UnreadableRolloutIsAWarning(t *testing.T) {
 	}
 }
 
+// Codex writes one rollout per thread, so a copy is planted: the id is
+// reported and none of its copies count, while other children still do.
+func TestFoldCodexChildUsage_DuplicateRolloutsCountNothing(t *testing.T) {
+	sessions := writeCodexChildRollouts(t, codexChildSameModelID, codexChildOtherModelID)
+	day := filepath.Join(sessions, "2026", "09", "29")
+	data, err := os.ReadFile(filepath.Join(day, "rollout-2026-09-29T15-46-38-"+codexChildOtherModelID+".jsonl"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-copy-"+codexChildOtherModelID+".jsonl"), data, 0o644))
+	fakeOpenshellCodexChildren(t, filepath.Join(t.TempDir(), "openshell.log"), t.TempDir(), "", sessions)
+
+	m := codexParentMetrics("gpt-5.6-luna")
+	n, err := CodexRuntime{}.foldCodexChildUsage("sb", []string{codexChildSameModelID, codexChildOtherModelID}, m)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 child rollout(s) could not be read")
+	assert.Equal(t, 1, n, "the luna child only")
+	assert.NotContains(t, m.PerModelUsage, "gpt-5.6-terra", "neither copy counts")
+	assertCodexUsageSumsToTotals(t, m)
+}
+
 // A credential planted as the child's model is redacted from the key.
 func TestFoldCodexChildUsage_RedactsThePlantedModel(t *testing.T) {
 	token := "ghp_" + strings.Repeat("A", 36)
@@ -554,14 +573,14 @@ func TestFoldCodexChildUsage_SkipsCountersOverMaxTokens(t *testing.T) {
 		t.Run(field, func(t *testing.T) {
 			sessions := writeCodexChildRollouts(t)
 			day := filepath.Join(sessions, "2026", "09", "29")
-			for name, value := range map[string]string{"a": "9223372036854775807", "b": "9223372036854775799"} {
+			for id, value := range map[string]string{codexChildSameModelID: "9223372036854775807", codexChildOtherModelID: "9223372036854775799"} {
 				rollout := `{"type":"token_usage_record","payload":{"thread_token_usage":{"` + field + `":` + value + `}}}` + "\n"
-				require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-"+name+"-"+codexChildSameModelID+".jsonl"), []byte(rollout), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-a-"+id+".jsonl"), []byte(rollout), 0o644))
 			}
 			fakeOpenshellCodexChildren(t, filepath.Join(t.TempDir(), "openshell.log"), t.TempDir(), "", sessions)
 
 			m := codexParentMetrics("gpt-5.6-luna")
-			n, err := CodexRuntime{}.foldCodexChildUsage("sb", []string{codexChildSameModelID}, m)
+			n, err := CodexRuntime{}.foldCodexChildUsage("sb", []string{codexChildSameModelID, codexChildOtherModelID}, m)
 			require.Error(t, err, "a skipped child is a warning, as a cut or unreadable read is")
 			assert.Contains(t, err.Error(), "2 child(ren) with a counter past")
 			assert.Zero(t, n)
