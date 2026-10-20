@@ -64,8 +64,9 @@ var codexChildUsageThreadID = regexp.MustCompile(`^[0-9a-f-]{36}$`)
 // codexChildUsage is what one child's rollout reported.
 type codexChildUsage struct {
 	ID string
-	// Model is turn_context.payload.model of the child's first turn; ""
-	// when the rollout has no turn_context.
+	// Model is turn_context.payload.model of the child's last turn, which is
+	// its own: a fork copies the parent's turn_context lines ahead of the
+	// child's. "" when the rollout has no turn_context.
 	Model string
 	// Usage is payload.thread_token_usage of the child's last
 	// token_usage_record: codex adds every completed response to it, and a
@@ -86,7 +87,7 @@ type codexChildUsage struct {
 // codexChildUsageReadCommand renders the one in-sandbox command that reads
 // the children's rollouts. For each id, sorted and once, it finds every
 // rollout named for the thread (codex writes one), prints a marker line,
-// then the rollout's first turn_context line and its last token_usage_record
+// then the rollout's last turn_context line and its last token_usage_record
 // line. The record and not the last token_count: codex writes a token_count
 // whose usage counters are zero when a request overflows the context window,
 // and writes it only after the response's tools finish, so a child cancelled
@@ -112,7 +113,7 @@ func codexChildUsageReadCommand(sessionsDir string, ids []string) (string, error
 		quoted = append(quoted, shellQuote(id))
 	}
 	return fmt.Sprintf(
-		`for id in %s; do files=$(command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null) || [ -n "$files" ] || printf '%%s %%s\n' %s "$id"; printf '%%s\n' "$files" | while IFS= read -r f; do case $f in %s/*) ;; *) continue ;; esac; if [ ! -r "$f" ]; then printf '%%s %%s\n' %s "$id"; continue; fi; printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p head -n 1; command -p grep -a -e '"type":"token_usage_record"' -- "$f" 2>/dev/null | command -p tail -n 1; done; done | command -p head -c %d`,
+		`for id in %s; do files=$(command -p find %s -type f -name "rollout-*-$id.jsonl" 2>/dev/null) || [ -n "$files" ] || printf '%%s %%s\n' %s "$id"; printf '%%s\n' "$files" | while IFS= read -r f; do case $f in %s/*) ;; *) continue ;; esac; if [ ! -r "$f" ]; then printf '%%s %%s\n' %s "$id"; continue; fi; printf '%%s %%s\n' %s "$id"; command -p grep -a -e '"type":"turn_context"' -- "$f" 2>/dev/null | command -p tail -n 1; command -p grep -a -e '"type":"token_usage_record"' -- "$f" 2>/dev/null | command -p tail -n 1; done; done | command -p head -c %d`,
 		strings.Join(quoted, " "), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(sessionsDir), shellQuote(codexChildUnreadableMarker), shellQuote(codexChildUsageMarker), codexChildUsageMaxBytes), nil
 }
 
@@ -156,9 +157,7 @@ func parseCodexChildUsage(data []byte) []codexChildUsage {
 		cur := &out[len(out)-1]
 		switch {
 		case env.Type == "turn_context":
-			if cur.Model == "" {
-				cur.Model = strings.TrimSpace(env.Payload.Model)
-			}
+			cur.Model = strings.TrimSpace(env.Payload.Model)
 		case env.Type == "token_usage_record":
 			cur.Usage = env.Payload.Thread
 			cur.HasUsage = true

@@ -49,6 +49,7 @@ const (
 	codexChildOtherModelID  = "01a06300-0000-7000-8000-0000000000a2"
 	codexChildFailedID      = "01a06300-0000-7000-8000-0000000000a3"
 	codexChildNoModelID     = "01a06300-0000-7000-8000-0000000000a4"
+	codexChildForkedID      = "01a06300-0000-7000-8000-0000000000a5"
 	codexChildFailedSpawnID = "01a06300-0000-7000-8000-0000000000a9"
 )
 
@@ -58,6 +59,7 @@ var codexChildFixtures = map[string]string{
 	codexChildOtherModelID: "child_usage_other_model.jsonl",
 	codexChildFailedID:     "child_usage_failed.jsonl",
 	codexChildNoModelID:    "child_usage_no_model.jsonl",
+	codexChildForkedID:     "child_usage_forked.jsonl",
 }
 
 // writeCodexChildRollouts lays the child fixtures out as codex would under a
@@ -161,7 +163,6 @@ func TestCodexChildUsageReadCommand_ReadsTheThreadTotal(t *testing.T) {
 		count(`null`),
 		record(3000, 4),
 		count(`{"total_token_usage":` + usage(3000, 4, 3004) + `}`),
-		`{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}`,
 		record(90000, 20),
 		count(`{"total_token_usage":` + usage(0, 0, 258400) + `,"last_token_usage":` + usage(0, 0, 168380) + `,"model_context_window":258400}`),
 	}, "\n") + "\n"
@@ -173,7 +174,20 @@ func TestCodexChildUsageReadCommand_ReadsTheThreadTotal(t *testing.T) {
 	assert.Equal(t, codexChildUsage{
 		ID: codexChildSameModelID, Model: "gpt-5.6-luna", HasUsage: true,
 		Usage: codexUsage{InputTokens: 90000, OutputTokens: 20},
-	}, got[0], "the first turn_context's model; the last record's thread total, not the zeroed token_count after it")
+	}, got[0], "the last record's thread total, not the zeroed token_count after it")
+}
+
+// A forked child's rollout starts with the parent's turn_context lines; the
+// read names the child by its own, the last.
+func TestCodexChildUsageReadCommand_NamesAForkedChildByItsOwnTurn(t *testing.T) {
+	t.Parallel()
+
+	got := runCodexChildUsageRead(t, writeCodexChildRollouts(t, codexChildForkedID), []string{codexChildForkedID})
+	require.Len(t, got, 1)
+	assert.Equal(t, codexChildUsage{
+		ID: codexChildForkedID, Model: "gpt-5.6-terra", HasUsage: true,
+		Usage: codexUsage{InputTokens: 600, OutputTokens: 40, ReasoningOutputTokens: 10},
+	}, got[0], "the child's model and record, not the parent's inherited turn_context or token_count")
 }
 
 // A planted rollout name with a newline in it splits into several "paths";
@@ -228,8 +242,8 @@ func TestParseCodexChildUsage(t *testing.T) {
 
 	got := parseCodexChildUsage([]byte(data))
 	require.Len(t, got, 3)
-	assert.Equal(t, codexChildUsage{ID: codexChildSameModelID, Model: "gpt-5.6-terra", HasUsage: true, Usage: codexUsage{InputTokens: 20, OutputTokens: 2}},
-		got[0], "first turn_context names the model, the last record wins, a malformed line is skipped")
+	assert.Equal(t, codexChildUsage{ID: codexChildSameModelID, Model: "gpt-5.6-sol", HasUsage: true, Usage: codexUsage{InputTokens: 20, OutputTokens: 2}},
+		got[0], "the last turn_context names the model, the last record wins, a malformed line is skipped")
 	assert.Equal(t, codexChildUsage{ID: codexChildOtherModelID, HasUsage: true, Usage: codexUsage{InputTokens: 5, OutputTokens: 5}},
 		got[1], "no turn_context: the model stays empty and the fold buckets it")
 	assert.Equal(t, codexChildUsage{ID: codexChildFailedID, Model: "gpt-5.6-terra"},
@@ -464,7 +478,7 @@ func TestFoldCodexChildUsage_CutReadIsAWarning(t *testing.T) {
 	day := filepath.Join(sessions, "2026", "09", "29")
 	big := `{"type":"turn_context","payload":{"model":"` + strings.Repeat("x", 600<<10) + `"}}` + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-2026-09-29T15-46-38-"+codexChildOtherModelID+".jsonl"), []byte(big), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-2026-09-29T15-46-38-"+codexChildFailedID+".jsonl"), append([]byte(big), readCodexFixture(t, "child_usage_other_model.jsonl")...), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(day, "rollout-2026-09-29T15-46-38-"+codexChildFailedID+".jsonl"), append(readCodexFixture(t, "child_usage_other_model.jsonl"), big...), 0o644))
 	fakeOpenshellCodexChildren(t, filepath.Join(t.TempDir(), "openshell.log"), t.TempDir(), "", sessions)
 
 	m := codexParentMetrics("gpt-5.6-luna")

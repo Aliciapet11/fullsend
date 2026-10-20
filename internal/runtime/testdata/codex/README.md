@@ -34,7 +34,7 @@ Inputs for `foldCodexChildUsage` (`internal/runtime/codex_subagents.go`), not fo
 `parseCodexStream`: they are codex **rollouts** (`$CODEX_HOME/sessions/**/rollout-*.jsonl`, the
 underscored envelope of `codex_redact.go`), not the `exec --json` stream. Line types and fields
 were copied from the rollouts of the 0.157.0 paid probe of 2026-09-29, trimmed, with
-synthetic ids. The fold reads two lines per rollout: the first `turn_context` (its
+synthetic ids. The fold reads two lines per rollout: the last `turn_context` (its
 `payload.model`) and the last `token_usage_record` (its `payload.thread_token_usage`, cumulative for
 the thread and not reset when a request overflows the context window, unlike `token_count`).
 
@@ -44,6 +44,7 @@ the thread and not reset when a request overflows the context window, unlike `to
 | `child_usage_other_model.jsonl` | A child on `gpt-5.6-terra`, every normalized counter non-zero. |
 | `child_usage_failed.jsonl` | A child whose model the provider rejected (404): `turn_context` names the model, `task_complete` carries `error`, and there is no `token_usage_record`, so it contributes nothing. |
 | `child_usage_no_model.jsonl` | A child with a `token_usage_record` and no `turn_context`: its usage is bucketed under `unknown`. |
+| `child_usage_forked.jsonl` | A forked child (hand-authored from codex 0.159.3's fork rules): the parent's `turn_context` (`gpt-5.6-luna`) and `token_count` copied ahead of the child's own `turn_context` (`gpt-5.6-terra`) and `token_usage_record`; its usage lands under `gpt-5.6-terra`. |
 
 The tests lay the rollouts out under a temporary sessions tree as
 `2026/09/29/rollout-2026-09-29T15-46-38-<thread id>.jsonl`, the name codex gives a rollout.
