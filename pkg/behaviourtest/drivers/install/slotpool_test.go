@@ -142,10 +142,14 @@ func (p *fakePool) exists(t *testing.T, s Slot) bool {
 
 func testLayout() PoolLayout { return PoolLayout{FirstOrgIndex: 1, OrgCount: 3, SlotsPerOrg: 4} }
 
+// newTestAllocator returns an allocator without the shared e2e-lock
+// bridge, so slot-leasing tests see only slot repo calls. orglock_test.go
+// covers the bridge.
 func newTestAllocator(t *testing.T, layout PoolLayout, p *fakePool) *slotAllocator {
 	t.Helper()
 	a, err := newSlotAllocator(layout, p.clientFor, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 	return a
 }
 
@@ -507,6 +511,7 @@ func TestSlotAllocator_Cancellation(t *testing.T) {
 		return p.clientFor(ctx, org)
 	}, t.Logf)
 	require.NoError(t, err)
+	a3.orgLock = nil
 	_, _, err = a3.Claim(ctx3)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Empty(t, a3.Held())

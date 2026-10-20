@@ -150,6 +150,147 @@ func TestGetRepo_ReportsIDAndDescription(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(99), repo.ID)
 	assert.Equal(t, "lease marker", repo.Description)
+	assert.True(t, repo.CreatedAt.IsZero(), "created_at absent from the response")
+}
+
+func TestRepoCreatedAt(t *testing.T) {
+	created := time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":         int64(7),
+			"name":       "e2e-lock",
+			"full_name":  "myorg/e2e-lock",
+			"created_at": created.Format(time.RFC3339),
+		})
+	}))
+	defer srv.Close()
+	client := newTestClient(t, srv)
+
+	repo, err := client.GetRepo(context.Background(), "myorg", "e2e-lock")
+	require.NoError(t, err)
+	assert.True(t, created.Equal(repo.CreatedAt), "GetRepo CreatedAt = %v", repo.CreatedAt)
+
+	repo, err = client.CreateRepo(context.Background(), "myorg", "e2e-lock", "lock", false)
+	require.NoError(t, err)
+	assert.True(t, created.Equal(repo.CreatedAt), "CreateRepo CreatedAt = %v", repo.CreatedAt)
+}
+
+// contentsServer is a minimal Contents API for one file that enforces the
+// "sha" precondition the way GitHub does.
+type contentsServer struct {
+	t       *testing.T
+	mu      sync.Mutex
+	content []byte
+	exists  bool
+	puts    int
+	// failPut makes the next PUT answer with this status.
+	failPut int
+}
+
+func (s *contentsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	assert.Equal(s.t, "/repos/o/r/contents/state/holders.json", r.URL.Path)
+	switch r.Method {
+	case http.MethodGet:
+		if !s.exists {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]any{"message": "Not Found"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"content": base64.StdEncoding.EncodeToString(s.content),
+			"sha":     forge.GitBlobSHA(s.content),
+		})
+	case http.MethodPut:
+		s.puts++
+		if s.failPut != 0 {
+			w.WriteHeader(s.failPut)
+			s.failPut = 0
+			return
+		}
+		var body struct {
+			Content string `json:"content"`
+			SHA     string `json:"sha"`
+		}
+		require.NoError(s.t, json.NewDecoder(r.Body).Decode(&body))
+		switch {
+		case s.exists && body.SHA == "":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(map[string]any{"message": "Invalid request.\n\n\"sha\" wasn't supplied."})
+			return
+		case s.exists && body.SHA != forge.GitBlobSHA(s.content):
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]any{"message": "state/holders.json does not match " + body.SHA})
+			return
+		}
+		data, err := base64.StdEncoding.DecodeString(body.Content)
+		require.NoError(s.t, err)
+		status := http.StatusOK
+		if !s.exists {
+			status = http.StatusCreated
+		}
+		s.content, s.exists = data, true
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]any{})
+	default:
+		s.t.Errorf("unexpected %s", r.Method)
+	}
+}
+
+func (s *contentsServer) state() ([]byte, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.content, s.puts
+}
+
+func TestUpdateFileIfMatch(t *testing.T) {
+	ctx := context.Background()
+	cs := &contentsServer{t: t}
+	srv := httptest.NewServer(cs)
+	defer srv.Close()
+	client := newTestClient(t, srv)
+	const path = "state/holders.json"
+
+	// Create only if absent.
+	require.NoError(t, client.UpdateFileIfMatch(ctx, "o", "r", path, "create", []byte("v1"), ""))
+	err := client.UpdateFileIfMatch(ctx, "o", "r", path, "create again", []byte("other"), "")
+	require.True(t, forge.IsConflict(err), "create over an existing file: %v", err)
+
+	// Update at the SHA of the content just read.
+	read, err := client.GetFileContent(ctx, "o", "r", path)
+	require.NoError(t, err)
+	staleSHA := forge.GitBlobSHA(read)
+	require.NoError(t, client.UpdateFileIfMatch(ctx, "o", "r", path, "update", []byte("v2"), staleSHA))
+
+	// A stale SHA is a conflict, sent exactly once, and leaves the file.
+	_, putsBefore := cs.state()
+	err = client.UpdateFileIfMatch(ctx, "o", "r", path, "stale", []byte("v3"), staleSHA)
+	require.True(t, forge.IsConflict(err), "stale SHA: %v", err)
+	content, puts := cs.state()
+	assert.Equal(t, putsBefore+1, puts, "a conflicting write must not be retried")
+	assert.Equal(t, "v2", string(content))
+
+	// A server error is not a conflict and is not replayed either.
+	cs.mu.Lock()
+	cs.failPut = http.StatusBadGateway
+	cs.mu.Unlock()
+	err = client.UpdateFileIfMatch(ctx, "o", "r", path, "ambiguous", []byte("v4"), forge.GitBlobSHA([]byte("v2")))
+	require.Error(t, err)
+	assert.False(t, forge.IsConflict(err))
+	content, after := cs.state()
+	assert.Equal(t, puts+1, after, "an ambiguous failure must not be replayed")
+	assert.Equal(t, "v2", string(content))
+}
+
+func TestIsFileConflict(t *testing.T) {
+	assert.True(t, isFileConflict(&APIError{StatusCode: http.StatusConflict}))
+	assert.True(t, isFileConflict(&APIError{StatusCode: http.StatusUnprocessableEntity, Message: `"sha" wasn't supplied.`}))
+	assert.False(t, isFileConflict(&APIError{StatusCode: http.StatusUnprocessableEntity, Message: "Validation Failed"}))
+	assert.False(t, isFileConflict(&APIError{StatusCode: http.StatusNotFound}))
 }
 
 func TestDeleteRepo(t *testing.T) {
@@ -2419,6 +2560,50 @@ func TestWithRetryGuard_ErrorStopsResend(t *testing.T) {
 			assert.Equal(t, int32(1), attempts.Load(), "the request is not resent after the guard refuses")
 		})
 	}
+}
+
+func TestWithRetryGuard_StopsCommitFilesRetryWaits(t *testing.T) {
+	// Every request after the repo read answers 404 (init race), so
+	// CommitFiles waits and would retry the branch-ref read.
+	var refReads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo":
+			_, _ = w.Write([]byte(`{"default_branch":"main"}`))
+		default:
+			refReads.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := &LiveClient{token: "test-token", baseURL: srv.URL, http: srv.Client(), afterFunc: noWaitAfter}
+
+	var guardCalls int
+	stop := errors.New("target replaced")
+	ctx := WithRetryGuard(context.Background(), func(context.Context) error {
+		guardCalls++
+		return stop
+	})
+	_, err := client.CommitFiles(ctx, "org", "repo", "msg", []forge.TreeFile{{Path: "a", Content: []byte("a")}})
+	require.ErrorIs(t, err, stop)
+	assert.Equal(t, 1, guardCalls, "the guard runs after the first repo-race wait")
+	assert.Equal(t, int32(1), refReads.Load(), "no branch-ref read follows a refused guard")
+}
+
+func TestWithRetryGuard_StopsCommitRetryDelay(t *testing.T) {
+	c := &LiveClient{afterFunc: noWaitAfter}
+	stop := errors.New("target replaced")
+	ctx := WithRetryGuard(context.Background(), func(context.Context) error { return stop })
+
+	var runs int
+	_, err := retryCommitOp(ctx, c, "commit", func() (bool, error) {
+		runs++
+		return false, forge.ErrNonFastForward
+	})
+	require.ErrorIs(t, err, stop)
+	assert.Equal(t, 1, runs, "the op is not rerun after the guard refuses")
 }
 
 func TestCreateFileOnBranch(t *testing.T) {

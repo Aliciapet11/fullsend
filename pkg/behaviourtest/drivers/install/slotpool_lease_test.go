@@ -152,6 +152,7 @@ func TestSlotAllocator_ReleaseReResolvesClient(t *testing.T) {
 		return p.clients[org], nil
 	}, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 
 	s, _, err := a.Claim(context.Background())
 	require.NoError(t, err)
@@ -172,6 +173,7 @@ func TestSlotAllocator_ReleaseFallsBackToClaimClient(t *testing.T) {
 		return p.clients[org], nil
 	}, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 
 	s, _, err := a.Claim(context.Background())
 	require.NoError(t, err)
@@ -296,6 +298,7 @@ func TestSlotAllocator_LiveClientRateLimitDoesNotPinClaim(t *testing.T) {
 	client := gh.New("test-token").WithBaseURL(srv.URL)
 	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 
 	start := time.Now()
 	_, _, err = a.Claim(context.Background())
@@ -331,6 +334,7 @@ func TestSlotAllocator_LiveClientTimeoutKeepsRetryAfter(t *testing.T) {
 	client := gh.New("test-token").WithBaseURL(srv.URL)
 	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 
 	start := time.Now()
 	_, _, err = a.Claim(context.Background())
@@ -367,6 +371,7 @@ func TestSlotAllocator_LiveClientThrottledListingMovesToNextOrg(t *testing.T) {
 	client := gh.New("test-token").WithBaseURL(srv.URL)
 	a, err := newSlotAllocator(layout, func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 	a.shuffle = func([]Slot) {}
 
 	start := time.Now()
@@ -420,6 +425,7 @@ func TestSlotAllocator_LiveClientDeleteNotReplayedAfterServerError(t *testing.T)
 	client := gh.New("test-token").WithBaseURL(srv.URL)
 	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 
 	s, _, err := a.Claim(context.Background())
 	require.NoError(t, err)
@@ -501,6 +507,7 @@ func TestSlotAllocator_LiveClientRateLimitedDeleteRechecksOwnership(t *testing.T
 			})
 			a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 			require.NoError(t, err)
+			a.orgLock = nil
 
 			s, _, err := a.Claim(context.Background())
 			require.NoError(t, err)
@@ -530,6 +537,7 @@ func TestSlotAllocator_LiveClientRateLimitedDeleteRetriesWhenStillOurs(t *testin
 	})
 	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 
 	s, _, err := a.Claim(context.Background())
 	require.NoError(t, err)
@@ -572,6 +580,7 @@ func TestSlotAllocator_ReleaseGuardLookupFailureDeletesNothing(t *testing.T) {
 	})
 	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
 	require.NoError(t, err)
+	a.orgLock = nil
 
 	s, _, err := a.Claim(context.Background())
 	require.NoError(t, err)

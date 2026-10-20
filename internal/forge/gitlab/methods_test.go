@@ -3463,6 +3463,16 @@ func TestErrNotSupported_OrgMethods(t *testing.T) {
 	})
 }
 
+func TestErrNotSupported_FileMethods(t *testing.T) {
+	client, _ := setupTest(t)
+	ctx := context.Background()
+
+	t.Run("UpdateFileIfMatch", func(t *testing.T) {
+		err := client.UpdateFileIfMatch(ctx, "org", "repo", "f", "m", []byte("x"), "")
+		require.ErrorIs(t, err, forge.ErrNotSupported)
+	})
+}
+
 func TestErrNotSupported_WorkflowMethods(t *testing.T) {
 	client, _ := setupTest(t)
 	ctx := context.Background()
