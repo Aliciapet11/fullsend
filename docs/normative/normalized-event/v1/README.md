@@ -508,7 +508,8 @@ fail closed. The `issue`/`update` (other) row resolves the bare issue update
 as ignored. That is the only ignored row, and an implementation MUST NOT
 extend it to other actions or object kinds. Any future named sub-check (e.g.
 draft→ready for `marked_ready`) MUST be added as an **explicit row in this
-spec**, not invented at implementation time. The `merge_request`/`close` row requires the current
+spec**, not invented at implementation time.
+The `merge_request`/`close` row requires the current
 `state == "closed"` in addition to the timestamps because GitLab can leave a
 stale `closed_at` on a reopened MR; the production poller already guards on
 `state == "closed"` for the same reason (`internal/poll/events.go`), and

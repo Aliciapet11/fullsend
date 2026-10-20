@@ -103,13 +103,18 @@ type webhookPayload struct {
 		NoteableType string `json:"noteable_type"`
 	} `json:"object_attributes"`
 	Changes struct {
-		Labels *struct {
-			Previous []webhookLabel `json:"previous"`
-			Current  []webhookLabel `json:"current"`
-		} `json:"labels"`
+		// Labels stays raw so an absent key (len 0) is distinguishable
+		// from an explicit null, which a pointer field cannot tell apart.
+		Labels json.RawMessage `json:"labels"`
 	} `json:"changes"`
 	Issue        *webhookIIDRef `json:"issue"`
 	MergeRequest *webhookIIDRef `json:"merge_request"`
+}
+
+// webhookLabelChange is the decoded changes.labels object.
+type webhookLabelChange struct {
+	Previous []webhookLabel `json:"previous"`
+	Current  []webhookLabel `json:"current"`
 }
 
 // labelDiff is one discrete label add/remove derived from changes.labels.
@@ -395,12 +400,18 @@ func (p *Poller) webhookIssueEvents(ctx context.Context, payload webhookPayload)
 	case "reopen":
 		return nil, errors.New("issue reopen has no event-time actor evidence")
 	case "update":
-		if payload.Changes.Labels == nil {
+		if len(payload.Changes.Labels) == 0 {
 			log.Printf("webhook: ignoring issue #%d update without changes.labels: not a routable transition, nothing dispatched", attrs.IID)
 			return nil, nil
 		}
+		// The key is present, so this is a label-change claim: a null or
+		// malformed value is rejected, never ignored.
+		var change *webhookLabelChange
+		if err := json.Unmarshal(payload.Changes.Labels, &change); err != nil || change == nil {
+			return nil, errors.New("issue update has an unusable changes.labels value")
+		}
 		var err error
-		diffs, err = diffWebhookLabels(payload.Changes.Labels.Previous, payload.Changes.Labels.Current)
+		diffs, err = diffWebhookLabels(change.Previous, change.Current)
 		if err != nil {
 			return nil, err
 		}

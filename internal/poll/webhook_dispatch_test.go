@@ -729,6 +729,41 @@ func TestRunWebhook_MalformedIssueLabelUpdateFailsClosed(t *testing.T) {
 	}
 }
 
+// TestRunWebhook_PresentButUnusableIssueLabelsFailClosed: the presence of
+// the changes.labels key decides between ignored and rejected, not its
+// value. An explicit null, an empty object, or a non-object value is a
+// label-change claim that cannot be validated, so the job fails.
+func TestRunWebhook_PresentButUnusableIssueLabelsFailClosed(t *testing.T) {
+	tests := []struct {
+		name    string
+		labels  any
+		wantErr string
+	}{
+		{"explicit null", nil, "unusable changes.labels"},
+		{"empty object", map[string]any{}, "does not resolve"},
+		{"non-object", "ready-to-code", "unusable changes.labels"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mc := newMockClient()
+			webhookLabelAddFixture(mc)
+			raw := mustJSON(t, map[string]any{
+				"object_kind":       "issue",
+				"user":              map[string]any{"id": alice.ID},
+				"object_attributes": map[string]any{"iid": 5, "action": "update"},
+				"changes":           map[string]any{"labels": tt.labels},
+			})
+			err := newWebhookPoller(mc).RunWebhook(context.Background(), raw)
+			if err == nil || !strings.Contains(err.Error(), "build webhook events") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want build error containing %q", err, tt.wantErr)
+			}
+			if len(mc.pipelineCalls) != 0 || mc.forceCommits != 0 {
+				t.Errorf("pipelines = %d, commits = %d, want none", len(mc.pipelineCalls), mc.forceCommits)
+			}
+		})
+	}
+}
+
 // TestRunWebhook_CASMergesConcurrentPollWrite checks that a poll cycle
 // committing between the webhook's read and write keeps its keys and
 // labels: the webhook reloads and unions rather than overwriting.
