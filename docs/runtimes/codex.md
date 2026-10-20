@@ -241,7 +241,10 @@ What a local codex run needs, beyond the guide:
   read. A `codex` or `node` found only through an agent-writable directory, or
   a symlink into one, fails the launch with
   `codex not found in a PATH directory the agent cannot write` or
-  `node not found in a PATH directory the agent cannot write` (exit 127). The
+  `node not found in a PATH directory the agent cannot write` (exit 127). Any
+  other first line that starts `codex` through `env` (`#!/usr/bin/env -S node`,
+  say) fails it with
+  `starts through env with a first line other than '#!/usr/bin/env node'`. The
   `PATH` that codex and its tools inherit does not change.
 - **The repository's own `.codex/` config is never loaded.** fullsend pins the cloned repo's
   project trust to untrusted, so `.codex/config.toml` and `.codex/hooks.json` (model, instructions,

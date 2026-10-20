@@ -15,6 +15,8 @@ import { test } from "node:test";
 
 import defaultExport, {
   AGENT_TOOL_PARAMETERS,
+  CHILD_BIN_ENV,
+  CHILD_NODE_ENV,
   CHILD_SYSTEM_NOTE,
   GATEWAY_CONFIG_FILE,
   GATEWAY_CONFIG_FILE_ENV,
@@ -26,6 +28,7 @@ import defaultExport, {
   RESULT_MAX_BYTES,
   childArgs,
   childEnv,
+  childLaunch,
   childFallbacks,
   childModelNotServed,
   childSessionDir,
@@ -104,6 +107,10 @@ function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "fullsend-agent-"));
   const piBin = join(dir, "fake-pi.mjs");
   writeFileSync(piBin, FAKE_PI, { mode: 0o755 });
+  // Children start as the launch pins them (piChildLaunchExport): this node
+  // running the fake pi.
+  process.env[CHILD_BIN_ENV] = piBin;
+  process.env[CHILD_NODE_ENV] = process.execPath;
   const manifest = {
     agentName: "review",
     tools: null,
@@ -936,7 +943,34 @@ test("run: at most maxConcurrent children run at once; the rest queue", async ()
   assert.deepEqual(children[0].opts.stdio, ["pipe", "pipe", "pipe"], "stdin is a pipe: it carries the prompt");
   assert.equal(children[0].child.stdinText, "p1", "the prompt is written and the pipe closed");
   assert.equal(children[0].opts.detached, undefined, "children share the parent's process group, so a killed parent takes them with it");
-  assert.equal(children[0].bin, manifest.agent.piBin);
+  assert.equal(children[0].bin, process.execPath, "the child starts through the pinned node");
+  assert.equal(children[0].args[0], manifest.agent.piBin, "running the pinned pi");
+});
+
+test("childLaunch: the pinned node and pi, pi alone without a node, refused otherwise", () => {
+  assert.deepEqual(childLaunch({ [CHILD_BIN_ENV]: "/usr/lib/pi/cli.js", [CHILD_NODE_ENV]: "/usr/bin/node" }), { command: "/usr/bin/node", prefix: ["/usr/lib/pi/cli.js"] });
+  assert.deepEqual(childLaunch({ [CHILD_BIN_ENV]: "/usr/local/bin/pi", [CHILD_NODE_ENV]: "" }), { command: "/usr/local/bin/pi", prefix: [] });
+  assert.deepEqual(childLaunch({ [CHILD_BIN_ENV]: "/usr/local/bin/pi" }), { command: "/usr/local/bin/pi", prefix: [] });
+  for (const [name, env] of Object.entries({
+    "no pi": { [CHILD_NODE_ENV]: "/usr/bin/node" },
+    "empty pi": { [CHILD_BIN_ENV]: "", [CHILD_NODE_ENV]: "/usr/bin/node" },
+    "relative pi": { [CHILD_BIN_ENV]: "pi", [CHILD_NODE_ENV]: "/usr/bin/node" },
+    "relative node": { [CHILD_BIN_ENV]: "/usr/lib/pi/cli.js", [CHILD_NODE_ENV]: "node" },
+    "no env": undefined,
+  })) {
+    assert.equal(childLaunch(env), null, name);
+  }
+});
+
+test("run: no child starts when the launch did not pin pi", async () => {
+  const { manifest } = fixture();
+  const { spawn, children } = fakeSpawn();
+  const env = { ...process.env };
+  delete env[CHILD_BIN_ENV];
+  const tool = createAgentTool(manifest, { spawn, ...quiet, env });
+  const res = await tool.run({ prompt: "p" }, { parentModel: "anthropic-vertex/claude-opus-4-6" });
+  assert.equal(children.length, 0, "nothing is spawned");
+  assert.match(JSON.stringify(res), /FULLSEND_PI_CHILD_BIN and FULLSEND_PI_CHILD_NODE do not name an absolute pi and node/);
 });
 
 test("run: a queued dispatch aborted before it starts never spawns and still settles", async () => {

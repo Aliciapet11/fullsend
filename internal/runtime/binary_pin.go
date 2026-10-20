@@ -32,13 +32,19 @@ const nodeShebangInterpreter = "#!/usr/bin/env node"
 // nodeShebangPin reads the first line of the pinned CLI in cliVar with the
 // `read` builtin (no external tool runs, and the file is one the agent user
 // cannot write) and, when it is nodeShebangInterpreter, pins node in nodeVar
-// (envDataBinaryPin, exit 127 when there is none). Any other first line,
-// such as an ELF binary's, or a file the shell cannot read, pins nodeVar
-// empty. `read` stops at the first newline, and its errors (a NUL byte in a
-// binary, an unreadable file) are discarded.
+// (envDataBinaryPin, exit 127 when there is none). Any other first line that
+// starts the CLI through env (`#! /usr/bin/env node`, `#!/usr/bin/env -S
+// node ...`, a CRLF line, another interpreter) stops the launch with exit
+// 127: env would look its interpreter up on whatever PATH the launch shell
+// has by then. Any other first line, such as an ELF binary's or an absolute
+// interpreter's, or a file the shell cannot read, pins nodeVar empty. `read`
+// stops at the first newline, and its errors (a NUL byte in a binary, an
+// unreadable file) are discarded.
 func nodeShebangPin(cliVar, nodeVar string) string {
 	return `{ fullsend_shebang=; IFS= read -r fullsend_shebang 2>/dev/null <"$` + cliVar + `"; case $fullsend_shebang in (` +
-		shellQuote(nodeShebangInterpreter) + `) ` + envDataBinaryPin(nodeVar, "node") + ` ;; (*) readonly ` + nodeVar + `= ;; esac; }`
+		shellQuote(nodeShebangInterpreter) + `) ` + envDataBinaryPin(nodeVar, "node") + ` ;; ` +
+		`('#!'*/env|'#!'*/env[[:blank:]]*) echo "fullsend: $` + cliVar + ` starts through env with a first line other than '` + nodeShebangInterpreter + `'" >&2; exit 127 ;; ` +
+		`(*) readonly ` + nodeVar + `= ;; esac; }`
 }
 
 // cliLaunch is the words that start the CLI binaryPin pinned: through the

@@ -249,7 +249,11 @@ What a local pi run needs, beyond the guide:
   `node` up on the `PATH` left after `.env` is read. A `pi` or `node` found
   only through an agent-writable directory, or a symlink into one, fails the
   launch with `pi not found in a PATH directory the agent cannot write` or
-  `node not found in a PATH directory the agent cannot write` (exit 127).
+  `node not found in a PATH directory the agent cannot write` (exit 127). The
+  Agent tool starts its sub-agents with the same pinned `pi` and `node`. The
+  first line must be exactly `#!/usr/bin/env node`: any other line that starts
+  pi through `env` fails the launch with
+  `starts through env with a first line other than '#!/usr/bin/env node'`.
 - **Platforms** — verified end to end on macOS Apple Silicon (podman machine, Homebrew `openshell`)
   and Fedora with rootless Podman; the guide's platform notes apply unchanged.
 - **`review` and `retro`** run their real sub-agent roster through the `Agent` tool; the children

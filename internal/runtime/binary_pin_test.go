@@ -188,6 +188,34 @@ func TestBinaryPin_PinsNodeForNodeScripts(t *testing.T) {
 	}
 }
 
+// A CLI that starts through env with any other first line is refused: env
+// would look its interpreter up on the PATH the launch has by then. A CLI
+// with an absolute interpreter starts directly.
+func TestBinaryPin_RefusesOtherEnvShebangs(t *testing.T) {
+	t.Parallel()
+	for _, shell := range pinShells() {
+		for name, first := range map[string]string{
+			"space after #!": "#! /usr/bin/env node",
+			"env -S":         "#!/usr/bin/env -S node --no-warnings",
+			"trailing space": "#!/usr/bin/env node ",
+			"CRLF":           "#!/usr/bin/env node\r",
+			"other program":  "#!/usr/bin/env python3",
+			"bare env":       "#!/usr/bin/env",
+		} {
+			t.Run(filepath.Base(shell)+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				f := newTrustedPinFixture(t)
+				f.stub(t, f.writable, "node", "#!/bin/sh\necho FAKE-NODE\n")
+				f.stub(t, f.protected, "pi", first+"\nconsole.log('cli')\n")
+				out, code := f.run(t, shell, f.writable+":"+f.protected, piBinaryPin()+` && `+cliLaunch(piBinaryVar, piNodeVar))
+				assert.Equal(t, 127, code, out)
+				assert.Contains(t, out, "starts through env with a first line other than '"+nodeShebangInterpreter+"'")
+				assert.NotContains(t, out, "FAKE-NODE")
+			})
+		}
+	}
+}
+
 // The node pin is read-only like the CLI pin, so a later assignment (what a
 // sourced .env could try) aborts the shell instead of choosing the
 // interpreter.

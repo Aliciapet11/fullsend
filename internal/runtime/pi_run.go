@@ -486,7 +486,7 @@ func buildPiRunCommand(params RunParams, m *piManifest, exts []piManifestExtensi
 	parts = append(parts,
 		// .env is read as data, never sourced (envDataLoad, #8498); that
 		// also drops LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT (#7580).
-		"&& "+envDataLoad(envFile, piBinaryVar, piNodeVar, piHookPythonEnv, piHookPathEnv),
+		"&& "+envDataLoad(envFile, piBinaryVar, piNodeVar, piHookPythonEnv, piHookPathEnv, piChildBinEnv, piChildNodeEnv),
 		// First thing after the agent-writable .env, on every provider
 		// path: clear the variables that steer the module loaders pi runs
 		// under. JITI_ALIAS alone swaps the file behind an `-e` path
@@ -503,6 +503,8 @@ func buildPiRunCommand(params RunParams, m *piManifest, exts []piManifestExtensi
 		// (and every sub-agent's adapter, which inherits it).
 		"&& "+piHookPythonExport(),
 		"&& "+piHookPathExport(),
+		// The pi and node pinned before .env, for the Agent tool's children.
+		"&& "+piChildLaunchExport(),
 		"&& export "+piRuntimeEnv+"=pi",
 		// pi's built-in google-vertex (Gemini) provider resolves credentials
 		// from GOOGLE_APPLICATION_CREDENTIALS + GOOGLE_CLOUD_PROJECT +
@@ -740,6 +742,23 @@ const piHookPathEnv = "FULLSEND_PI_HOOK_PATH"
 // the trusted PATH. It must follow envDataLoad, which records it.
 func piHookPathExport() string {
 	return "export " + piHookPathEnv + `="$` + envDataTrustedPathVar + `"`
+}
+
+// piChildBinEnv and piChildNodeEnv hand fullsend-agent.js the pi CLI and
+// the node it starts its children with: the pair binaryPin pinned before
+// .env (piBinaryVar, piNodeVar). Spawning the bare manifest piBin instead
+// would leave a `#!/usr/bin/env node` pi to look node up on the PATH the
+// parent inherited, which .env and the agent can change. Both names are on
+// the loader's drop list and are exported after the load.
+const (
+	piChildBinEnv  = "FULLSEND_PI_CHILD_BIN"
+	piChildNodeEnv = "FULLSEND_PI_CHILD_NODE"
+)
+
+// piChildLaunchExport is the POSIX sh fragment that exports piChildBinEnv
+// and piChildNodeEnv from the pins. It must follow piBinaryPin.
+func piChildLaunchExport() string {
+	return "export " + piChildBinEnv + `="$` + piBinaryVar + `" ` + piChildNodeEnv + `="$` + piNodeVar + `"`
 }
 
 // piLoaderEnvNames are the environment variables that steer the module

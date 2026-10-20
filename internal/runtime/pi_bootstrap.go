@@ -69,8 +69,9 @@ const (
 // Agent/Task, which is also when Run does not load the extension.
 type piAgentManifest struct {
 	Enabled bool `json:"enabled"`
-	// PiBin is the pi binary the children run, resolved in the sandbox at
-	// Bootstrap ("pi" when the probe found nothing, i.e. PATH lookup).
+	// PiBin is the pi binary the Bootstrap probe found ("pi" when it found
+	// nothing). Children start through the pi and node the launch pinned
+	// instead (piChildLaunchExport).
 	PiBin       string `json:"piBin"`
 	SessionsDir string `json:"sessionsDir"`
 	// Extensions are the -e paths every child gets, in order: the provider
