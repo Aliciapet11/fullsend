@@ -572,6 +572,25 @@ func TestEnvDataPin_SkipsAgentWritableInterpreters(t *testing.T) {
 	assert.Equal(t, string(trusted), string(out), "an interpreter the agent user owns is not pinned")
 	assert.NoFileExists(t, marker)
 
+	// A protected directory's readlink that is a symlink is never run, even
+	// when its target looks protected too: the `test` function makes the
+	// fixture directory and the link target pass the -w and -O checks, so
+	// only the symlink check keeps the planted readlink from running.
+	protected := t.TempDir()
+	writableReal, err := filepath.EvalSymlinks(writable)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(writable, "readlink"), []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(writableReal, "readlink"), filepath.Join(protected, "readlink")))
+	protectedReal, err := filepath.EvalSymlinks(protected)
+	require.NoError(t, err)
+	shadow = `test() { case "$1" in -w|-O) case "` + protectedReal + `/readlink" in "$2"/*|"$2") return 1 ;; esac; case "$2" in "` + writableReal + `/readlink") return 1 ;; esac ;; esac; command test "$@"; }; `
+	cmd = exec.Command("/bin/sh", "-c", shadow+envDataPin()+` && printf '%s' "$`+envDataPythonVar+`"`)
+	cmd.Env = []string{"PATH=" + protectedReal + ":" + os.Getenv("PATH")}
+	out, err = cmd.Output()
+	require.NoError(t, err)
+	assert.Equal(t, string(trusted), string(out))
+	assert.NoFileExists(t, marker, "a readlink linking to an agent-writable file ran")
+
 	resolved, err := filepath.EvalSymlinks(string(trusted))
 	require.NoError(t, err)
 	assert.Equal(t, resolved, string(trusted), "the pin is the resolved interpreter")
@@ -584,6 +603,64 @@ func TestEnvDataPin_SkipsAgentWritableInterpreters(t *testing.T) {
 	require.ErrorAs(t, err, &exitErr)
 	assert.Equal(t, 127, exitErr.ExitCode())
 	assert.NoFileExists(t, marker)
+}
+
+// The trusted PATH holds physical directories, and readlink runs with only
+// the trusted PATH, so neither a symlinked PATH entry nor a helper a
+// protected readlink looks up can bring an agent-writable directory back.
+func TestEnvDataPin_TrustedPathIsPhysicalAndIsolated(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("as root every directory is writable")
+	}
+	trusted, err := exec.Command("/bin/sh", "-c", envDataPin()+` && printf '%s' "$`+envDataPythonVar+`"`).Output()
+	if err != nil {
+		t.Skip("no python3 in a non-writable PATH directory on this host")
+	}
+	realReadlink, err := exec.LookPath("readlink")
+	require.NoError(t, err)
+	writable, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	marker := filepath.Join(writable, "ran")
+	require.NoError(t, os.WriteFile(filepath.Join(writable, "fsx_helper"), []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755))
+	links, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	link := filepath.Join(links, "bin")
+	require.NoError(t, os.Symlink(writable, link))
+	protected, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(protected, "readlink"),
+		[]byte("#!/bin/sh\nfsx_helper 2>/dev/null\nexec '"+realReadlink+"' \"$@\"\n"), 0o755))
+
+	// `test` makes the symlinked entry's own directories and the fixture
+	// readlink look protected; the directory the link points to is
+	// checked for real.
+	shadow := `test() { case "$1" in -w|-O) for q in "` + link + `" "` + protected + `/readlink"; do case "$q" in "$2"/*|"$2") return 1 ;; esac; done ;; esac; command test "$@"; }; `
+	cmd := exec.Command("/bin/sh", "-c", shadow+envDataPin()+` && printf '%s|%s' "$`+envDataPythonVar+`" "$`+envDataTrustedPathVar+`"`)
+	cmd.Env = []string{"PATH=" + link + ":" + protected + ":" + writable + ":" + os.Getenv("PATH")}
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	py, tp, _ := strings.Cut(string(out), "|")
+	assert.Equal(t, string(trusted), py)
+	assert.NotContains(t, ":"+tp+":", ":"+link+":")
+	assert.NotContains(t, ":"+tp+":", ":"+writable+":", "a symlinked entry is judged by where it points")
+	assert.Contains(t, ":"+tp+":", ":"+protected+":", "the fixture readlink is the one the pin runs")
+	assert.NoFileExists(t, marker, "readlink looked up a helper outside the trusted PATH")
+
+	// A physical directory with a `:` in its name would split into entries
+	// nobody checked, `.` among them.
+	colon := filepath.Join(protected, "x:.")
+	require.NoError(t, os.Mkdir(colon, 0o755))
+	colonLink := filepath.Join(links, "colon")
+	require.NoError(t, os.Symlink(colon, colonLink))
+	shadow = `test() { case "$1" in -w|-O) case "` + colon + `" in "$2"/*|"$2") return 1 ;; esac ;; esac; command test "$@"; }; `
+	cmd = exec.Command("/bin/sh", "-c", shadow+envDataPin()+` && printf '%s' "$`+envDataTrustedPathVar+`"`)
+	cmd.Env = []string{"PATH=" + colonLink + ":" + os.Getenv("PATH")}
+	out, err = cmd.Output()
+	require.NoError(t, err)
+	for _, entry := range strings.Split(string(out), ":") {
+		assert.True(t, strings.HasPrefix(entry, "/"), "a trusted PATH entry is not absolute: %q in %q", entry, out)
+	}
+	assert.NotContains(t, string(out), "x:.")
 }
 
 // The fragment pins python3 before reading .env and runs it isolated.

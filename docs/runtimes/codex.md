@@ -228,6 +228,8 @@ What a local codex run needs, beyond the guide:
   pins are never taken from `.env` (#8498). The sandbox image needs `python3` for this, in a
   `PATH` directory the sandbox user neither owns nor can write; without one the launch fails with
   `python3 not found in a PATH directory the agent cannot write` (exit 127).
+  It also needs `readlink` there as a regular file, not a symlink; without one the launch also
+  prints `no readlink that is a regular file in a PATH directory the agent cannot write`.
 - **The repository's own `.codex/` config is never loaded.** fullsend pins the cloned repo's
   project trust to untrusted, so `.codex/config.toml` and `.codex/hooks.json` (model, instructions,
   MCP servers, hooks) never apply. A target repo cannot change how the agent runs.

@@ -113,14 +113,32 @@ const envDataWritableAncestor = `while :; do if test -w "$p" || test -O "$p"; th
 // agent user can write. It runs before anything the agent wrote is read, so
 // the PATH it filters is the runner's. A sandbox image can put an
 // agent-owned directory first (a virtualenv's bin, say), so a plain PATH
-// lookup there finds whatever the agent left. A directory is left out when
-// the agent user owns it or can write it, or any directory above it. When
+// lookup there finds whatever the agent left. Each entry is recorded as its
+// physical path (`cd -P`, a builtin), so a symlinked entry is judged by the
+// directories it really lives in, and one whose physical path holds a `:`
+// is left out, as it would split. A directory is left out when the agent
+// user owns it or can write it, or any directory above it. When
 // the launch runs as the owner of / (root), nothing could be protected, so
 // the PATH is kept as is.
 func envDataTrustedPath() string {
 	return `{ readonly ` + envDataTrustedPathVar + `="$(if test -O /; then printf '%s' "$PATH"; else IFS=:; set -f; s=; ` +
-		`for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; p=$d; ` + envDataWritableAncestor + `; ` +
+		`for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; d="$(cd -P "$d" 2>/dev/null && pwd -P)" || continue; case $d in (*:*) continue ;; esac; p=$d; ` + envDataWritableAncestor + `; ` +
 		`if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done; fi)"; }`
+}
+
+// envDataReadlink finds the readlink the interpreter lookup runs, held to
+// the same rule as python3: the first readlink on the trusted PATH that is
+// a regular file the agent user neither owns nor can write. A symlink is
+// refused: its target's directories cannot be checked without running
+// something first, and a root-owned bin directory can still link into a
+// directory the agent writes. As root it takes the first one on the
+// trusted PATH. With none, it prints why and leaves $rl empty.
+func envDataReadlink() string {
+	return `rl=; for d in $` + envDataTrustedPathVar + `; do test -f "$d/readlink" && test -x "$d/readlink" || continue; ` +
+		`if test -O /; then rl=$d/readlink; break; fi; ` +
+		`if test -h "$d/readlink" || test -w "$d/readlink" || test -O "$d/readlink"; then continue; fi; ` +
+		`rl=$d/readlink; break; done; ` +
+		`test -n "$rl" || echo 'fullsend: no readlink that is a regular file in a PATH directory the agent cannot write' >&2`
 }
 
 // envDataPin records where python3 is before anything the agent wrote can
@@ -128,14 +146,15 @@ func envDataTrustedPath() string {
 // trusted PATH whose resolved file, and every directory above it, the agent
 // user cannot write: a root-owned bin directory can still hold a symlink to
 // an interpreter the agent owns. The resolved path is what gets pinned, and
-// with no such python3 the launch stops (exit 127).
+// with no such python3 the launch stops (exit 127). The symlinks are
+// resolved with a readlink held to the same rule (envDataReadlink).
 func envDataPin() string {
-	return envDataTrustedPath() + ` && { readonly ` + envDataPythonVar + `="$(IFS=:; set -f; for d in $` + envDataTrustedPathVar +
-		`; do test -x "$d/python3" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" readlink -f "$d/python3" 2>/dev/null)" || continue; ` +
+	return envDataTrustedPath() + ` && { readonly ` + envDataPythonVar + `="$(IFS=:; set -f; ` + envDataReadlink() + `; ` +
+		`test -n "$rl" || exit 1; for d in $` + envDataTrustedPathVar +
+		`; do test -x "$d/python3" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" "$rl" -f "$d/python3" 2>/dev/null)" || continue; ` +
 		`if ! test -O /; then p=$r; ` + envDataWritableAncestor + `; fi; printf '%s' "$r"; break; done)" && ` +
 		`case "$` + envDataPythonVar + `" in /*) ;; *) false ;; esac || ` +
-		`{ PATH="$` + envDataTrustedPathVar + `" command -v readlink >/dev/null || echo 'fullsend: readlink not found in a PATH directory the agent cannot write' >&2; ` +
-		`echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
+		`{ echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
 }
 
 // envDataLoad is the POSIX sh fragment that replaces `. envFile`. The

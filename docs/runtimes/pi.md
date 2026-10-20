@@ -237,8 +237,10 @@ What a local pi run needs, beyond the guide:
   `podman pull ghcr.io/fullsend-ai/fullsend-sandbox:latest` fixes it.
 - **`python3` in the sandbox image** — the launch reads `.env` as data with a pinned `python3`
   (`-I -S`), taken from a `PATH` directory the sandbox user neither owns nor can write; without
-  one it fails with `python3 not found in a PATH directory the agent cannot write` (exit 127). The fullsend sandbox
-  image ships it.
+  one it fails with `python3 not found in a PATH directory the agent cannot write` (exit 127).
+  It also needs `readlink` there as a regular file, not a symlink; without one the launch also
+  prints `no readlink that is a regular file in a PATH directory the agent cannot write`. The
+  fullsend sandbox image ships both.
 - **Platforms** — verified end to end on macOS Apple Silicon (podman machine, Homebrew `openshell`)
   and Fedora with rootless Podman; the guide's platform notes apply unchanged.
 - **`review` and `retro`** run their real sub-agent roster through the `Agent` tool; the children
