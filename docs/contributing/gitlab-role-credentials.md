@@ -1104,7 +1104,11 @@ lives in `internal/repos/gitlab_trigger_schedules.go`:
   Only then are the installer-owned originals deleted, so a failure keeps
   polling on the installer's schedules. A spec with no live schedule at all is
   left to `convergeSchedules`, and the next install moves the schedule it
-  creates.
+  creates. Install adopts a managed schedule it does not already own only
+  when its owner is a verified retired generation of the account or a
+  verified installer Maintainer. For any other owner, such as a Developer or
+  an unverifiable user, install refuses to adopt the schedule, and an
+  administrator must remove or reassign it before install is re-run.
 
   **Accepted temporary-PAT risk (#8519).** GitLab records the caller as the
   schedule owner, so account-owned creation currently requires a temporary
@@ -1131,7 +1135,11 @@ lives in `internal/repos/gitlab_trigger_schedules.go`:
   then the account's schedule is deleted. The hand-back also runs before the
   account is ever raised to Maintainer (a schedule fires on the server's clock
   and would run with Maintainer access) and when rotation or repair retires a
-  generation, before its account is deleted.
+  generation, before its account is deleted. When the activation is recorded
+  for the replacement generation, adoption has already moved the retired
+  account's managed schedules straight to the replacement account in the same
+  install, before the deferred retirement, so retirement finds none to hand
+  back (#8602).
 - **Interrupted cleanup.** Every move creates before it deletes, so an
   interruption leaves a duplicate that the next run removes, never a project
   without a polling schedule.
@@ -1182,8 +1190,13 @@ change), the live override role of an installed account (the exact role, or
 that it could not be verified), the resources a pending cleanup still holds by
 ID, and drift such as a missing key, push entry, trigger, or sink, a sink that
 is not masked, protected, non-file, and unscoped, an unfinished retirement of a
-previous generation, an account that is not Developer, or an account that no
-longer exists. Anything other than
+previous generation, an account that is not Developer, an account that no
+longer exists, or a managed polling schedule that the account does not own
+while the dispatch activation is recorded (`scheduleOwnershipDrift`). For
+that last case the reason tells the operator to re-run install when install
+can adopt the schedule's owner, and otherwise that an administrator must
+remove or reassign the schedule; an owner or schedule list that could not be
+read is reported as unverified. Anything other than
 `not-installed`, `deferred`, and `ready` is reported as drift.
 
 GitLab.com Free rejects per-user protected-branch merge grants, but it
