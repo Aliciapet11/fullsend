@@ -26,13 +26,18 @@ const claudeDebugLog = "claude-debug.log"
 // .env is read and marked read-only.
 const claudeBinaryVar = "FULLSEND_CLAUDE_BIN"
 
+// claudeNodeVar holds the node that starts claude when claude is a
+// `#!/usr/bin/env node` script, empty otherwise (binaryPin). In the sandbox
+// image claude is an ELF binary.
+const claudeNodeVar = "FULLSEND_CLAUDE_NODE"
+
 // claudeBinaryPin is the POSIX sh fragment that records where claude is; see
 // binaryPin for why it holds. The pin runs before .env, which adds the
 // harness-owned /sandbox/workspace/bin to PATH and sources harness .env.d
 // files, so neither a `claude` file there nor a PATH change in an env file
 // decides which binary the run starts.
 func claudeBinaryPin() string {
-	return binaryPin(claudeBinaryVar, "claude")
+	return binaryPin(claudeBinaryVar, claudeNodeVar, "claude")
 }
 
 // claudeLoaderEnvUnset clears, after .env, the variables that load code into
@@ -794,10 +799,10 @@ func buildRunCommandWithDigests(params RunParams, hookDigests claudeHookDigests)
 		// through the pinned path, which no function or alias can shadow
 		// either. With sandbox hooks the hooks guard runs on both sides of
 		// .env (claudeGuardedEnv).
-		fmt.Sprintf("cd %s && %s%s && %s%s && \"$%s\"",
+		fmt.Sprintf("cd %s && %s%s && %s%s && %s",
 			shellQuote(params.RepoDir), claudeBinaryPin(), preEnv,
 			claudeGuardedEnv(envFile, params.HooksSettingsPath != "", gw == nil, hookDigests),
-			postEnv, claudeBinaryVar),
+			postEnv, cliLaunch(claudeBinaryVar, claudeNodeVar)),
 		"--print",
 		"--verbose",
 		"--output-format stream-json",

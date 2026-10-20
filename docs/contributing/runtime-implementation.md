@@ -489,8 +489,11 @@ The sandbox has two key directories that map to Claude Code's config levels (plu
     ├── .env                            Environment variables (read as data before claude)
     ├── .env.d/                         Additional env files (host_files expand)
     │
-    │   claude is resolved on PATH before .env and launched by that path
-    │   (FULLSEND_CLAUDE_BIN), like codex and pi. .env puts workspace/bin
+    │   claude is resolved on the trusted PATH before .env (the first one
+    │   the agent cannot write, binaryPin) and launched by that path
+    │   (FULLSEND_CLAUDE_BIN), like codex, pi and opencode; a
+    │   #!/usr/bin/env node CLI runs through a node pinned the same way
+    │   (codex's npm launcher and pi). .env puts workspace/bin
     │   last on PATH and restores the runner's PATH in front after .env.d
     │   (what claude and pi run under; codex restores its pre-.env PATH;
     │   the Claude Code and codex hooks run under the trusted PATH);
@@ -980,7 +983,7 @@ with `-e`, after the hook adapter — when the agent definition has no `tools:` 
 | Manifest field | Meaning |
 |---|---|
 | `enabled` | The tool is registered. `Run` also gates the `-e` and the integrity guard on it |
-| `piBin` | The `pi` binary children run, resolved in the sandbox at `Bootstrap` (`command -v pi`); `pi` when the probe found nothing |
+| `piBin` | The `pi` binary the `Bootstrap` probe found (`command -v pi`); `pi` when it found nothing. Children do not start through it: the launch exports the `pi` and `node` it pinned before `.env` as `FULLSEND_PI_CHILD_BIN` and `FULLSEND_PI_CHILD_NODE`, and the extension starts children with those |
 | `sessionsDir` | Parent's session dir; child `<seq>` gets `--session-dir <sessionsDir>/agent-<seq>` |
 | `extensions` | The `-e` list every child gets, in order: the vendored provider extensions actually present in the image (`test -d` at `Bootstrap`) then the hook adapter when security is on. Never `fullsend-agent.js` itself |
 | `extensionDigests` | SHA-256 (hex) of each child `-e` entry `Bootstrap` itself wrote under the config dir — the hook adapter and the edit-repair extension, the same bytes their launch guards check. Re-hashed before every dispatch; a mismatch refuses the dispatch naming the file. The vendored provider extensions are absent on purpose: root-owned and read-only in the image, outside anything the agent can write. Omitted when neither applies (hooks off and no `edit` tool) |
@@ -1343,7 +1346,8 @@ their tools by name — `tirith_check.py` runs a bare `tirith` — so a `.env` t
 holding a fake `tirith` that exits 0 neuters the entire PreToolUse chain while every digest stays
 green. Reproduced before the pin existed. `Run` captures `PATH` into a readonly variable before
 sourcing `.env` and restores it afterwards for codex itself. The hook adapter's children get a
-narrower one: `FULLSEND_TRUSTED_PATH`, which `envDataLoad` records read-only before `.env` (the
+narrower one: `FULLSEND_TRUSTED_PATH`, which the CLI pin (`binaryPin`, through `envDataTrustedPin`)
+records read-only before `.env` (the
 launch `PATH` without the directories the agent user owns or can write, or that have such an ancestor,
 and without relative entries) and `Run` exports after it; the adapter sets the children's `PATH`
 from it. `Run` also unsets `LD_PRELOAD`, `LD_LIBRARY_PATH` and

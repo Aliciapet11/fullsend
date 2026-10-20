@@ -150,7 +150,7 @@ func claudeHooksGuard(d claudeHookDigests, settingsFile bool) string {
 func claudeGuardedEnv(envFile string, hooksEnabled, settingsFile bool, d claudeHookDigests) string {
 	// .env is read as data, never sourced (envDataLoad, #8498); the unsets
 	// and the second guard pass below stay as a second layer.
-	source := envDataLoad(envFile, claudeBinaryVar, claudeGatewayPlaceholderVar)
+	source := envDataLoad(envFile, claudeBinaryVar, claudeNodeVar, claudeGatewayPlaceholderVar)
 	if !hooksEnabled {
 		return strings.Join([]string{source, "unset -f claude", claudeLoaderEnvUnset}, " && ")
 	}

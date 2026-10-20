@@ -480,14 +480,15 @@ Vendoring commit messages use title + body (upload and stale delete). `admin ins
 │  │                                          │                   │
 │  │ Command built by buildRunCommand():      │                   │
 │  │  cd {repoDir} &&                         │                   │
-│  │  { readonly FULLSEND_CLAUDE_BIN=         │                   │
-│  │    "$(command -v claude)" (absolute,     │                   │
-│  │    else exit 127); } &&                  │                   │
+│  │  { readonly FULLSEND_CLAUDE_BIN= first   │                   │
+│  │    claude on the trusted PATH that the   │                   │
+│  │    agent cannot write, else exit 127;    │                   │
+│  │    node too for a node script } &&       │                   │
 │  │  envDataLoad {envFile} (pinned python3   │                   │
 │  │    reads .env as data; eval its exports)&&│                  │
 │  │  unset -f claude &&                      │                   │
 │  │  unset LD_* PYTHON* NODE_* BUN_OPTIONS &&│                   │
-│  │  "$FULLSEND_CLAUDE_BIN" --print          │                   │
+│  │  [$NODE] "$FULLSEND_CLAUDE_BIN" --print  │                   │
 │  │    --verbose                             │                   │
 │  │    --output-format stream-json           │                   │
 │  │    [--settings {hooksSettingsPath}]      │                   │

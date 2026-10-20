@@ -68,7 +68,7 @@ func openCodeReadTrustedEnv(sandboxName string) (openCodeTrustedEnv, error) {
 // the launch does, and prints the two trusted values. The loader reports a
 // dropped line by file and line only, so its stderr can be shown on failure.
 func openCodeTrustedEnvReadCommand(envFile string) string {
-	return openCodeUtilityPin() + " && " + envDataLoad(envFile, openCodeEnvDataDrop...) + ` && "$` + openCodePrintfVar + `" '%s' "${OPENCODE_CONFIG_CONTENT-}" ` +
+	return openCodeUtilityPin() + " && " + envDataTrustedPin() + " && " + envDataLoad(envFile, openCodeEnvDataDrop...) + ` && "$` + openCodePrintfVar + `" '%s' "${OPENCODE_CONFIG_CONTENT-}" ` +
 		shellQuote(openCodeEnvReadSeparator) + ` "${GOOGLE_APPLICATION_CREDENTIALS-}"`
 }
 
