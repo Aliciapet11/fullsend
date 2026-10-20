@@ -543,12 +543,12 @@ Coordinate these changes with the operator of your OpenShell gateway:
   the version it pins in
   [`.github/scripts/openshell-version.sh`](https://github.com/fullsend-ai/fullsend/blob/main/.github/scripts/openshell-version.sh)
   at your release tag.
-  The [OpenShell gateway configuration reference](https://github.com/NVIDIA/OpenShell/blob/main/docs/how-it-works/gateways/configuration.mdx)
-  describes proxy chaining for policy-approved TLS connections using the HTTP
-  CONNECT method to establish a tunnel. Plain-HTTP destination traffic remains
-  direct. These are not fullsend harness fields or a general replacement for
-  every `HTTP_PROXY` or `ALL_PROXY` use. Do not reintroduce application proxy
-  exports through `.env.d` as a workaround.
+  The [OpenShell gateway configuration reference](https://github.com/NVIDIA/OpenShell/blob/v0.1.4/docs/how-it-works/gateways/configuration.mdx)
+  for that version describes proxy chaining for policy-approved TLS
+  connections using the HTTP CONNECT method to establish a tunnel. Plain-HTTP
+  destination traffic remains direct. These are not fullsend harness fields or
+  a general replacement for every `HTTP_PROXY` or `ALL_PROXY` use. Do not
+  reintroduce application proxy exports through `.env.d` as a workaround.
   **GitHub Action limitation:** fullsend's own GitHub Action writes
   `gateway.toml` with a fixed template and has no input for upstream proxy or
   CA settings. Self-hosted Actions runners behind a corporate proxy that relied
@@ -565,7 +565,12 @@ Coordinate these changes with the operator of your OpenShell gateway:
   generated bundle with a custom-only file, or changing only the agent
   image's trust store, configures both trust paths. Have the gateway operator
   validate the required application and supervisor connections before
-  deployment.
+  deployment. The linked tag is what the pinned gateway supports; a setting
+  documented only at a later OpenShell tag is not available until fullsend
+  bumps the pin. If the linked tag does not document `additional_ca_bundle`
+  (added in OpenShell 0.1.5, for Podman gateways), a private CA used without
+  a corporate proxy has no gateway-level replacement for `SSL_CERT_FILE` or
+  `NODE_EXTRA_CA_CERTS` at that version.
 - **Git settings:** place git configuration with `host_files` (a git config
   file or shell rc file the tools load) or use the tool's own configuration,
   instead of `GIT_SSH_COMMAND`, `GIT_CONFIG_GLOBAL`, `GIT_ASKPASS` and the
