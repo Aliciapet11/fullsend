@@ -447,6 +447,9 @@ type Repository struct {
 	Private       bool
 	Archived      bool
 	Fork          bool
+	// Description is the repository description. Populated by CreateRepo
+	// and GetRepo; list operations may leave it empty.
+	Description string
 	// CIConfigPath is the project's configured CI configuration path, as
 	// reported by GitLab (ci_config_path). Empty means the default
 	// .gitlab-ci.yml at the repository root. Other forges leave it empty.

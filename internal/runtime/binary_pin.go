@@ -1,7 +1,7 @@
 package runtime
 
 // binaryPin is the POSIX sh fragment the claude, codex and pi launches use to
-// record where their CLI is before the agent-writable .env is sourced.
+// record where their CLI is before the agent-writable .env is read.
 //
 //   - `command -v` is a builtin. Its answer must be an absolute path: for a
 //     function, alias or builtin of that name it prints the bare name, which

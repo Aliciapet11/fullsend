@@ -23,7 +23,7 @@ import (
 const claudeDebugLog = "claude-debug.log"
 
 // claudeBinaryVar holds the absolute path of the claude binary, resolved before
-// .env is sourced and marked read-only.
+// .env is read and marked read-only.
 const claudeBinaryVar = "FULLSEND_CLAUDE_BIN"
 
 // claudeBinaryPin is the POSIX sh fragment that records where claude is; see
@@ -789,11 +789,11 @@ func buildRunCommandWithDigests(params RunParams, hookDigests claudeHookDigests)
 	}
 
 	parts := []string{
-		// The pin comes before `. .env`; `unset -f` is a special builtin, which a
-		// function defined in .env (or an .env.d file it sources) cannot
-		// shadow, and the launch goes through the pinned path, which no
-		// function or alias can shadow either. With sandbox hooks the hooks
-		// guard runs on both sides of .env (claudeGuardedEnv).
+		// The pin comes before the .env read (envDataLoad); `unset -f` is a
+		// special builtin, which no function can shadow, and the launch goes
+		// through the pinned path, which no function or alias can shadow
+		// either. With sandbox hooks the hooks guard runs on both sides of
+		// .env (claudeGuardedEnv).
 		fmt.Sprintf("cd %s && %s%s && %s%s && \"$%s\"",
 			shellQuote(params.RepoDir), claudeBinaryPin(), preEnv,
 			claudeGuardedEnv(envFile, params.HooksSettingsPath != "", gw == nil, hookDigests),
@@ -911,11 +911,12 @@ func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, ex
 		return err
 	}
 
-	// The interpreter and PATH the hooks run with are resolved here, on a
-	// shell the agent has not touched, and baked into hooks.json (whose digest
-	// the launch guard pins) rather than left to the PATH a later iteration's
-	// .env can set.
-	python, hookPath, err := claudePreflightInterpreter(sandboxName)
+	// The interpreter and PATH the hooks run with are resolved here, from
+	// directories the agent cannot write (hookPreflightInterpreter, which also
+	// asserts the version floor the hook scripts need: datetime.UTC, Python
+	// 3.11), and baked into hooks.json (whose digest the launch guard pins)
+	// rather than left to the PATH a later iteration's .env can set.
+	python, hookPath, err := hookPreflightInterpreter(sandboxName)
 	if err != nil {
 		return err
 	}
@@ -950,26 +951,6 @@ func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, ex
 	}
 	recordClaudeHookDigests(sandboxName, claudeHookDigestsFor(hooks, hooksJSON))
 	return nil
-}
-
-// claudePreflightInterpreter returns the absolute python3 and the PATH the
-// Claude hooks run with, both read from a sandbox shell before the agent has
-// run in it. The interpreter reuses the codex preflight, including its version
-// floor (the hook scripts need datetime.UTC, Python 3.11).
-func claudePreflightInterpreter(sandboxName string) (python, path string, err error) {
-	python, err = codexPreflightPython(sandboxName)
-	if err != nil {
-		return "", "", err
-	}
-	stdout, _, exitCode, err := sandbox.Exec(sandboxName, `printf '%s' "$PATH"`, 10*time.Second)
-	if err != nil {
-		return "", "", fmt.Errorf("reading the sandbox PATH for the hooks: %w", err)
-	}
-	path = strings.TrimSpace(stdout)
-	if exitCode != 0 || path == "" || strings.ContainsAny(path, "\n\r") {
-		return "", "", fmt.Errorf("reading the sandbox PATH for the hooks: unusable result (exit %d)", exitCode)
-	}
-	return python, path, nil
 }
 
 func bootstrapPlugins(sandboxName, configDir string, plugins []string) error {

@@ -35,7 +35,7 @@ import (
 // inline, so there only the scripts are exposed.
 //
 // The interpreter and PATH the hooks run with are pinned by Bootstrap into
-// hooks.json (claudePreflightInterpreter), so the hooks.json digest covers
+// hooks.json (hookPreflightInterpreter), so the hooks.json digest covers
 // them.
 //
 // Out of scope here, and unchanged: Claude Code's own settings.json under the

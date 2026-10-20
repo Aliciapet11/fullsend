@@ -12,14 +12,16 @@ import (
 // could rewrite a hook file and `exec` the CLI, so the later unsets, the
 // second integrity pass and the pinned binary never ran.
 //
-// envDataLoad replaces `. .env` in the Claude Code, codex and pi launches. A
-// python3 resolved before anything the agent wrote is consulted (envDataPin,
-// the same `command -v` pin the CLIs use) runs isolated (-I: no PYTHON*
-// variables, no user site, no script directory on sys.path; -S: no site
-// module, so no .pth file runs), parses .env and the files it names, and
-// prints one single-quoted `NAME='value'` line per variable, with `export `
-// in front for the exported ones. The launch shell evals only that output, so
-// no construct from .env executes.
+// envDataLoad replaces `. .env` in the Claude Code, codex, pi and OpenCode
+// launches, and in the runner's in-sandbox probes that read the run's
+// environment (EnvDataLoad, #8574), so a probe sees the values the launch
+// does and no .env or .env.d line runs as shell anywhere the runner reads it.
+// A python3 resolved before anything the agent wrote is consulted (envDataPin)
+// runs isolated (-I: no PYTHON* variables, no user site, no script or working
+// directory on sys.path; -S: no site module, so no .pth file runs), parses
+// .env and the files it names, and prints one single-quoted `NAME='value'`
+// line per variable, with `export ` in front for the exported ones. The
+// launch shell evals only that output, so no construct from .env executes.
 //
 // The grammar, per statement (a statement ends at a newline; a quoted value
 // may span lines):
@@ -35,9 +37,14 @@ import (
 //     grammar, without control lines.
 //
 // Anything else (command substitution, functions, `.`, `exec`, `unset`,
-// `readonly`, `alias`, `;`-joined commands, other parameter expansion forms)
-// is dropped and reported on stderr by file and line only, never by content,
-// since a dropped line can carry a credential.
+// `readonly`, `alias`, `;`-joined commands such as `FOO=x; export FOO`,
+// `export A=1 B=2`, other parameter expansion forms such as
+// `${NAME:-default}`) is dropped and reported on stderr by file and line
+// only, never by content, since a dropped line can carry a credential. An
+// assignment whose value contains a NUL byte, which the launch shell could
+// not hold, is dropped and reported the same way. A dropped statement whose
+// quotes span lines is skipped to where a shell would end it, so its later
+// lines are not read as statements of their own.
 //
 // A name is exported when it was in the launch environment or is marked by
 // `export`, as in a POSIX shell. Any other assignment is still set as a shell
@@ -50,9 +57,11 @@ import (
 const (
 	envDataPythonVar  = "FULLSEND_ENV_PYTHON"
 	envDataExportsVar = "FULLSEND_ENV_EXPORTS"
+	// envDataTrustedPathVar is the read-only launch PATH with every directory
+	// the agent user could write (or that has a writable ancestor) left out.
+	envDataTrustedPathVar = "FULLSEND_TRUSTED_PATH"
 	// envDataRunnerPathVar is the read-only variable the runner's PATH capture
-	// line sets. The loader script spells the name out; a test keeps the two
-	// in step.
+	// line sets. envDataLoaderScript takes the name from this constant.
 	envDataRunnerPathVar = "FULLSEND_RUNNER_PATH"
 )
 
@@ -69,7 +78,7 @@ var envDataDropNames = []string{
 	"PYTHON*",
 	"BASH_ENV", "ENV",
 	"IFS",
-	envDataPythonVar, envDataExportsVar,
+	envDataPythonVar, envDataExportsVar, envDataTrustedPathVar,
 }
 
 // EnvDataControlLines are the runner-written .env lines the launch-time
@@ -92,21 +101,89 @@ func envDataControlLines(workspace string) []string {
 	}
 }
 
+// envDataWritableAncestor is the sh loop body shared by the trusted-PATH and
+// interpreter lookups: starting at $p, it walks up to / and moves on to the
+// next candidate (`continue 2`) when the agent user owns or can write any
+// directory
+// (case patterns carry a leading paren: bash 3.2 cannot parse a bare `)`
+// pattern inside `$( )`)
+// on the way, since a writable ancestor can rename the entry away and put
+// another in its place, and an owner can make a read-only entry writable
+// again.
+const envDataWritableAncestor = `while :; do if test -w "$p" || test -O "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done`
+
+// envDataTrustedPath records the launch PATH without the directories the
+// agent user can write. It runs before anything the agent wrote is read, so
+// the PATH it filters is the runner's. A sandbox image can put an
+// agent-owned directory first (a virtualenv's bin, say), so a plain PATH
+// lookup there finds whatever the agent left. Each entry is recorded as its
+// physical path (`cd -P`, a builtin), so a symlinked entry is judged by the
+// directories it really lives in, and one whose physical path holds a `:`
+// is left out, as it would split. A directory is left out when the agent
+// user owns it or can write it, or any directory above it. When
+// the launch runs as the owner of / (root), nothing could be protected, so
+// only relative and empty entries and missing directories are left out.
+func envDataTrustedPath() string {
+	return `{ readonly ` + envDataTrustedPathVar + `="$(IFS=:; set -f; s=; ` +
+		`for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; if ! test -O /; then ` +
+		`d="$(cd -P "$d" 2>/dev/null && pwd -P)" || continue; case $d in (*:*) continue ;; esac; p=$d; ` + envDataWritableAncestor + `; fi; ` +
+		`if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done)"; }`
+}
+
+// envDataReadlink finds the readlink the interpreter lookup runs, held to
+// the same rule as python3: the first readlink on the trusted PATH that is
+// a regular file the agent user neither owns nor can write. A symlink is
+// refused: its target's directories cannot be checked without running
+// something first, and a root-owned bin directory can still link into a
+// directory the agent writes. As root it takes the first one on the
+// trusted PATH. With none, it prints why and leaves $rl empty.
+func envDataReadlink() string {
+	return `rl=; for d in $` + envDataTrustedPathVar + `; do test -f "$d/readlink" && test -x "$d/readlink" || continue; ` +
+		`if test -O /; then rl=$d/readlink; break; fi; ` +
+		`if test -h "$d/readlink" || test -w "$d/readlink" || test -O "$d/readlink"; then continue; fi; ` +
+		`rl=$d/readlink; break; done; ` +
+		`test -n "$rl" || echo 'fullsend: no readlink that is a regular file in a PATH directory the agent cannot write' >&2`
+}
+
 // envDataPin records where python3 is before anything the agent wrote can
-// influence the lookup; see binaryPin.
+// influence the lookup; see binaryPin. It takes the first python3 on the
+// trusted PATH whose resolved file, and every directory above it, the agent
+// user cannot write: a root-owned bin directory can still hold a symlink to
+// an interpreter the agent owns. The resolved path is what gets pinned, and
+// with no such python3 the launch stops (exit 127). The symlinks are
+// resolved with a readlink held to the same rule (envDataReadlink).
 func envDataPin() string {
-	return binaryPin(envDataPythonVar, "python3")
+	return envDataTrustedPath() + ` && { readonly ` + envDataPythonVar + `="$(IFS=:; set -f; ` + envDataReadlink() + `; ` +
+		`test -n "$rl" || exit 1; for d in $` + envDataTrustedPathVar +
+		`; do test -x "$d/python3" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" "$rl" -f "$d/python3" 2>/dev/null)" || continue; ` +
+		`if ! test -O /; then p=$r; ` + envDataWritableAncestor + `; fi; printf '%s' "$r"; break; done)" && ` +
+		`case "$` + envDataPythonVar + `" in /*) ;; *) false ;; esac || ` +
+		`{ echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
 }
 
 // envDataLoad is the POSIX sh fragment that replaces `. envFile`. The
 // assignment's status is the command substitution's, so a loader failure (a
 // missing .env, a missing interpreter) ends the && chain. `eval` is a
 // special builtin and nothing from .env has run, so no function can stand
-// in for it, and it only ever sees the loader's single-quoted export lines.
+// in for it, and it only ever sees the loader's single-quoted
+// `[export ]NAME='value'` lines.
 // extraDrop are names the calling runtime pins read-only before the load.
 func envDataLoad(envFile string, extraDrop ...string) string {
 	return envDataLoadWith(envFile, EnvDataControlLines(), extraDrop)
 }
+
+// EnvDataLoad is envDataLoad for the runner's in-sandbox probes in
+// internal/cli (the pre-agent context scan and the GitHub preflight), which
+// read the run's environment from .env before they run a command (#8574).
+// The probe shell pins nothing read-only, so no extra names are dropped.
+func EnvDataLoad(envFile string) string {
+	return envDataLoad(envFile)
+}
+
+// EnvDataTrustedPathVar names the read-only trusted PATH EnvDataLoad records
+// before .env is read. A probe runs its own tools with it, so a PATH that
+// .env sets cannot choose them.
+const EnvDataTrustedPathVar = envDataTrustedPathVar
 
 // envDataLoadWith is envDataLoad with the control lines given, so tests can
 // point the .env.d and iteration.env paths at a temporary workspace.
@@ -125,11 +202,12 @@ func envDataLoadWith(envFile string, control []string, extraDrop []string) strin
 // envDataLoaderScript is the python3 program envDataLoad runs. argv: the .env
 // path, the four control lines, then the space-separated drop names. It
 // prints `[export ]NAME='value'` lines on stdout and exits non-zero, printing
-// nothing, when .env or a file it names (an .env.d file or iteration.env)
-// exists but cannot be read. Indented with tabs: the launch command is
-// checked for double spaces.
-const envDataLoaderScript = `import os, re, sys
+// nothing, when .env, the .env.d directory or a file it names (an .env.d file
+// or iteration.env) exists but cannot be read. Indented with tabs: the launch
+// command is checked for double spaces.
+const envDataLoaderScript = `import os, re, stat, sys
 env_file, cap_line, envd_line, restore_line, iter_line, drop_arg = sys.argv[1:7]
+RUNNER_PATH = "` + envDataRunnerPathVar + `"
 drop = set(drop_arg.split())
 drop_prefixes = tuple(d[:-1] for d in drop if d.endswith("*"))
 envd_dir = os.path.dirname(envd_line.split()[3])
@@ -147,6 +225,9 @@ def taken(name):
 def assign(path, line, name, value):
 	if not taken(name):
 		warn(path, line, "%s is not taken from .env" % name)
+		return
+	if "\0" in value:
+		warn(path, line, "the value of %s contains a NUL byte" % name)
 		return
 	values[name] = value
 	if name not in order:
@@ -223,6 +304,36 @@ def end_of_statement(s, i):
 	if i < len(s) and s[i] != "\n":
 		raise ValueError("trailing text after the assignment")
 	return i
+def skip_statement(s, i, eol):
+	stack = []
+	while i < len(s):
+		c = s[i]
+		top = stack[-1] if stack else None
+		if top == "'":
+			if c == "'":
+				stack.pop()
+		elif c == "\\":
+			i += 1
+		elif c == "$" and s.startswith(("{", "("), i + 1):
+			stack.append("}" if s[i + 1] == "{" else ")")
+			i += 1
+		elif top == "\"":
+			if c == "\"":
+				stack.pop()
+		elif c in "'\"":
+			stack.append(c)
+		elif c == top:
+			stack.pop()
+		elif top == ")" and c == "(":
+			stack.append(")")
+		elif not stack:
+			if c == "\n":
+				return i
+			if c == "#" and s[i - 1] in " \t;&|()":
+				i = s.find("\n", i)
+				return len(s) if i < 0 else i
+		i += 1
+	return eol if stack else len(s)
 def statement(path, line, s, i, eol):
 	j = i
 	export = False
@@ -254,6 +365,18 @@ def statement(path, line, s, i, eol):
 			if n in values and n not in order:
 				order.append(n)
 	return eol
+def is_file(p):
+	try:
+		return stat.S_ISREG(os.stat(p).st_mode)
+	except PermissionError as e:
+		failed.append((p, e))
+	except OSError:
+		pass
+	return False
+def read_included(p):
+	e = read_file(p, False)
+	if e is not None:
+		failed.append((p, e))
 def read_file(path, control):
 	try:
 		with open(path, encoding=sys.getfilesystemencoding(), errors="surrogateescape", newline="") as f:
@@ -273,34 +396,34 @@ def read_file(path, control):
 		if text.startswith("#"):
 			pass
 		elif control and text == cap_line:
-			if "FULLSEND_RUNNER_PATH" not in readonly:
-				assign(path, line, "FULLSEND_RUNNER_PATH", values.get("PATH", ""))
-				readonly.add("FULLSEND_RUNNER_PATH")
+			if RUNNER_PATH not in readonly:
+				assign(path, line, RUNNER_PATH, values.get("PATH", ""))
+				readonly.add(RUNNER_PATH)
 		elif control and text == envd_line:
 			try:
 				names = sorted(os.listdir(envd_dir))
-			except OSError:
+			except (FileNotFoundError, NotADirectoryError):
+				names = []
+			except OSError as e:
+				failed.append((envd_dir, e))
 				names = []
 			for n in names:
 				p = os.path.join(envd_dir, n)
-				if n.endswith(".env") and not n.startswith(".") and os.path.isfile(p):
-					e = read_file(p, False)
-					if e is not None:
-						failed.append((p, e))
+				if n.endswith(".env") and not n.startswith(".") and is_file(p):
+					read_included(p)
 		elif control and text == restore_line:
 			now = values.get("PATH", "")
-			assign(path, line, "PATH", values.get("FULLSEND_RUNNER_PATH", "") + (":" + now if now else ""))
+			assign(path, line, "PATH", values.get(RUNNER_PATH, "") + (":" + now if now else ""))
 			exported.add("PATH")
 		elif control and text == iter_line:
-			if os.path.isfile(iter_file):
-				e = read_file(iter_file, False)
-				if e is not None:
-					failed.append((iter_file, e))
+			if is_file(iter_file):
+				read_included(iter_file)
 		else:
 			try:
 				eol = statement(path, line, s, i, eol)
 			except ValueError as e:
 				warn(path, line, str(e))
+				eol = skip_statement(s, i, eol)
 		i = eol
 	return None
 err = read_file(env_file, True)

@@ -118,10 +118,6 @@ example above.
 
 ## Behaviour differences worth knowing
 
-- **`.env` is still sourced as shell.** Claude Code, codex and pi read the agent-writable
-  `/sandbox/workspace/.env` and its `.env.d/*.env` files as data (#8498); OpenCode still sources
-  them, so a line there runs as shell at launch. See the agent-writable `.env` row in the
-  [security feature matrix](../contributing/runtime-implementation.md) (#8574).
 - **Bash allowlists are not enforced.** `Bash(gh:*)` in the agent's `tools:` becomes plain `bash`,
   with a warning. To restrict commands, give `bash` a pattern map in the policy
   (`"bash": {"*": "deny", "gh *": "allow"}`). An agent that declares Bash gets that same map.
@@ -129,6 +125,11 @@ example above.
   the previous iteration could have written, re-uploads the agent, and checks that OpenCode loads it.
   `skills/` in the config directory stays agent-writable until #7824.
 - **Repo config is ignored.** OpenCode does not load the target repo's `.opencode/` config or skills.
+- **`.env` is read as data.** As on the other runtimes, the launch parses `.env` with a pinned
+  `python3` and runs none of it as shell, so the image needs `python3` and a regular-file `readlink`
+  in `PATH` directories the sandbox user neither owns nor can write. Without them the launch fails
+  with `python3 not found in a PATH directory the agent cannot write` (exit 127). The fullsend
+  sandbox image ships both.
 
 ## Troubleshooting
 
@@ -140,6 +141,7 @@ example above.
 | `ProviderModelNotFoundError` | The id is not in OpenCode's built-in catalog. Use an id from the table above |
 | Vertex `404 NOT_FOUND` for the model | Your project does not serve it. Name one it serves |
 | `Falling back to default agent` | OpenCode could not load the agent, and the iteration fails. Rerun with `--debug='*'` and read `opencode-debug.log` |
+| `python3 not found in a PATH directory the agent cannot write` | The image has no `python3`, or no regular-file `readlink`, outside directories the sandbox user owns or can write. Use the fullsend sandbox image or add both |
 | Tool calls fail with a permission error | The policy does not allow that tool (step 1) |
 
 ## See also

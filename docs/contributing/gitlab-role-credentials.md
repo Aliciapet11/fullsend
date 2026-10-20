@@ -162,7 +162,7 @@ references, never secret values.
 | `FULLSEND_GITLAB_TRIGGER_ACCOUNT` | unmasked variable | Version 1 ledger for the trigger-only service account (phase, nonce, branch, and the account, bootstrap PAT, deploy key, branch-grant entry, and trigger token IDs, plus the SHA-256 digest of the trigger token and a `publication_pending` marker for an unfinished token replacement). Never stores token values or private keys. Written by `repos install` and removed by `repos uninstall` only after every resource it records is gone, so it is the durable cleanup obligation until then. See [Trigger-only service account](#trigger-only-service-account). |
 | `FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN` | masked, protected variable | The pipeline trigger token owned by the trigger-only service account. Written only after GitLab reports the variable masked, protected, and not file-typed; deleted before its token is revoked. Scheduled polling uses the account's job token, not this variable; while the dispatch activation is recorded, the managed webhook embeds this token ([#8509](https://github.com/fullsend-ai/fullsend/issues/8509)). See [Trigger-only service account](#trigger-only-service-account). |
 | `FULLSEND_GITLAB_DISPATCH_ACTIVATION` | protected, unmasked variable | Activation record for the trigger-account dispatch route: the ledger generation it was recorded for, no secrets. Written by `repos install` only after the dispatch activation gate passes; deleted first by every install, repair, rotation, containment pass and uninstall. A record that no longer matches the ledger is ignored. See the dispatch activation gate under [Trigger-only service account](#trigger-only-service-account). |
-| `FULLSEND_GITLAB_POLLER_GENERATIONS` | unmasked variable | Version 1 Poller identity-generation state (current, pending, and retiring Poller account IDs and the pending generation's handoff phase). Never stores token values. Written by `repos install` when it creates or rotates the webhook trigger. Absent = empty state; present but blank fails closed. See [Poller identity generations](#poller-identity-generations). |
+| `FULLSEND_GITLAB_POLLER_GENERATIONS` | unmasked variable | Version 1 Poller identity-generation state (current, pending, and retiring Poller account IDs and the pending generation's handoff phase). Never stores token values. Written by `repos install` when it creates or rotates the webhook trigger, and when it retires the superseded generation. Absent = empty state; present but blank fails closed. See [Poller identity generations](#poller-identity-generations). |
 
 Canonical constants live in [`internal/forge/forge.go`](../../internal/forge/forge.go)
 (`SecretForgeToken`, `SecretGitLabPollerToken`,
@@ -548,7 +548,12 @@ generation whose cutover did not complete, or an unresolved retiring Poller
 each block any new generation. The current Poller is never elevated or
 modified, and its polling continues throughout. At most one old/new pair
 exists: cutover makes the verified account current and the old one retiring,
-and no further generation starts until retirement completes.
+and no further generation starts until retirement completes. Because ADR 0125
+sets no numeric Free-tier limit, this bound is the Free-tier quota for Poller
+generation accounts. It allows the current Poller plus either one pending
+replacement or one retiring Poller, and at most
+`maxAbandonedPollerGenerations` (three) abandoned replacements awaiting
+deletion.
 
 Cutover (`internal/repos/gitlab_poller_cutover.go`) runs only after a verified
 generation is returned and its trigger has been published: the caller stores
@@ -600,9 +605,64 @@ managed Poller and records the cutover then. Cutover preserves every token
 fullsend created for the Poller (`created_token_ids`), so an outgoing legacy
 token keeps its provenance until grace cleanup revokes it. Superseded managed
 triggers are revoked once the webhook uses the new one. The retiring
-Poller stays at Developer. Its schedules, credentials, and account are retired
-by [#8244](https://github.com/fullsend-ai/fullsend/issues/8244). Until then a
-forced trigger rotation defers, and the existing compliant fast path is kept.
+Poller stays at Developer. Until it is retired, a forced trigger rotation
+defers and the existing compliant fast path is kept.
+
+Retirement (`internal/repos/gitlab_poller_retirement.go`,
+[#8244](https://github.com/fullsend-ai/fullsend/issues/8244)) runs on an
+ordinary lease-holding install. On the installer-owned Poller route it runs
+before the fast path decides whether it is provisioned, so a rotation in the
+same run can start the next generation; on the trigger-account route it runs
+after the account-owned webhook converged, so that webhook is the evidence it
+protects. A retirement failure never stops the webhook repair: install keeps
+the error, completes the repair, and returns it joined with any later error.
+`GitLabPollerRetirement` implementations are not safe for concurrent use and
+take no lock of their own: callers hold the project lease and call one method
+at a time (`retireSupersededPollerGeneration` does nothing without it).
+`GitLabWebhookNeedsProvisioning` reports a recorded `retiring_user_id` as
+work. Retirement waits, and changes nothing, until all of these hold:
+
+- the trigger owner implements `GitLabPollerRetirement`;
+- the managed Poller is the recorded current generation;
+- rotation state records that Poller as `managed_user_id` with a durably
+  recorded `distributed_at` at least `gitlabroles.DefaultRotationGrace` (24
+  hours) old, the same grace rotation gives in-flight jobs;
+- `PollerRetirementBlocked` reports no unfinished job running as the retiring
+  account and no administrator-supplied credential owned by it.
+
+It then:
+
+1. Re-reads the managed webhooks, the trigger inventory and the
+   trigger-account ledger immediately before revoking
+   (`currentWebhookTriggerEvidence`), so the trigger the webhook uses now is
+   protected on either route: the account's recorded trigger when a webhook
+   embeds its published token, and the legacy `FULLSEND_TRIGGER_TOKEN` trigger
+   otherwise. It waits when a managed webhook embeds neither. It then revokes
+   the pipeline triggers owned by the retiring account and confirms by listing
+   again that none remains. It waits, changing nothing, if a protected trigger
+   is owned by the retiring account. A trigger whose owner GitLab omits is
+   revoked only when it carries the managed webhook trigger description and no
+   webhook uses it; any other ownerless trigger cannot be attributed, so
+   retirement waits and names it for the operator to revoke, because account
+   deletion verification counts it.
+2. Calls `RetirePollerAccount`, which contains the account's managed
+   credentials, verifies that no active personal access token, usable SSH key,
+   unfinished job, schedule, or trigger remains, requests deletion of the
+   service account, and re-lists the service accounts to confirm it is gone.
+   It fails while the account is still listed. An account that is already gone
+   counts as retired.
+3. Clears `retiring_user_id` (`finishPollerRetirement`) against a fresh read of
+   the generation document.
+4. Counts, with `preservedPollerMergeGrants`, the merge-access entries that
+   grant the retired account individually on the default branch's exact-name
+   protection rule, and adds an operator note. It never removes them:
+   `EnsureGitLabPollerPipelineAccess` reuses an existing grant and fullsend
+   records no provenance for per-user merge grants, so an entry cannot be
+   proven to be fullsend's rather than an administrator's. A failed
+   protected-branch read changes only the note, not the outcome.
+
+Every step can be safely repeated. Any failure keeps `retiring_user_id`, so the
+next install retries.
 
 ### Poller-owned webhook trigger token
 
@@ -1044,7 +1104,11 @@ lives in `internal/repos/gitlab_trigger_schedules.go`:
   Only then are the installer-owned originals deleted, so a failure keeps
   polling on the installer's schedules. A spec with no live schedule at all is
   left to `convergeSchedules`, and the next install moves the schedule it
-  creates.
+  creates. Install adopts a managed schedule it does not already own only
+  when its owner is a verified retired generation of the account or a
+  verified installer Maintainer. For any other owner, such as a Developer or
+  an unverifiable user, install refuses to adopt the schedule, and an
+  administrator must remove or reassign it before install is re-run.
 
   **Accepted temporary-PAT risk (#8519).** GitLab records the caller as the
   schedule owner, so account-owned creation currently requires a temporary
@@ -1071,7 +1135,11 @@ lives in `internal/repos/gitlab_trigger_schedules.go`:
   then the account's schedule is deleted. The hand-back also runs before the
   account is ever raised to Maintainer (a schedule fires on the server's clock
   and would run with Maintainer access) and when rotation or repair retires a
-  generation, before its account is deleted.
+  generation, before its account is deleted. When the activation is recorded
+  for the replacement generation, adoption has already moved the retired
+  account's managed schedules straight to the replacement account in the same
+  install, before the deferred retirement, so retirement finds none to hand
+  back (#8602).
 - **Interrupted cleanup.** Every move creates before it deletes, so an
   interruption leaves a duplicate that the next run removes, never a project
   without a polling schedule.
@@ -1122,8 +1190,13 @@ change), the live override role of an installed account (the exact role, or
 that it could not be verified), the resources a pending cleanup still holds by
 ID, and drift such as a missing key, push entry, trigger, or sink, a sink that
 is not masked, protected, non-file, and unscoped, an unfinished retirement of a
-previous generation, an account that is not Developer, or an account that no
-longer exists. Anything other than
+previous generation, an account that is not Developer, an account that no
+longer exists, or a managed polling schedule that the account does not own
+while the dispatch activation is recorded (`scheduleOwnershipDrift`). For
+that last case the reason tells the operator to re-run install when install
+can adopt the schedule's owner, and otherwise that an administrator must
+remove or reassign the schedule; an owner or schedule list that could not be
+read is reported as unverified. Anything other than
 `not-installed`, `deferred`, and `ready` is reported as drift.
 
 GitLab.com Free rejects per-user protected-branch merge grants, but it
@@ -1390,9 +1463,11 @@ version pins without matching upstream templates are rejected before writes.
 Agent input bridges explicitly disable expansion, and poll-job links are
 logged only after creator/HMAC authentication.
 The webhook fast-path's `TRIGGER_PAYLOAD` classification
-and the `CI_JOB_TOKEN` running-job identity pin are still open,
-live-GitLab-only ship gates tracked in ADR 0125 (Caveats). Flip the env
-var to `enforced` fleet-wide only after those close. Poll jobs
+and the `CI_JOB_TOKEN` running-job identity pin are implemented, but live
+GitLab validation is still partial: see
+[GitLab webhook validation status](../normative/normalized-event/v1/README.md#gitlab-webhook-validation-status)
+and ADR 0125 (Caveats). Flip the env var to `enforced` fleet-wide only after
+the remaining live-validation gates close. Poll jobs
 resolve `FULLSEND_GITLAB_POLLER_TOKEN` once, after the schedule-only pin.
 The Go CLI then overrides `GITLAB_TOKEN` / `PUSH_TOKEN` from the
 registered role credential; nothing restores `FULLSEND_FORGE_TOKEN`.
@@ -1649,7 +1724,7 @@ Leave these to the follow-up issues.
 | [#7558](https://github.com/fullsend-ai/fullsend/issues/7558) | **Implemented.** `repos uninstall` removes GitLab role-identity state: the registry, rotation document, built-in and custom role secrets, and matching project access tokens. |
 | [#7559](https://github.com/fullsend-ai/fullsend/issues/7559) | **Implemented.** Shared-token fallback and the public migration/cutover/rollback controls are removed; old state is ignored by runtime. |
 | [#7502](https://github.com/fullsend-ai/fullsend/issues/7502) | **Implemented.** [ADR 0067](../ADRs/0067-gitlab-cron-polling-event-dispatch.md) records that the three-role decision in [#7424](https://github.com/fullsend-ai/fullsend/issues/7424) / [#7496](https://github.com/fullsend-ai/fullsend/issues/7496) supersedes its shared-identity assumption and permits registered custom roles as an extension. Operator-facing lifecycle is in [configuring-gitlab.md](../guides/getting-started/configuring-gitlab.md#role-identity-model-and-credential-lifecycle). |
-| [#8083](https://github.com/fullsend-ai/fullsend/issues/8083) | **In progress** under [#7772](https://github.com/fullsend-ai/fullsend/issues/7772). Role service-account provisioning, install reconciliation, rotation/recovery, status/drift, and ownership-gated uninstall cleanup are active: CLI activation ([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)) wires the service-account lifecycle into the CLI. The live fresh-identity Poller handoff ([#8243](https://github.com/fullsend-ai/fullsend/issues/8243)) activates the Poller-owned trigger token lifecycle and the webhook fast path where eligible; generation retirement ([#8244](https://github.com/fullsend-ai/fullsend/issues/8244)) and live acceptance validation, including GitLab.com Free and actual webhook/role-job execution, remain required. See [Project service accounts](#project-service-accounts). |
+| [#8083](https://github.com/fullsend-ai/fullsend/issues/8083) | **In progress** under [#7772](https://github.com/fullsend-ai/fullsend/issues/7772). Role service-account provisioning, install reconciliation, rotation/recovery, status/drift, and ownership-gated uninstall cleanup are active: CLI activation ([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)) wires the service-account lifecycle into the CLI. The live fresh-identity Poller handoff ([#8243](https://github.com/fullsend-ai/fullsend/issues/8243)) activates the Poller-owned trigger token lifecycle and the webhook fast path where eligible, and install retires the superseded Poller generation ([#8244](https://github.com/fullsend-ai/fullsend/issues/8244)); live acceptance validation, including GitLab.com Free and actual webhook/role-job execution, remains required. See [Project service accounts](#project-service-accounts). |
 | [#7931](https://github.com/fullsend-ai/fullsend/issues/7931) | **Implemented.** The `FULLSEND_GITLAB_ROLE_MIGRATION` gate constant, the cutover mechanism that retired a leftover shared credential during install, and the uninstall cleanup of that leftover secret and its project access token are all removed. Automated cleanup for a repository installed before the role-only rollout is intentionally not preserved; that repository may require manual cleanup. |
 
 ## Credential-routing security checklist

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/fullsend-ai/fullsend/internal/dispatch/cf"
+	"github.com/fullsend-ai/fullsend/internal/dispatch/gcf"
 )
 
 const testCollectorHeaderValue = "collector-header-value-for-tests"
@@ -442,17 +444,86 @@ func TestMintDeployCmd_CloudflareDryRunWithTracing(t *testing.T) {
 }
 
 func TestMintDeployCmd_TracingFlagErrors(t *testing.T) {
-	t.Run("gcp is not yet supported", func(t *testing.T) {
+	t.Run("gcp requires a headers choice", func(t *testing.T) {
+		fake := gcf.NewFakeGCFClient()
+		withMintGCFClient(t, fake)
 		cmd := newRootCmd()
-		cmd.SetArgs([]string{"mint", "deploy", "--platform=gcp", "--project=p", "--otlp-traces-endpoint=https://collector.example/v1/traces"})
+		cmd.SetArgs([]string{"mint", "deploy", "--platform=gcp", "--project=my-project-id", "--otlp-traces-endpoint=https://collector.example/v1/traces"})
 		err := cmd.Execute()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not yet supported for --platform=gcp")
-		assert.Contains(t, err.Error(), "--otlp-no-headers")
+		assert.Contains(t, err.Error(), "--otlp-headers-file or --otlp-no-headers")
+		assert.Empty(t, gcf.RecordedCalls(fake))
+	})
+	t.Run("gcp rejects skip-deploy", func(t *testing.T) {
+		fake := gcf.NewFakeGCFClient()
+		withMintGCFClient(t, fake)
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"mint", "deploy", "--platform=gcp", "--project=my-project-id", "--skip-deploy", "--otlp-no-headers", "--otlp-traces-endpoint=https://collector.example/v1/traces"})
+		err := cmd.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--skip-deploy")
+		assert.Empty(t, gcf.RecordedCalls(fake))
+	})
+	t.Run("gcp rejects plain http", func(t *testing.T) {
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"mint", "deploy", "--platform=gcp", "--project=my-project-id", "--otlp-no-headers", "--otlp-traces-endpoint=http://collector.example/v1/traces"})
+		err := cmd.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "https")
 	})
 	t.Run("invalid endpoint", func(t *testing.T) {
 		cmd := newRootCmd()
 		cmd.SetArgs([]string{"mint", "deploy", "--platform=cloudflare", "--otlp-traces-endpoint=collector"})
 		require.Error(t, cmd.Execute())
 	})
+}
+
+func TestMintDeployCmd_GCPDryRunWithTracing(t *testing.T) {
+	fake := gcf.NewFakeGCFClient()
+	withMintGCFClient(t, fake)
+	headersFile := writeHeadersFile(t, "Authorization="+testCollectorHeaderValue, 0o600)
+
+	out := captureStdout(t, func() {
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{
+			"mint", "deploy", "--platform=gcp", "--project=my-project-id", "--region=europe-west4", "--dry-run",
+			"--otlp-endpoint=https://collector.example",
+			"--otlp-headers-file=" + headersFile,
+		})
+		require.NoError(t, cmd.Execute())
+	})
+	assert.Contains(t, out, "https://collector.example into the function source (deployment fullsend-mint/europe-west4)")
+	assert.Contains(t, out, "1 collector header(s) in a new Secret Manager secret "+gcf.TraceHeadersSecretPrefix)
+	assert.NotContains(t, out, testCollectorHeaderValue)
+	assert.Empty(t, gcf.RecordedCalls(fake))
+}
+
+// The GCP deploy stores the collector headers in Secret Manager before the
+// function source is uploaded. The upload is failed here so the test stops
+// before the readiness probe, which needs a real Cloud Run URL.
+func TestRunMintDeployGCP_TracingStoresHeadersSecret(t *testing.T) {
+	secretData := map[string][]byte{}
+	fake := gcf.NewFakeGCFClient(
+		gcf.WithFakeSecrets(map[string]bool{}),
+		gcf.WithFakeSecretData(secretData),
+		gcf.WithFakeErrors(map[string]error{"UploadFunctionSource": fmt.Errorf("upload stopped by test")}),
+	)
+	withMintGCFClient(t, fake)
+	tracing, err := resolveMintTracing("https://collector.example/v1/traces", "", writeHeadersFile(t, "Authorization="+testCollectorHeaderValue, 0o600), false)
+	require.NoError(t, err)
+
+	var deployErr error
+	out := captureStdout(t, func() {
+		deployErr = runMintDeployGCP(context.Background(), "my-project-id", "us-central1", filepath.Join(t.TempDir(), "missing"), false, false, "", "", nil, false, gcf.StatusGitHubAuth{}, tracing)
+	})
+	require.Error(t, deployErr)
+	assert.Contains(t, deployErr.Error(), "upload stopped by test")
+	assert.NotContains(t, deployErr.Error(), testCollectorHeaderValue)
+	assert.NotContains(t, out, testCollectorHeaderValue)
+	require.Len(t, secretData, 1)
+	for sid, data := range secretData {
+		assert.True(t, strings.HasPrefix(sid, gcf.TraceHeadersSecretPrefix), "unexpected secret ID %q", sid)
+		assert.Equal(t, "Authorization="+testCollectorHeaderValue, string(data))
+	}
+	assert.Contains(t, gcf.RecordedCalls(fake), "SetSecretIAMBinding")
 }
