@@ -245,7 +245,28 @@ type slotAllocator struct {
 	held         map[Slot]lease
 	blockedUntil map[string]time.Time
 	quota        map[string]forge.RateLimit
+	// pending maps each slot to the lease descriptions of creates whose
+	// outcome is unknown: the create failed ambiguously and the ownership
+	// lookup could not show the repo was ours or someone else's. Later
+	// passes re-check these nonces so a create that landed (including one
+	// landing after the lookup) is adopted rather than leaked.
+	pending map[Slot][]string
 }
+
+// ownership is what findOwn learned about the repository under a slot's
+// name.
+type ownership int
+
+const (
+	// ownMine: the repository carries one of our lease nonces.
+	ownMine ownership = iota
+	// ownForeign: a repository exists and carries none of our nonces.
+	ownForeign
+	// ownAbsent: no repository exists under the name.
+	ownAbsent
+	// ownUnknown: the lookup failed.
+	ownUnknown
+)
 
 // lease is one held slot: the client that created (or adopted) the repo
 // and the identity that proves a repo under the slot's name is still ours.
@@ -299,6 +320,7 @@ func newSlotAllocator(layout PoolLayout, clientFor OrgClientFunc, logf func(stri
 		held:         make(map[Slot]lease),
 		blockedUntil: make(map[string]time.Time),
 		quota:        make(map[string]forge.RateLimit),
+		pending:      make(map[Slot][]string),
 	}, nil
 }
 
@@ -392,6 +414,26 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			}
 		}
 		if occupied[strings.ToLower(slot.String())] {
+			// A repo under the name may be one of our own earlier creates
+			// whose outcome was unknown, possibly landing after the
+			// lookup that followed it. Check before calling it occupied.
+			if nonces := a.pendingFor(slot); len(nonces) > 0 {
+				l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
+				switch own {
+				case ownMine:
+					a.logf("[slots] %s is our earlier ambiguous create; adopting it", slot)
+					a.recordLease(slot, l)
+					return slot, client, nil
+				case ownForeign:
+					a.clearPending(slot)
+				case ownUnknown:
+					if ctx.Err() != nil {
+						return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
+					}
+					a.recordOrgError(slot, client, fmt.Errorf("re-checking ownership of %s: %w", slot, ownErr), capErr)
+					continue
+				}
+			}
 			capErr.Occupied++
 			continue
 		}
@@ -418,32 +460,48 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			return slot, client, nil
 		}
 
+		// Our earlier ambiguous creates for this slot are matched too: the
+		// repo under the name may be one of them.
+		nonces := append(a.pendingFor(slot), desc)
 		switch {
 		case forge.IsAlreadyExists(err):
-			l, ours, ownErr := a.findOwn(ctx, client, slot, desc)
-			if ours {
+			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
+			switch own {
+			case ownMine:
 				a.logf("[slots] %s already existed after our create; adopting it", slot)
 				a.recordLease(slot, l)
 				return slot, client, nil
+			case ownForeign:
+				a.clearPending(slot)
+				capErr.Occupied++
+			default:
+				// The repo exists but the lookup could not say whose it
+				// is: it may be ours, so it is unknown, not occupied, and
+				// is re-checked on later passes.
+				a.addPending(slot, desc)
+				if ctx.Err() != nil {
+					return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
+				}
+				a.recordOrgError(slot, client,
+					fmt.Errorf("checking ownership of %s after create reported it exists: %w", slot, ownErr), capErr)
 			}
-			if ownErr != nil && isBackoffError(ownErr) {
-				// The ownership lookup was throttled or timed out: move on
-				// to other orgs instead of probing this one again.
-				a.recordOrgError(slot, client, ownErr, capErr)
-				break
-			}
-			capErr.Occupied++
 		case ctx.Err() != nil:
 			// The create may have succeeded server-side; the repo then
 			// looks occupied to everyone and is left for GC.
 			return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
 		case timedOut:
 			// The create may have landed before the deadline cut it off.
-			l, ours, ownErr := a.findOwn(ctx, client, slot, desc)
-			if ours {
+			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
+			switch own {
+			case ownMine:
 				a.logf("[slots] %s was created despite create timeout; adopting it", slot)
 				a.recordLease(slot, l)
 				return slot, client, nil
+			case ownForeign:
+				a.clearPending(slot)
+			default:
+				// The create may still land after this lookup.
+				a.addPending(slot, desc)
 			}
 			if ownErr != nil && isBackoffError(ownErr) {
 				// Honour a rate-limit deadline the lookup observed too;
@@ -454,19 +512,72 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			a.logf("[slots] creating %s did not finish within %v, backing off %s until %s: %v",
 				slot, claimCreateTimeout, slot.Org, until.UTC().Format(time.RFC3339), err)
 			capErr.RateLimited[slot.Org] = until
-		default:
+		case isDeniedError(err):
 			a.recordOrgError(slot, client, err, capErr)
+		default:
+			// A connection reset or a decode failure after a 201 can hide
+			// a create that landed: look for our nonce before giving up.
+			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
+			switch own {
+			case ownMine:
+				a.logf("[slots] %s was created despite create error; adopting it: %v", slot, err)
+				a.recordLease(slot, l)
+				return slot, client, nil
+			case ownForeign:
+				a.clearPending(slot)
+				a.logf("[slots] %s create failed and the name is held by another lease: %v", slot, err)
+				capErr.Occupied++
+				continue
+			}
+			// The create may still land after this lookup.
+			a.addPending(slot, desc)
+			if ctx.Err() != nil {
+				return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
+			}
+			a.recordOrgError(slot, client, err, capErr)
+			if ownErr != nil && isBackoffError(ownErr) {
+				a.recordOrgError(slot, client, ownErr, capErr)
+			}
 		}
 	}
 	return Slot{}, nil, capErr
 }
 
-// recordLease stores the lease for slot and logs the claim.
+// recordLease stores the lease for slot, forgets the slot's pending
+// nonces (the name is ours now, so none of them can land), and logs the
+// claim.
 func (a *slotAllocator) recordLease(slot Slot, l lease) {
 	a.mu.Lock()
 	a.held[slot] = l
+	delete(a.pending, slot)
 	a.mu.Unlock()
 	a.logf("[slots] claimed %s (%s)", slot, a.quotaSummary(slot.Org))
+}
+
+// pendingFor returns a copy of slot's pending lease descriptions.
+func (a *slotAllocator) pendingFor(slot Slot) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.pending[slot])
+}
+
+// addPending records desc as a create for slot whose outcome is unknown.
+func (a *slotAllocator) addPending(slot Slot, desc string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !slices.Contains(a.pending[slot], desc) {
+		a.pending[slot] = append(a.pending[slot], desc)
+	}
+}
+
+// clearPending forgets slot's pending lease descriptions once another
+// lease's repository holds the name: none of our creates can land while
+// it exists. A create landing after that repository is deleted is left
+// for GC.
+func (a *slotAllocator) clearPending(slot Slot) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.pending, slot)
 }
 
 // recordOrgError files a failed API call for slot's org under the
@@ -511,22 +622,25 @@ func (a *slotAllocator) listOccupied(ctx context.Context, client forge.Client, o
 }
 
 // findOwn looks the slot's repository up by name and reports whether it
-// carries desc, in which case the returned lease adopts it. The lookup is
-// bounded by claimCreateTimeout. A lookup failure is returned so the caller
-// can back the org off when it is throttling; the repo is then treated as
-// not ours.
-func (a *slotAllocator) findOwn(ctx context.Context, client forge.Client, slot Slot, desc string) (lease, bool, error) {
+// carries one of descs (ownMine, with a lease adopting it), carries none
+// of them (ownForeign), is absent (ownAbsent), or could not be looked up
+// (ownUnknown). The lookup is bounded by claimCreateTimeout. For
+// ownAbsent and ownUnknown the lookup error is returned so the caller
+// can back the org off when it is throttling.
+func (a *slotAllocator) findOwn(ctx context.Context, client forge.Client, slot Slot, descs []string) (lease, ownership, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, claimCreateTimeout)
 	defer cancel()
 	repo, err := client.GetRepo(reqCtx, slot.Org, slot.Repo)
 	a.observeQuota(slot.Org, client)
-	if err != nil {
-		return lease{}, false, err
+	switch {
+	case forge.IsNotFound(err):
+		return lease{}, ownAbsent, err
+	case err != nil:
+		return lease{}, ownUnknown, err
+	case repo == nil || !slices.Contains(descs, repo.Description):
+		return lease{}, ownForeign, nil
 	}
-	if repo == nil || repo.Description != desc {
-		return lease{}, false, nil
-	}
-	return lease{client: client, repoID: repo.ID, description: desc}, true, nil
+	return lease{client: client, repoID: repo.ID, description: repo.Description}, ownMine, nil
 }
 
 // Acquire repeats Claim until a slot is leased or ctx ends, waiting

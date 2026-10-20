@@ -33,6 +33,11 @@ type orgClient struct {
 	// createLandsThenBlocks is createBlocks after the repo was created
 	// server-side, as a create whose response never arrives.
 	createLandsThenBlocks bool
+	// createLandsLate is createBlocks for a create that lands only after
+	// the claim gave up on it: CreateRepo records the description in
+	// lateDesc instead of creating, and the test lands it later.
+	createLandsLate bool
+	lateDesc        string
 	// deleteLostErr makes DeleteRepo succeed server-side and then fail
 	// with this error.
 	deleteLostErr error
@@ -46,8 +51,11 @@ func (c *orgClient) CreateRepo(ctx context.Context, org, name, description strin
 	c.creates++
 	err := c.createErr
 	lost := c.createLostErr
-	blocks := c.createBlocks || c.createLandsThenBlocks
+	blocks := c.createBlocks || c.createLandsThenBlocks || c.createLandsLate
 	lands := c.createLandsThenBlocks
+	if c.createLandsLate {
+		c.lateDesc = description
+	}
 	c.mu.Unlock()
 	if err != nil {
 		return nil, err
