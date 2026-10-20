@@ -69,6 +69,10 @@ if [[ "\${GH_FAIL}" == "delete" && "\$*" == *DELETE* ]]; then
   echo "simulated label DELETE failure" >&2
   exit 1
 fi
+if [[ "\${GH_FAIL}" == "delete_404" && "\$*" == *DELETE* ]]; then
+  echo "gh: Label does not exist (HTTP 404)" >&2
+  exit 1
+fi
 if [[ "\${GH_FAIL}" == "permission" && "\$*" == *"/collaborators/"* ]]; then
   echo "simulated permission API failure" >&2
   exit 1
@@ -210,6 +214,18 @@ run_case "malformed permission response returns error" "false" "error" "false"
 set_role "author" "raw:{}"
 write_pr "MEMBER" '[]'
 run_case "permission response missing permission field returns error" "false" "error" "false"
+
+# Permission response with permission: none (e.g. apps/bots) falls through to label check
+set_role "author" "raw:{\"role_name\":\"\",\"permission\":\"none\"}"
+write_pr "NONE" '[]'
+run_case "bot or app author with permission none falls through to unauthorized" "false" "unauthorized" "false"
+
+export EVENT_ACTION="labeled"
+export LABEL_ACTOR_LOGIN="labeler"
+write_pr "NONE" '[{"name":"ok-to-test"}]'
+write_events '[{"event":"labeled","label":{"name":"ok-to-test"},"created_at":"2026-06-01T11:00:00Z"}]'
+run_case "bot or app author with ok-to-test can be approved by maintainer" "true" "ok_to_test" "false"
+unset EVENT_ACTION LABEL_ACTOR_LOGIN
 
 echo "" >"${ROLES_DIR}/author"
 write_pr "CONTRIBUTOR" '[]'
@@ -374,6 +390,11 @@ else
 fi
 export GH_FAIL="delete"
 run_case "label removal failure returns error" "false" "error" "false"
+export GH_FAIL="false"
+
+# Label removal when concurrent workflow already deleted label (HTTP 404) succeeds
+export GH_FAIL="delete_404"
+run_case "label removal race with 404 treated as already removed" "false" "untrusted_labeler" "true"
 export GH_FAIL="false"
 export CHECK_E2E_AUTH_DRY_RUN="true"
 unset LABEL_ACTOR_LOGIN
