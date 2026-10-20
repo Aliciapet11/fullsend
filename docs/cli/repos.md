@@ -794,8 +794,13 @@ otherwise it reports `Not reactivating disabled GitLab polling schedules` and
 keeps the schedule disabled.
 A deferral leaves the activation cleared and hands any account-owned managed
 schedule back to the installer, so polling stays the dispatch path through the
-Poller credential. Rotation and repair hand a retired account's schedules back
-before deleting it, and uninstall deletes them. The ledger carries no
+Poller credential. When rotation or repair records the activation for the
+replacement generation, the ownership stage moves the managed schedules the
+retired account still owns straight to the replacement account in the same run,
+before the retirement that follows the webhook cutover
+([#8602](https://github.com/fullsend-ai/fullsend/issues/8602)). Otherwise
+retirement hands a retired account's schedules back to the installer before
+deleting it, and uninstall deletes them. The ledger carries no
 activation field. This version adds the `trigger_token_digest` and
 `publication_pending` fields, so older strict CLI decoders reject a ledger
 written by this version before they read its version; see the
@@ -847,7 +852,12 @@ fails, a ledger-only `ready` is reported as `unreadable` drift instead.
 `repos status` adds a `gitlab_trigger_account` object with a `state`
 (`not-installed`, `ready`, `drifted`, `deferred`, `in-progress`,
 `cleanup-pending`, or `unreadable`) and exact `reasons`, including token
-variable drift and an unfinished retirement of a previous generation. States
+variable drift and an unfinished retirement of a previous generation. While
+the dispatch activation is recorded, a managed polling schedule that the
+trigger account does not own (it runs with its owner's permissions) is
+reported as drift until `repos install` moves it. When its owner is not a
+retired generation or a verified installer Maintainer, install refuses to adopt
+it, and an administrator must remove or reassign it first. States
 other than `not-installed`, `deferred`, and `ready` add `gitlab-trigger-account`
 drift.
 

@@ -641,9 +641,11 @@ published trigger token instead of the Poller-owned one. Details are in
 - **Rotation:** `fullsend repos install --rotate-gitlab-trigger-account`
   replaces the account, deploy key, push entry, and trigger token with a fresh
   generation. The previous account is first confirmed at Developer access, and
-  rotation stops without replacing anything when that cannot be verified. The
-  previous generation's managed polling schedules are handed back to the
-  installer, then moved to the new account once its activation is recorded.
+  rotation stops without replacing anything when that cannot be verified. When
+  the new account's activation is recorded in the same run, the previous
+  generation's managed polling schedules move straight to the new account.
+  Otherwise they are handed back to the installer and move to the new account
+  once its activation is recorded.
 - **Uninstall:** `repos uninstall` deletes the managed polling schedules the
   account owns, along with the account.
 - **Breaking change:** the ledger now records `trigger_token_digest` (the
