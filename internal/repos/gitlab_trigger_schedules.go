@@ -41,7 +41,9 @@ import (
 // interruption leaves a duplicate (removed on the next run) rather than no
 // polling schedule at all:
 //
-//   - adoption: a managed schedule owned by anyone else is replaced by an
+//   - adoption: a managed schedule owned by anyone else (a verified installer
+//     Maintainer, or a retired generation awaiting retirement after rotation
+//     or repair) is replaced by an
 //     account-owned one on the protected branch, keeping its active state. A
 //     disabled replacement is created disabled (the create request carries
 //     active=false), so it is never active; while the original survives it is
@@ -431,6 +433,13 @@ func (op *gitLabTriggerAccountOp) planAccountSchedules(ctx context.Context) ([]a
 				mine = append(mine, s)
 			} else {
 				if op.recordedGenerationOwner(s.OwnerID) && s.OwnerID != int64(op.st.AccountID) {
+					// A retired generation still owns the schedule while its
+					// retirement waits for the webhook cutover (rotation or
+					// repair). It moves straight to the current account:
+					// retirement would otherwise hand it to the installer after
+					// this stage ran, leaving it installer-owned until another
+					// install (#8602).
+					others = append(others, s)
 					continue
 				}
 				trusted, err := op.installerScheduleOwner(ctx, s.OwnerID, int64(installerID))

@@ -2,6 +2,7 @@ package repos
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -40,6 +41,44 @@ func TestDiagnoseGitLabTriggerAccount_NotInstalledAndDeferred(t *testing.T) {
 	got = e.diagnose(e.f, trigBranch)
 	assert.Equal(t, GitLabTriggerStateNotInstalled, got.State)
 	assert.Contains(t, got.Reasons[len(got.Reasons)-1], "could not check")
+}
+
+// With the dispatch activation recorded, a managed schedule the trigger
+// account does not own runs with its owner's permissions, so status reports it
+// instead of a ready account. The dispatch gate must not, because the
+// schedules move only after it passes (#8602).
+func TestDiagnoseGitLabTriggerAccount_ScheduleOwnershipAfterActivation(t *testing.T) {
+	ctx := context.Background()
+	e := newTrigEnv()
+	e.readyActive(t)
+	spec := trigSpec(t, trigSlashDesc)
+	id := e.adminSchedule(t, spec.Description, trigBranch, spec.Cron, true)
+
+	got := e.diagnose(e.f, trigBranch)
+	assert.Equal(t, GitLabTriggerStateDrifted, got.State)
+	require.Len(t, got.Reasons, 1)
+	assert.Contains(t, got.Reasons[0], fmt.Sprintf("managed polling schedule %d", id))
+	assert.Contains(t, got.Reasons[0], "not the trigger account")
+	assert.Contains(t, got.Reasons[0], "re-run repos install")
+	assert.Equal(t, GitLabTriggerStateReady, diagnoseGitLabTriggerAccount(ctx, e.state, e.f, trigOwner, trigRepo, trigBranch, true).State, "the dispatch gate ignores schedule ownership")
+	assert.Equal(t, GitLabTriggerStateReady, e.diagnose(nil, "").State, "the ledger-only diagnosis makes no live reads")
+
+	e.state.Errors = map[string]error{"ListPipelineSchedules": errTrigInjected}
+	got = e.diagnose(e.f, trigBranch)
+	assert.Equal(t, GitLabTriggerStateDrifted, got.State)
+	assert.Contains(t, strings.Join(got.Reasons, "\n"), "owner of the managed polling schedules is unverified")
+	e.state.Errors = nil
+
+	_, err := ConvergeGitLabTriggerSchedules(ctx, e.opts())
+	require.NoError(t, err)
+	assert.Equal(t, GitLabTriggerStateReady, e.diagnose(e.f, trigBranch).State)
+
+	// Without a recorded activation the schedules belong to the installer.
+	e2 := newTrigEnv()
+	e2.readyActive(t)
+	e2.adminSchedule(t, spec.Description, trigBranch, spec.Cron, true)
+	require.NoError(t, SetGitLabTriggerDispatchActive(ctx, e2.opts(), false))
+	assert.Equal(t, GitLabTriggerStateReady, e2.diagnose(e2.f, trigBranch).State)
 }
 
 func TestDiagnoseGitLabTriggerAccount_ReadyAndDrift(t *testing.T) {

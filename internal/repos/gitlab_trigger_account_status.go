@@ -139,6 +139,11 @@ func diagnoseGitLabTriggerAccount(ctx context.Context, client forge.Client, api 
 			reasons = append(reasons, "install and rotation defer: "+reason)
 		}
 		reasons = append(reasons, op.liveDrift(ctx)...)
+		// The dispatch gate must not depend on schedule ownership: the
+		// schedules move to the account only after the gate passes.
+		if !allowPendingRetirement {
+			reasons = append(reasons, op.scheduleOwnershipDrift(ctx)...)
+		}
 	}
 	if len(reasons) > 0 {
 		return GitLabTriggerAccountStatus{State: GitLabTriggerStateDrifted, Reasons: append(deferralNotes, reasons...)}
@@ -201,6 +206,34 @@ func foreignStateReason(err error) string {
 		return "could not verify the trigger account holds no credential or resource fullsend did not create: " + err.Error()
 	}
 	return "install would refuse to continue: " + err.Error()
+}
+
+// scheduleOwnershipDrift reports managed polling schedules that the trigger
+// account does not own although the dispatch activation is recorded for it.
+// GitLab runs a scheduled pipeline with its owner's permissions, so such a
+// schedule polls as that user (for example the installer) instead of the
+// Developer-level account until install moves it (#8602). Without a recorded
+// activation the schedules are meant to stay installer-owned.
+func (op *gitLabTriggerAccountOp) scheduleOwnershipDrift(ctx context.Context) []string {
+	active, err := op.dispatchActivationRecorded(ctx)
+	if err != nil {
+		return []string{"could not read the dispatch activation; the owner of the managed polling schedules is unverified"}
+	}
+	if !active {
+		return nil
+	}
+	schedules, err := op.opts.State.ListPipelineSchedules(ctx, op.opts.Owner, op.opts.Repo)
+	if err != nil {
+		return []string{"could not list pipeline schedules; the owner of the managed polling schedules is unverified"}
+	}
+	var reasons []string
+	for _, s := range schedules {
+		if !isManagedPipelineSchedule(s.Description) || s.OwnerID == int64(op.st.AccountID) {
+			continue
+		}
+		reasons = append(reasons, fmt.Sprintf("managed polling schedule %d (%q) is owned by user %d, not the trigger account, although the dispatch activation is recorded, so it runs with that user's permissions; re-run repos install to move it to the trigger account", s.ID, s.Description, s.OwnerID))
+	}
+	return reasons
 }
 
 // liveDrift compares the recorded resources with GitLab. A failed read is

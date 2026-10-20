@@ -950,7 +950,12 @@ reason and resource IDs.
   When the activation is not recorded (the account or the gate deferred, or the
   account stage failed), install hands any account-owned schedule back to the
   installer instead. This also happens before the account is ever raised to
-  Maintainer and when rotation or repair retires an account. Each move creates
+  Maintainer and when rotation or repair retires an account while the
+  activation is not recorded. When rotation or repair records the activation
+  for the replacement generation, the schedules the retired account still owns
+  move straight to the replacement account in the same run. While the
+  activation is recorded, `repos status` reports any managed schedule the
+  trigger account does not own as drift; re-run install to move it. Each move creates
   the replacement before deleting the original, so an interrupted run leaves a
   duplicate that the next install removes. If an install stops before it
   reaches the trigger-account stage, the activation stays withdrawn and the

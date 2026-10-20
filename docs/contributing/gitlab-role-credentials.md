@@ -1131,7 +1131,11 @@ lives in `internal/repos/gitlab_trigger_schedules.go`:
   then the account's schedule is deleted. The hand-back also runs before the
   account is ever raised to Maintainer (a schedule fires on the server's clock
   and would run with Maintainer access) and when rotation or repair retires a
-  generation, before its account is deleted.
+  generation, before its account is deleted. When the activation is recorded
+  for the replacement generation, adoption has already moved the retired
+  account's managed schedules straight to the replacement account in the same
+  install, before the deferred retirement, so retirement finds none to hand
+  back (#8602).
 - **Interrupted cleanup.** Every move creates before it deletes, so an
   interruption leaves a duplicate that the next run removes, never a project
   without a polling schedule.
