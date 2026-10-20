@@ -237,10 +237,8 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 	// on argv: on a retry iteration it carries the previous failure's text.
 	assert.Contains(t, cmd, "printf '%s' '"+DefaultAgentPrompt+"' | \"$FULLSEND_CODEX_BIN\"")
 
-	// PATH is captured before .env and restored after it: the hook scripts
-	// resolve their tools by name (tirith_check.py runs a bare `tirith`), so a
-	// .env that prepends a fake one would neuter the chain with every digest
-	// green. Reproduced before the pin was added.
+	// PATH is captured before .env and restored after it for codex itself;
+	// the hook children take the trusted PATH exported below.
 	pinAt := strings.Index(cmd, `readonly FULLSEND_CODEX_PATH="$PATH"`)
 	envAt := strings.Index(cmd, codexEnvLoad)
 	restoreAt := strings.Index(cmd, `export PATH="$FULLSEND_CODEX_PATH"`)
@@ -248,6 +246,19 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 	require.Positive(t, restoreAt)
 	assert.Less(t, pinAt, envAt, "PATH is captured before .env")
 	assert.Greater(t, restoreAt, envAt, "and restored after it")
+
+	// The hook adapter's children take the trusted PATH, which envDataLoad
+	// records read-only before .env (inside codexEnvLoad); it is exported
+	// after .env and before codex starts, and nothing unsets it.
+	trustedAt := strings.Index(cmd, codexEnvLoad)
+	exportAt := strings.Index(cmd, "export "+envDataTrustedPathVar)
+	execAt := strings.Index(cmd, `| "$FULLSEND_CODEX_BIN"`)
+	require.Positive(t, trustedAt)
+	require.Positive(t, exportAt)
+	assert.Contains(t, codexEnvLoad, "readonly "+envDataTrustedPathVar+"=")
+	assert.Greater(t, exportAt, envAt, "exported after .env")
+	assert.Less(t, exportAt, execAt, "and before codex starts")
+	assert.NotRegexp(t, `unset [^&]*\b`+envDataTrustedPathVar+`\b`, cmd)
 
 	// Loader variables would inject code into any dynamically linked program
 	// the run starts, before its main.

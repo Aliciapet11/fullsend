@@ -271,7 +271,10 @@ func (r CodexRuntime) Bootstrap(input BootstrapInput) error {
 		if err := uploadBytes(sandboxName, r.codexAdapterPath(), codexHookAdapterPy); err != nil {
 			return fmt.Errorf("installing hook adapter: %w", err)
 		}
-		python, err := codexPreflightPython(sandboxName)
+		// The hook children's PATH is pinned by the launch itself
+		// (envDataTrustedPath, see buildCodexRunCommand), so only the
+		// interpreter is taken from here.
+		python, _, err := hookPreflightInterpreter(sandboxName)
 		if err != nil {
 			return err
 		}
@@ -548,25 +551,43 @@ func codexReadHarnessSecurityEnv(sandboxName string) ([]codexEnvPair, error) {
 	return env, nil
 }
 
-// codexPreflightPython resolves the absolute interpreter the hook handlers
-// will name. It is resolved here, on a shell the agent has not touched, rather
-// than left as a bare `python3` in hooks.json: codex spawns hooks after the
-// agent-writable .env is sourced, so PATH resolution at that point is the
-// agent's to influence.
-func codexPreflightPython(sandboxName string) (string, error) {
-	stdout, _, exitCode, err := sandbox.Exec(sandboxName, "command -v python3", 10*time.Second)
+// hookInterpreterSep separates the interpreter from the PATH on the line
+// hookInterpreterProbe prints.
+const hookInterpreterSep = "|fullsend-hook-sep|"
+
+// hookInterpreterProbe is the sandbox command hookPreflightInterpreter runs:
+// the launch's own python3 pin (envDataPin), then one line holding the pinned
+// interpreter and the trusted PATH it was taken from.
+func hookInterpreterProbe() string {
+	return envDataPin() + ` && printf '%s` + hookInterpreterSep + `%s\n' "$` + envDataPythonVar + `" "$` + envDataTrustedPathVar + `"`
+}
+
+// hookPreflightInterpreter resolves the absolute interpreter the hook
+// handlers name and the PATH the hooks resolve their tools from, both from
+// directories the agent cannot write. It runs the lookup the launch makes
+// before it reads .env (envDataPin) on a shell the agent has not touched,
+// rather than leaving a bare `python3` in hooks.json or taking the sandbox
+// PATH as is: an image can put a directory the agent owns (a virtualenv's
+// bin) first on PATH.
+func hookPreflightInterpreter(sandboxName string) (python, path string, err error) {
+	stdout, stderr, exitCode, err := sandbox.Exec(sandboxName, hookInterpreterProbe(), 10*time.Second)
 	if err != nil {
-		return "", fmt.Errorf("resolving python3 for the hook adapter: %w", err)
+		return "", "", fmt.Errorf("resolving python3 for the hooks: %w", err)
 	}
-	path := strings.TrimSpace(stdout)
-	if exitCode != 0 || path == "" {
-		return "", fmt.Errorf("resolving python3 for the hook adapter: not found in the sandbox image (exit %d)", exitCode)
+	line := strings.TrimSpace(stdout)
+	if i := strings.LastIndexByte(line, '\n'); i >= 0 {
+		line = strings.TrimSpace(line[i+1:])
 	}
-	if i := strings.LastIndexByte(path, '\n'); i >= 0 {
-		path = strings.TrimSpace(path[i+1:])
+	python, path, found := strings.Cut(line, hookInterpreterSep)
+	if exitCode != 0 || !found || python == "" {
+		return "", "", fmt.Errorf("resolving python3 for the hooks: none found in a PATH directory the agent cannot write (exit %d): %s",
+			exitCode, strings.TrimSpace(sanitizeOutput(stderr)))
 	}
-	if !strings.HasPrefix(path, "/") {
-		return "", fmt.Errorf("resolving python3 for the hook adapter: %q is not an absolute path", sanitizeOutput(path))
+	if !strings.HasPrefix(python, "/") {
+		return "", "", fmt.Errorf("resolving python3 for the hooks: %q is not an absolute path", sanitizeOutput(python))
+	}
+	if path == "" || strings.ContainsAny(path, "\r\n") {
+		return "", "", fmt.Errorf("resolving the PATH for the hooks: unusable result (exit %d)", exitCode)
 	}
 	// The adapter's isolation of its children rests on `-I` keeping the
 	// script's own directory off sys.path, so the verified hooks directory can
@@ -574,10 +595,10 @@ func codexPreflightPython(sandboxName string) (string, error) {
 	// true of every CPython that has had `-I`, but the floor is asserted here
 	// rather than assumed: below it, a planted `hooks/json/` would shadow a
 	// stdlib import inside a hook script.
-	if err := codexPreflightPythonVersion(sandboxName, path); err != nil {
-		return "", err
+	if err := codexPreflightPythonVersion(sandboxName, python); err != nil {
+		return "", "", err
 	}
-	return path, nil
+	return python, path, nil
 }
 
 // codexMinPythonMinor is the 3.x minor the hook adapter requires. 3.11 is the

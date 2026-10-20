@@ -48,8 +48,8 @@ fullsend_have=$(command -p cat '/sandbox/codex-config/openai-token' 2>/dev/null)
 test "$fullsend_have" = "$fullsend_want" ;; *) command -p false ;; esac; }; then echo 'fullsend: OPENAI_API_KEY is an older generation than the credential file holds; leaving the file as it is' >&2; else echo 'fullsend: OPENAI_API_KEY is older than the newest generation in the history, but the credential file does not hold that one; not treating the skipped write as done' >&2; command -p false; fi; else { test "$fullsend_last" = "$OPENAI_API_KEY" || printf '%s\n' "$OPENAI_API_KEY" >> '/sandbox/codex-config/openai-token.generations'; } &&
 printf '%s' "$OPENAI_API_KEY" > '/sandbox/codex-config/openai-token.fullsend'.$$ &&
 command -p mv -f '/sandbox/codex-config/openai-token.fullsend'.$$ '/sandbox/codex-config/openai-token'; fi; } 9>>'/sandbox/codex-config/openai-token.fullsend-seed.lock' || { command -p rm -f '/sandbox/codex-config/openai-token.fullsend'.$$ '/sandbox/codex-config/openai-token.generations'.$$; echo 'fullsend: writing the codex token file failed' >&2; exit 1; }; } &&
-{ readonly FULLSEND_TRUSTED_PATH="$(if test -O /; then printf '%s' "$PATH"; else IFS=:; set -f; s=; for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; d="$(cd -P "$d" 2>/dev/null &&
-pwd -P)" || continue; case $d in (*:*) continue ;; esac; p=$d; while :; do if test -w "$p" || test -O "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done; if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done; fi)"; } &&
+{ readonly FULLSEND_TRUSTED_PATH="$(IFS=:; set -f; s=; for d in $PATH; do case $d in (/*) ;; (*) continue ;; esac; if ! test -O /; then d="$(cd -P "$d" 2>/dev/null &&
+pwd -P)" || continue; case $d in (*:*) continue ;; esac; p=$d; while :; do if test -w "$p" || test -O "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done; fi; if test -d "$d"; then printf '%s%s' "$s" "$d"; s=:; fi; done)"; } &&
 { readonly FULLSEND_ENV_PYTHON="$(IFS=:; set -f; rl=; for d in $FULLSEND_TRUSTED_PATH; do test -f "$d/readlink" &&
 test -x "$d/readlink" || continue; if test -O /; then rl=$d/readlink; break; fi; if test -h "$d/readlink" || test -w "$d/readlink" || test -O "$d/readlink"; then continue; fi; rl=$d/readlink; break; done; test -n "$rl" || echo 'fullsend: no readlink that is a regular file in a PATH directory the agent cannot write' >&2; test -n "$rl" || exit 1; for d in $FULLSEND_TRUSTED_PATH; do test -x "$d/python3" || continue; r="$(PATH="$FULLSEND_TRUSTED_PATH" "$rl" -f "$d/python3" 2>/dev/null)" || continue; if ! test -O /; then p=$r; while :; do if test -w "$p" || test -O "$p"; then continue 2; fi; case $p in (/) break ;; esac; p=${p%/*}; p=${p:-/}; done; fi; printf '%s' "$r"; break; done)" &&
 case "$FULLSEND_ENV_PYTHON" in /*) ;; *) false ;; esac || { echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; } &&
@@ -290,7 +290,7 @@ eval "$FULLSEND_ENV_EXPORTS" &&
 unset FULLSEND_ENV_EXPORTS &&
 export CODEX_HOME=/sandbox/codex-config &&
 export PATH="$FULLSEND_CODEX_PATH" &&
-export FULLSEND_CODEX_PATH &&
+export FULLSEND_TRUSTED_PATH &&
 export FULLSEND_RUNTIME=codex &&
 unset OPENAI_BASE_URL OPENAI_API_KEY CODEX_API_KEY NODE_OPTIONS NODE_PATH PYTHONPATH PYTHONHOME PYTHONSTARTUP LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT &&
 unset -f test command grep cut wc sha256sum printf codex &&

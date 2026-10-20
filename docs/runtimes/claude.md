@@ -243,8 +243,9 @@ hooks, in a `PATH` directory the sandbox user neither owns nor can write (a virt
 `$HOME`-managed interpreter does not count); without one the launch fails with
 `python3 not found in a PATH directory the agent cannot write` (exit 127). It also needs
 `readlink` there as a regular file, not a symlink; without one the launch also prints
-`no readlink that is a regular file in a PATH directory the agent cannot write`. The fullsend
-sandbox image ships both. `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
+`no readlink that is a regular file in a PATH directory the agent cannot write`. With sandbox
+hooks on, that `python3` must also be 3.11 or newer; an older one fails Bootstrap with
+`hook interpreter ... needs at least 3.11`. The fullsend sandbox image ships both. `.env` carries the harness `env.sandbox` values, the host-file env files it sources, and anything
 the agent wrote there between iterations. The rest of the environment, including provider
 credentials, comes from the sandbox.
 
