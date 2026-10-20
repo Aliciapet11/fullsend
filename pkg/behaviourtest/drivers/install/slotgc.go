@@ -146,6 +146,17 @@ type gcLeaseState struct {
 	LastCollectedAt time.Time `json:"last_collected_at"`
 }
 
+// valid reports whether s is a record a collector writes: a held lease has
+// an expiry, and a released one carries the collection time. Anything else
+// (null, {}, a holder without an expiry) was edited by hand and is left for
+// manual repair rather than treated as available.
+func (s gcLeaseState) valid() bool {
+	if s.Holder != "" {
+		return !s.ExpiresAt.IsZero()
+	}
+	return !s.LastCollectedAt.IsZero()
+}
+
 // gcLease is a collector lease this allocator holds.
 type gcLease struct {
 	org    string
@@ -446,10 +457,11 @@ func isSlotOwnershipMarker(desc string) bool {
 	return true
 }
 
-// sameRepo reports whether cur is the repository c was judged on.
+// sameRepo reports whether cur is the repository c was judged on and is
+// still eligible: a repository archived since the scan stays occupied.
 func (c gcCandidate) sameRepo(cur *forge.Repository) bool {
 	return cur != nil && cur.ID == c.repo.ID && cur.Description == c.repo.Description &&
-		cur.CreatedAt.Equal(c.repo.CreatedAt)
+		cur.CreatedAt.Equal(c.repo.CreatedAt) && !cur.Archived
 }
 
 // reclaimSlot deletes candidate c while lease l is still held and the
@@ -468,6 +480,9 @@ func (a *slotAllocator) reclaimSlot(ctx context.Context, client forge.Client, l 
 	case err != nil:
 		return false, "not deleted: identity recheck failed", a.gcFailure(c.slot.Org, client, "rechecking "+c.slot.Repo, err)
 	case !c.sameRepo(cur):
+		if cur.ID == c.repo.ID && cur.Archived {
+			return false, "archived during collection; not deleted", ""
+		}
 		return false, fmt.Sprintf("replaced during collection (id %d, was %d); not deleted", cur.ID, c.repo.ID), ""
 	}
 
@@ -497,7 +512,7 @@ func (a *slotAllocator) reclaimSlot(ctx context.Context, client forge.Client, l 
 	case errors.Is(err, errGCLeaseLost):
 		return false, "not deleted: collector lease lost during retry wait", a.leaseStop(client, l, err)
 	case errors.Is(err, errGCRepoChanged):
-		return false, "gone or replaced during retry wait; delete not resent", ""
+		return false, "gone, replaced or archived during retry wait; delete not resent", ""
 	}
 
 	// The delete may have landed with only its response lost; decide by the
@@ -511,10 +526,18 @@ func (a *slotAllocator) reclaimSlot(ctx context.Context, client forge.Client, l 
 	if checkErr == nil && !c.sameRepo(after) {
 		note = fmt.Sprintf("delete failed and the name now holds another repository (id %d): %v", after.ID, err)
 	}
-	if isBackoffError(err) || (checkErr != nil && isBackoffError(checkErr)) {
-		return false, note, a.gcFailure(c.slot.Org, client, "deleting "+c.slot.Repo, err)
+	// Record each throttled response's own window, so a Retry-After on the
+	// lookup is kept even when the delete failed for another reason.
+	var stop string
+	if checkErr != nil && isBackoffError(checkErr) {
+		stop = a.gcFailure(c.slot.Org, client, "rechecking "+c.slot.Repo+" after a failed delete", checkErr)
 	}
-	return false, note, ""
+	if isBackoffError(err) {
+		if s := a.gcFailure(c.slot.Org, client, "deleting "+c.slot.Repo, err); stop == "" {
+			stop = s
+		}
+	}
+	return false, note, stop
 }
 
 // leaseStop renders the stop reason for a failed lease check.
@@ -523,6 +546,14 @@ func (a *slotAllocator) leaseStop(client forge.Client, l *gcLease, err error) st
 		return fmt.Sprintf("stopped: %v", err)
 	}
 	return a.gcFailure(l.org, client, "checking collector lease", err)
+}
+
+// truncateID shortens a UUID for log lines.
+func truncateID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // gcLeaseUnavailable returns why a collector may not take the lease in
@@ -660,6 +691,9 @@ func (a *slotAllocator) readGCLease(ctx context.Context, client forge.Client, or
 	var state gcLeaseState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return gcLeaseState{}, "", fmt.Errorf("decoding %s/%s/%s (left for manual repair): %w", org, slotGCRepo, slotGCLeasePath, err)
+	}
+	if !state.valid() {
+		return gcLeaseState{}, "", fmt.Errorf("decoding %s/%s/%s (left for manual repair): incomplete lease record", org, slotGCRepo, slotGCLeasePath)
 	}
 	return state, forge.GitBlobSHA(data), nil
 }

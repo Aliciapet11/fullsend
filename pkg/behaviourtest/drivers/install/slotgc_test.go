@@ -844,6 +844,93 @@ func TestSlotGC_AmbiguousFailuresFailClosed(t *testing.T) {
 	})
 }
 
+// TestSlotGC_ThrottledLookupAfterFailedDeleteBacksOffOrg checks that a
+// non-throttle delete failure followed by a throttled lookup still keeps the
+// lookup's Retry-After window, so later claims skip the org.
+func TestSlotGC_ThrottledLookupAfterFailedDeleteBacksOffOrg(t *testing.T) {
+	ctx := context.Background()
+	clock := newTestClock(time.Now())
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	stale := Slot{Org: StageOrg, Repo: "test-repo-01"}
+	seedSlotRepo(p, stale, newLeaseDescription(), staleTime(clock))
+	hooked := newGCHookClient(p.clients[StageOrg])
+	hooked.deleteErr = &gh.APIError{StatusCode: http.StatusBadGateway, Message: "bad gateway"}
+	hooked.onGetRepo = func(repo string, call int) error {
+		// Calls: scan, identity recheck, then the lookup after the delete.
+		if repo == stale.Repo && call == 3 {
+			return &gh.APIError{StatusCode: http.StatusForbidden, Message: "secondary rate limit", RetryAfter: 10 * time.Minute}
+		}
+		return nil
+	}
+	a := newGCAllocator(t, layout, singleClient(hooked), clock)
+
+	n, report := a.collectOrg(ctx, hooked, StageOrg)
+	assert.Zero(t, n)
+	assert.Contains(t, report, "delete failed: github api: 502 bad gateway")
+	assert.Contains(t, report, "rate-limited until")
+	until, blocked := a.orgBlockedUntil(StageOrg)
+	require.True(t, blocked, "the lookup's rate-limit window must be recorded")
+	assert.GreaterOrEqual(t, until.Sub(clock.Now()), 10*time.Minute)
+
+	calls := hooked.getRepoCalls(stale.Repo)
+	_, report = a.collectOrg(ctx, hooked, StageOrg)
+	assert.Contains(t, report, "skipped: rate-limited until")
+	assert.Equal(t, calls, hooked.getRepoCalls(stale.Repo), "a closed rate window is not probed")
+}
+
+// TestSlotGC_RepoArchivedDuringCollectionIsKept archives the candidate
+// between the scan and the pre-delete identity recheck.
+func TestSlotGC_RepoArchivedDuringCollectionIsKept(t *testing.T) {
+	ctx := context.Background()
+	clock := newTestClock(time.Now())
+	layout := StagePoolLayout(1)
+	p := newFakePool(layout)
+	stale := Slot{Org: StageOrg, Repo: "test-repo-01"}
+	seedSlotRepo(p, stale, newLeaseDescription(), staleTime(clock))
+	hooked := newGCHookClient(p.clients[StageOrg])
+	hooked.onGetRepo = func(repo string, call int) error {
+		if repo == stale.Repo && call == 2 {
+			for i := range p.fc.Repos {
+				if p.fc.Repos[i].Name == stale.Repo {
+					p.fc.Repos[i].Archived = true
+				}
+			}
+		}
+		return nil
+	}
+	a := newGCAllocator(t, layout, singleClient(hooked), clock)
+
+	n, report := a.collectOrg(ctx, hooked, StageOrg)
+	assert.Zero(t, n)
+	assert.Contains(t, report, "test-repo-01 (archived during collection; not deleted)")
+	assert.True(t, p.exists(t, stale))
+	assert.Zero(t, deleteCount(p.fc, stale), "an archived repo is never deleted")
+}
+
+// TestSlotGC_IncompleteLeaseRecordIsLeftForRepair checks that lease records
+// that decode but are not ones a collector writes stop collection instead
+// of counting as an available lease.
+func TestSlotGC_IncompleteLeaseRecordIsLeftForRepair(t *testing.T) {
+	ctx := context.Background()
+	for _, content := range []string{`null`, `{}`, `{"holder":"x"}`} {
+		t.Run(content, func(t *testing.T) {
+			clock := newTestClock(time.Now())
+			layout := StagePoolLayout(1)
+			p := newFakePool(layout)
+			stale := Slot{Org: StageOrg, Repo: "test-repo-01"}
+			seedSlotRepo(p, stale, newLeaseDescription(), staleTime(clock))
+			require.NoError(t, p.fc.CreateOrUpdateFile(ctx, StageOrg, slotGCRepo, slotGCLeasePath, "edited", []byte(content)))
+			a := newGCAllocator(t, layout, p.clientFor, clock)
+			n, report := a.collectOrg(ctx, p.clients[StageOrg], StageOrg)
+			assert.Zero(t, n)
+			assert.Contains(t, report, "left for manual repair")
+			assert.True(t, p.exists(t, stale))
+			assert.Zero(t, deleteCount(p.fc, stale))
+		})
+	}
+}
+
 // TestSlotGC_NoCredentials reports an org whose client cannot be resolved.
 func TestSlotGC_NoCredentials(t *testing.T) {
 	clock := newTestClock(time.Now())
@@ -866,6 +953,7 @@ type gcDeleteServer struct {
 	created  time.Time
 	desc     string
 	replaced bool
+	archived bool
 	deletes  atomic.Int32
 	// okAfterFirst makes DELETEs after the first one succeed.
 	okAfterFirst bool
@@ -916,7 +1004,7 @@ func (s *gcDeleteServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": id, "name": "test-repo-01", "full_name": "halfsend/test-repo-01", "description": s.desc,
-			"created_at": created.UTC().Format(time.RFC3339),
+			"created_at": created.UTC().Format(time.RFC3339), "archived": s.archived,
 		})
 	case r.Method == http.MethodDelete && r.URL.Path == "/repos/halfsend/test-repo-01":
 		if s.deletes.Add(1) > 1 && s.okAfterFirst {
@@ -948,11 +1036,18 @@ func TestSlotGC_LiveClientRateLimitedDeleteRechecks(t *testing.T) {
 		{
 			name:    "replaced during wait",
 			onWait:  func(s *gcDeleteServer) { s.replaced = true },
-			deletes: 1, want: "gone or replaced during retry wait; delete not resent",
+			deletes: 1, want: "gone, replaced or archived during retry wait; delete not resent",
 		},
 		{
-			name:    "lease taken over during wait",
-			onWait:  func(s *gcDeleteServer) { s.lease = []byte(`{"holder":"successor"}`) },
+			name:    "archived during wait",
+			onWait:  func(s *gcDeleteServer) { s.archived = true },
+			deletes: 1, want: "gone, replaced or archived during retry wait; delete not resent",
+		},
+		{
+			name: "lease taken over during wait",
+			onWait: func(s *gcDeleteServer) {
+				s.lease = []byte(`{"holder":"successor","expires_at":"2999-01-01T00:00:00Z"}`)
+			},
 			deletes: 1, want: "collector lease lost during retry wait",
 		},
 	}

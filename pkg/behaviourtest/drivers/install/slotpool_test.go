@@ -17,6 +17,53 @@ import (
 	gh "github.com/fullsend-ai/fullsend/internal/forge/github"
 )
 
+// testClock is a settable clock for allocators.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newTestClock(at time.Time) *testClock { return &testClock{now: at} }
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) Set(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = at
+}
+
+// logRecorder collects log lines.
+type logRecorder struct {
+	t     *testing.T
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *logRecorder) logf(format string, args ...any) {
+	r.t.Helper()
+	line := fmt.Sprintf(format, args...)
+	r.mu.Lock()
+	r.lines = append(r.lines, line)
+	r.mu.Unlock()
+	r.t.Log(line)
+}
+
+func (r *logRecorder) contains(sub string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.lines {
+		if strings.Contains(l, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 // orgClient is one org's credentials over a shared fake forge. It can
 // inject a CreateRepo error and report rate-limit headers.
 type orgClient struct {
