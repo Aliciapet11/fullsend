@@ -660,6 +660,13 @@ func (a *slotAllocator) joinOrgLock(ctx context.Context, slot Slot, client forge
 	a.observeQuota(slot.Org, client)
 	switch {
 	case err != nil:
+		if m != nil {
+			// The admission write may have landed with only its response
+			// lost; leave it so the holder does not keep the lock occupied
+			// until stale reclaim. Leaving a holder that never joined is a
+			// no-op.
+			a.leaveOrgLock(ctx, client, m)
+		}
 		if ctx.Err() == nil {
 			a.recordOrgError(slot, client, err, capErr)
 		}

@@ -509,7 +509,7 @@ func TestSharedOrgLock_JoinFailures(t *testing.T) {
 		require.ErrorIs(t, capErr.Failed[bridgeOrg], boom)
 	})
 
-	t.Run("failed initialisation removes the half-made lock", func(t *testing.T) {
+	t.Run("failed initialisation leaves the half-made lock for stale reclaim", func(t *testing.T) {
 		p := newFakePool(layout)
 		p.fc.Errors = map[string]error{"CommitFiles": boom}
 		a := newBridgeAllocator(t, layout, p.clientFor, nil)
@@ -517,8 +517,16 @@ func TestSharedOrgLock_JoinFailures(t *testing.T) {
 		var capErr *CapacityError
 		require.ErrorAs(t, err, &capErr)
 		require.ErrorIs(t, capErr.Failed[bridgeOrg], boom)
-		assert.False(t, lockExists(t, p.fc, bridgeOrg))
+		assert.True(t, lockExists(t, p.fc, bridgeOrg), "the commit may still land, so the repository is not deleted")
 		assert.False(t, p.exists(t, Slot{Org: bridgeOrg, Repo: "test-repo-01"}))
+
+		// Without the shared flag the lock reads as exclusive, so another
+		// runner skips the org instead of joining a half-made lock.
+		delete(p.fc.Errors, "CommitFiles")
+		b := newBridgeAllocator(t, layout, p.clientFor, nil)
+		_, _, err = b.Claim(ctx)
+		require.ErrorAs(t, err, &capErr)
+		assert.Contains(t, capErr.LockExcluded[bridgeOrg], "exclusive")
 	})
 
 	t.Run("shared lock of unknown age is not joined", func(t *testing.T) {
@@ -892,4 +900,230 @@ func TestSharedOrgLock_InitCommitIsNotResentAfterAmbiguousFailure(t *testing.T) 
 	// A resend after a 5xx could land after another runner joined and be
 	// retried against the new head, overwriting that holder's entry.
 	assert.Equal(t, int32(1), attempts.Load(), "the initialisation commit must not be resent after an ambiguous failure")
+}
+
+// lateInitClient makes the lock repository's initial CommitFiles fail
+// without landing it, and lands it only after holders.json was read as
+// missing: a commit that is applied after the creator gave up on it.
+type lateInitClient struct {
+	*orgClient
+	mu      sync.Mutex
+	pending []forge.TreeFile
+	// afterMissingRead runs after the late commit landed.
+	afterMissingRead func()
+}
+
+func (c *lateInitClient) CommitFiles(ctx context.Context, owner, repo, message string, files []forge.TreeFile) (bool, error) {
+	if repo != e2etest.LockRepo {
+		return c.orgClient.CommitFiles(ctx, owner, repo, message, files)
+	}
+	c.mu.Lock()
+	c.pending = files
+	c.mu.Unlock()
+	return false, errors.New("response lost")
+}
+
+func (c *lateInitClient) GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error) {
+	data, err := c.orgClient.GetFileContent(ctx, owner, repo, path)
+	if repo != e2etest.LockRepo || path != sharedLockHoldersPath || !forge.IsNotFound(err) {
+		return data, err
+	}
+	c.mu.Lock()
+	files, hook := c.pending, c.afterMissingRead
+	c.pending, c.afterMissingRead = nil, nil
+	c.mu.Unlock()
+	if files != nil {
+		if _, commitErr := c.orgClient.CommitFiles(ctx, owner, repo, "late init", files); commitErr != nil {
+			return nil, commitErr
+		}
+		if hook != nil {
+			hook()
+		}
+	}
+	return data, err
+}
+
+func TestSharedOrgLock_LateInitCommitIsNotDeleted(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	late := &lateInitClient{orgClient: p.clients[bridgeOrg]}
+	a := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return late, nil }, nil)
+	b := newBridgeAllocator(t, layout, p.clientFor, nil)
+
+	// The initial commit lands between a's missing-state read and whatever
+	// a does next, and b joins the published lock at once.
+	var s2 Slot
+	late.afterMissingRead = func() {
+		var joinErr error
+		s2, _, joinErr = b.Claim(ctx)
+		require.NoError(t, joinErr)
+	}
+	// a's claim moves on to the next slot and joins the published lock.
+	s1, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+
+	require.True(t, lockExists(t, p.fc, bridgeOrg), "a must not delete a lock another runner joined")
+	state := readLockState(t, p.fc, bridgeOrg)
+	assert.Len(t, state.Holders, 3, "b's and a's holders are intact; the creator's entry is left for stale reclaim")
+	assert.False(t, state.Closed)
+	assert.True(t, p.exists(t, s2))
+	assert.Empty(t, p.fc.DeletedRepos, "nothing may be deleted")
+
+	require.NoError(t, a.Release(ctx, s1))
+	require.NoError(t, b.Release(ctx, s2))
+	assert.True(t, lockExists(t, p.fc, bridgeOrg), "the creator's stale entry keeps the lock until reclaim")
+}
+
+// joinLostClient applies a join write to the forge and then reports an
+// error, as a response lost in transit.
+type joinLostClient struct {
+	*orgClient
+	mu   sync.Mutex
+	lost bool
+}
+
+func (c *joinLostClient) UpdateFileIfMatch(ctx context.Context, owner, repo, path, message string, content []byte, expectedSHA string) error {
+	err := c.orgClient.UpdateFileIfMatch(ctx, owner, repo, path, message, content, expectedSHA)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil && message == "join shared lock" && !c.lost {
+		c.lost = true
+		return errors.New("response lost")
+	}
+	return err
+}
+
+func TestSharedOrgLock_AmbiguousJoinWriteIsLeft(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	seed := newBridgeAllocator(t, layout, p.clientFor, nil)
+	s1, _, err := seed.Claim(ctx)
+	require.NoError(t, err)
+
+	lost := &joinLostClient{orgClient: p.clients[bridgeOrg]}
+	a := newBridgeAllocator(t, layout, func(context.Context, string) (forge.Client, error) { return lost, nil }, nil)
+	// The first join's write lands and its response is lost; the claim
+	// moves on to the next slot with a fresh join.
+	s2, _, err := a.Claim(ctx)
+	require.NoError(t, err)
+
+	state := readLockState(t, p.fc, bridgeOrg)
+	assert.Len(t, state.Holders, 2, "the holder whose join response was lost must not stay in the lock")
+	assert.False(t, state.Closed)
+
+	require.NoError(t, seed.Release(ctx, s1))
+	require.NoError(t, a.Release(ctx, s2))
+	assert.False(t, lockExists(t, p.fc, bridgeOrg), "no leaked holder keeps the lock after the last release")
+}
+
+// replaceOnStateReadClient replaces the lock repository with a new shared
+// lock right after the first holders.json read.
+type replaceOnStateReadClient struct {
+	*orgClient
+	mu      sync.Mutex
+	replace func()
+}
+
+func (c *replaceOnStateReadClient) GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error) {
+	data, err := c.orgClient.GetFileContent(ctx, owner, repo, path)
+	if repo != e2etest.LockRepo || path != sharedLockHoldersPath || err != nil {
+		return data, err
+	}
+	c.mu.Lock()
+	hook := c.replace
+	c.replace = nil
+	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return data, err
+}
+
+func TestSharedOrgLock_JoinBindsRepositoryIDToState(t *testing.T) {
+	ctx := context.Background()
+	layout := StagePoolLayout(2)
+	p := newFakePool(layout)
+	seed := newBridgeAllocator(t, layout, p.clientFor, nil)
+	_, _, err := seed.Claim(ctx)
+	require.NoError(t, err)
+	oldRepo, err := p.fc.GetRepo(ctx, bridgeOrg, e2etest.LockRepo)
+	require.NoError(t, err)
+
+	hooked := &replaceOnStateReadClient{orgClient: p.clients[bridgeOrg]}
+	other := newBridgeAllocator(t, layout, p.clientFor, nil)
+	hooked.replace = func() {
+		require.NoError(t, p.fc.DeleteRepo(ctx, bridgeOrg, e2etest.LockRepo))
+		_, _, claimErr := other.Claim(ctx)
+		require.NoError(t, claimErr)
+	}
+
+	b := newSharedOrgLock(t.Logf, time.Now)
+	m, reason, err := b.join(ctx, hooked, bridgeOrg)
+	require.NoError(t, err)
+	require.NotNil(t, m, reason)
+	cur, err := p.fc.GetRepo(ctx, bridgeOrg, e2etest.LockRepo)
+	require.NoError(t, err)
+	assert.NotEqual(t, oldRepo.ID, cur.ID, "the lock was replaced")
+	assert.Equal(t, cur.ID, m.repoID, "the membership records the repository its generation came from")
+	assert.Equal(t, readLockState(t, p.fc, bridgeOrg).Generation, m.generation)
+}
+
+// lockDeleteServer is a live-API stand-in for deleting the e2e-lock
+// repository: DELETE is rate-limited; the repository ID changes once the
+// client's rate-limit wait has elapsed.
+type lockDeleteServer struct {
+	deletes  atomic.Int32
+	replaced atomic.Bool
+}
+
+func (s *lockDeleteServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	const path = "/repos/halfsend/" + e2etest.LockRepo
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == path:
+		id := 1
+		if s.replaced.Load() {
+			id = 2
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "name": e2etest.LockRepo, "full_name": "halfsend/" + e2etest.LockRepo})
+	case r.Method == http.MethodDelete && r.URL.Path == path:
+		if s.deletes.Add(1) > 1 && !s.replaced.Load() {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func TestSharedOrgLock_DeleteIfIDRechecksIDAfterRateLimitWait(t *testing.T) {
+	for _, replaced := range []bool{true, false} {
+		t.Run(fmt.Sprintf("replaced=%v", replaced), func(t *testing.T) {
+			state := &lockDeleteServer{}
+			srv := httptest.NewServer(state)
+			defer srv.Close()
+			client := gh.New("test-token").WithBaseURL(srv.URL).WithAfterFunc(func(time.Duration) <-chan time.Time {
+				if replaced {
+					state.replaced.Store(true)
+				}
+				ch := make(chan time.Time, 1)
+				ch <- time.Now()
+				return ch
+			})
+
+			b := newSharedOrgLock(t.Logf, time.Now)
+			deleted, err := b.deleteIfID(context.Background(), client, "halfsend", 1)
+			require.NoError(t, err)
+			if replaced {
+				assert.False(t, deleted)
+				assert.Equal(t, int32(1), state.deletes.Load(), "the DELETE must not be resent against a replacement lock")
+				return
+			}
+			assert.True(t, deleted)
+			assert.Equal(t, int32(2), state.deletes.Load(), "the DELETE is resent while the lock is still ours")
+		})
+	}
 }

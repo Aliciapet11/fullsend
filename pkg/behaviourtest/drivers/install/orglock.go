@@ -158,6 +158,8 @@ var errLockCreateRace = errors.New("lock repo created concurrently")
 // org has none. It returns a nil membership and the reason when the org
 // is not eligible: a legacy lock, a shared lock past the admission
 // window or closing, or state that kept changing. Errors are API failures.
+// A failed admission write returns its membership together with the error:
+// the write may have landed, so the caller must leave that membership.
 func (b *sharedOrgLock) join(ctx context.Context, client forge.Client, org string) (*orgLockMembership, string, error) {
 	for range sharedLockJoinAttempts {
 		getCtx, cancelGet := b.bound(ctx)
@@ -210,6 +212,24 @@ func (b *sharedOrgLock) join(ctx context.Context, client forge.Client, org strin
 		if err != nil {
 			return nil, "", err
 		}
+		if repo != nil && repo.ID != 0 {
+			// The ID recorded below and the generation read above must
+			// describe the same repository. The repository read before the
+			// state and the one read after it have the same ID, and IDs are
+			// never reused, so the state came from that repository. A lock
+			// replaced after this check fails the conditional write below.
+			recheckCtx, cancelRecheck := b.bound(ctx)
+			cur, recheckErr := client.GetRepo(recheckCtx, org, e2etest.LockRepo)
+			cancelRecheck()
+			switch {
+			case forge.IsNotFound(recheckErr):
+				continue
+			case recheckErr != nil:
+				return nil, "", fmt.Errorf("rereading %s/%s: %w", org, e2etest.LockRepo, recheckErr)
+			case cur.ID != repo.ID:
+				continue
+			}
+		}
 		if state.Closed {
 			return nil, "shared e2e-lock is closing", nil
 		}
@@ -227,7 +247,10 @@ func (b *sharedOrgLock) join(ctx context.Context, client forge.Client, org strin
 			continue
 		}
 		if err != nil {
-			return nil, "", err
+			// The write may have landed with only its response lost, so
+			// the holder may be in holders.json. The membership is returned
+			// with the error so the caller can leave it.
+			return m, "", err
 		}
 		b.logf("[e2e-lock] joined shared lock on %s (lock age at admission: %s, holders: %d)",
 			org, age.Round(time.Second), len(state.Holders))
@@ -280,18 +303,18 @@ func (b *sharedOrgLock) create(ctx context.Context, client forge.Client, org str
 
 // abandonInit cleans up after CommitFiles failed while creating a lock. A
 // failed commit does not prove nothing was published: the commit can land
-// and the response then fail, and another runner may already have joined
-// the generation, so the repository is never deleted on the error alone.
-// The holder state decides:
+// after the error, or land and then fail on the response, and another
+// runner may join the generation at once. A missing holders.json at one
+// instant does not rule out a later publication, so the repository is
+// never deleted here. The holder state decides:
 //
-//   - holders.json is absent: nothing was published and nobody was
-//     admitted, so the repository is deleted if it still has the ID this
-//     runner created.
 //   - holders.json is this generation: it was published, so the creator
 //     leaves through the conditional leave protocol; other holders that
 //     joined keep the lock, and the last one deletes it.
-//   - anything else (another generation, an unreadable state): the lock is
-//     left for stale reclaim.
+//   - anything else (not yet published, another generation, an unreadable
+//     state): the lock is left for stale reclaim. Without the shared flag
+//     it reads as an exclusive lock, so other runners skip the org rather
+//     than join a half-made lock.
 //
 // It runs even when ctx is done; each call is still bounded by the timeout.
 func (b *sharedOrgLock) abandonInit(ctx context.Context, client forge.Client, m *orgLockMembership) {
@@ -299,13 +322,7 @@ func (b *sharedOrgLock) abandonInit(ctx context.Context, client forge.Client, m 
 	state, _, err := b.readState(ctx, client, m.org)
 	switch {
 	case forge.IsNotFound(err):
-		if m.repoID == 0 {
-			b.logf("[e2e-lock] warning: %s/%s was not initialised and its ID is unknown; leaving it for stale reclaim", m.org, e2etest.LockRepo)
-			return
-		}
-		if _, delErr := b.deleteIfID(ctx, client, m.org, m.repoID); delErr != nil {
-			b.logf("[e2e-lock] warning: removing half-created lock %s/%s failed: %v", m.org, e2etest.LockRepo, delErr)
-		}
+		b.logf("[e2e-lock] warning: %s/%s has no holder state after a failed initialisation, which does not rule out a late commit; leaving it for stale reclaim", m.org, e2etest.LockRepo)
 	case err != nil:
 		b.logf("[e2e-lock] warning: cannot tell whether %s/%s was initialised, leaving it for stale reclaim: %v", m.org, e2etest.LockRepo, err)
 	case state.Generation != m.generation:
@@ -398,9 +415,10 @@ func retryPause(ctx context.Context) error {
 // reclaim that replaced the lock, and that replacement may already have
 // live holders, so a mismatch deletes nothing. When the ID is unknown the
 // lock cannot be targeted safely and is left for stale reclaim. The checks
-// and the delete are not atomic. The window is one API round trip, but
-// rate-limit retries, which are still allowed, can stretch it up to the
-// per-call timeout. The delete is not replayed after an ambiguous failure.
+// and the delete are not atomic, and GitHub has no delete by ID, so the
+// window is one API round trip. Rate-limit retries are still allowed, but
+// the repository ID is rechecked before each resend, so a wait does not
+// widen it. The delete is not replayed after an ambiguous failure.
 func (b *sharedOrgLock) deleteClosed(ctx context.Context, client forge.Client, m *orgLockMembership) error {
 	if m.repoID == 0 {
 		b.logf("[e2e-lock] warning: closed shared lock on %s has no recorded repository ID; leaving it for stale reclaim", m.org)
@@ -441,24 +459,49 @@ func (b *sharedOrgLock) reclaim(ctx context.Context, client forge.Client, org st
 	return nil
 }
 
-// deleteIfID deletes the lock repository if it still has the given ID.
-// It reports whether this call deleted it.
-func (b *sharedOrgLock) deleteIfID(ctx context.Context, client forge.Client, org string, id int64) (bool, error) {
+// errLockReplaced is returned by the delete retry guard when the lock
+// repository is gone or has another ID after a retry wait.
+var errLockReplaced = errors.New("lock repo gone or replaced")
+
+// checkLockID reports errLockReplaced unless the lock repository exists
+// with the given ID.
+func (b *sharedOrgLock) checkLockID(ctx context.Context, client forge.Client, org string, id int64) error {
 	getCtx, cancelGet := b.bound(ctx)
 	cur, err := client.GetRepo(getCtx, org, e2etest.LockRepo)
 	cancelGet()
 	if forge.IsNotFound(err) {
-		return false, nil
+		return errLockReplaced
 	}
 	if err != nil {
-		return false, err
+		return err
 	}
 	if cur.ID != id {
+		return errLockReplaced
+	}
+	return nil
+}
+
+// deleteIfID deletes the lock repository if it still has the given ID.
+// It reports whether this call deleted it. The ID is checked before the
+// delete and again before every resend after a rate-limit wait, during
+// which the lock could have been replaced; the delete is not resent then.
+func (b *sharedOrgLock) deleteIfID(ctx context.Context, client forge.Client, org string, id int64) (bool, error) {
+	if err := b.checkLockID(ctx, client, org, id); errors.Is(err, errLockReplaced) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	// Look up on the caller's ctx, not the guarded request context, so the
+	// lookup is not itself guarded.
+	guarded := gh.WithRetryGuard(gh.WithoutAmbiguousRetry(ctx), func(context.Context) error {
+		return b.checkLockID(ctx, client, org, id)
+	})
+	delCtx, cancelDel := b.bound(guarded)
+	err := client.DeleteRepo(delCtx, org, e2etest.LockRepo)
+	cancelDel()
+	if errors.Is(err, errLockReplaced) {
 		return false, nil
 	}
-	delCtx, cancelDel := b.bound(gh.WithoutAmbiguousRetry(ctx))
-	err = client.DeleteRepo(delCtx, org, e2etest.LockRepo)
-	cancelDel()
 	if err != nil && !forge.IsNotFound(err) {
 		return false, err
 	}
