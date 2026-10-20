@@ -1042,12 +1042,16 @@ func TestRunAgent_URLBaseMalformedOrgConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "loading fullsend config")
 }
 
-func TestBuildScanContextCommand_SourcesEnv(t *testing.T) {
+// The pre-agent scan reads .env as data, as the launch does (#8574): no .env
+// or .env.d line runs as shell in the probe.
+func TestBuildScanContextCommand_ReadsEnvAsData(t *testing.T) {
 	traceID := "aabbccdd-1122-4334-8556-aabbccddeeff"
 	cmd := buildScanContextCommand("/sandbox/workspace/repo", traceID)
-	assert.Contains(t, cmd, ". /sandbox/workspace/.env &&")
+	assert.True(t, strings.HasPrefix(cmd, agentruntime.EnvDataLoad("/sandbox/workspace/.env")+" && "), cmd)
+	assert.NotContains(t, cmd, ". /sandbox/workspace/.env")
 	assert.Contains(t, cmd, "FULLSEND_TRACE_ID='"+traceID+"'")
 	assert.Contains(t, cmd, "-exec /sandbox/workspace/bin/fullsend scan context")
+	assert.Contains(t, cmd, `PATH="$FULLSEND_TRUSTED_PATH" find `, "find runs on the trusted PATH")
 }
 
 func TestBuildScanContextCommand_AcceptsAdoptedTraceID(t *testing.T) {

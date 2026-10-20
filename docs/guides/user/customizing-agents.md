@@ -370,9 +370,9 @@ also need the Go toolchain. Pin the parent tag to a digest before CI use.
 On Claude and pi runs the sandbox already has `/sandbox/workspace/bin` on its
 `PATH`, after the image's own directories. A file there adds a command; it
 does not replace a command the image already provides, such as `git`,
-`python3` or `node`. Codex runs restore the `PATH` from before the workspace
-`.env` is sourced, so `/sandbox/workspace/bin` is not on the codex agent's
-`PATH`; call the script by its absolute path there. To make a script
+`python3` or `node`. Codex and OpenCode runs restore the `PATH` from before
+the workspace `.env` is read, so `/sandbox/workspace/bin` is not on the codex
+or OpenCode agent's `PATH`; call the script by its absolute path there. To make a script
 available as a command on Claude and pi runs, drop it there:
 
 1. Create your script (e.g. `scripts/my-tool.sh`):
@@ -428,8 +428,8 @@ When you need a directory outside `/sandbox/workspace/bin` on the `PATH`
    ```
 
 3. At startup the sandbox reads every `*.env` file under
-   `/sandbox/workspace/.env.d/`, picking up your PATH addition. Claude, codex
-   and pi launches read these files as data, not shell: write plain
+   `/sandbox/workspace/.env.d/`, picking up your PATH addition. Claude, codex,
+   pi and OpenCode launches read these files as data, not shell: write plain
    `export NAME=value` lines, one assignment per line and without
    `${NAME:-default}` (see
    [`.env.d` host files](../../reference/harness-reference.md)).
@@ -439,12 +439,15 @@ its own `PATH` back in front, so your directory ends up after the runner's
 entries: a command found only in `/opt/my-toolchain/bin` is picked up from
 there, and a command the image also provides, such as `git` or `go`, is
 picked up from the image. To replace one of those, extend the sandbox image
-(see [Extending the sandbox image](#extending-the-sandbox-image)). Codex runs
-restore the `PATH` from before `.env`, so `.env.d` additions are not on the
-codex agent's `PATH`.
+(see [Extending the sandbox image](#extending-the-sandbox-image)). Codex and
+OpenCode runs restore the `PATH` from before `.env`, so `.env.d` additions are
+not on the codex or OpenCode agent's `PATH`.
 
-`.env.d` files run as shell in the agent launch shell; treat them like
-`pre_script`. `host_files` can also place configuration that tools load, such
+Launches and the runner's probes read `.env.d` files as data, and shell
+constructs in them (command substitution, `;`-joined commands, `${NAME:-default}`
+and other lines that are not plain assignments) are skipped with a warning.
+`.env` itself is still valid shell that an agent may source, so keep treating
+these files like `pre_script`. `host_files` can also place configuration that tools load, such
 as git config or shell rc files; that is trusted like `pre_script` too.
 
 **Note**: `env.sandbox` cannot modify `PATH`, the harness ignores special
