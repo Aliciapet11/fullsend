@@ -985,7 +985,7 @@ func TestCodexAdapter_RefusesWithoutTheDigestEnv(t *testing.T) {
 			cmd.Env = append(codexAdapterBaseEnv(), env...)
 			if env == nil {
 				// Strip it entirely rather than pass an empty value.
-				cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool {
+				cmd.Env = slices.DeleteFunc(codexAdapterBaseEnv(), func(kv string) bool {
 					return strings.HasPrefix(kv, codexHookDigestsEnv+"=")
 				})
 			}
@@ -993,6 +993,9 @@ func TestCodexAdapter_RefusesWithoutTheDigestEnv(t *testing.T) {
 			out, runErr := cmd.CombinedOutput()
 			require.Error(t, runErr, "output: %s", out)
 			assert.Equal(t, 2, exitCodeOf(t, runErr))
+			if env == nil {
+				assert.Contains(t, string(out), codexHookDigestsEnv+" is missing or malformed")
+			}
 		})
 	}
 }
