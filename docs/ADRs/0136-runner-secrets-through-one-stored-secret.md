@@ -18,6 +18,11 @@ Date: 2026-10-07
 
 Accepted
 
+*Amended by [ADR 0145](0145-keep-credential-deny-list-out-of-runner-secret-refusal.md),
+which keeps the credential deny-list that #3373 adds to the `env.sandbox` gate
+out of the refused-names rule below, matches that rule case-insensitively, and
+adds the `DYLD_*` family to the refused prefixes.*
+
 ## Context
 
 A custom harness's `pre_script`, `post_script` and `validation_loop` read
@@ -75,13 +80,6 @@ These rules apply to names in the GitHub object:
 - **Overlays (interim):** an overlay that references an object name may be
   guarded only by `runtime.forge` and `config`, until ADR 0112's guarded-field
   check is implemented.
-
-> **Note (2026-10, [#3373](https://github.com/fullsend-ai/fullsend/issues/3373)):**
-> "Sandbox-reserved" in the refused-names rule above meant the
-> runner-infrastructure names; "credential" meant the OIDC and provider-only
-> keys, not the wider credential-class deny-list. The later merge of that
-> deny-list into `reservedSandboxKeys` was decoupled from this refusal; see
-> the harness reference for the current split.
 
 GitLab is unchanged: a JSON bundle does not fit GitLab's per-variable masking,
 each secret stays its own masked CI/CD variable, and none of these rules apply

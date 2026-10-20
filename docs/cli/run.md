@@ -293,7 +293,8 @@ For comparison:
 - Child processes inherit both variables. In a pi sub-agent read the deadline, not the budget: the
   deadline is the same wall-clock limit the parent has, while `FULLSEND_TIMEOUT_MINUTES` is the
   parent iteration's whole budget, not the time the child has left.
-- Both names are reserved: an `env.sandbox` entry with either name is dropped. Pre-, post- and
+- Both names are reserved: an `env.sandbox` entry with either name is dropped
+  (see [Reserved `env.sandbox` keys](#reserved-envsandbox-keys)). Pre-, post- and
   validation scripts run on the host and do not see them.
 
 **Pacing from a skill.** Read the deadline, not the budget, and keep the arithmetic in two steps —
@@ -453,6 +454,26 @@ receives one only when the harness declares it under `env.runner`; see
 
 Repo-level setup (provider, profile, `~/.npmrc`, code/fix overlays):
 [Private registries and GitHub Packages](../guides/user/customizing-agents.md#private-registries-and-github-packages).
+
+## Reserved `env.sandbox` keys
+
+`fullsend run` drops reserved names from `env.sandbox` instead of exporting
+them into the sandbox. Matching is case-insensitive. It warns twice:
+
+- When the harness loads, one warning names every reserved key:
+  `N env.sandbox key(s) are reserved and will be dropped instead of exported into the sandbox: ...`
+- As it writes the sandbox environment, one stderr line per key:
+  `WARNING: env.sandbox key "NAME" is reserved (runner infrastructure or security deny-list); skipping`
+
+`fullsend lock` prints the load-time warning when it composes a harness. A
+current lock entry is not composed; run `fullsend lock --update` to check its
+keys. `lock` composes without event context, so a key added by an overlay
+guarded on `event` is reported only by `fullsend run`. The reserved names are
+listed in the `env.sandbox` note in [Customizing
+agents](../guides/user/customizing-agents.md#reserved-envsandbox-names);
+where blocked proxy and certificate settings go instead is in [Migrating proxy
+and certificate
+settings](../guides/user/customizing-agents.md#migrating-proxy-and-certificate-settings).
 
 ## Runner secrets
 

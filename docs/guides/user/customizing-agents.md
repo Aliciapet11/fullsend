@@ -450,19 +450,25 @@ and other lines that are not plain assignments) are skipped with a warning.
 these files like `pre_script`. `host_files` can also place configuration that tools load, such
 as git config or shell rc files; that is trusted like `pre_script` too.
 
+#### Reserved `env.sandbox` names
+
 **Note**: `env.sandbox` cannot modify runner infrastructure or security
 settings through the reserved names below. The runner drops these names
 before writing the sandbox environment, case-insensitively:
 
 - **Runner infrastructure and process-loading safeguards:** `PATH`, `HOME`,
   `SHELL`, `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `TRACEPARENT`,
-  and the `FULLSEND_*` variables it reserves for itself (output and fetch
-  plumbing, `FULLSEND_ROLE`, `FULLSEND_SLUG`, `FULLSEND_TIMEOUT_MINUTES`,
-  `FULLSEND_ITERATION_DEADLINE`, `FULLSEND_RUNNER_PATH`).
+  and every `FULLSEND_*` variable the runner itself exports into the sandbox
+  (its output and fetch plumbing, the repository path, role and slug, the
+  iteration budget and deadline, and its own `PATH` entry). The set grows
+  with the runner; the warnings described below name any such key a harness
+  sets.
 - **Credentials it mints or receives:** `FULLSEND_GCP_OIDC_AUTH_FILE`,
-  `FULLSEND_TRIGGER_TOKEN`, `FULLSEND_WEBHOOK_SECRET`,
-  `FULLSEND_INFERENCE_GATEWAY_API_KEY`, `FULLSEND_OPENAI_API_KEY`,
-  `OPENAI_API_KEY`, `GH_WORKFLOW_TOKEN`, and the GitHub Actions OpenID Connect
+  `FULLSEND_TRIGGER_TOKEN`, `FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN`,
+  `FULLSEND_WEBHOOK_SECRET`, `FULLSEND_INFERENCE_GATEWAY_API_KEY`,
+  `FULLSEND_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GH_WORKFLOW_TOKEN`, the
+  runner-secret bundle and its staging path (`FULLSEND_GITHUB_RUNNER_SECRETS`,
+  `FULLSEND_GITHUB_RUNNER_SECRETS_FILE`), and the GitHub Actions OpenID Connect
   (OIDC) request pair `ACTIONS_ID_TOKEN_REQUEST_URL` /
   `ACTIONS_ID_TOKEN_REQUEST_TOKEN`. The runner uses this pair to request a
   token proving the job's identity.
@@ -500,12 +506,13 @@ environment. To check the harness without starting an agent:
 
 1. Run `fullsend lock <agent-name>`. It reports the same lint warning when it
    loads and composes the harness. Locking may fetch dependencies and write the
-   lock file. If the entry is already current, it skips composition and reports
-   that diagnostics were not checked.
+   lock file. If the entry is already current, it skips composition and does
+   not check the keys. `lock` composes without event context, so a key added
+   by an overlay guarded on `event` is reported only by `fullsend run`.
 2. Run `fullsend lock <agent-name> --update` (or
-   `fullsend lock --all --update`) if diagnostics were skipped and you want to
-   check the composed harness. This forces dependency re-resolution and may
-   change the lock file; it is not a diagnostics-only operation.
+   `fullsend lock --all --update`) to check the composed harness when the entry
+   is current. This forces dependency re-resolution and may change the lock
+   file; it is not a diagnostics-only operation.
 
 No key-specific warning on a cache hit means the keys were not checked, not
 that they are allowed.
@@ -516,9 +523,16 @@ on stderr; this separate identifier check is not reported by `fullsend lock`.
 Dropping a key removes that one `env.sandbox` export; it does not unset a value
 that reaches the sandbox another way, as `host_files` `.env.d` does.
 
-This gate covers `env.sandbox` only. `host_files` `.env.d` content is sourced
-as shell inside the sandbox and is trusted like `pre_script`, but it is not a
-general migration path for blocked proxy or certificate settings.
+This gate covers `env.sandbox` only. `host_files` `.env.d` files are read
+before the runtime starts: every launch and the runner's in-sandbox probes
+read them as data and take only assignment lines, and never take the
+dynamic-loader, interpreter and shell-startup variables that the
+[`.env.d` host files](../../reference/harness-reference.md#field-details)
+entry in the harness reference lists. `.env` itself is still valid shell that
+an agent may source, so keep treating these files like `pre_script`. Either
+way, `.env.d` is not a general migration path for blocked proxy or
+certificate settings; the harness reference entry has the per-runtime
+rules.
 
 #### Migrating proxy and certificate settings
 
@@ -552,6 +566,22 @@ Coordinate these changes with the operator of your OpenShell gateway:
   image's trust store, configures both trust paths. Have the gateway operator
   validate the required application and supervisor connections before
   deployment.
+- **Git settings:** place git configuration with `host_files` (a git config
+  file or shell rc file the tools load) or use the tool's own configuration,
+  instead of `GIT_SSH_COMMAND`, `GIT_CONFIG_GLOBAL`, `GIT_ASKPASS` and the
+  other blocked `GIT_*` names. `host_files` content is trusted like
+  `pre_script`. Git and TLS equivalents the list does not yet cover, such as
+  `GIT_SSH`, `GIT_CONFIG_*` and `REQUESTS_CA_BUNDLE`, are tracked in
+  [#8503](https://github.com/fullsend-ai/fullsend/issues/8503).
+- **Interpreter, loader and shell names:** `NODE_OPTIONS`, `PYTHONPATH`,
+  `JAVA_TOOL_OPTIONS`, `LD_AUDIT`, `IFS` and the other blocked names of this
+  class have no supported replacement route into the sandbox. They are
+  blocked because they change how code is loaded or run. Which of them
+  `host_files` `.env.d` still delivers differs by runtime; the
+  [`.env.d` host files](../../reference/harness-reference.md#field-details)
+  entry lists what each runtime drops or unsets. Whatever it delivers, it
+  does so only because that file is trusted like `pre_script`, so it is not
+  a sanctioned way to restore them.
 
 ### Adding a skill
 

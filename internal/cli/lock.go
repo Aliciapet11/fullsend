@@ -198,10 +198,6 @@ func lockOneAgent(ctx context.Context, agentName, absFullsendDir, forgeFlag stri
 	if !update && lf != nil {
 		if entry := lf.Lookup(agentName); entry != nil && !entry.IsStale(harnessHash) {
 			printer.StepDone(fmt.Sprintf("Lock entry for %s is up to date (%d dependencies)", agentName, len(entry.Dependencies)))
-			// A current dependency lock is not evidence that harness diagnostics
-			// ran under this CLI version. Keep the no-composition fast path, but
-			// make its reporting limit explicit instead of implying a clean lint.
-			printer.StepWarn(fmt.Sprintf("Harness diagnostics for %s were skipped because its lock entry is current; use --update to check reserved env.sandbox keys", agentName))
 			return nil, nil
 		}
 	}

@@ -149,6 +149,9 @@ repo baseline and overrides)
   `runtime.forge` or `config` (interim until ADR 0112's guarded-field check).
   GitLab is unchanged: one masked CI/CD variable per secret, none of these
   rules ([ADR 0136](ADRs/0136-runner-secrets-through-one-stored-secret.md)).
+  The refusal does not consult the credential deny-list that the
+  `env.sandbox` gate also checks
+  ([ADR 0145](ADRs/0145-keep-credential-deny-list-out-of-runner-secret-refusal.md)).
 - Agent configuration env vars: behavioral knobs use `{AGENT}_{SETTING_NAME}`
   naming (e.g., `REVIEW_SEVERITY_THRESHOLD`), delivered via `env.runner` and
   `env.sandbox` in the harness YAML. Each agent documents its config vars in

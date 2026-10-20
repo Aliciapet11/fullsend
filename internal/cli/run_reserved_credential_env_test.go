@@ -14,9 +14,9 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/sandbox"
 )
 
-// reservedInfraSandboxKeys are the seven process-loading names env.sandbox has
-// rejected since before #3373 widened the blocklist to the credential
-// deny-list. All seven are also members of reservedCredentialKeys, under its
+// reservedInfraSandboxKeys are the seven process-loading names env.sandbox
+// rejected before #3373 widened the blocklist to the credential deny-list.
+// All seven are also members of reservedCredentialKeys, under its
 // Process loading / shell behavior group, so the loop below asserts them twice
 // — deliberately: keeping them here means the sandbox door still pins them if
 // a name is ever dropped from the credential door. Some of the other
@@ -51,8 +51,8 @@ func TestReservedSandboxKeys_CoversReservedCredentialKeys(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			t.Parallel()
 
-			assert.True(t, reservedSandboxKeys[key],
-				"reservedSandboxKeys must include %s: env.sandbox can inject a variable the credential path refuses", key)
+			assert.True(t, isReservedSandboxKey(key),
+				"env.sandbox must refuse %s: it can inject a variable the credential path refuses", key)
 
 			lines := buildSandboxEnvLines(&harness.Harness{
 				Env: &harness.EnvConfig{Sandbox: map[string]string{key: "/tmp/evil"}},
@@ -108,11 +108,13 @@ func TestGuideNamesMatchTheGate(t *testing.T) {
 	matches := guideEnvNameRe.FindAllStringSubmatch(note, -1)
 	// The floor is what keeps this test from failing silently: a reworded
 	// paragraph the pattern no longer matches would otherwise scan zero names
-	// and pass. The note enumerates in the low fifties today, including the
-	// two pass-through names in the carve-out sentence, so a floor in the
-	// fifties also catches a whole bullet being dropped from the prose.
+	// and pass. The note enumerates about fifty-five names today, including
+	// the two pass-through names in the carve-out sentence (the runner's own
+	// FULLSEND_* exports are described as a family, not listed, so that a new
+	// runner export does not need a guide edit), so a floor just under that
+	// also catches a whole bullet being dropped from the prose.
 	require.GreaterOrEqual(t, len(matches), 50,
-		"the note enumerates in the low fifties but only %d matched, so either the pattern no longer fits the prose or names were dropped from it — this test proves nothing until one of those is fixed",
+		"the note enumerates about fifty-five names but only %d matched, so either the pattern no longer fits the prose or names were dropped from it — this test proves nothing until one of those is fixed",
 		len(matches))
 
 	// The pass-through set is a second copy of what the prose promises, so pin
@@ -132,35 +134,19 @@ func TestGuideNamesMatchTheGate(t *testing.T) {
 			t.Parallel()
 
 			if documentedPassthroughNames[name] {
-				assert.False(t, isReservedSandboxKey(name),
+				// The carve-out is a promise that hook inputs still arrive, so
+				// check delivery itself, not only the predicate.
+				require.False(t, isReservedSandboxKey(name),
 					"the guide says %s is still delivered through env.sandbox, but the gate now drops it", name)
+				lines := buildSandboxEnvLines(&harness.Harness{
+					Env: &harness.EnvConfig{Sandbox: map[string]string{name: "value"}},
+				})
+				assert.Contains(t, strings.Join(lines, "\n"), "export "+name+"=",
+					"the guide promises %s reaches the sandbox, but the gate dropped it", name)
 				return
 			}
 			assert.True(t, isReservedSandboxKey(name),
 				"the guide names %s as dropped from env.sandbox, but the gate accepts it", name)
-		})
-	}
-}
-
-// TestDocumentedPassthroughNames_StayDelivered pins the other half of the same
-// paragraph, which promises that hook inputs the harness supplies deliberately
-// still arrive. Blocking them would break the SSRF and allowlist hooks, so the
-// guide's carve-out is worth a test as much as the blocklist is.
-func TestDocumentedPassthroughNames_StayDelivered(t *testing.T) {
-	t.Parallel()
-
-	for _, key := range []string{"FULLSEND_CANARY_TOKEN", "FULLSEND_TOOL_ALLOWLIST"} {
-		t.Run(key, func(t *testing.T) {
-			t.Parallel()
-
-			require.False(t, reservedSandboxKeys[key],
-				"the guide says %s is still delivered through env.sandbox", key)
-
-			lines := buildSandboxEnvLines(&harness.Harness{
-				Env: &harness.EnvConfig{Sandbox: map[string]string{key: "value"}},
-			})
-			assert.Contains(t, strings.Join(lines, "\n"), "export "+key+"=",
-				"the guide promises %s reaches the sandbox, but the gate dropped it", key)
 		})
 	}
 }

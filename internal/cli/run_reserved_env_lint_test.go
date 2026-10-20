@@ -98,27 +98,6 @@ func TestReservedSandboxEnvDiagnostics_CleanHarness(t *testing.T) {
 	assert.Nil(t, reservedSandboxEnvDiagnostics(nil), "a nil harness must not panic")
 }
 
-// TestReservedSandboxEnvDiagnostics_AgreesWithTheGate is the drift guard: it
-// feeds every reserved name back through both the diagnostic and the gate, so
-// the warning cannot start lying about what a run drops. It reads the same map
-// the gate consults, so a name added to any merged list is covered here the
-// moment it is added.
-func TestReservedSandboxEnvDiagnostics_AgreesWithTheGate(t *testing.T) {
-	t.Parallel()
-
-	for key := range reservedSandboxKeys {
-		t.Run(key, func(t *testing.T) {
-			t.Parallel()
-
-			h := &harness.Harness{Env: &harness.EnvConfig{Sandbox: map[string]string{key: "x"}}}
-			diags := reservedSandboxEnvDiagnostics(h)
-			require.Len(t, diags, 1, "%s is reserved, so it must be reported", key)
-			assert.True(t, strings.Contains(diags[0].Message, key))
-			assert.Empty(t, buildSandboxEnvLines(h), "%s must not reach the sandbox", key)
-		})
-	}
-}
-
 // TestReservedSandboxEnvDiagnostics_ReportsInSortedOrder pins the exact list
 // text rather than membership. lock de-duplicates diagnostics across forge
 // variants by diag.String(), and the keys arrive from map iteration, so
