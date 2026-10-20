@@ -324,7 +324,7 @@ variables is deployed.
 | `validation failed after 2 iteration(s)` with `Agent exited with code 0` above it | The agent finished in time; its output failed validation on every iteration. | Read the `Validation failed:` lines and fix the output, not the budget. |
 | `Could not export the iteration deadline: exit 1: ...` | The runner could not write the variables into the sandbox. The iteration runs without them; the runner still kills it at the budget. | Usually a non-writable sandbox workspace; a sandbox that died mid-run looks the same. Check the sandbox logs and the image. |
 | `clearing stale iteration deadline (iteration N): ...` | The write failed and the previous iteration's file could not be removed either. The run stops rather than let the agent read a stale deadline. | Same as above. |
-| `FULLSEND_ITERATION_DEADLINE` unset inside the agent | The agent's shell was started without sourcing `/sandbox/workspace/.env`. | Runtimes that fullsend ships always source it; a custom command must do the same. |
+| `FULLSEND_ITERATION_DEADLINE` unset inside the agent | The agent's shell was started without sourcing `/sandbox/workspace/.env`. | Runtimes that fullsend ships always load it; a custom command must do the same. |
 
 ## How a run ends
 
@@ -386,7 +386,7 @@ run has a forge OIDC endpoint (a GitHub Actions job with `id-token: write`), the
 - checks after sandbox creation that the sandbox policy reaches the gateway host only through an
   inspected route, and deletes the sandbox if it does not;
 - seeds the provider's placeholder into a runner-owned token file before the agent-writable `.env`
-  is sourced, and refreshes the assertion before each token's own `exp`, re-seeding the file;
+  is loaded, and refreshes the assertion before each token's own `exp`, re-seeding the file;
 - removes the provider when the run ends (or expires it in place under `--keep-sandbox`).
 
 A failure at any step fails the run; the route never falls back to another credential. With no

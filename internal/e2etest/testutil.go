@@ -78,6 +78,30 @@ var orgPool = []string{
 	"halfsend-12",
 }
 
+var (
+	// poolTokenFn returns the token used for an org in the pool. It defaults
+	// to tokenForOrg. Override in tests to drive acquireOrg without minting
+	// tokens.
+	poolTokenFn = tokenForOrg
+
+	// poolClientFn builds the forge.Client used for an org in the pool. It
+	// defaults to newLiveClient. Override in tests to drive acquireOrg
+	// without calling GitHub.
+	poolClientFn = func(token string) forge.Client { return newLiveClient(token) }
+)
+
+// rateLimitedUnlessCancelled reports whether a tryCreateLock error should
+// be handled as a GitHub rate limit. A cancelled request can wrap a 429,
+// so it returns ctx.Err() first when the context is done: callers must
+// surface that error instead of logging "rate limited" and moving on to
+// the next org.
+func rateLimitedUnlessCancelled(ctx context.Context, err error) (bool, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	return gh.IsRateLimitError(err), nil
+}
+
 // acquireOrg scans the pool for an unlocked org and acquires its lock.
 // Returns the org name and token used to hold the lock.
 func acquireOrg(ctx context.Context, cfg envConfig, runID string, pool []string, timeout time.Duration, logf func(string, ...any)) (string, string, error) {
@@ -93,19 +117,23 @@ func acquireOrg(ctx context.Context, cfg envConfig, runID string, pool []string,
 	sawRateLimit := false
 	for _, org := range shuffled {
 		logf("[org-pool] Trying to acquire %s...", org)
-		token, tokErr := tokenForOrg(ctx, cfg, org)
+		token, tokErr := poolTokenFn(ctx, cfg, org)
 		if tokErr != nil {
 			logf("[org-pool] Could not get token for %s: %v", org, tokErr)
 			continue
 		}
-		client := newLiveClient(token)
+		client := poolClientFn(token)
 
 		acquired, err := tryCreateLock(ctx, client, org, runID, logf)
 		if err != nil {
 			logf("[org-pool] Error trying %s: %v", org, err)
+			rateLimited, ctxErr := rateLimitedUnlessCancelled(ctx, err)
+			if ctxErr != nil {
+				return "", "", ctxErr
+			}
 			// Rate-limit scope depends on the credential: installation
 			// tokens are minted per org, a shared PAT is limited per user.
-			if gh.IsRateLimitError(err) {
+			if rateLimited {
 				if cfg.useMint {
 					// Installation tokens are minted per org, so the
 					// limit is per org too: another org's token still
@@ -170,17 +198,21 @@ func acquireOrg(ctx context.Context, cfg envConfig, runID string, pool []string,
 		}
 		roundRateLimited := false
 		for _, org := range shuffled {
-			token, tokErr := tokenForOrg(ctx, cfg, org)
+			token, tokErr := poolTokenFn(ctx, cfg, org)
 			if tokErr != nil {
 				logf("[org-pool] Could not get token for %s: %v", org, tokErr)
 				continue
 			}
-			client := newLiveClient(token)
+			client := poolClientFn(token)
 
 			acquired, err := tryCreateLock(ctx, client, org, runID, logf)
 			if err != nil {
 				logf("[org-pool] Error trying %s: %v", org, err)
-				if gh.IsRateLimitError(err) {
+				rateLimited, ctxErr := rateLimitedUnlessCancelled(ctx, err)
+				if ctxErr != nil {
+					return "", "", ctxErr
+				}
+				if rateLimited {
 					if cfg.useMint {
 						// Installation tokens are minted per org, so the
 						// limit is per org too: another org's token still
@@ -249,7 +281,11 @@ func acquireOrgFromClient(ctx context.Context, client forge.Client, token, runID
 		acquired, err := tryCreateLock(ctx, client, org, runID, logf)
 		if err != nil {
 			logf("[org-pool] Error trying %s: %v", org, err)
-			if gh.IsRateLimitError(err) {
+			rateLimited, ctxErr := rateLimitedUnlessCancelled(ctx, err)
+			if ctxErr != nil {
+				return "", "", ctxErr
+			}
+			if rateLimited {
 				logf("[org-pool] Hit rate limit, skipping remaining orgs this round")
 				sawRateLimit = true
 				break
@@ -295,7 +331,11 @@ func acquireOrgFromClient(ctx context.Context, client forge.Client, token, runID
 		for _, org := range shuffled {
 			acquired, err := tryCreateLock(ctx, client, org, runID, logf)
 			if err != nil {
-				if gh.IsRateLimitError(err) {
+				rateLimited, ctxErr := rateLimitedUnlessCancelled(ctx, err)
+				if ctxErr != nil {
+					return "", "", ctxErr
+				}
+				if rateLimited {
 					logf("[org-pool] Hit rate limit, skipping remaining orgs this round")
 					roundRateLimited = true
 					break

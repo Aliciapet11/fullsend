@@ -176,7 +176,7 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 		`sha256sum`,
 		testRunnerHeldDigests.ConfigTOML,
 		`OPENAI_API_KEY`,
-		`. '` + sandbox.SandboxWorkspace + `/.env'`,
+		codexEnvLoad,
 		`export CODEX_HOME=`,
 		`unset OPENAI_BASE_URL OPENAI_API_KEY CODEX_API_KEY NODE_OPTIONS NODE_PATH PYTHONPATH PYTHONHOME PYTHONSTARTUP`,
 		`unset -f test command grep cut wc sha256sum printf codex`,
@@ -205,7 +205,7 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 	assert.Equal(t, 2, strings.Count(cmd, removal))
 	firstRemovalAt := strings.Index(cmd, removal)
 	lastRemovalAt := strings.LastIndex(cmd, removal)
-	removalEnvAt := strings.Index(cmd, `. '`+sandbox.SandboxWorkspace+`/.env'`)
+	removalEnvAt := strings.Index(cmd, codexEnvLoad)
 	removalExecAt := strings.Index(cmd, "exec --json")
 	require.GreaterOrEqual(t, firstRemovalAt, 0)
 	assert.Less(t, firstRemovalAt, removalEnvAt, "the first removal runs before .env is sourced")
@@ -242,7 +242,7 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 	// .env that prepends a fake one would neuter the chain with every digest
 	// green. Reproduced before the pin was added.
 	pinAt := strings.Index(cmd, `readonly FULLSEND_CODEX_PATH="$PATH"`)
-	envAt := strings.Index(cmd, `. '`+sandbox.SandboxWorkspace+`/.env'`)
+	envAt := strings.Index(cmd, codexEnvLoad)
 	restoreAt := strings.Index(cmd, `export PATH="$FULLSEND_CODEX_PATH"`)
 	require.Positive(t, pinAt)
 	require.Positive(t, restoreAt)
@@ -818,7 +818,7 @@ func TestBuildCodexRunCommand_ExportsSpawnDigests(t *testing.T) {
 		"agents/correctness.toml:"+strings.Repeat("c", 64)+" hooks.json:"+digests.HooksJSON)
 	spawnAt := strings.Index(cmd, spawnExport)
 	require.Positive(t, spawnAt, "the spawn digests are not exported: %s", cmd)
-	assert.Greater(t, spawnAt, strings.Index(cmd, `. '`+sandbox.SandboxWorkspace+`/.env'`),
+	assert.Greater(t, spawnAt, strings.Index(cmd, codexEnvLoad),
 		"exported after .env so nothing there can move it")
 	assert.Less(t, spawnAt, strings.Index(cmd, "exec --json"))
 	assert.Contains(t, cmd,

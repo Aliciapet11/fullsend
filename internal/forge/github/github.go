@@ -182,6 +182,24 @@ type APIError struct {
 	StatusCode int
 	Message    string
 	Errors     []APIErrorDetail
+	// RetryAfter is the wait the final response's Retry-After header
+	// asked for, uncapped. Zero when the header was absent or not a
+	// positive number of seconds.
+	RetryAfter time.Duration
+	// cause is the context error that cut a rate-limit backoff short; it
+	// keeps errors.Is(err, context.DeadlineExceeded) working for callers
+	// that bound the request with their own deadline.
+	cause error
+}
+
+// RetryAfterFromError returns the Retry-After wait carried by an
+// APIError in err's chain. ok is false when err carries none.
+func RetryAfterFromError(err error) (d time.Duration, ok bool) {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.RetryAfter <= 0 {
+		return 0, false
+	}
+	return apiErr.RetryAfter, true
 }
 
 // APIErrorDetail is one validation error entry returned by GitHub.
@@ -209,9 +227,15 @@ func (e *APIError) Error() string {
 
 // IsTransient reports whether the API error represents a transient
 // failure that may succeed on retry: server errors (500–504) and
-// rate limits (429). This method satisfies the transientReporter
-// interface used by forge.IsTransient.
+// rate limits (429). An error whose rate-limit backoff was cut short by
+// the caller's context (cause set) is not transient: retrying after the
+// context was cancelled or its deadline passed would defy caller intent.
+// This method satisfies the transientReporter interface used by
+// forge.IsTransient.
 func (e *APIError) IsTransient() bool {
+	if e.cause != nil {
+		return false
+	}
 	return e.StatusCode == http.StatusTooManyRequests ||
 		(e.StatusCode >= 500 && e.StatusCode <= 504)
 }
@@ -231,6 +255,9 @@ func (e *APIError) IsTransient() bool {
 // failures. The wrapping happens at call sites (e.g., CreateBranch)
 // where the operation context disambiguates the cause.
 func (e *APIError) Unwrap() error {
+	if e.cause != nil {
+		return e.cause
+	}
 	if e.StatusCode == http.StatusNotFound {
 		return forge.ErrNotFound
 	}
@@ -275,6 +302,24 @@ func IsPATForbiddenError(err error) bool {
 }
 
 const maxRetries = 5
+
+type noAmbiguousRetryKey struct{}
+
+// WithoutAmbiguousRetry returns a context that stops the client from
+// retrying a request after an ambiguous failure: a transport timeout or a
+// 5xx response, where the server may already have applied the request.
+// Rate-limit rejections (429, rate-limit 403) are still retried because
+// the server did not process those. Use it for requests that must not be
+// replayed blindly, such as deleting a repository by name that another
+// party may have recreated; the caller re-checks state after the error.
+func WithoutAmbiguousRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noAmbiguousRetryKey{}, true)
+}
+
+func ambiguousRetryDisabled(ctx context.Context) bool {
+	v, _ := ctx.Value(noAmbiguousRetryKey{}).(bool)
+	return v
+}
 
 // requestHeader is one extra header to set on a do() request. Only
 // getConditional uses this today (If-None-Match); it exists as a variadic
@@ -361,6 +406,9 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 			// HTTP client timeout (Client.Timeout exceeded): retry
 			// with exponential backoff, same as transient server errors.
 			if isTimeoutError(ctx, err) {
+				if ambiguousRetryDisabled(ctx) {
+					return nil, fmt.Errorf("http %s %s: %w (not retried: the request may have been applied)", method, path, err)
+				}
 				if attempt == maxRetries-1 {
 					return nil, fmt.Errorf("http %s %s: %w (after %d attempts)", method, path, err, maxRetries)
 				}
@@ -391,6 +439,13 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 		// Body already read or drained by isRetryable.
 		resp.Body.Close()
 
+		if resp.StatusCode >= 500 && ambiguousRetryDisabled(ctx) {
+			return nil, &APIError{
+				StatusCode: resp.StatusCode,
+				Message:    fmt.Sprintf("server error on %s %s (not retried: the request may have been applied)", method, path),
+			}
+		}
+
 		delay := retryDelay(resp, attempt)
 		retryAfter := resp.Header.Get("Retry-After")
 
@@ -420,11 +475,35 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 					msg += " [rate-limit headers absent; no prior observation]"
 				}
 			}
-			return nil, &APIError{StatusCode: resp.StatusCode, Message: msg}
+			apiErr := &APIError{StatusCode: resp.StatusCode, Message: msg}
+			if secs, convErr := strconv.Atoi(retryAfter); convErr == nil && secs > 0 {
+				apiErr.RetryAfter = time.Duration(secs) * time.Second
+			}
+			return nil, apiErr
 		}
 		select {
 		case <-c.afterFunc(delay):
 		case <-ctx.Done():
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
+				// Keep the server-provided Retry-After deadline the
+				// client was waiting out so the caller can honour it
+				// after cutting the wait short. The client's own
+				// backoff delay is not a server deadline, so it goes
+				// in the message only and RetryAfter stays zero when
+				// the header was absent.
+				wait := delay
+				var serverWait time.Duration
+				if secs, convErr := strconv.Atoi(retryAfter); convErr == nil && secs > 0 {
+					serverWait = time.Duration(secs) * time.Second
+					wait = serverWait
+				}
+				return nil, &APIError{
+					StatusCode: resp.StatusCode,
+					Message:    fmt.Sprintf("rate limit: interrupted while waiting %s to retry %s %s: %v", wait, method, path, ctx.Err()),
+					RetryAfter: serverWait,
+					cause:      ctx.Err(),
+				}
+			}
 			return nil, ctx.Err()
 		}
 	}
@@ -886,8 +965,10 @@ func (c *LiveClient) CreateRepo(ctx context.Context, org, name, description stri
 	}
 
 	var repo struct {
+		ID            int64  `json:"id"`
 		Name          string `json:"name"`
 		FullName      string `json:"full_name"`
+		Description   string `json:"description"`
 		DefaultBranch string `json:"default_branch"`
 		Private       bool   `json:"private"`
 	}
@@ -896,8 +977,10 @@ func (c *LiveClient) CreateRepo(ctx context.Context, org, name, description stri
 	}
 
 	return &forge.Repository{
+		ID:            repo.ID,
 		Name:          repo.Name,
 		FullName:      repo.FullName,
+		Description:   repo.Description,
 		DefaultBranch: repo.DefaultBranch,
 		Private:       repo.Private,
 	}, nil
@@ -918,6 +1001,7 @@ func (c *LiveClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Re
 		ID            int64  `json:"id"`
 		Name          string `json:"name"`
 		FullName      string `json:"full_name"`
+		Description   string `json:"description"`
 		DefaultBranch string `json:"default_branch"`
 		Private       bool   `json:"private"`
 		Archived      bool   `json:"archived"`
@@ -931,6 +1015,7 @@ func (c *LiveClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Re
 		ID:            r.ID,
 		Name:          r.Name,
 		FullName:      r.FullName,
+		Description:   r.Description,
 		DefaultBranch: r.DefaultBranch,
 		Private:       r.Private,
 		Archived:      r.Archived,

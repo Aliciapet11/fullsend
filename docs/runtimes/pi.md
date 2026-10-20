@@ -235,6 +235,12 @@ What a local pi run needs, beyond the guide:
 - **A sandbox image that includes pi** — `ghcr.io/fullsend-ai/fullsend-sandbox` v0.37.0+ (the image
   bakes `PI_VERSION`). A stale image fails preflight with `pi preflight: pi --version exited 127`;
   `podman pull ghcr.io/fullsend-ai/fullsend-sandbox:latest` fixes it.
+- **`python3` in the sandbox image** — the launch reads `.env` as data with a pinned `python3`
+  (`-I -S`), taken from a `PATH` directory the sandbox user neither owns nor can write; without
+  one it fails with `python3 not found in a PATH directory the agent cannot write` (exit 127).
+  It also needs `readlink` there as a regular file, not a symlink; without one the launch also
+  prints `no readlink that is a regular file in a PATH directory the agent cannot write`. The
+  fullsend sandbox image ships both.
 - **Platforms** — verified end to end on macOS Apple Silicon (podman machine, Homebrew `openshell`)
   and Fedora with rootless Podman; the guide's platform notes apply unchanged.
 - **`review` and `retro`** run their real sub-agent roster through the `Agent` tool; the children
@@ -814,7 +820,7 @@ that project's Model Garden, or the provider resolved a different project than y
 
 **`[pi-anthropic-vertex] disabled: set GOOGLE_CLOUD_PROJECT ...`.** The sandbox environment comes
 from the harness (`host_files`, `env.sandbox`), not from `--env-file`, which only reaches the runner
-process (ADR 0055). Files sourced from `.env.d/` need `export` on each line. The fleet harnesses
+process (ADR 0055). Files read from `.env.d/` need `export` on each line. The fleet harnesses
 already wire this; a custom harness must too.
 
 **The run used Claude instead of pi.** The runtime falls back to `claude` when neither the config's

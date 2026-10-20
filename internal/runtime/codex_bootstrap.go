@@ -501,12 +501,14 @@ var codexHarnessSecurityEnvKeys = []string{"FULLSEND_CANARY_TOKEN", "FULLSEND_TO
 // token or allowlist cannot contain it.
 const codexEnvReadSeparator = "|fullsend-env-sep|"
 
-// codexReadHarnessSecurityEnvCmd sources envFile silently, so nothing a
-// sourced file prints lands in front of the first value, and prints the
-// codexHarnessSecurityEnvKeys values joined by codexEnvReadSeparator. A failed
-// source prints nothing and exits non-zero, so a broken .env fails Bootstrap
-// instead of pinning the values as unset. Its stderr stays discarded because
-// the shell echoes the offending .env line, which can carry a token. The
+// codexReadHarnessSecurityEnvCmd reads envFile as data, as the launch does
+// (envDataLoad, #8574), so no .env or .env.d line runs and nothing lands in
+// front of the first value, and prints the codexHarnessSecurityEnvKeys values
+// joined by codexEnvReadSeparator. A .env (or a file it names) that exists
+// but cannot be read prints nothing and exits non-zero, so it fails Bootstrap
+// instead of pinning the values as unset; a line the loader does not take is
+// skipped, as at launch. The loader reports a dropped line by file and line
+// only, never by content, so its stderr is kept for the error message. The
 // references are double-quoted, not shellQuote'd: single quotes would print
 // the literal "${KEY:-}" text instead of expanding it.
 func codexReadHarnessSecurityEnvCmd(envFile string) string {
@@ -514,8 +516,8 @@ func codexReadHarnessSecurityEnvCmd(envFile string) string {
 	for _, key := range codexHarnessSecurityEnvKeys {
 		refs = append(refs, fmt.Sprintf("${%s:-}", key))
 	}
-	return fmt.Sprintf(`. %s >/dev/null 2>&1 && printf '%%s' "%s"`,
-		shellQuote(envFile), strings.Join(refs, codexEnvReadSeparator))
+	return fmt.Sprintf(`%s && printf '%%s' "%s"`,
+		envDataLoad(envFile), strings.Join(refs, codexEnvReadSeparator))
 }
 
 // codexReadHarnessSecurityEnv reads the harness-supplied hook variables from

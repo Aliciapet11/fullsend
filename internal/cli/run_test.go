@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1041,12 +1042,16 @@ func TestRunAgent_URLBaseMalformedOrgConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "loading fullsend config")
 }
 
-func TestBuildScanContextCommand_SourcesEnv(t *testing.T) {
+// The pre-agent scan reads .env as data, as the launch does (#8574): no .env
+// or .env.d line runs as shell in the probe.
+func TestBuildScanContextCommand_ReadsEnvAsData(t *testing.T) {
 	traceID := "aabbccdd-1122-4334-8556-aabbccddeeff"
 	cmd := buildScanContextCommand("/sandbox/workspace/repo", traceID)
-	assert.Contains(t, cmd, ". /sandbox/workspace/.env &&")
+	assert.True(t, strings.HasPrefix(cmd, agentruntime.EnvDataLoad("/sandbox/workspace/.env")+" && "), cmd)
+	assert.NotContains(t, cmd, ". /sandbox/workspace/.env")
 	assert.Contains(t, cmd, "FULLSEND_TRACE_ID='"+traceID+"'")
 	assert.Contains(t, cmd, "-exec /sandbox/workspace/bin/fullsend scan context")
+	assert.Contains(t, cmd, `PATH="$FULLSEND_TRUSTED_PATH" find `, "find runs on the trusted PATH")
 }
 
 func TestBuildScanContextCommand_AcceptsAdoptedTraceID(t *testing.T) {
@@ -4721,6 +4726,31 @@ func TestIterationEnvSourceLine(t *testing.T) {
 	assert.Equal(t,
 		"if [ -f /sandbox/workspace/.fullsend/iteration.env ]; then . /sandbox/workspace/.fullsend/iteration.env; fi",
 		iterationEnvSourceLine())
+}
+
+// TestEnvDataControlLinesMatchRunner keeps the .env lines bootstrapEnv writes
+// as shell in step with the lines the launch-time loader reads as data
+// (runtime.EnvDataControlLines, #8498): a line the loader does not recognize
+// is dropped, which would lose the .env.d files, the PATH restore or
+// iteration.env at launch.
+func TestEnvDataControlLinesMatchRunner(t *testing.T) {
+	t.Parallel()
+	lines := append(runnerPathLines(), harnessEnvLines(&harness.Harness{})...)
+	want := agentruntime.EnvDataControlLines()
+	require.Len(t, want, 4)
+	assert.Equal(t, runnerPathCaptureLine(), want[0])
+	assert.Equal(t, "for f in /sandbox/workspace/.env.d/*.env; do [ -f \"$f\" ] && . \"$f\"; done", want[1])
+	assert.Equal(t, runnerPathRestoreLine(), want[2])
+	assert.Equal(t, iterationEnvSourceLine(), want[3])
+	// Each line appears in what bootstrapEnv writes, in the loader's order,
+	// wherever the runner places it.
+	prev := -1
+	for _, line := range want {
+		idx := slices.Index(lines, line)
+		require.GreaterOrEqual(t, idx, 0, "the runner does not write %q", line)
+		assert.Greater(t, idx, prev, "%q is out of order", line)
+		prev = idx
+	}
 }
 
 // TestIterationEnvCommand pins the shell the runner executes before every

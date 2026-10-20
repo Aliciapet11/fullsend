@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"gopkg.in/yaml.v3"
@@ -489,6 +490,11 @@ func GitLabWebhookNeedsProvisioning(ctx context.Context, client forge.Client, ba
 		case PollerPhaseVerified, PollerPhaseElevated, PollerPhaseTriggerRequested:
 			return true, nil
 		}
+	}
+	// A superseded Poller generation that has not been retired is retired
+	// only by running the install step.
+	if gen.RetiringUserID != 0 {
+		return true, nil
 	}
 	if len(st.hooks) > 0 || len(st.triggers) > 0 {
 		// Live managed credentials with an unmet or unverifiable safety
@@ -1885,7 +1891,16 @@ func deferGitLabTriggerReplacement(ctx context.Context, client forge.Client, res
 // lease capability the caller holds for non-dry runs, or nil; a trigger owner
 // that implements GitLabPollerHandoff mints through a fresh Poller generation
 // only when the lease is held.
-func ensureGitLabWebhookFastPath(ctx context.Context, client forge.Client, triggerOwner GitLabTriggerOwner, lease *GitLabProjectLease, baseURL, owner, repo string, rotate, dryRun bool, red *credentialRedactor) (GitLabWebhookResult, error) {
+func ensureGitLabWebhookFastPath(ctx context.Context, client forge.Client, triggerOwner GitLabTriggerOwner, lease *GitLabProjectLease, baseURL, owner, repo string, rotate, dryRun bool, red *credentialRedactor) (fastPathRes GitLabWebhookResult, fastPathErr error) {
+	// A failing retirement of a superseded Poller never stops the webhook
+	// repair below: its error is kept and joined to whatever the rest of the
+	// step returns, so the next install retries retirement.
+	var retirementErr error
+	defer func() {
+		if retirementErr != nil {
+			fastPathErr = errors.Join(fastPathErr, retirementErr)
+		}
+	}()
 	// A managed Poller left above Developer (for example by an interrupted
 	// rotation) is corrected before the safety and readiness early returns
 	// below, so none of them can leave the installed Poller identity
@@ -1949,15 +1964,54 @@ func ensureGitLabWebhookFastPath(ctx context.Context, client forge.Client, trigg
 			return GitLabWebhookResult{Action: "update", Details: carried}, finErr
 		}
 	}
+	// A superseded Poller generation is retired once its cutover is confirmed
+	// and its rotation grace has elapsed, which also lets a later rotation
+	// start the next generation. Dry runs change nothing. The trigger evidence
+	// that protects the webhook's trigger is re-read just before revocation,
+	// and a failure is kept in retirementErr instead of returned, so it never
+	// prevents the webhook repair that follows.
+	var retirementNote string
+	retire := func() (changes, notes []string) {
+		if triggerOwner == nil || dryRun || lease == nil {
+			return nil, nil
+		}
+		ret, retErr := retireSupersededPollerGeneration(ctx, client, triggerOwner, lease, owner, repo, currentWebhookTriggerEvidence(client, baseURL, owner, repo), time.Now())
+		st.triggers = dropRevokedTriggers(st.triggers, ret.revokedTriggerIDs)
+		switch {
+		case retErr != nil:
+			retirementErr = retErr
+			retirementNote = "Retirement of the superseded GitLab Poller generation did not finish and is retried by the next install: " + retErr.Error()
+		case ret.waiting != "":
+			retirementNote = ret.waiting
+		}
+		if retirementNote != "" {
+			notes = []string{retirementNote}
+		}
+		return ret.details, notes
+	}
 	// On the trigger-account route (#8509) the webhook carries the account's
-	// trigger token and nothing is minted for the Poller.
+	// trigger token and nothing is minted for the Poller. Retirement runs after
+	// the route converged, so the account-owned webhook is the evidence it
+	// protects; a route that failed leaves retirement for the next install.
 	acct, err := loadGitLabWebhookTriggerAccount(ctx, client, owner, repo)
 	if err != nil {
 		return GitLabWebhookResult{Details: carried}, err
 	}
 	if acct != nil {
-		return ensureGitLabWebhookAccountRoute(ctx, client, st, acct, baseURL, owner, repo, rotate, dryRun, red, carried)
+		res, routeErr := ensureGitLabWebhookAccountRoute(ctx, client, st, acct, baseURL, owner, repo, rotate, dryRun, red, carried)
+		if routeErr != nil {
+			return res, routeErr
+		}
+		changes, notes := retire()
+		res.Details = append(res.Details[:len(res.Details):len(res.Details)], append(changes, notes...)...)
+		if len(changes) > 0 && (res.Action == "none" || res.Action == "") {
+			res.Action = "update"
+		}
+		return res, nil
 	}
+	changes, notes := retire()
+	carried = append(carried[:len(carried):len(carried)], append(changes, notes...)...)
+	pollerRes.Details = append(pollerRes.Details[:len(pollerRes.Details):len(pollerRes.Details)], changes...)
 	// Reconcile trigger ownership after an unflagged legacy-role replacement.
 	// A compliant trigger of the previous Developer identity is safe to retain
 	// while replacement is deferred, but it must not suppress Poller cutover.
@@ -1986,6 +2040,9 @@ func ensureGitLabWebhookFastPath(ctx context.Context, client forge.Client, trigg
 		}
 		if len(pollerRes.Details) > 0 {
 			return GitLabWebhookResult{Action: "update", Details: carried}, nil
+		}
+		if retirementNote != "" {
+			return GitLabWebhookResult{Action: "none", Details: carried}, nil
 		}
 		return GitLabWebhookResult{Action: "none"}, nil
 	}
