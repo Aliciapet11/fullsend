@@ -976,17 +976,17 @@ else
   fail "clean with failed listing: rc=${RC} removed=[$(removed)] out=[${OUT}]"
 fi
 
-# #8479: a local Podman builds and runs with no containers.conf env or
-# env_host and no mounts.conf default mounts. A remote client has neither the
-# flag nor its own env settings applied; Docker has no such configuration.
+# #8479: a local Podman builds and runs with no containers.conf env, env_host,
+# volumes or devices and no mounts.conf default mounts. A remote client has
+# neither the flag nor its own settings applied; Docker has no such configuration.
 override_of() { sed -n "s/^$1 //p" "${ENGINE_LOG}.env" | sort -u; }
 STUB_IMAGE_RC=1 run_ci_local "${PODMAN}" go-vet
 OVR=$(override_of run)
 if [ "${RC}" -eq 0 ] && [ "$(last_build_args | head -1)" = --default-mounts-file=/dev/null ] &&
   [ "$(last_run_args | head -1)" = --default-mounts-file=/dev/null ] &&
   [ -n "${OVR}" ] && [ "$(override_of build)" = "${OVR}" ] &&
-  [ "$(cat "${OVR}")" = "$(printf '[containers]\nenv_host = false\nenv = []')" ]; then
-  pass "local podman: builds and runs get no default mounts and no containers.conf env"
+  [ "$(cat "${OVR}")" = "$(printf '[containers]\nenv_host = false\nenv = []\nvolumes = []\ndevices = []')" ]; then
+  pass "local podman: builds and runs get no default mounts and no containers.conf env, volumes or devices"
 else
   fail "local podman isolation: rc=${RC} override=[${OVR}] build=[$(last_build_args | head -1)] run=[$(last_run_args | head -1)]"
 fi

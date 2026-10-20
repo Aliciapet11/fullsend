@@ -65,9 +65,9 @@ Isolation: ci-local passes no host environment variables, SSH agent or
 credential files from outside the checkout into the container, and no host
 proxy settings: Podman builds and runs with --http-proxy=false, and Docker's
 ~/.docker/config.json proxies are overridden with empty values. Podman's own
-containers.conf env and env_host settings and mounts.conf default mounts (on
-RHEL, the host's subscription certificates under /run/secrets) are turned
-off for a local Podman; with a remote client (macOS, Windows) only the
+containers.conf env, env_host, volumes and devices settings and mounts.conf
+default mounts (on RHEL, the host's subscription certificates under
+/run/secrets) are turned off for a local Podman; with a remote client (macOS, Windows) only the
 Podman machine's own configuration applies. Only the checkout (including
 gitignored files), its .git directory and cache volumes are mounted,
 read-write. GH_TOKEN/GITHUB_TOKEN are empty, as on CI. This keeps host
@@ -186,12 +186,14 @@ build_image() {
 }
 
 # Podman's own configuration can add host variables (containers.conf env and
-# env_host) and host files (mounts.conf; on RHEL, the subscription
-# certificates under /run/secrets) to every build and run. A local Podman
+# env_host), host files and devices (containers.conf volumes and devices, and
+# mounts.conf; on RHEL, the subscription certificates under /run/secrets) to
+# every build and run. A local Podman
 # reads both on the host, so turn them off: an override file that Podman
 # reads last, and the hidden --default-mounts-file flag (containers.conf's
 # default_mounts_file is ignored). A remote client (macOS, Windows,
-# CONTAINER_HOST) has no such flag and sends none of its own env settings;
+# CONTAINER_HOST) has no such flag and applies none of its own env, volumes
+# or devices settings;
 # only the Podman machine's configuration applies there.
 # shortcut: replaces a CONTAINERS_CONF_OVERRIDE the user set (Podman takes one), merge it if anyone needs that.
 PODMAN_GLOBAL=()
@@ -201,7 +203,7 @@ podman_isolation() {
   remote=$("$ENGINE" info --format '{{.Host.ServiceIsRemote}}') || die "cannot query $ENGINE; is it running?"
   [ "$remote" = false ] || return 0
   mkdir -p "$cache" || die "cannot create $cache"
-  printf '[containers]\nenv_host = false\nenv = []\n' > "$cache/containers-override.$$" ||
+  printf '[containers]\nenv_host = false\nenv = []\nvolumes = []\ndevices = []\n' > "$cache/containers-override.$$" ||
     die "cannot write the Podman override file in $cache"
   f=$(write_once "$cache/containers-override.$$" "$cache/containers-override") ||
     die "cannot write the Podman override file in $cache"
