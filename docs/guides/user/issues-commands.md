@@ -147,9 +147,11 @@ cat plan.md | fullsend issues create \
   --jira-email you@example.com
 ```
 
-`--type` and `--parent` are Jira only. GitHub and GitLab have no
-equivalent here, so passing either with `--tracker github` or
-`--tracker gitlab` is an error rather than being silently ignored.
+`--type` and `--parent` are only implemented for Jira so far. GitHub
+and GitLab have their own equivalents (GitHub issue types and
+sub-issues, GitLab `issue_type`), but they are not wired up yet.
+Passing either flag with `--tracker github` or `--tracker gitlab` is
+an error rather than being silently ignored.
 
 ### Flags
 

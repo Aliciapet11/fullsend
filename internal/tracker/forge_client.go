@@ -52,10 +52,10 @@ func (c *ForgeClient) GetIssue(ctx context.Context, project string, number int) 
 }
 
 // CreateIssue implements Client by splitting project into owner/repo for
-// the underlying forge call. GitHub and GitLab have no equivalent of
-// Jira's issue type ID or parent key here, so a non-empty IssueType or
-// Parent is rejected with ErrNotSupported instead of being silently
-// dropped.
+// the underlying forge call. Issue type and parent are only implemented
+// for Jira so far (GitHub and GitLab have their own equivalents, but
+// they are not wired up yet), so a non-empty IssueType or Parent is
+// rejected with ErrNotSupported instead of being silently dropped.
 func (c *ForgeClient) CreateIssue(ctx context.Context, project, title string, body Body, opts CreateIssueOptions) (*Issue, error) {
 	if opts.IssueType != "" {
 		return nil, fmt.Errorf("tracker: issue type: %w (Jira only)", ErrNotSupported)
