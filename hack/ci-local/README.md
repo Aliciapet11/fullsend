@@ -28,7 +28,9 @@ The `Containerfile` uses only classic instructions (no `RUN` heredocs, no
 Podman 6.1, Buildah 1.28 (the version behind Debian 12's Podman 4.3) and
 Docker 29 with BuildKit. Docker's **legacy builder** (`DOCKER_BUILDKIT=0`) is
 not supported: it leaves `TARGETARCH` unset, and the build stops at its first
-step with a message saying so.
+step with a message saying so. `ci-local` itself needs **Podman 4.5 or
+later** for its [isolation](#isolation) override, and stops before any build
+or run with an older one; use Docker (`CI_LOCAL_ENGINE=docker`) there.
 
 Apple silicon runs arm64 Linux. Use `--amd64` to match GitHub's x86_64
 runners exactly (emulated, slow). It needs Rosetta emulation, which Docker
@@ -43,16 +45,18 @@ the host.
 
 - `ci-local` passes no host environment variables, SSH agent or credential
   files from outside the checkout into the container. Podman's own
-  configuration could add some: any `env`, `env_host = true`, `volumes` or
-  `devices` setting in `containers.conf`, and the default mounts in
-  `mounts.conf` (on RHEL, the host's subscription certificates under
-  `/run/secrets`). With a local Podman, `ci-local` turns these off for its
-  builds and runs: it points `CONTAINERS_CONF_OVERRIDE` at a file that sets
-  `env_host = false` and `env`, `volumes` and `devices` to `[]` (replacing
-  any override you set), and passes `--default-mounts-file=/dev/null`. A
-  remote Podman client (macOS, Windows) applies none of its own `env`,
-  `volumes` or `devices` settings and has no default-mounts flag; there only
-  the Podman machine's configuration applies, and nothing from the host's.
+  configuration could add some: any `env`, `env_host = true`, `volumes`,
+  `mounts` or `devices` setting in `containers.conf`, and the default mounts
+  in `mounts.conf` (on RHEL, the host's subscription certificates under
+  `/run/secrets`). `ci-local` turns these off for its Podman builds and runs:
+  it points `CONTAINERS_CONF_OVERRIDE` at a file that sets
+  `env_host = false` and `env`, `volumes`, `mounts` and `devices` to `[]`
+  (replacing any override you set). A remote Podman client (macOS, Windows)
+  reads that file too, because it adds its own `containers.conf` mounts to
+  the container. With a local Podman, `ci-local` also passes
+  `--default-mounts-file=/dev/null`; a remote client has no such flag and
+  reads no `mounts.conf`. Podman before 4.5 silently ignores
+  `CONTAINERS_CONF_OVERRIDE`, so `ci-local` refuses to run with it.
   `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on CI. No host proxy settings,
   which can carry credentials, reach builds or containers either. Podman
   builds and runs with `--http-proxy=false`, so host `HTTP(S)_PROXY` values

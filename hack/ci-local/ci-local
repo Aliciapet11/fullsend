@@ -65,10 +65,10 @@ Isolation: ci-local passes no host environment variables, SSH agent or
 credential files from outside the checkout into the container, and no host
 proxy settings: Podman builds and runs with --http-proxy=false, and Docker's
 ~/.docker/config.json proxies are overridden with empty values. Podman's own
-containers.conf env, env_host, volumes and devices settings and mounts.conf
-default mounts (on RHEL, the host's subscription certificates under
-/run/secrets) are turned off for a local Podman; with a remote client (macOS, Windows) only the
-Podman machine's own configuration applies. Only the checkout (including
+containers.conf env, env_host, volumes, mounts and devices settings are turned
+off (this needs Podman 4.5 or later), and so are mounts.conf default mounts (on
+RHEL, the host's subscription certificates under /run/secrets) for a local
+Podman; a remote client (macOS, Windows) reads no mounts.conf. Only the checkout (including
 gitignored files), its .git directory and cache volumes are mounted,
 read-write. GH_TOKEN/GITHUB_TOKEN are empty, as on CI. This keeps host
 secrets out; it is not a sandbox against the code under test. The download
@@ -186,28 +186,33 @@ build_image() {
 }
 
 # Podman's own configuration can add host variables (containers.conf env and
-# env_host), host files and devices (containers.conf volumes and devices, and
-# mounts.conf; on RHEL, the subscription certificates under /run/secrets) to
-# every build and run. A local Podman
-# reads both on the host, so turn them off: an override file that Podman
-# reads last, and the hidden --default-mounts-file flag (containers.conf's
-# default_mounts_file is ignored). A remote client (macOS, Windows,
-# CONTAINER_HOST) has no such flag and applies none of its own env, volumes
-# or devices settings;
-# only the Podman machine's configuration applies there.
+# env_host), host files and devices (containers.conf volumes, mounts and
+# devices, and mounts.conf; on RHEL, the subscription certificates under
+# /run/secrets) to every build and run. Turn them off with an override file
+# that Podman reads last; a remote client (macOS, Windows, CONTAINER_HOST)
+# reads it too, since it fills in the container's mounts from its own
+# containers.conf. Podman < 4.5 ignores CONTAINERS_CONF_OVERRIDE silently, so
+# refuse it. Only a local Podman reads mounts.conf, through the hidden
+# --default-mounts-file flag (containers.conf's default_mounts_file is
+# ignored); a remote client has no such flag.
 # shortcut: replaces a CONTAINERS_CONF_OVERRIDE the user set (Podman takes one), merge it if anyone needs that.
 PODMAN_GLOBAL=()
 podman_isolation() {
   [ "$(basename "$ENGINE")" = podman ] || return 0
-  local remote cache="$HOME/.cache/ci-local" f
+  local remote ver major minor cache="$HOME/.cache/ci-local" f
   remote=$("$ENGINE" info --format '{{.Host.ServiceIsRemote}}') || die "cannot query $ENGINE; is it running?"
-  [ "$remote" = false ] || return 0
+  ver=$("$ENGINE" version --format '{{.Client.Version}}') || die "cannot query the $ENGINE version"
+  IFS=. read -r major minor _ <<< "$ver"
+  major=${major%%[!0-9]*} minor=${minor%%[!0-9]*}
+  [ "${major:-0}" -gt 4 ] || { [ "${major:-0}" -eq 4 ] && [ "${minor:-0}" -ge 5 ]; } ||
+    die "Podman $ver ignores CONTAINERS_CONF_OVERRIDE, so host containers.conf settings would reach the container; upgrade to Podman 4.5 or later, or set CI_LOCAL_ENGINE=docker"
   mkdir -p "$cache" || die "cannot create $cache"
-  printf '[containers]\nenv_host = false\nenv = []\nvolumes = []\ndevices = []\n' > "$cache/containers-override.$$" ||
+  printf '[containers]\nenv_host = false\nenv = []\nvolumes = []\nmounts = []\ndevices = []\n' > "$cache/containers-override.$$" ||
     die "cannot write the Podman override file in $cache"
   f=$(write_once "$cache/containers-override.$$" "$cache/containers-override") ||
     die "cannot write the Podman override file in $cache"
   export CONTAINERS_CONF_OVERRIDE=$f
+  [ "$remote" = false ] || return 0
   PODMAN_GLOBAL=(--default-mounts-file=/dev/null)
 }
 

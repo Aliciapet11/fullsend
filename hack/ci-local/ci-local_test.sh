@@ -48,6 +48,8 @@ case "$1" in
   info)
     case "$*" in *ServiceIsRemote*) echo "${STUB_REMOTE:-false}"; exit "${STUB_INFO_RC:-0}" ;; esac
     echo "${STUB_OS:-}"; exit 0 ;;
+  # STUB_PODMAN_VERSION: what `podman version` reports as Client.Version.
+  version) echo "${STUB_PODMAN_VERSION:-5.0.0}"; exit 0 ;;
   # clean: STUB_IMAGES/STUB_VOLUMES are the listings; STUB_BUSY is refused as in use.
   # STUB_LIST_RC fails both listings, as a stopped engine does.
   images) printf '%s\n' "${STUB_IMAGES:-}"; exit "${STUB_LIST_RC:-0}" ;;
@@ -976,17 +978,19 @@ else
   fail "clean with failed listing: rc=${RC} removed=[$(removed)] out=[${OUT}]"
 fi
 
-# #8479: a local Podman builds and runs with no containers.conf env, env_host,
-# volumes or devices and no mounts.conf default mounts. A remote client has
-# neither the flag nor its own settings applied; Docker has no such configuration.
+# #8479: Podman builds and runs with no containers.conf env, env_host,
+# volumes, mounts or devices; a local one also gets no mounts.conf default
+# mounts. A remote client has no such flag but reads the override; Docker has
+# no such configuration.
 override_of() { sed -n "s/^$1 //p" "${ENGINE_LOG}.env" | sort -u; }
+OVR_WANT=$(printf '[containers]\nenv_host = false\nenv = []\nvolumes = []\nmounts = []\ndevices = []')
 STUB_IMAGE_RC=1 run_ci_local "${PODMAN}" go-vet
 OVR=$(override_of run)
 if [ "${RC}" -eq 0 ] && [ "$(last_build_args | head -1)" = --default-mounts-file=/dev/null ] &&
   [ "$(last_run_args | head -1)" = --default-mounts-file=/dev/null ] &&
   [ -n "${OVR}" ] && [ "$(override_of build)" = "${OVR}" ] &&
-  [ "$(cat "${OVR}")" = "$(printf '[containers]\nenv_host = false\nenv = []\nvolumes = []\ndevices = []')" ]; then
-  pass "local podman: builds and runs get no default mounts and no containers.conf env, volumes or devices"
+  [ "$(cat "${OVR}")" = "${OVR_WANT}" ]; then
+  pass "local podman: builds and runs get no default mounts and no containers.conf env, volumes, mounts or devices"
 else
   fail "local podman isolation: rc=${RC} override=[${OVR}] build=[$(last_build_args | head -1)] run=[$(last_run_args | head -1)]"
 fi
@@ -997,8 +1001,9 @@ else
   fail "user override kept: [$(override_of run)]"
 fi
 STUB_IMAGE_RC=1 STUB_REMOTE=true run_ci_local "${PODMAN}" go-vet
-if [ "${RC}" -eq 0 ] && ! grep -q -- '--default-mounts-file' "${ENGINE_LOG}" && [ -z "$(override_of run)" ]; then
-  pass "remote podman: no --default-mounts-file (the remote client has none) and no override"
+if [ "${RC}" -eq 0 ] && ! grep -q -- '--default-mounts-file' "${ENGINE_LOG}" &&
+  [ "$(override_of run)" = "${OVR}" ] && [ "$(override_of build)" = "${OVR}" ]; then
+  pass "remote podman: the same override, and no --default-mounts-file (the remote client has none)"
 else
   fail "remote podman: rc=${RC} override=[$(override_of run)] log: $(tr '\n' ' ' < "${ENGINE_LOG}")"
 fi
@@ -1013,6 +1018,19 @@ if [ "${RC}" -ne 0 ] && grep -q 'cannot query .*podman; is it running?' <<< "${O
   pass "podman: a failed remote/local query stops before any build or run"
 else
   fail "failed podman info: rc=${RC} out=[${OUT}]"
+fi
+# Podman < 4.5 ignores CONTAINERS_CONF_OVERRIDE without any error.
+STUB_PODMAN_VERSION=4.4.4 run_ci_local "${PODMAN}" go-vet
+if [ "${RC}" -ne 0 ] && grep -q 'Podman 4.4.4 ignores CONTAINERS_CONF_OVERRIDE' <<< "${OUT}" && ! grep -qxE 'ARG (run|build)' "${ENGINE_LOG}"; then
+  pass "podman < 4.5: stops before any build or run"
+else
+  fail "podman 4.4.4: rc=${RC} out=[${OUT}]"
+fi
+STUB_PODMAN_VERSION=4.5.0-dev STUB_REMOTE=true run_ci_local "${PODMAN}" go-vet
+if [ "${RC}" -eq 0 ]; then
+  pass "podman 4.5.0-dev (remote): runs"
+else
+  fail "podman 4.5.0-dev: rc=${RC} out=[${OUT}]"
 fi
 
 if [ "${FAILURES}" -ne 0 ]; then
