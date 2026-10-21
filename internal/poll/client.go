@@ -63,6 +63,9 @@ type GitLabClient interface {
 	DeleteRef(ctx context.Context, owner, repo, refPath string) error
 	GetAuthenticatedUser(ctx context.Context) (string, error)
 	GetAuthenticatedUserID(ctx context.Context) (int, error)
+	// GetUserBot reads the authoritative user bot flag. Issue and note author
+	// objects can omit it, including for project service accounts.
+	GetUserBot(ctx context.Context, userID int) (bool, error)
 	// CreateNoteAwardEmoji adds an emoji reaction. noteableType must be
 	// "Issue" or "MergeRequest" to select the correct API endpoint.
 	CreateNoteAwardEmoji(ctx context.Context, owner, repo string, noteableType string, noteableIID, noteID int, emoji string) error
@@ -89,6 +92,16 @@ type GitLabClient interface {
 	// otherwise, since a poller binary upgrade is not synchronized with
 	// that repository's own scaffold migration.
 	CreatePipelineWithInputs(ctx context.Context, owner, repo, ref string, inputs map[string]forge.PipelineInputValue) (int64, string, error)
+	// CreateChildPipelineWithInputs starts a downstream pipeline on ref
+	// through the pipeline trigger API, authenticated by the running
+	// job's CI_JOB_TOKEN rather than the client's PAT (#8438). GitLab
+	// records it with source "pipeline" and attributes it to the user who
+	// owns the calling job, so it runs on a protected branch whenever that
+	// user may, independently of the Poller credential's protected-ref
+	// access. Implementations MUST NOT retry: an ambiguous outcome could
+	// otherwise start a duplicate agent pipeline. Returns the pipeline ID
+	// and web URL.
+	CreateChildPipelineWithInputs(ctx context.Context, owner, repo, ref, jobToken string, inputs map[string]forge.PipelineInputValue) (int64, string, error)
 }
 
 // Issue represents a GitLab issue as returned by the API.

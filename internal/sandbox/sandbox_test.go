@@ -2850,3 +2850,66 @@ func TestResolvedBasename(t *testing.T) {
 		assert.Equal(t, "gone.txt", resolvedBasename("/no/such/gone.txt"))
 	})
 }
+
+// stubOpenshellForExtract puts a fake openshell first on PATH. The listing
+// runs "openshell sandbox exec …" and each copy runs
+// "openshell sandbox download <name> <remote> <destDir>", so the script
+// branches on $2.
+func stubOpenshellForExtract(t *testing.T, execBody, downloadBody string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$2\" = \"exec\" ]; then\n" + execBody + "\nfi\n" +
+		"if [ \"$2\" = \"download\" ]; then\n" + downloadBody + "\nfi\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestExtractOutputFiles_OpenshellFailureIsAnError(t *testing.T) {
+	stubOpenshellForExtract(t,
+		"  echo 'sandbox is not ready' >&2\n  exit 1",
+		"  exit 0")
+
+	got, err := ExtractOutputFiles("sb", "/sandbox/output", t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sandbox is not ready")
+	assert.Empty(t, got)
+}
+
+func TestExtractOutputFiles_EmptyOutputIsNotAnError(t *testing.T) {
+	stubOpenshellForExtract(t, "  exit 0", "  exit 0")
+
+	got, err := ExtractOutputFiles("sb", "/sandbox/output", t.TempDir())
+	assert.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestExtractOutputFiles_ListedButNoneCopiedIsAnError(t *testing.T) {
+	stubOpenshellForExtract(t,
+		"  echo /sandbox/output/agent-result.json\n  exit 0",
+		"  echo 'sandbox is not ready' >&2\n  exit 1")
+
+	got, err := ExtractOutputFiles("sb", "/sandbox/output", t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 listed, none copied")
+	assert.Empty(t, got)
+}
+
+func TestExtractOutputFiles_CopiesListedFiles(t *testing.T) {
+	stubOpenshellForExtract(t,
+		"  echo /sandbox/output/agent-result.json\n  exit 0",
+		"  printf '{}' > \"$5/$(basename \"$4\")\"\n  exit 0")
+
+	localDir := t.TempDir()
+	got, err := ExtractOutputFiles("sb", "/sandbox/output", localDir)
+	require.NoError(t, err)
+	want := filepath.Join(localDir, "agent-result.json")
+	assert.Equal(t, []string{want}, got)
+	data, readErr := os.ReadFile(want)
+	require.NoError(t, readErr)
+	assert.Equal(t, "{}", string(data))
+}

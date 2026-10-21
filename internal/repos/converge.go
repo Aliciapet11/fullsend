@@ -785,6 +785,7 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 			return nil, err
 		}
 	}
+	excludedUsesOpenAI, excludedUsesVertex := false, false
 	if len(cfg.ExcludeRepos) > 0 {
 		excluded := make(map[string]bool, len(cfg.ExcludeRepos))
 		for _, name := range cfg.ExcludeRepos {
@@ -794,6 +795,16 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 		for _, rr := range repos {
 			if !excluded[strings.ToLower(rr.Owner+"/"+rr.Repo)] {
 				kept = append(kept, rr)
+				continue
+			}
+			// An excluded repo takes no write, but it is still part of the
+			// selection the credential inputs are validated against, so a
+			// skipped consumer does not fail the run for the others.
+			switch manifest.ResolveConfigForEntry(rr.Owner, rr.Repo, rr.Forge, rr.Entry).InferenceAuth {
+			case InferenceAuthOpenAIAPIKey:
+				excludedUsesOpenAI = true
+			case InferenceAuthVertexWIF, InferenceAuthOpenAIWIF:
+				excludedUsesVertex = true
 			}
 		}
 		repos = kept
@@ -1039,8 +1050,9 @@ func Converge(ctx context.Context, cfg ConvergeConfig,
 	// Reject credential inputs that no selected repository consumes, before
 	// any write: silently ignoring them would leave the caller believing the
 	// credentials were provisioned. Mixed fleets keep working because each
-	// input group only needs one consumer.
-	usesOpenAI, usesVertex := false, false
+	// input group only needs one consumer. Excluded repos still count as
+	// consumers (they remain selected) but receive no write.
+	usesOpenAI, usesVertex := excludedUsesOpenAI, excludedUsesVertex
 	for _, d := range discoveries {
 		switch d.resolved.InferenceAuth {
 		case InferenceAuthOpenAIAPIKey:
@@ -2075,10 +2087,11 @@ func withoutLegacyOpenAIConsumer(ctx context.Context, resolved ResolvedConfig, f
 // contract (or rejecting an incomplete one) and the live pipeline-variable
 // override restriction, refusing a typed-to-legacy transition, and
 // confirming the root .gitlab-ci.yml would merge cleanly (e.g. no STAGE
-// conflict). It performs no writes and never mutates project state. A
-// fresh-install dry run that skips these checks can report "Would install
-// (new)" for a plan the real installation would reject — see the review
-// finding on preview fidelity.
+// conflict), and confirming the project's push rule would let the
+// poll-state branches be created. It performs no writes and never mutates
+// project state. A fresh-install dry run that skips these checks can report
+// "Would install (new)" for a plan the real installation would reject — see
+// the review finding on preview fidelity.
 func gitlabFreshInstallDryRunPreflight(ctx context.Context, resolved ResolvedConfig, installCfg InstallConfig) error {
 	client := resolved.ForgeConfig.Client
 	owner, repo := installCfg.Owner, installCfg.Repo
@@ -2118,7 +2131,7 @@ func gitlabFreshInstallDryRunPreflight(ctx context.Context, resolved ResolvedCon
 			return fmt.Errorf("merging .gitlab-ci.yml: %w", err)
 		}
 	}
-	return nil
+	return requireGitLabPushRuleAllowsPollStateBranches(ctx, client, owner, repo)
 }
 
 // convergeVariables checks and repairs variable drift for an installed repo.
@@ -2546,6 +2559,34 @@ func convergeSchedules(ctx context.Context,
 	return actions
 }
 
+// recordedTriggerScheduleOwner reports whether the schedule belongs to an
+// account generation in the validated trigger-account ledger.
+// A forbidden update is delegated only when GitLab reports that the owner is
+// one of the recorded trigger-account generations. Unknown or human owners
+// retain the update error.
+func recordedTriggerScheduleOwner(ctx context.Context, client forge.Client, owner, repo string, scheduleOwnerID int64) bool {
+	if scheduleOwnerID <= 0 {
+		return false
+	}
+	raw, exists, err := client.GetRepoVariable(ctx, owner, repo, forge.VarGitLabTriggerAccount)
+	if err != nil || !exists {
+		return false
+	}
+	state, err := decodeGitLabTriggerAccountState(raw)
+	if err != nil {
+		return false
+	}
+	if int64(state.AccountID) == scheduleOwnerID {
+		return true
+	}
+	for _, retired := range state.Retired {
+		if int64(retired.AccountID) == scheduleOwnerID {
+			return true
+		}
+	}
+	return false
+}
+
 // activatePipelineSchedules reactivates existing GitLab pipeline schedules
 // that match the given component names but are currently disabled.
 func activatePipelineSchedules(ctx context.Context, client forge.Client,
@@ -2578,15 +2619,32 @@ func activatePipelineSchedules(ctx context.Context, client forge.Client,
 
 		foundInactive := false
 		var activateErr error
+		forbidden := false
 		for _, s := range schedules {
 			if s.Description != spec.Description || s.Active {
 				continue
 			}
 			foundInactive = true
 			if err := client.UpdatePipelineSchedule(ctx, owner, repo, s.ID, true); err != nil {
+				if forge.IsForbidden(err) {
+					if recordedTriggerScheduleOwner(ctx, client, owner, repo, s.OwnerID) {
+						// The following trigger-account stage reactivates this
+						// recorded account generation's schedule.
+						forbidden = true
+						continue
+					}
+				}
 				activateErr = err
 				break
 			}
+		}
+		if activateErr == nil && forbidden {
+			actions = append(actions, ComponentAction{
+				Component: name,
+				Action:    "none",
+				Detail:    fmt.Sprintf("%s is owned by the recorded GitLab trigger account and will be reactivated by the trigger-account stage", DriftFieldName(name)),
+			})
+			continue
 		}
 		if !foundInactive {
 			actions = append(actions, ComponentAction{

@@ -358,3 +358,15 @@ func alreadyDispatched(dispatched map[string]int64, mirrors mirrorSet, stage str
 	}
 	return false
 }
+
+// dispatchedForAnyStage reports whether any stage already has a dispatch
+// record for event's exact occurrence key.
+func dispatchedForAnyStage(dispatched map[string]int64, event RoutableEvent) bool {
+	suffix := ":" + event.Key()
+	for key := range dispatched {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
+}

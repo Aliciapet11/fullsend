@@ -39,8 +39,13 @@ func TestRunReposInstall_SelectionErrorStillContainsResolvedGitLabRepos(t *testi
 		return nil
 	}
 	triggerCalls := 0
-	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string) error {
+	opts.testConvergeTriggerAccount = func(context.Context, forge.Client, string, string, bool) error {
 		triggerCalls++
+		return nil
+	}
+	repairCalls := 0
+	opts.testRepairTriggerSchedules = func(context.Context, forge.Client, string, string) error {
+		repairCalls++
 		return nil
 	}
 	var runErr error
@@ -50,6 +55,7 @@ func TestRunReposInstall_SelectionErrorStillContainsResolvedGitLabRepos(t *testi
 	assert.ErrorContains(t, runErr, "matching repository selection")
 	assert.Equal(t, []string{"group/project"}, contained, "the resolved repository is contained")
 	assert.Zero(t, triggerCalls, "no installation stage runs")
+	assert.Zero(t, repairCalls, "a selection error leaves live schedules untouched")
 	assert.Empty(t, fc.CommittedFilesToBranch, "no scaffold is committed")
 	assert.Empty(t, fc.CreatedFiles, "no file is written")
 	assert.Empty(t, fc.CreatedSecrets, "no secret is written")

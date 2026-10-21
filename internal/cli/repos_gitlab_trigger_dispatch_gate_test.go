@@ -23,7 +23,7 @@ func TestReportGitLabTriggerDispatchGate_DeferredReportsEveryReason(t *testing.T
 	fc.PipelineVarOverrideRoles["acme/widgets"] = forge.PipelineVarOverrideDeveloper
 
 	var buf bytes.Buffer
-	reportGitLabTriggerDispatchGate(context.Background(), fc, nil, ui.New(&buf), "acme", "widgets", "main")
+	reportGitLabTriggerDispatchGate(context.Background(), fc, nil, ui.New(&buf), "acme", "widgets", "main", nil)
 
 	out := buf.String()
 	assert.Contains(t, out, "[acme/widgets] GitLab trigger dispatch activation deferred")
@@ -46,6 +46,20 @@ func TestReportGitLabTriggerDispatchGate_PrerequisitesVerified(t *testing.T) {
 	if !assert.Contains(t, out, "GitLab trigger dispatch prerequisites verified") {
 		return
 	}
-	assert.Contains(t, out, "the dispatch route is not yet activated")
+	assert.Contains(t, out, "the dispatch activation is recorded")
 	assert.NotContains(t, out, "deferred")
+	assert.NotContains(t, out, "Unverified inherited")
+}
+
+func TestReportGitLabTriggerDispatchGate_ReportsUnverifiedInheritedScopes(t *testing.T) {
+	var buf bytes.Buffer
+	printGitLabTriggerDispatchGate(ui.New(&buf), "acme/widgets", repos.GitLabTriggerDispatchGate{
+		Ready:                     true,
+		UnverifiedInheritedScopes: []string{"instance", "acme"},
+	})
+
+	out := buf.String()
+	assert.Contains(t, out, "Unverified inherited CI/CD variable scopes")
+	assert.Contains(t, out, "instance, acme")
+	assert.Contains(t, out, "before the job verifies its creator")
 }

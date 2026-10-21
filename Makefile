@@ -3,7 +3,7 @@
        mindmap go-build go-test go-fmt go-vet go-tidy \
        lint-md-links script-test test ci-local \
        behaviour-test playback-test \
-       wasm-build wasm-stage mint-cf-worker-test
+       wasm-build wasm-stage wasm-stage-traced mint-cf-worker-test
 
 # Let Go automatically download the toolchain version required by go.mod.
 # This ensures local builds use the right version without manual intervention.
@@ -101,7 +101,7 @@ mindmap:
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
 go-build:
-	go build -ldflags "-X github.com/fullsend-ai/fullsend/internal/cli.version=$(VERSION)" -o bin/fullsend ./cmd/fullsend/
+	go build -ldflags "-X github.com/fullsend-ai/fullsend/internal/buildinfo.version=$(VERSION)" -o bin/fullsend ./cmd/fullsend/
 
 go-test:
 	GH_TOKEN= GITHUB_TOKEN= \
@@ -156,10 +156,20 @@ wasm-stage: wasm-build
 	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" $(WORKERSRC_DIR)/wasm_exec.js
 	@echo "==> Staged: $(WORKERSRC_DIR)/mintcore.wasm, $(WORKERSRC_DIR)/wasm_exec.js"
 
+# Stage a second WASM binary with a test OTLP traces endpoint stamped in
+# (the same -ldflags mechanism `fullsend mint deploy` uses). Only the Worker
+# tracing bridge tests (src/index.tracing.test.ts) import it; never deploy it.
+# Keep the endpoint in sync with TEST_COLLECTOR_URL in that test file.
+wasm-stage-traced:
+	@echo "==> Building traced mintcore WASM binary for Worker bridge tests..."
+	cd cmd/mint-wasm && GOOS=js GOARCH=wasm go build \
+		-ldflags "-s -w -X main.otlpTracesEndpoint=https://collector.test/v1/traces -X main.traceDeployment=worker-bridge-test" \
+		-o ../../$(WORKERSRC_DIR)/mintcore-traced.wasm .
+
 # Run CF Worker bridge smoke tests.
 # Works on a clean checkout: stages WASM, installs locked npm deps, runs vitest.
 # Do not rename: .github/workflows/mint-cf-worker-test.yml calls this target.
-mint-cf-worker-test: wasm-stage
+mint-cf-worker-test: wasm-stage wasm-stage-traced
 	@echo "==> Installing CF Worker npm dependencies..."
 	cd $(WORKERSRC_DIR) && npm ci --no-audit --no-fund
 	@echo "==> Type-checking CF Worker source (production + test files)..."
@@ -184,9 +194,12 @@ script-test:
 	$(call run-timed,bash scripts/check-e2e-authorization-test.sh)
 	$(call run-timed,bash scripts/redact-behaviour-artifacts-test.sh)
 	$(call run-timed,bash .github/scripts/check-fix-eligibility-test.sh)
+	$(call run-timed,bash .github/scripts/count-fix-commits-test.sh)
 	$(call run-timed,bash .github/scripts/pre-fetch-review-body-test.sh)
 	$(call run-timed,bash scripts/check-agents-gate-pin-test.sh)
 	$(call run-timed,bash scripts/verify-release-tag-test.sh)
+	$(call run-timed,bash skills/cutting-releases/scripts/prepend-release-highlights-test.sh)
+	$(call run-timed,bash scripts/renovate/update-go-checksums-test.sh)
 	$(call run-timed,bash internal/scaffold/fullsend-repo/scripts/pre-fetch-prior-review-test.sh)
 	$(call run-timed,bash internal/scaffold/fullsend-repo/.github/scripts/setup-agent-env-test.sh)
 	$(call run-timed,bash hack/gitlab-runner-vm/executor/prepare_validation_test.sh)

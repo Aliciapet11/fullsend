@@ -419,8 +419,8 @@ fullsend repos install acme/api
   partial set fails before anything is written, and the error names only the missing identifiers.
 - Migrating from `fullsend github setup --openai-*` needs no new OpenAI values: the existing
   `inference.openai` block or repository variables are still read as they are. The existing
-  `.fullsend/config.yaml` has no ownership marker, though, so `repos install` stops before any
-  write until it is adopted: move the settings you want to keep, including `inference.openai`,
+  `.fullsend/config.yaml` has no ownership marker, though, so `repos install` skips that
+  repository, writing nothing to it, until it is adopted (the other repositories still converge): move the settings you want to keep, including `inference.openai`,
   into the repository's `repos.yaml` entry, then add the ownership marker to the file (see
   [Migrating to manifest-driven `repos install`](../getting-started/migrating-from-github-setup.md#repository-installed-with-github-setup-markerless-overlay)).
   The identifiers are configuration, not secrets, and install never treats them as credentials.
@@ -585,6 +585,7 @@ to carry the credential over.
 | `sandbox policy rule codex allows api.openai.com:443 without L7 inspection` | The named policy (or a provider-composed rule) leaves an uninspected route to `api.openai.com`. Use the fleet `policies/base.yaml`: it has no network rules of its own, and the openai provider supplies the inspected route. |
 | `500 credential_unavailable` from `api.openai.com` | The placeholder pi sent no longer resolves: the credential expired, or the provider was replaced. With `--keep-sandbox` this is expected after the run ends. Otherwise check the refresh lines in the run log. |
 | `401` or `500` from `api.openai.com` partway through a run | The refresh could not get a new token in time (the run log shows the attempts) and the credential expired as designed. Check the exchange errors above and re-run. |
+| Local run on a laptop that slept | The refresher checks the wall clock every 30 seconds and refreshes on the first check after wake if the credential is due or already expired. Agent requests sent before that check can still fail. The [inference gateway route](../user/inference-gateway.md#troubleshooting-the-gateway-route) refreshes its token the same way. Note that `timeout_minutes` and the "Agent running (… elapsed, … remaining)" heartbeat count only time the host was awake. |
 
 ## Related
 

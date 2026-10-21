@@ -63,6 +63,7 @@ create_issues:
       - my-org
     repos:                           # Specific repos (owner/name) agents may create issues in
       - fullsend-ai/fullsend
+      - fullsend-ai/agents
 
 # ── Authorization ────────────────────────────────────────────
 authorization:                       # Extra sources of slash-command permission, checked before the collaborator API
@@ -94,6 +95,7 @@ inference:
     url: ""                          # Gateway URL, e.g. https://gateway.example.com or https://gateway.example.com/team-a (optional path prefix, no trailing /v1, port 443 only; plain http only for a loopback test host)
     audience: ""                     # OIDC audience the runner requests for the gateway (oidc mode)
     auth: ""                         # Credential mode: oidc (default) or api-key (ADR 0138)
+    messages_auth_header: ""         # Messages-dialect credential header: authorization (default) or x-api-key (api-key mode only, ADR 0142)
     models: {}                       # Inline model list: id -> {api, compat, contextWindow, maxTokens}
     models_file: ""                  # Or: repository path to a pi-inference-gateway config file
 
@@ -224,9 +226,26 @@ restricts which orgs and repos agents may create issues in.
 
 When omitted, agents cannot create issues outside the repository they are
 running in. That repository is always allowed, so it does not need an
-entry. The default per-repo configuration generated without a preset lists
-only `fullsend-ai/fullsend` in `allow_targets.repos`, which lets retro file
-upstream proposals and triage file upstream prerequisites.
+entry. The default GitHub per-repo configuration generated without a preset lists
+both `fullsend-ai/fullsend` and `fullsend-ai/agents` in `allow_targets.repos`,
+so retro proposals and triage prerequisites can reach the platform or agent
+repository that owns the change. These are installation defaults, not an
+automatic grant for every repository in `allowed_remote_resources`.
+Fresh GitLab installations instead record an explicit empty `allow_targets`
+policy: cross-project targets must be configured for the GitLab host.
+Explicit settings are preserved. Retro and triage post-scripts currently read
+only the overlay (`.fullsend/config.yaml`), not the preset
+(`.fullsend/config.base.yaml`). Until
+[agents#1728](https://github.com/fullsend-ai/agents/issues/1728) is fixed,
+preset users must declare the required `config.create_issues.allow_targets` in the
+managed repository’s `repos.yaml` entry and rerun `fullsend repos install`,
+or edit `.fullsend/config.yaml` for an unmanaged installation. Updating only
+the preset does not enable these cross-repository operations. Include all
+targets the post-scripts need in the overlay policy.
+Existing installations retain their permissions on upgrade; on GitHub, to opt in, add
+`fullsend-ai/agents` to the existing target list in the managed repository’s
+`repos.yaml` configuration, or in `.fullsend/config.yaml` for an installation
+not managed through `fullsend repos`. Preserve any other targets you need.
 
 ### `authorization`
 
@@ -386,6 +405,27 @@ flag is an error). See
     the OIDC token. The key is not rotated, so nothing is re-seeded. The
     block applies on local runs too, so the runner owns the route there
     as well.
+  - `messages_auth_header` — the header the gateway credential travels in
+    on Messages-dialect requests: `authorization` (the default, used when
+    the field is absent) or `x-api-key`
+    ([ADR 0142](../ADRs/0142-inference-gateway-x-api-key-header-for-messages-models.md)).
+    A CLI or reusable workflow from v0.48.0 or earlier ignores the field
+    and sends `Authorization: Bearer`, so an `x-api-key` gateway answers
+    401. Set `x-api-key` for a gateway that
+    reads the caller's key from `x-api-key` on `/v1/messages`, the header
+    Anthropic documents for API keys on that API. It is valid only with
+    `auth: api-key`: a resolved block in the `oidc` mode that sets
+    `x-api-key` is a config error, because an OIDC token is a bearer
+    token. Only the Messages dialect moves: pi `anthropic-messages` models
+    send the key as `x-api-key`, and Claude Code gets it as
+    `ANTHROPIC_API_KEY` instead of `ANTHROPIC_AUTH_TOKEN`. pi
+    `openai-responses` and `openai-completions` models, and codex, keep
+    `Authorization: Bearer`. Each request carries the credential in one
+    header only. The header is configured, never guessed: the runner does
+    not retry in the other header after a 401. A gateway that reads
+    `x-api-key` must remove the caller's key before it sets its own
+    upstream key; see
+    [Header custody for an x-api-key gateway](../guides/infrastructure/inference-gateway-operator.md#header-custody-for-an-x-api-key-gateway).
   - `models` — optional inline model list, a map of model id to settings:
     `api` (one of `openai-responses`, `anthropic-messages`,
     `openai-completions`), and optional `compat`, `contextWindow` and
@@ -427,7 +467,7 @@ flag is an error). See
   discover the gateway's models. On codex the list is not used: fullsend
   renders no catalog for codex, so the id after `gateway/` is the model it
   sends (a configured `models_file` must still be readable).
-  `url`, `audience` and `auth` layer
+  `url`, `audience`, `auth` and `messages_auth_header` layer
   independently; the model list (either form) is one unit,
   and a layer that sets it replaces the inherited list. There is no
   runner-variable override for this block. `fullsend github setup

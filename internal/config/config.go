@@ -154,6 +154,8 @@ func (a AgentEntry) DerivedName() string {
 const (
 	// DefaultUpstreamRepo is the canonical fullsend repository for layered workflow calls.
 	DefaultUpstreamRepo = "fullsend-ai/fullsend"
+	// DefaultAgentsRepo is the canonical repository for upstream agent resources.
+	DefaultAgentsRepo = "fullsend-ai/agents"
 	// DefaultUpstreamRef is the default ref for layered upstream workflow calls.
 	DefaultUpstreamRef = "main"
 	// DefaultGHRunner is the default GitHub Actions runner image for scaffold workflows.
@@ -161,10 +163,11 @@ const (
 	// DefaultSandboxImage and DefaultCodeImage are the sandbox images
 	// `fullsend agent new` writes into a generated harness. They track the
 	// fleet's pins in fullsend-ai/agents (harness/triage.yaml and
-	// harness/code.yaml) and are repinned by hand on the same cadence as the
-	// fleet repin PRs. `agent new --image` overrides them.
-	DefaultSandboxImage = "ghcr.io/fullsend-ai/fullsend-sandbox@sha256:f8255971fec8a72a60adb20f501e55098f237e699dc829f0894647c0de2a19c2"
-	DefaultCodeImage    = "ghcr.io/fullsend-ai/fullsend-code@sha256:ea2a31f38ee80e2a9a898a898a289fe432aa882fa5a4046c3236ab8e2627d7e7"
+	// harness/code.yaml). Nothing updates them automatically: repin them by
+	// hand when a release repins the fleet. `agent new --image` overrides
+	// them.
+	DefaultSandboxImage = "ghcr.io/fullsend-ai/fullsend-sandbox@sha256:bcf8cd84a37623d761d38f2a6f51d20283f8798b7d3eeb9c509a2503c074bd55"
+	DefaultCodeImage    = "ghcr.io/fullsend-ai/fullsend-code@sha256:3055d4f52136a7c89fb8aa1976b468a5f9dd929c6be55fd6cd958e222c6e18ca"
 )
 
 // PerRepoInferenceConfig groups inference backend settings for
@@ -743,11 +746,11 @@ func NewPerRepoConfig(roles []string, targetRepo string) PerRepoConfigWriter {
 	if targetRepo != "" {
 		// The target repository itself is implicitly allowed by the
 		// triage and retro post-scripts, so only the upstream
-		// cross-repo permission (retro proposals, triage prerequisites)
-		// needs an explicit entry (#8218).
+		// cross-repo permissions (retro proposals, triage prerequisites)
+		// need explicit entries (#8218, #8504).
 		cfg.CreateIssues = &CreateIssuesConfig{
 			AllowTargets: AllowTargets{
-				Repos: []string{DefaultUpstreamRepo},
+				Repos: DefaultIssueCreationRepos(),
 			},
 		}
 	}

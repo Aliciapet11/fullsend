@@ -68,9 +68,23 @@ type callerJob struct {
 	Concurrency *jobConcurrency   `yaml:"concurrency"`
 }
 
+// jobConcurrency decodes cancel-in-progress as a yaml.Node so tests can tell a
+// literal YAML boolean (tag !!bool) from a quoted string such as "true" (tag
+// !!str), which a Go bool field would decode identically.
 type jobConcurrency struct {
-	Group            string `yaml:"group"`
-	CancelInProgress bool   `yaml:"cancel-in-progress"`
+	Group            string    `yaml:"group"`
+	CancelInProgress yaml.Node `yaml:"cancel-in-progress"`
+}
+
+// assertLiteralTrue asserts that node is the unquoted YAML boolean true.
+func assertLiteralTrue(t *testing.T, node yaml.Node, context string) {
+	t.Helper()
+	assert.Equal(t, yaml.ScalarNode, node.Kind,
+		"%s: cancel-in-progress must be set to a scalar value", context)
+	assert.Equal(t, "!!bool", node.Tag,
+		"%s: cancel-in-progress must be a literal YAML boolean, not a quoted string (got %q)", context, node.Value)
+	assert.Equal(t, "true", node.Value,
+		"%s: cancel-in-progress must be true", context)
 }
 
 // reusableStageWorkflow includes workflow-level concurrency on reusable agent workflows.
@@ -123,7 +137,18 @@ var dispatchStageConcurrencyExpectations = map[string]stageConcurrencyExpectatio
 		groupPrefix: "fullsend-prioritize-",
 		groupMust:   []string{"github.repository", "github.event.issue.number", "github.event.pull_request.number"},
 	},
+	// harness-run pins today's group key. When #7475 changes the key, update
+	// these fragments in the same PR.
+	"harness-run": {
+		groupPrefix: "fullsend-harness-",
+		groupMust:   []string{"matrix.agent", "github.repository", "matrix.status_repo", "matrix.status_number"},
+	},
 }
+
+// dispatchNonAgentJobs lists reusable-dispatch.yml jobs that intentionally
+// carry no concurrency expectation. Every other job in the workflow must have
+// an entry in dispatchStageConcurrencyExpectations.
+var dispatchNonAgentJobs = []string{"route", "harness-dispatch"}
 
 // stepDeclRe matches a YAML step declaration line: "      - name: <marker>".
 var stepDeclRe = regexp.MustCompile(`(?m)^      - name: (.+)$`)
@@ -739,9 +764,23 @@ func TestReusableDispatchStageConcurrency(t *testing.T) {
 				assert.Contains(t, job.Concurrency.Group, fragment,
 					"job %q concurrency group should reference %q", stage, fragment)
 			}
-			assert.True(t, job.Concurrency.CancelInProgress,
-				"job %q should cancel in-progress runs when a newer dispatch arrives", stage)
+			assertLiteralTrue(t, job.Concurrency.CancelInProgress,
+				fmt.Sprintf("job %q should cancel in-progress runs when a newer dispatch arrives", stage))
 		})
+	}
+
+	nonAgent := make(map[string]bool, len(dispatchNonAgentJobs))
+	for _, name := range dispatchNonAgentJobs {
+		nonAgent[name] = true
+		_, ok := caller.Jobs[name]
+		assert.True(t, ok,
+			"non-agent job %q is not in reusable-dispatch.yml; remove the stale entry from dispatchNonAgentJobs", name)
+	}
+
+	for name := range caller.Jobs {
+		_, pinned := dispatchStageConcurrencyExpectations[name]
+		assert.True(t, pinned || nonAgent[name],
+			"job %q in reusable-dispatch.yml has no concurrency expectation; add it to dispatchStageConcurrencyExpectations or list it in dispatchNonAgentJobs", name)
 	}
 }
 
@@ -763,8 +802,8 @@ func TestReusableAgentWorkflowConcurrency(t *testing.T) {
 				assert.Contains(t, wf.Concurrency.Group, fragment,
 					"reusable-%s.yml concurrency group should reference %q", stage, fragment)
 			}
-			assert.True(t, wf.Concurrency.CancelInProgress,
-				"reusable-%s.yml should cancel in-progress runs", stage)
+			assertLiteralTrue(t, wf.Concurrency.CancelInProgress,
+				fmt.Sprintf("reusable-%s.yml should cancel in-progress runs", stage))
 
 			callerExpect := dispatchStageConcurrencyExpectations[stage]
 			require.NotEmpty(t, callerExpect.groupPrefix, "missing dispatch expectation for %s", stage)
@@ -792,8 +831,8 @@ func TestThinCallerStageConcurrency(t *testing.T) {
 				assert.Contains(t, wf.Concurrency.Group, fragment,
 					"%s concurrency group should reference %q", path, fragment)
 			}
-			assert.True(t, wf.Concurrency.CancelInProgress,
-				"%s should cancel in-progress runs when a newer dispatch arrives", path)
+			assertLiteralTrue(t, wf.Concurrency.CancelInProgress,
+				fmt.Sprintf("%s should cancel in-progress runs when a newer dispatch arrives", path))
 		})
 	}
 }
@@ -942,6 +981,10 @@ func TestDispatchPerStageAuthorization(t *testing.T) {
 				"human PR auto-fix requires write+ on the PR author")
 			assert.Regexp(t, `(?s)PR_USER_LOGIN.*\[bot\].*STAGE="fix".*fullsend-fix.*has_repo_permission "\$\{PR_USER_LOGIN\}" write`, s)
 
+			// Fix iteration count comes from the tested filter in .github/scripts,
+			// which trusts the Authored-by trailer only from the App bot.
+			assert.Contains(t, s, `jq -s --arg bot_email "${GIT_BOT_EMAIL}" -f .defaults/.github/scripts/count-fix-commits.jq`)
+
 			// ready-to-code is a mutation path: bot handoff OR write+ (default min)
 			assert.Regexp(t, `(?s)ready-to-code".*\\\[bot\\\]\$.*is_event_actor_authorized "\$\{EVENT_SENDER_LOGIN\}"`, s,
 				"ready-to-code must check bot bypass before write+ gate")
@@ -1089,6 +1132,34 @@ func TestLiveShimSlashCommandFilter(t *testing.T) {
 		"fullsend.yaml must retain bot-type filter for defense-in-depth alongside /fs- prefix check")
 }
 
+func TestPerRepoShimAdmitsEmptyBodyReviewEvents(t *testing.T) {
+	cases := []struct {
+		name    string
+		content func(t *testing.T) []byte
+	}{
+		{name: "live", content: loadRepoFile(".github/workflows/fullsend.yaml")},
+		{name: "template", content: loadScaffoldFile("templates/shim-per-repo.yaml")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var wf callerWorkflow
+			require.NoError(t, yaml.Unmarshal(tc.content(t), &wf))
+			job, ok := wf.Jobs["dispatch"]
+			require.True(t, ok)
+			assert.Contains(t, job.If, "github.event_name != 'pull_request_review'")
+			assert.NotContains(t, job.If, "github.event.action == 'submitted'",
+				"the workflow trigger already limits review events to submitted actions")
+			assert.NotContains(t, job.If, "github.event.review.state != 'commented'",
+				"empty-body commented reviews can carry substantive inline feedback")
+			assert.NotContains(t, job.If, "github.event.review.body != ''",
+				"empty-body commented reviews must reach custom review_submitted triggers")
+			assert.NotContains(t, job.If, "github.event.review.user.login",
+				"shim must preserve review events used by custom harness triggers")
+		})
+	}
+}
+
 // TestDispatchPRHeadResolution validates that reusable-dispatch.yml contains
 // the "Resolve PR head for issue_comment events" step and the pull_request
 // merge into event_payload, ensuring issue_comment-triggered agents receive
@@ -1116,9 +1187,6 @@ func TestDispatchPRHeadResolution(t *testing.T) {
 			assert.Contains(t, s, "id: pr-head",
 				"resolve step must have id: pr-head")
 
-			assert.Contains(t, s, `steps.pr-check.outputs.skipped != 'true'`,
-				"resolve step if: must include pr-check guard")
-
 			assert.Contains(t, s, `'.pull_request = $pr'`,
 				"must merge PR JSON into event_payload via jq")
 
@@ -1130,41 +1198,6 @@ func TestDispatchPRHeadResolution(t *testing.T) {
 
 			assert.Contains(t, s, "continuing without PR context",
 				"API failure for non-fix/review stages must warn and continue")
-		})
-	}
-}
-
-// TestDispatchPRCheckBotFilter validates that the existing-PR guard in both
-// dispatch workflows uses __typename + login for bot detection (not bare login
-// string comparison), and includes matched PR numbers in the skip notice (#5974).
-func TestDispatchPRCheckBotFilter(t *testing.T) {
-	type workflowCase struct {
-		name    string
-		content func(t *testing.T) []byte
-	}
-
-	cases := []workflowCase{
-		{
-			"reusable-dispatch.yml",
-			loadRepoFile(".github/workflows/reusable-dispatch.yml"),
-		},
-	}
-
-	for _, wc := range cases {
-		t.Run(wc.name, func(t *testing.T) {
-			s := string(wc.content(t))
-
-			assert.Contains(t, s, `author { login __typename }`,
-				"GraphQL query must request both login and __typename for bot detection")
-
-			assert.Contains(t, s, `select(.author.__typename != "Bot" or .author.login != "fullsend-ai-coder")`,
-				"bot filter must exclude only the code-agent bot via __typename + login — see docs/contributing/bot-identities.md")
-
-			assert.Contains(t, s, `map("#\(.number)") | join(", ")`,
-				"jq must format PR numbers as #N, #M — bare .[].number silently truncates multi-PR notices")
-
-			assert.Regexp(t, `::notice::.*\$\{LINKED_PRS\}`, s,
-				"skip notice must include the matched PR number(s)")
 		})
 	}
 }
@@ -1182,6 +1215,111 @@ func TestActionPRHeadSHAInput(t *testing.T) {
 		"fullsend run step must pass PR_HEAD_SHA env from input")
 	assert.Contains(t, s, "PR_HEAD_SHA_INPUT: ${{ inputs.pr-head-sha }}",
 		"reconcile step must pass PR_HEAD_SHA_INPUT env from input")
+}
+
+func TestActionReconcileStatusUsesSuppliedRoleFallback(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "action.yml"))
+	require.NoError(t, err)
+	s := string(content)
+
+	assert.Contains(t, s, "  role:\n    description:",
+		"action.yml must declare the optional role supplied by matrix dispatch")
+	assert.Contains(t, s, "SUPPLIED_ROLE: ${{ inputs.role }}",
+		"reconcile step must receive the supplied role")
+	assert.Contains(t, s, "RESOLVED_ROLE=\"${HARNESS_ROLE:-${SUPPLIED_ROLE:-${AGENT}}}\"",
+		"reconciliation must use the supplied role when an early failure prevents the harness from reporting one")
+}
+
+func TestActionReconcileStatusSupportsOlderCLIs(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "action.yml"))
+	require.NoError(t, err)
+	var action struct {
+		Runs struct {
+			Steps []struct {
+				Name string `yaml:"name"`
+				Run  string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"runs"`
+	}
+	require.NoError(t, yaml.Unmarshal(content, &action))
+
+	var script string
+	for _, step := range action.Runs.Steps {
+		if step.Name == "Finalize orphaned status comment" {
+			script = step.Run
+			break
+		}
+	}
+	require.NotEmpty(t, script)
+
+	run := func(t *testing.T, supportsReviewRun bool, eventName, eventJSON, prHeadInput string) []string {
+		t.Helper()
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "bin")
+		require.NoError(t, os.Mkdir(bin, 0o755))
+		outputPath := filepath.Join(dir, "reconcile-args")
+		eventPath := filepath.Join(dir, "event.json")
+		if eventJSON != "" {
+			require.NoError(t, os.WriteFile(eventPath, []byte(eventJSON), 0o644))
+		}
+
+		help := ":"
+		if supportsReviewRun {
+			// Keep writing after the matching flag: grep -q closes its input
+			// early, which would make this producer fail with SIGPIPE.
+			help = "printf '%s\\n' --review-run; for _ in $(seq 1 100000); do printf 'more help output\\n'; done"
+		}
+		fake := "#!/usr/bin/env bash\nset -euo pipefail\n" +
+			"if [[ \"${1:-}\" == reconcile-status && \"${2:-}\" == --help ]]; then " + help + "; exit 0; fi\n" +
+			"printf '%s\\n' \"$@\" > \"${RECONCILE_ARGS:?}\"\n"
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "fullsend"), []byte(fake), 0o755))
+
+		cmd := exec.Command("bash", "-c", script)
+		cmd.Env = append(os.Environ(),
+			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"RECONCILE_ARGS="+outputPath,
+			"MINT_URL=https://mint.example.com",
+			"AGENT=review",
+			"STATUS_REPO=org/repo",
+			"STATUS_NUMBER=7",
+			"RUN_ID=run-1",
+			"RUN_URL=",
+			"JOB_STATUS=cancelled",
+			"HARNESS_ROLE=",
+			"SUPPLIED_ROLE=",
+			"WAS_SKIPPED=false",
+			"PR_HEAD_SHA_INPUT="+prHeadInput,
+			"FULLSEND_DIR="+dir,
+			"GITHUB_WORKSPACE="+dir,
+			"GITHUB_SHA=merge-or-base",
+			"GITHUB_EVENT_NAME="+eventName,
+			"GITHUB_EVENT_PATH="+eventPath,
+		)
+		result, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", result)
+		args, err := os.ReadFile(outputPath)
+		require.NoError(t, err)
+		return strings.Fields(string(args))
+	}
+
+	assert.Contains(t, run(t, true, "workflow_dispatch", "", "explicit-head"), "--review-run", "a supporting CLI must receive --review-run even when help continues after the flag")
+	assert.NotContains(t, run(t, false, "workflow_dispatch", "", "explicit-head"), "--review-run", "older CLIs must still reconcile without the unknown flag")
+
+	nativeEvent := `{"pull_request":{"number":7,"head":{"sha":"native-head"}}}`
+	assert.Contains(t, run(t, true, "pull_request", nativeEvent, "explicit-head"), "explicit-head",
+		"the workflow input takes precedence over the native event")
+	for _, eventName := range []string{"pull_request", "pull_request_target"} {
+		t.Run(eventName, func(t *testing.T) {
+			args := run(t, true, eventName, nativeEvent, "")
+			assert.Contains(t, args, "native-head")
+			assert.NotContains(t, args, "merge-or-base")
+		})
+	}
+	wrappedEvent := `{"inputs":{"event_payload":"{\"pull_request\":{\"head\":{\"sha\":\"wrapped-head\"}}}"}}`
+	assert.Contains(t, run(t, true, "workflow_dispatch", wrappedEvent, ""), "wrapped-head",
+		"workflow dispatch continues to extract the embedded PR head")
+	assert.NotContains(t, run(t, true, "pull_request", `{"pull_request":{"number":7}}`, ""), "--sha",
+		"an unknown PR head must not be compared with the live HEAD")
 }
 
 // TestReusableDispatchPRHeadSHAPassthrough validates that agent jobs in

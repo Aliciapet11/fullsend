@@ -69,7 +69,7 @@ Optional environment variables:
 | Variable | Purpose |
 |----------|---------|
 | `GH_TOKEN` / `GITHUB_TOKEN` | Override token source for local runs |
-| `FULLSEND_MINT_URL` | Override mint endpoint (default: hosted public mint, same as `fullsend admin --mint-url`) |
+| `FULLSEND_MINT_URL` | Override mint endpoint (default: hosted public mint, same as `fullsend github setup --mint-url`) |
 | `E2E_LOCK_TIMEOUT` | Max wait for a free pool org (default 10m) |
 | `E2E_GCP_PROJECT_ID` | GCP project for inference setup (`github setup --inference-project`) |
 
@@ -101,7 +101,7 @@ Required repository secrets:
 | `TEST_ACTOR_TRIAGE_PAT` | Classic PAT for the triage-level human-like test actor (`fstest-triage`); exposed to the behaviour job under the same env name |
 | `TEST_ACTOR_OUTSIDER_PAT` | Classic PAT for the outsider (no org write) human-like test actor (`fstest-outsider`); exposed to the behaviour job under the same env name |
 
-Mint URL uses the hosted public endpoint by default (same as `fullsend admin --mint-url`). Override with org/repo variable `FULLSEND_MINT_URL` if needed; no separate e2e secret.
+Mint URL uses the hosted public endpoint by default (same as `fullsend github setup --mint-url`). Override with org/repo variable `FULLSEND_MINT_URL` if needed; no separate e2e secret.
 
 ### Behaviour job GitHub Environments
 
@@ -740,19 +740,16 @@ use repository secrets. Because that exposes credentials to untrusted code, a
 
 ### Who runs automatically
 
-E2E tests run without maintainer action when the PR author is an org/repo
-**member** or **collaborator** (`author_association` of `OWNER`, `MEMBER`, or
-`COLLABORATOR` on the base repo). The gate uses the frozen
-`github.event.pull_request.author_association` from the workflow event — not a
-live REST lookup — because `GITHUB_TOKEN` lacks `read:org` and cannot see org
-membership for members with private visibility. (Note: agent dispatch paths use
-the collaborator permission API instead, which does not have this limitation —
-see [ADR 0054](../../ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md).)
+E2E tests run without maintainer action when the PR author has **write
+access or higher** (`write`, `maintain`, or `admin` on the base repo) or is an
+allowed trusted bot. The gate verifies this using the collaborator permission
+API rather than `author_association`, ensuring contributors with read or
+triage roles cannot trigger credentialed CI runs automatically.
 
 ### Who needs `ok-to-test`
 
-External contributors and fork PR authors must have a maintainer with write
-access apply the **`ok-to-test`** label **after** the latest push. A label from
+Contributors without write access must have a maintainer with write access
+apply the **`ok-to-test`** label **after** the latest push. A label from
 anyone else (for example a triage-role user) is removed and does not authorize
 the run. The label must be created once in GitHub repo settings (Settings →
 Labels).
@@ -793,8 +790,8 @@ gate. Re-run the workflow or add/re-apply `ok-to-test` as appropriate.
    authors authorized immediately)
 2. **`ok-to-test` label** — the thin **E2E ok-to-test** workflow calls the same
    suite via `workflow_call` (fork / external path)
-3. **Gate** — authorize the PR author or a fresh `ok-to-test` label (base
-   checkout only; never checks out PR head)
+3. **Gate** — authorize a write+ / trusted-bot author, or an `ok-to-test`
+   labeled event from a write+ sender (base checkout only; never checks out PR head)
 4. **Behaviour / playback** — checkout PR head SHA, authenticate to GCP via
    WIF, mint cross-org tokens per pool org, `make behaviour-test` (or
    `make playback-test` for the playback job)
