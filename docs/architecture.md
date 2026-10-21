@@ -387,13 +387,18 @@ The existing design principle is that [the repo is the coordinator](problems/age
 - Process lifecycle (target state): bound `fullsend run` and `fullsend poll`
   support once, resident polling, and deadline-bounded polling. Bare
   `fullsend poll` and non-CI bound runs default to once; a CI bound run with
-  entity sources, eventless eligibility, and a usable job deadline defaults
-  to timed. Its internal timer checks only its bound entity, independently of
-  optional private Fullsend-to-Fullsend wake delivery. Each sandbox attempt is
-  fresh, while one `fullsend run` call publishes only its latest
-  invocation's result through the existing artifact shape and joins all
-  sandbox traces under a run-level parent. A long-lived poll lifecycle may
-  update that result at idle or within a response window. Current CLI and
+  entity sources, eventless eligibility, a usable job deadline, and recurring
+  repository-scoped poll coverage defaults to timed. Its internal timer checks
+  only its bound entity, independently of optional private Fullsend-to-Fullsend
+  wake delivery; the broad `fullsend poll` scan normally runs less often. Bound
+  `run` exits after an idle period in either resident lifecycle, while a
+  repository-wide `fullsend poll` may stay resident until stopped. Eventless
+  work deferred at a bound run's deadline awaits `fullsend poll` rediscovery;
+  event-backed work retains its pending platform execution. Each sandbox
+  attempt is fresh, while one `fullsend run` call publishes only its latest
+  selected cycle's validated result through the existing artifact shape and
+  joins all sandbox traces under a run-level parent. A long-lived poll lifecycle
+  may update that result at idle or within a response window. Current CLI and
   workflows remain one-shot
   ([ADR 0144](ADRs/0144-reuse-poll-and-entity-bound-run-processes.md)).
 - Harness routing uses one CEL predicate over a required normalized entity and
@@ -447,17 +452,20 @@ The existing design principle is that [the repo is the coordinator](problems/age
   model-initiated direct source-system calls; future ADRs may encourage use of
   platform-originated checked data or add filtering for model-originated
   retrievals ([ADR 0133](ADRs/0133-actor-attributed-data-security-boundary.md)).
-- Poll entity-discovery authorization: `fullsend poll` has no prompting event
-  actor; verified, non-user-assertable Fullsend invocation provenance authorizes
-  entity enumeration and evaluation, and callers without it are denied. Before
-  each candidate harness's CEL predicate, the platform fail-closed enumerates a
-  closed superset of action-indicating entity elements, resolves each actor's
-  current permission, and removes elements below that harness's observation or
-  mutation threshold. Later input-selection and injection filtering are defense
-  in depth for prompt construction. Entity-first execution remains disabled
-  until its versioned normalized-entity contract exists. Every run uses the
-  harness's configured identity
-  ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
+- Fullsend-originated entity evaluation (target state): `fullsend poll`
+  enumerates candidates, while a bound `fullsend run` may recheck only its
+  canonical entity with `event == null`. Both require verified,
+  non-user-assertable Fullsend invocation provenance and effective platform
+  eligibility; the actor of an earlier event does not authorize an eventless
+  cycle. Before each candidate harness's CEL predicate, the platform
+  fail-closed enumerates a closed superset of action-indicating entity
+  elements, resolves each actor's current permission, and removes elements
+  below that harness's observation or mutation threshold. Later input-selection
+  and injection filtering are defense in depth for prompt construction.
+  Entity-first execution remains disabled until its versioned normalized-entity
+  contract exists. Every run uses the harness's configured identity
+  ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md),
+  [ADR 0144](ADRs/0144-reuse-poll-and-entity-bound-run-processes.md)).
 
 **Open questions:**
 

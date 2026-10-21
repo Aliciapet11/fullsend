@@ -63,32 +63,46 @@ there is a useful opportunity for another work cycle.
 ## Decision
 
 Adopt three process lifecycles for `fullsend poll` and entity-bound
-`fullsend run`: **once** performs one discovery cycle in `poll`, or one entity
-eligibility check and at most one sandbox run in `run`, then exits; **poll**
-repeats checks and waits for work; **timed** does the same within a hard
-deadline and also exits after a period without actionable work. Scheduled
-checks and no-op wakeups do not extend the timed idle period. A timed run
-starts no sandbox unless its remaining budget can accommodate expected
-execution and teardown; otherwise it returns actionable work to the
-invocation layer for a later execution. Resident checks use rate-limit-aware
-intervals that may favor entities which change more often, while retaining
-periodic reconciliation after missed notifications. `fullsend poll` repeats
-repository-scoped discovery through its configured drivers; a bound `run` has
-its own timer and resolves only its canonical entity. The bound timer does not
-query queued platform executions before checking that entity.
+`fullsend run`. The **once** lifecycle performs one discovery cycle in `poll`,
+or one entity eligibility check and at most one sandbox run in `run`, then
+exits. The **poll** lifecycle repeats checks and waits for work; a bound `run`
+exits after a finite platform-configured idle period, while `fullsend poll` may
+remain resident until stopped. The **timed** lifecycle also repeats checks but
+has a hard deadline; a bound `run` still exits on idle. The deadline bounds
+elapsed time, not a numeric cycle count.
+
+For a bound `run`, idle time starts at command entry or after a sandbox cycle
+ends. False checks, no-op wakeups, and pre-script skips do not reset it. The
+idle window for an entity-source harness MUST cover at least one due check
+after a sandbox, including any shared-cache delay, unless the hard deadline
+or provider backoff intervenes. A timed run starts no sandbox unless its
+remaining budget can accommodate expected execution and teardown; otherwise
+it records a deferral
+for the recovery paths below.
+
+Resident checks use rate-limit-aware intervals that may favor entities which
+change more often, while retaining periodic reconciliation after missed
+notifications. The repository-wide `fullsend poll` discovery interval SHOULD
+default to longer than a bound `run`'s single-entity check interval, subject
+to provider budgets and backoff. `fullsend poll` repeats repository-scoped
+discovery through its configured drivers; a bound `run` has its own timer and
+resolves only its canonical entity. The bound timer does not query queued
+platform executions before checking that entity.
 
 Resident timers MAY share a bounded-TTL cache of due-check records scoped by
 harness identity and revision, repository, canonical entity, and effective
 policy revision. A hit defers another read of that known entity until expiry,
-accepting bounded reconciliation latency to reduce API usage. `poll` still enumerates new
-candidates on its separate rate-aware discovery cadence. Compatible provider
-reads may be shared, but cached entity or authorization data cannot substitute
-for a due check. An accepted event or eventless wake invalidates the affected
-record and makes a check due. Completion of an invocation invalidates its
-pre-invocation view for the next scheduled check. Each due check resolves a
-complete current entity, refreshes actor authorization, and
-evaluates the harness CEL predicate. Failed or incomplete reads are not
-equivalent to no work.
+accepting bounded reconciliation latency to reduce API usage. `poll` still
+enumerates new candidates on its separate rate-aware discovery cadence.
+Compatible provider reads may be shared, but cached entity or authorization
+data cannot substitute for a due check. An accepted event or eventless wake
+invalidates the affected record and makes a check due. Completion of an
+invocation invalidates its pre-invocation view for the next scheduled check.
+Deferral for insufficient budget also invalidates the affected due-check record
+so `fullsend poll` does not wait for its TTL. Each due check resolves a
+complete current entity, refreshes actor authorization, and evaluates the
+harness CEL predicate.
+Failed or incomplete reads are not equivalent to no work.
 
 A bound `run` accepts an event, entity, or entity ID and resolves it, using
 source, kind, and repository context, to one canonical entity. Ambiguous or
@@ -102,12 +116,21 @@ local use, and cannot select a resident lifecycle. An event-only harness can
 bind to the entity resolved from its event, but cannot become actionable from
 scheduled checks without another verified event.
 
-An explicit lifecycle choice takes precedence for `poll` and bound `run`.
+An explicit lifecycle choice takes precedence for `poll` and bound `run`,
+subject to eligibility.
 `fullsend poll` defaults to once in every environment, preserving external
 cron and CronJob use. A bound `run` defaults to once outside CI. In CI it
 defaults to timed only with a usable job deadline, valid entity sources, and
-effective policy permitting eventless evaluation; otherwise it defaults to
-once. Thus the timed CI default does not depend on a reachable listener.
+effective policy permitting eventless evaluation, plus a recurring
+repository-scoped `fullsend poll` discovery path covering those sources;
+otherwise it defaults to once. An explicitly selected resident bound lifecycle
+that performs
+eventless timer checks requires the same coverage and fails closed without it.
+Coverage means a configured recurring invocation or resident discovery cycle
+that can eventually re-enumerate each eligible entity after a bound run exits.
+Event-only harnesses may instead remain resident for verified event-bearing
+wakes, with ADR 0106's pending execution as their recovery path. Thus the
+timed CI default does not depend on a reachable listener.
 The job deadline is distinct from an individual sandbox timeout. ADR 0063's
 reserved `fullsend poll --watch` denotes the explicit poll lifecycle; the
 lifecycle selection remains distinct from the existing `fullsend poll --mode`
@@ -128,6 +151,13 @@ sandbox. After valid assembly, the pre-script runs. A non-skipped cycle uses a
 newly minted token, fresh sandbox, and applicable post-script. Cleanup occurs
 at cycle end on success, failure, skip, or cancellation. Forge mutations occur
 within that cycle rather than waiting for a later summary.
+
+An explicitly resident bound `run` in the poll lifecycle can keep running
+while CEL continues to select work; idle exit does not impose a numeric cycle
+cap under continuous work. The need for rate, cost, or loop circuit breakers
+identified by ADR 0106 extends to successive cycles inside
+one call as well as to separate queued calls. Resource limits may stop or
+delay work, but cannot mark a true CEL result as already handled.
 
 The [Authorization Contract v1](../normative/authorization/v1/README.md)
 ends authorization-cache lifetime on re-invocation, even in the same host
@@ -172,20 +202,34 @@ independent deadlines and results. The sandbox and agent runtime cannot
 control the wake channel or host loop.
 
 The invocation layer owns the [ADR 0106](0106-serialize-agent-runs-and-coalesce-subsequent-events.md)
-scope of harness, target repository, and canonical entity. It retains the
-durable newest-pending platform execution for follow-up work and MAY also wake
-the one active bound process when reachable. Wake delivery alone never
-consumes pending work. If the active call exits, the pending execution starts
-and re-evaluates its current entity, authorization, and CEL
-predicate; a false result launches no sandbox, while a true result follows
-the normal cycle path. This preserves work across endpoint lookup, delivery,
-and process-exit races. The active bound process never polls the platform's
-pending-work list. A wake channel is a low-latency hint, not the ownership
-record.
+scope of harness, target repository, and canonical entity. For event-backed
+follow-ups it retains the durable newest-pending platform execution and MAY
+also wake the one active bound process when reachable. Wake delivery alone
+never consumes pending work. If an in-process cycle already handled the event,
+the pending execution may still start after the active call exits. It resolves
+current entity state and authorization and evaluates CEL with its retained
+event; if CEL is now false, it exits before invoking a sandbox. If an
+event-sensitive predicate remains true, a fresh sandbox may run again unless
+the harness expresses handled state in CEL or its pre-script. The bound process
+never polls the platform's pending-work list. A wake channel is a low-latency
+hint, not the ownership record.
+
+Timer-discovered eventless work creates no pending platform execution. If a
+bound run cannot process it before exit, it records the deferral, releases any
+source-native discovery lock, and invalidates its due-check cache entry. The
+recurring repository-scoped `fullsend poll` discovery path re-enumerates the
+harness's entity source on its next scheduled invocation or resident discovery
+cycle; when it encounters the still-actionable entity, it dispatches a new
+bounded `run`. The bound process does not dispatch a replacement platform execution
+itself. This path may add the broader poll cadence to recovery latency.
 
 One bound `fullsend run` call is one externally visible run with a stable run
 identity and host-owned parent trace span. Each selected cycle has a child
 span and, if its sandbox starts, a sandbox trace subtree under that parent.
+Each child cycle records whether a verified event actor or the trusted
+Fullsend invocation identity initiated it. An eventless cycle records its
+effective policy, harness revision, repository, and canonical entity; the
+actor of an earlier event is not attributed as its initiator.
 Starting a later CEL-selected cycle makes the earlier result historical and
 the run's current state in progress. When that cycle ends, its validated
 result or explicit skip, failure, or cancellation is the current outcome;
@@ -204,15 +248,18 @@ cycle skips or fails. Its `metrics.json` aggregates resource use across all
 cycles; per-cycle metrics remain in diagnostics and child spans. Host-written
 final metadata identifies the canonical entity key, platform-verified result
 revision, selected cycle, validation status, and any deferred or unchecked
-continuation with its durable handoff. Accepted work that cannot run before
-exit does not erase the latest completed cycle's result, but the metadata
-cannot claim the entity is caught up. Chained workflows that discover the
-artifact and validate its final output can retain that path, but must check
-the latest validation status before acting: a successful `workflow_run`
-conclusion alone can describe a skipped cycle. Revision-sensitive consumers
-must compare the verified result revision with live entity state before a
-mutation; `workflow_run.head_sha` may describe an earlier revision. Workflows
-that require a follow-up for every sandbox invocation or treat run-level
+continuation. It distinguishes event-backed work protected by an ADR 0106
+pending execution from timer-discovered work awaiting `fullsend poll`
+rediscovery; the latter has no direct platform handoff. Accepted work that
+cannot run before exit does not erase the latest completed cycle's result, but
+the metadata cannot claim the entity is caught up. Chained workflows that
+discover the artifact and validate its final output can retain that path, but
+must check the latest validation status before acting: a successful
+`workflow_run` conclusion alone can describe a skipped cycle.
+Revision-sensitive consumers must compare the verified result revision with
+live entity state before a mutation; `workflow_run.head_sha` may describe an
+earlier revision. Workflows that require a follow-up for every sandbox
+invocation or treat run-level
 metrics as one sandbox's usage also need migration.
 
 A bound `run` in the long-lived poll lifecycle updates the same run-level
@@ -226,8 +273,9 @@ publication and must be visible as failure rather than a successful no-op.
   while each actionable attempt still receives a fresh sandbox.
 - Timed processes can reuse a CI job briefly and release it on idle or before
   its deadline instead of occupying the full allotted time.
-- Invocation backends retain durable pending work; optional private wake
-  delivery reduces latency without becoming a prerequisite for timed CI.
+- Event-backed follow-ups retain pending platform work; eventless deferrals
+  rely on slower `fullsend poll` rediscovery. Private wake delivery reduces
+  latency without becoming a prerequisite for timed CI.
 - Several sandbox invocations in one CI job retain one external result and
   artifact while their separate activity remains visible in the parent trace.
 - The current one-shot CLI and platform workflows need lifecycle, event
