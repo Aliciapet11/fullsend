@@ -68,7 +68,9 @@ proxy settings: Podman builds and runs with --http-proxy=false, and Docker's
 containers.conf env, env_host, volumes, mounts and devices settings are turned
 off (this needs Podman 4.5 or later), and so are mounts.conf default mounts (on
 RHEL, the host's subscription certificates under /run/secrets) for a local
-Podman; a remote client (macOS, Windows) reads no mounts.conf. Only the checkout (including
+Podman; a remote client (macOS, Windows) reads no mounts.conf. A remote client
+on Linux is refused: its service reads the host's containers.conf and
+mounts.conf, which the override can't reach. Only the checkout (including
 gitignored files), its .git directory and cache volumes are mounted,
 read-write. GH_TOKEN/GITHUB_TOKEN are empty, as on CI. This keeps host
 secrets out; it is not a sandbox against the code under test. The download
@@ -146,9 +148,10 @@ resolve_versions() {
   add LYCHEE_SHA256_AMD64 "$(grep -m1 -E 'lychee\.tar\.gz.*sha256sum' "$wf" | grep -oE '[0-9a-f]{64}')" lint.yml
   add PINACT_VERSION "$(grep -m1 -oE 'pinact/releases/download/v[0-9.]+/' "$wf" | sed -E 's#.*/v##; s#/$##')" lint.yml
   add PINACT_SHA256_AMD64 "$(grep -m1 -E 'pinact\.tar\.gz.*sha256sum' "$wf" | grep -oE '[0-9a-f]{64}')" lint.yml
-  # Docker runs as the host uid:gid (user_args); build runner with those ids
-  # so whoami/id -un resolve. Podman's keep-id adds its own passwd entry.
-  if [ "$(basename "$ENGINE")" != podman ]; then
+  # Docker and rootful Podman run as the host uid:gid (user_args); build
+  # runner with those ids so whoami/id -un resolve. keep-id adds its own
+  # passwd entry.
+  if [ -z "$KEEP_ID" ]; then
     BUILD_ARGS+=(--build-arg "RUNNER_UID=$(id -u)" --build-arg "RUNNER_GID=$(id -g)")
   fi
   # Tag by platform + versions + everything the build copies in (Containerfile
@@ -194,13 +197,24 @@ build_image() {
 # containers.conf. Podman < 4.5 ignores CONTAINERS_CONF_OVERRIDE silently, so
 # refuse it. Only a local Podman reads mounts.conf, through the hidden
 # --default-mounts-file flag (containers.conf's default_mounts_file is
-# ignored); a remote client has no such flag.
+# ignored); a remote client has no such flag. A remote client on Linux talks
+# to a service on that host (CONTAINER_HOST, --remote, podman-remote), which
+# applies the host's containers.conf env and mounts.conf itself, so refuse it.
+# Rootful Podman maps keep-id to root, so it gets Docker's --user uid:gid.
 # shortcut: replaces a CONTAINERS_CONF_OVERRIDE the user set (Podman takes one), merge it if anyone needs that.
 PODMAN_GLOBAL=()
+KEEP_ID=""
 podman_isolation() {
   [ "$(basename "$ENGINE")" = podman ] || return 0
-  local remote ver major minor cache="$HOME/.cache/ci-local" f
-  remote=$("$ENGINE" info --format '{{.Host.ServiceIsRemote}}') || die "cannot query $ENGINE; is it running?"
+  local info remote rootless ver major minor cache="$HOME/.cache/ci-local" f
+  info=$("$ENGINE" info --format '{{.Host.ServiceIsRemote}} {{.Host.Security.Rootless}}') || die "cannot query $ENGINE; is it running?"
+  read -r remote rootless <<< "$info"
+  [ "$remote" = false ] || [ "$(uname -s)" != Linux ] ||
+    die "a remote Podman client on Linux applies the service's own containers.conf env and mounts.conf (on this host, the host's); unset CONTAINER_HOST and drop --remote, or set CI_LOCAL_ENGINE=docker"
+  if [ "$rootless" = true ]; then KEEP_ID=1
+  elif [ "$(id -u)" = 0 ]; then
+    die "rootful Podman run as root (sudo) would run the tests as root, unlike CI; run Podman rootless as your user, or set CI_LOCAL_ENGINE=docker"
+  fi
   ver=$("$ENGINE" version --format '{{.Client.Version}}') || die "cannot query the $ENGINE version"
   IFS=. read -r major minor _ <<< "$ver"
   major=${major%%[!0-9]*} minor=${minor%%[!0-9]*}
@@ -220,10 +234,10 @@ podman_isolation() {
 Z=""
 command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" = Enforcing ] && Z=":z"
 
-# Rootless podman maps the host user onto the image's runner user; Docker
-# needs the host uid/gid passed explicitly.
+# Rootless podman maps the host user onto the image's runner user; Docker and
+# rootful Podman need the host uid/gid passed explicitly.
 user_args() {
-  if [ "$(basename "$ENGINE")" = podman ]; then echo --userns=keep-id
+  if [ -n "$KEEP_ID" ]; then echo --userns=keep-id
   else echo --user; echo "$(id -u):$(id -g)"; fi
 }
 
@@ -427,18 +441,18 @@ run_in() {
   while IFS= read -r -d '' m; do mounts+=("$m"); done < <(mount_args)
   while IFS= read -r u; do users+=("$u"); done < <(user_args)
   while IFS= read -r a; do noproxy+=("$a"); done < <(noproxy_args -e)
-  if [ "$(basename "$ENGINE")" != podman ]; then
-    # Docker creates named volumes root-owned; open them up for the host uid.
+  if [ -z "$KEEP_ID" ]; then
+    # Docker and rootful Podman create named volumes root-owned; open them up for the host uid.
     # This runs as root, so nothing tested code can write may reach it: only
     # the named volumes are mounted (no checkout or .git, so a planted symlink
     # can't point chmod at host files), and sh/chmod are absolute with a fixed
     # PATH (the image PATH includes /home/runner/go/bin, a shared volume).
     local vols=()
     while IFS= read -r -d '' m; do vols+=("$m"); done < <(volume_args)
-    "$ENGINE" run --rm --user 0 --network none -e PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    "$ENGINE" ${PODMAN_GLOBAL[@]+"${PODMAN_GLOBAL[@]}"} run --rm --user 0 --network none -e PATH=/usr/sbin:/usr/bin:/sbin:/bin \
       ${PLATFORM:+--platform "$PLATFORM"} "${noproxy[@]}" "${vols[@]}" "$IMAGE" \
       /bin/sh -c '/bin/chmod 1777 /home/runner/go /home/runner/.cache/* /home/runner/.npm /src/node_modules /src/internal/dispatch/cf/workersrc/node_modules' >/dev/null ||
-      { echo "ci-local: could not open up the Docker volumes for uid $(id -u)" >&2; return 1; }
+      { echo "ci-local: could not open up the $(basename "$ENGINE") volumes for uid $(id -u)" >&2; return 1; }
   fi
   # safe.directory: the mounts show a host owner; trust only those two repos.
   "$ENGINE" ${PODMAN_GLOBAL[@]+"${PODMAN_GLOBAL[@]}"} run --rm "${tty[@]}" ${PLATFORM:+--platform "$PLATFORM"} \
@@ -491,8 +505,8 @@ if [ "$1" != build-image ] && [ "$1" != shell ] && [ "$1" != clean ]; then
   for t in "${targets[@]}"; do target_cmd "$t" >/dev/null || exit 2; done
 fi
 
+podman_isolation # before resolve_versions: rootful Podman adds the runner uid build args
 resolve_versions
-podman_isolation
 if [ "$1" = build-image ]; then build_image --no-cache; exit; fi
 if [ "$1" = clean ]; then clean; exit; fi
 "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1 || build_image

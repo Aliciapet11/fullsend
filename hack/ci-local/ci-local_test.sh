@@ -44,9 +44,10 @@ while [ "${1#--}" != "$1" ]; do shift; done
 echo "$1 ${CONTAINERS_CONF_OVERRIDE:-}" >> "${ENGINE_LOG}.env"
 case "$1" in
   image) exit "${STUB_IMAGE_RC:-0}" ;;
-  # STUB_REMOTE: what `podman info` reports as Host.ServiceIsRemote; STUB_INFO_RC fails that query.
+  # STUB_REMOTE/STUB_ROOTLESS: what `podman info` reports as Host.ServiceIsRemote
+  # and Host.Security.Rootless; STUB_INFO_RC fails that query.
   info)
-    case "$*" in *ServiceIsRemote*) echo "${STUB_REMOTE:-false}"; exit "${STUB_INFO_RC:-0}" ;; esac
+    case "$*" in *ServiceIsRemote*) echo "${STUB_REMOTE:-false} ${STUB_ROOTLESS:-true}"; exit "${STUB_INFO_RC:-0}" ;; esac
     echo "${STUB_OS:-}"; exit 0 ;;
   # STUB_PODMAN_VERSION: what `podman version` reports as Client.Version.
   version) echo "${STUB_PODMAN_VERSION:-5.0.0}"; exit 0 ;;
@@ -93,6 +94,17 @@ printf '%s\n' "${STUB_SCUTIL_OUT:-}"
 STUB
 chmod +x "${WORK}/bin-scutil/scutil"
 export PATH="${WORK}/bin-scutil:${PATH}"
+
+# Stub uname: `uname -s` prints STUB_UNAME_S when set (remote Podman is
+# refused on Linux); everything else goes to the real uname.
+mkdir -p "${WORK}/bin-uname"
+printf '#!/usr/bin/env bash
+[ "$1" = -s ] && [ -n "${STUB_UNAME_S:-}" ] && { echo "$STUB_UNAME_S"; exit; }
+exec %q "$@"
+' \
+  "$(command -v uname)" > "${WORK}/bin-uname/uname"
+chmod +x "${WORK}/bin-uname/uname"
+export PATH="${WORK}/bin-uname:${PATH}"
 
 # Args of the last `run` call that is not Docker's root volume chmod.
 last_run_args() {
@@ -702,7 +714,7 @@ fi
 # A failed root helper fails the target before the main container starts.
 STUB_HELPER_RC=1 run_ci_local "${DOCKER}" go-vet
 if [ "${RC}" -ne 0 ] && grep -q 'go-vet *FAIL' <<< "${OUT}" &&
-  grep -q 'could not open up the Docker volumes' <<< "${OUT}" && [ -z "$(last_run_args)" ]; then
+  grep -q 'could not open up the docker volumes' <<< "${OUT}" && [ -z "$(last_run_args)" ]; then
   pass "docker: a failed volume helper fails the target without starting the main container"
 else
   fail "failed volume helper: rc=${RC} main-run=[$(last_run_args | tr '\n' ' ')] out=[${OUT}]"
@@ -1000,7 +1012,7 @@ if [ "$(override_of run)" = "${OVR}" ]; then
 else
   fail "user override kept: [$(override_of run)]"
 fi
-STUB_IMAGE_RC=1 STUB_REMOTE=true run_ci_local "${PODMAN}" go-vet
+STUB_IMAGE_RC=1 STUB_REMOTE=true STUB_UNAME_S=Darwin run_ci_local "${PODMAN}" go-vet
 if [ "${RC}" -eq 0 ] && ! grep -q -- '--default-mounts-file' "${ENGINE_LOG}" &&
   [ "$(override_of run)" = "${OVR}" ] && [ "$(override_of build)" = "${OVR}" ]; then
   pass "remote podman: the same override, and no --default-mounts-file (the remote client has none)"
@@ -1026,11 +1038,49 @@ if [ "${RC}" -ne 0 ] && grep -q 'Podman 4.4.4 ignores CONTAINERS_CONF_OVERRIDE' 
 else
   fail "podman 4.4.4: rc=${RC} out=[${OUT}]"
 fi
-STUB_PODMAN_VERSION=4.5.0-dev STUB_REMOTE=true run_ci_local "${PODMAN}" go-vet
+STUB_PODMAN_VERSION=4.5.0-dev STUB_REMOTE=true STUB_UNAME_S=Darwin run_ci_local "${PODMAN}" go-vet
 if [ "${RC}" -eq 0 ]; then
   pass "podman 4.5.0-dev (remote): runs"
 else
   fail "podman 4.5.0-dev: rc=${RC} out=[${OUT}]"
+fi
+# A remote client on Linux reaches a service that applies the host's own
+# containers.conf env and mounts.conf, out of the override's reach.
+STUB_REMOTE=true STUB_UNAME_S=Linux run_ci_local "${PODMAN}" go-vet
+if [ "${RC}" -ne 0 ] && grep -q 'remote Podman client on Linux' <<< "${OUT}" && ! grep -qxE 'ARG (run|build)' "${ENGINE_LOG}"; then
+  pass "remote podman on Linux: stops before any build or run"
+else
+  fail "remote podman on Linux: rc=${RC} out=[${OUT}]"
+fi
+STUB_UNAME_S=Linux run_ci_local "${PODMAN}" go-vet
+if [ "${RC}" -eq 0 ]; then
+  pass "local podman on Linux: runs"
+else
+  fail "local podman on Linux: rc=${RC} out=[${OUT}]"
+fi
+
+# Rootful Podman maps keep-id to root, so it runs as the host uid:gid like Docker.
+STUB_IMAGE_RC=1 STUB_ROOTLESS=false run_ci_local "${PODMAN}" go-vet
+ARGS=$(last_run_args) RB=$(last_build_args)
+if [ "${RC}" -eq 0 ] && grep -A1 -x -- '--user' <<< "${ARGS}" | grep -qx "$(id -u):$(id -g)" &&
+  ! grep -q 'keep-id' <<< "${ARGS}" && grep -qx "RUNNER_UID=$(id -u)" <<< "${RB}" &&
+  grep -qx "RUNNER_GID=$(id -g)" <<< "${RB}" && grep -q 'chmod 1777' "${ENGINE_LOG}"; then
+  pass "rootful podman: --user uid:gid, RUNNER_UID/RUNNER_GID, volumes opened up, no keep-id"
+else
+  fail "rootful podman: rc=${RC} args=[$(tr '\n' ' ' <<< "${ARGS}")] out=[${OUT}]"
+fi
+# Rootful Podman under sudo would run the tests as uid 0.
+mkdir -p "${WORK}/bin-root"
+printf '#!/bin/sh
+[ "$1" = -u ] && { echo 0; exit; }
+exec %q "$@"
+' "$(command -v id)" > "${WORK}/bin-root/id"
+chmod +x "${WORK}/bin-root/id"
+PATH="${WORK}/bin-root:${PATH}" STUB_ROOTLESS=false run_ci_local "${PODMAN}" go-vet
+if [ "${RC}" -ne 0 ] && grep -q 'would run the tests as root' <<< "${OUT}" && ! grep -qxE 'ARG (run|build)' "${ENGINE_LOG}"; then
+  pass "rootful podman as root: stops before any build or run"
+else
+  fail "rootful podman as root: rc=${RC} out=[${OUT}]"
 fi
 
 if [ "${FAILURES}" -ne 0 ]; then

@@ -31,6 +31,11 @@ not supported: it leaves `TARGETARCH` unset, and the build stops at its first
 step with a message saying so. `ci-local` itself needs **Podman 4.5 or
 later** for its [isolation](#isolation) override, and stops before any build
 or run with an older one; use Docker (`CI_LOCAL_ENGINE=docker`) there.
+The tests run as your uid, as on CI's non-root runner. Rootless Podman maps
+you onto the image's `runner` user (`--userns=keep-id`); a rootful Podman
+(`podman machine set --rootful`) maps that to root, so `ci-local` passes
+`--user` with your uid:gid instead, as for Docker. It refuses rootful Podman
+run as root (`sudo`).
 
 Apple silicon runs arm64 Linux. Use `--amd64` to match GitHub's x86_64
 runners exactly (emulated, slow). It needs Rosetta emulation, which Docker
@@ -55,7 +60,11 @@ the host.
   reads that file too, because it adds its own `containers.conf` mounts to
   the container. With a local Podman, `ci-local` also passes
   `--default-mounts-file=/dev/null`; a remote client has no such flag and
-  reads no `mounts.conf`. Podman before 4.5 silently ignores
+  reads no `mounts.conf`. A remote client on Linux (`CONTAINER_HOST`,
+  `--remote`, or a podman-remote-only install) is refused: its service runs
+  on that host and applies the host's `containers.conf` `env` and
+  `mounts.conf` itself, out of the override's reach. Unset `CONTAINER_HOST`
+  and drop `--remote`, or use Docker. Podman before 4.5 silently ignores
   `CONTAINERS_CONF_OVERRIDE`, so `ci-local` refuses to run with it.
   `GH_TOKEN`/`GITHUB_TOKEN` are empty, as on CI. No host proxy settings,
   which can carry credentials, reach builds or containers either. Podman
