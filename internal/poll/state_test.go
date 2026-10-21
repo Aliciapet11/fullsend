@@ -2334,6 +2334,23 @@ func TestSeedGitLabPollStateBranches_ForceCommitErrorPropagates(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a force-commit error to propagate")
 	}
+	if strings.Contains(err.Error(), "Push rules") {
+		t.Errorf("unrelated error must not carry the push-rule hint: %v", err)
+	}
+}
+
+func TestSeedGitLabPollStateBranches_PushRuleRejectionAddsHint(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.Errors["ForceCommitFileToBranch"] = errors.New("gitlab api: 400 Cannot create branch. The branch name must match this regular expression: master")
+	_, err := SeedGitLabPollStateBranches(context.Background(), fc, "testgroup", "testrepo", "test-secret")
+	if err == nil {
+		t.Fatal("expected a force-commit error to propagate")
+	}
+	for _, want := range []string{"must match this regular expression", "Push rules", PollStateBranchSlash, PollStateBranchEvents} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
 }
 
 func TestEnsureDispatchSecret_GeneratesWhenMissing(t *testing.T) {

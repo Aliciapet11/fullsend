@@ -1383,6 +1383,15 @@ type Client interface {
 	// than treat an unreported setting as disabled. Returns ErrNotFound if
 	// the project does not exist. GitHub returns ErrNotSupported.
 	GetJobTokenRepositoryPushAllowed(ctx context.Context, owner, repo string) (bool, error)
+	// GetPushRuleBranchNameRegex returns the branch_name_regex of the
+	// GitLab project's push rule (GET /projects/:id/push_rule), which
+	// every pushed or API-created branch name must match. Returns
+	// ("", nil) when the project has no push rule or the rule sets no
+	// branch name regex. Returns ErrNotFound when the endpoint or project
+	// is unavailable (push rules are not offered on every GitLab edition)
+	// and ErrForbidden when the caller may not read push rules. GitHub
+	// returns ErrNotSupported.
+	GetPushRuleBranchNameRegex(ctx context.Context, owner, repo string) (string, error)
 
 	// Commit comparison
 	// CompareCommits compares two commits and returns their relationship

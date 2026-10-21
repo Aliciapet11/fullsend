@@ -5747,6 +5747,10 @@ func TestUnsupportedMethods(t *testing.T) {
 		_, err := client.GetJobTokenRepositoryPushAllowed(ctx, "o", "r")
 		assert.ErrorIs(t, err, forge.ErrNotSupported)
 	})
+	t.Run("GetPushRuleBranchNameRegex", func(t *testing.T) {
+		_, err := client.GetPushRuleBranchNameRegex(ctx, "o", "r")
+		assert.ErrorIs(t, err, forge.ErrNotSupported)
+	})
 	t.Run("ForceCommitFileToBranch", func(t *testing.T) {
 		err := client.ForceCommitFileToBranch(ctx, "o", "r", "b", "p", "m", []byte("c"))
 		assert.ErrorIs(t, err, forge.ErrNotSupported)

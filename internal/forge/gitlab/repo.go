@@ -315,6 +315,27 @@ func (c *LiveClient) GetJobTokenRepositoryPushAllowed(ctx context.Context, owner
 	return *p.Allowed, nil
 }
 
+// GetPushRuleBranchNameRegex reads the branch_name_regex of the project's
+// push rule. GitLab answers with a JSON null when no push rule exists;
+// that, like a rule without a branch name regex, returns ("", nil).
+func (c *LiveClient) GetPushRuleBranchNameRegex(ctx context.Context, owner, repo string) (string, error) {
+	resp, err := c.get(ctx, fmt.Sprintf("/projects/%s/push_rule", projectPath(owner, repo)))
+	if err != nil {
+		return "", fmt.Errorf("get push rule for %s/%s: %w", owner, repo, err)
+	}
+
+	var rule *struct {
+		BranchNameRegex *string `json:"branch_name_regex"`
+	}
+	if err := decodeJSON(resp, &rule); err != nil {
+		return "", fmt.Errorf("decode push rule: %w", err)
+	}
+	if rule == nil || rule.BranchNameRegex == nil {
+		return "", nil
+	}
+	return *rule.BranchNameRegex, nil
+}
+
 func (c *LiveClient) DeleteRepo(ctx context.Context, owner, repo string) error {
 	return c.delete_(ctx, fmt.Sprintf("/projects/%s", projectPath(owner, repo)))
 }

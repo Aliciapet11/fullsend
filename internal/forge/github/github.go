@@ -4969,6 +4969,11 @@ func (c *LiveClient) GetJobTokenRepositoryPushAllowed(_ context.Context, _, _ st
 	return false, forge.ErrNotSupported
 }
 
+// GetPushRuleBranchNameRegex is not supported on GitHub.
+func (c *LiveClient) GetPushRuleBranchNameRegex(_ context.Context, _, _ string) (string, error) {
+	return "", forge.ErrNotSupported
+}
+
 // ForceCommitFileToBranch is not supported on GitHub.
 func (c *LiveClient) ForceCommitFileToBranch(_ context.Context, _, _, _, _, _ string, _ []byte) error {
 	return forge.ErrNotSupported

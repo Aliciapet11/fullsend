@@ -381,6 +381,11 @@ func Install(ctx context.Context, cfg InstallConfig,
 				})
 			}
 		}
+		// Step 5b creates the poll-state branches; refuse before any
+		// write if the project's push rule would reject their names.
+		if err := requireGitLabPushRuleAllowsPollStateBranches(ctx, client, cfg.Owner, cfg.Repo); err != nil {
+			return result, err
+		}
 	}
 
 	// Step 5: Write repository variables. Variables and secrets are

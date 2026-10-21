@@ -45,6 +45,13 @@ GitHub repositories use a different command (`fullsend github setup`). See
   their compatible setting. See [GitLab Role-Credential
   Contract](../../contributing/gitlab-role-credentials.md#how-a-job-selects-its-credential)
   for the remaining live-validation rollout gates for this transport.
+* If the project has a push rule with a branch name regex (**Settings >
+  Repository > Push rules > Branch name**), it must also match
+  `fullsend-poll-state-slash` and `fullsend-poll-state-events`. Install
+  creates those branches, so `repos install` (including `--dry-run`) reads
+  the push rule and stops before any write when the regex rejects a branch
+  that does not exist yet. The check is skipped when the push rule cannot
+  be read, for example on editions without push rules.
 
 ## Typed-input dispatch migration
 

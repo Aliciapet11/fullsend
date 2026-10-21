@@ -304,6 +304,11 @@ type FakeClient struct {
 	// Key: "owner/repo". Missing keys read as false (push disabled).
 	JobTokenRepositoryPushAllowed map[string]bool
 
+	// PushRuleBranchNameRegexes stores the GitLab push rule
+	// branch_name_regex per project. Key: "owner/repo". Missing keys read
+	// as "" (no push rule).
+	PushRuleBranchNameRegexes map[string]string
+
 	// Directory listings for ListDirectoryContents.
 	DirContents map[string][]DirectoryEntry // key: "owner/repo/path@ref"
 
@@ -2953,6 +2958,16 @@ func (f *FakeClient) GetJobTokenRepositoryPushAllowed(_ context.Context, owner, 
 		return false, e
 	}
 	return f.JobTokenRepositoryPushAllowed[owner+"/"+repo], nil
+}
+
+func (f *FakeClient) GetPushRuleBranchNameRegex(_ context.Context, owner, repo string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if e := f.err("GetPushRuleBranchNameRegex"); e != nil {
+		return "", e
+	}
+	return f.PushRuleBranchNameRegexes[owner+"/"+repo], nil
 }
 
 func (f *FakeClient) CompareCommits(_ context.Context, owner, repo, base, head string) (string, error) {
