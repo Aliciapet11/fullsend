@@ -349,8 +349,10 @@ blocks that repository's install (adoption required) even when the
 repository has no `config` key; the other selected repositories still
 converge. On a first install with no `config_base` preset and no
 explicit `create_issues` declaration, install records
-`config.create_issues.allow_targets.repos: [fullsend-ai/fullsend]` in the
-repository's manifest entry before rendering the overlay. If the manifest is an
+`config.create_issues.allow_targets.repos: [fullsend-ai/fullsend, fullsend-ai/agents]` in the
+GitHub repository's manifest entry before rendering the overlay. For GitLab, it
+records `config.create_issues.allow_targets: {}` instead: additional project
+targets must be configured explicitly for the GitLab host. If the manifest is an
 HTTPS URL or read-only, install fails with the exact edit to make.
 Resolution is code defaults, then `config_base`, then `defaults.config`,
 then the repository's forge section `config` (`github.config` or
