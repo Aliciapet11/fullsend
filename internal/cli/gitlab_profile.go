@@ -53,7 +53,10 @@ func generateGitLabForgeProfile() (string, func(), error) {
 		Endpoints: []gitlabForgeEndpoint{
 			{Host: host, Port: portNum, Protocol: "rest", Access: "read-write", Enforcement: "enforce"},
 		},
-		Binaries: []string{"**/git", "**/glab", "**/node", "**/pre-commit"},
+		// curl is required because the stock GitLab agents call the REST
+		// API with curl; the single endpoint above keeps it scoped to the
+		// configured forge host (#8683).
+		Binaries: []string{"**/curl", "**/git", "**/glab", "**/node", "**/pre-commit"},
 	}
 
 	var buf bytes.Buffer
