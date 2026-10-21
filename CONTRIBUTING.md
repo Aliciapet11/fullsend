@@ -32,7 +32,12 @@ This project uses the [Probot DCO app](https://github.com/apps/dco) to enforce s
 
 - Stage your changes, then run `make lint` before pushing and fix any failures.
 - For Go changes, run `make go-test` and add tests for new or modified logic. CI uploads coverage to Codecov and enforces the thresholds in [`.codecov.yml`](.codecov.yml): **80% patch coverage target** on changed lines (**75% enforced floor**, 5% threshold) and **no more than 1% drop** in overall project coverage relative to the base branch.
-- **If your PR introduces a breaking change**, the PR title must carry the `!` suffix (e.g., `feat(harness)!: require role field`). GoReleaser builds release notes from PR titles — a missing `!` means users get no warning before upgrading. See [COMMITS.md](COMMITS.md#breaking-changes) for how to identify breaking changes and what to include in the commit body.
+- **If your PR introduces a breaking change**, the PR title and every breaking
+  commit's subject must carry the `!` suffix (e.g., `feat(harness)!: require
+  role field`). GoReleaser builds release notes from commit subjects (the PR
+  title on a squash merge) — a missing `!` means users get no warning before
+  upgrading. See [COMMITS.md](COMMITS.md#breaking-changes) for how to identify
+  breaking changes and what to include in the commit body.
 - Wrap prose in Markdown files at about 80 columns, so diffs show only the
   lines you changed. Tables, code blocks, headings, and long URLs are
   exceptions. See
