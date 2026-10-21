@@ -91,6 +91,13 @@ const (
 	// ("provider was modified concurrently").
 	providerRetries      = 3
 	providerRetryBackoff = 500 * time.Millisecond
+
+	// safeDownloadAttempts is the number of full download attempts
+	// SafeDownload makes into a fresh staging directory. OpenShell already
+	// retries transient transfer failures internally, but those retries can
+	// leave a partially unpacked tree in the same destination. A second
+	// Fullsend-level attempt into a new directory recovers from that state.
+	safeDownloadAttempts = 2
 )
 
 // RetrySleepFn is the function called between retry attempts in
@@ -1862,12 +1869,60 @@ func DownloadFile(sandboxName, remotePath, localPath string) error {
 }
 
 // SafeDownload copies a directory from a sandbox to the local machine and then
-// sanitizes the result by removing dangerous symlinks (absolute or repo-escaping) and .git/hooks/.
+// sanitizes the result by removing dangerous symlinks (absolute or
+// repo-escaping) and .git/hooks/. Each attempt downloads into a fresh staging
+// directory, so a partial extraction from a failed attempt cannot collide with
+// a later one. The sanitized staging directory replaces localDir only after
+// both download and sanitization succeed.
 func SafeDownload(sandboxName, remoteDir, localDir string) error {
-	if err := Download(sandboxName, remoteDir, localDir); err != nil {
-		return err
+	parent := filepath.Dir(localDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("creating download parent %s: %w", parent, err)
 	}
-	return sanitizeDownload(localDir)
+
+	var errs []error
+	for attempt := 1; attempt <= safeDownloadAttempts; attempt++ {
+		stagingDir, err := os.MkdirTemp(parent, ".fullsend-safe-download-*")
+		if err != nil {
+			return fmt.Errorf("creating download staging directory: %w", err)
+		}
+
+		if err := Download(sandboxName, remoteDir, stagingDir); err != nil {
+			errs = append(errs, fmt.Errorf("attempt %d/%d: %w", attempt, safeDownloadAttempts, err))
+			if removeErr := os.RemoveAll(stagingDir); removeErr != nil {
+				errs = append(errs, fmt.Errorf("cleaning staging directory after failed attempt: %w", removeErr))
+			}
+			continue
+		}
+
+		if err := sanitizeDownload(stagingDir); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return fmt.Errorf("sanitizing downloaded directory: %w", err)
+		}
+		if err := replaceDownload(stagingDir, localDir); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return err
+		}
+		if attempt > 1 {
+			fmt.Fprintf(os.Stderr, "sandbox download succeeded on attempt %d/%d\n", attempt, safeDownloadAttempts)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("safe download from sandbox failed after %d attempts: %w", safeDownloadAttempts, errors.Join(errs...))
+}
+
+// replaceDownload atomically publishes a sanitized staging directory at
+// localDir. The staging directory is created in localDir's parent, so the
+// rename stays on the same filesystem.
+func replaceDownload(stagingDir, localDir string) error {
+	if err := os.RemoveAll(localDir); err != nil {
+		return fmt.Errorf("replacing existing download directory %s: %w", localDir, err)
+	}
+	if err := os.Rename(stagingDir, localDir); err != nil {
+		return fmt.Errorf("publishing downloaded directory to %s: %w", localDir, err)
+	}
+	return nil
 }
 
 // CollectLogs runs `openshell logs <name> --source <source> -n 0` and returns
