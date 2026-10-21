@@ -2099,6 +2099,9 @@ func SeedGitLabPollStateBranches(ctx context.Context, client forge.Client, owner
 			return seeded, fmt.Errorf("marshaling poll state on %s: %w", b.name, err)
 		}
 		if err := client.ForceCommitFileToBranch(ctx, owner, repo, b.name, PollStateFileName, "fullsend: seed poll state", data); err != nil {
+			if strings.Contains(err.Error(), "must match this regular expression") {
+				return seeded, fmt.Errorf("seeding poll state on %s: %w (the project's push rule rejects this branch name; update Settings > Repository > Push rules > Branch name so it also allows %s and %s)", b.name, err, PollStateBranchSlash, PollStateBranchEvents)
+			}
 			return seeded, fmt.Errorf("seeding poll state on %s: %w", b.name, err)
 		}
 		seeded = true

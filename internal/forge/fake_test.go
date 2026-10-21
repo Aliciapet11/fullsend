@@ -1063,6 +1063,9 @@ func fakeClientCalls(ctx context.Context) map[string]func(fc *FakeClient) []any 
 		"GetJobTokenRepositoryPushAllowed": func(fc *FakeClient) []any {
 			return pack(fc.GetJobTokenRepositoryPushAllowed(ctx, "o", "r"))
 		},
+		"GetPushRuleBranchNameRegex": func(fc *FakeClient) []any {
+			return pack(fc.GetPushRuleBranchNameRegex(ctx, "o", "r"))
+		},
 		"CompareCommits": func(fc *FakeClient) []any { return pack(fc.CompareCommits(ctx, "o", "r", "a", "b")) },
 
 		// GitHubExtensions
