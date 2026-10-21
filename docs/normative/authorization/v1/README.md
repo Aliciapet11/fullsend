@@ -291,11 +291,13 @@ insufficient. A caller that cannot establish that provenance MUST be denied.
 Wildcard eligibility (`*` or `all`) requires the same explicit platform-level
 justification as any other wildcard allowlist in this contract.
 
-Each eventless bound cycle's audit record MUST identify the verified Fullsend
-invocation identity, target repository, effective policy, harness revision, and
-canonical entity. An event-bearing child cycle identifies its verified event
-actor; the actor of an earlier event is not attributed as the initiator of a
-later eventless cycle in the same containing run.
+Each eventless entity evaluation's audit record MUST identify the verified
+Fullsend invocation identity, target repository, effective policy, harness
+revision, canonical entity, and every retained action-indicating element and
+its actor. Those element actors describe evaluated entity history, not the
+evaluation's initiator. An event-bearing child cycle identifies its verified
+event actor; the actor of an earlier event is not attributed as the initiator
+of a later eventless cycle in the same containing run.
 
 Authorization of the Fullsend invocation origin does not authorize entity
 content. For each evaluated harness, before evaluating its CEL predicate,

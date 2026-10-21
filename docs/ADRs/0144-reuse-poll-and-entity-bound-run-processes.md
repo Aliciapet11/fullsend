@@ -243,9 +243,12 @@ One bound `fullsend run` call is one externally visible run with a stable run
 identity and host-owned parent trace span. Each selected cycle has a child
 span and, if its sandbox starts, a sandbox trace subtree under that parent.
 Each child cycle records whether a verified event actor or the trusted
-Fullsend invocation identity initiated it. An eventless cycle records its
-effective policy, harness revision, repository, and canonical entity; the
-actor of an earlier event is not attributed as its initiator.
+Fullsend invocation identity initiated it. Each eventless CEL evaluation
+records its effective policy, harness revision, repository, and canonical
+entity, and identifies every retained action-indicating element and its actor
+as entity-history provenance. Neither a retained element's actor nor an
+earlier event's actor is attributed as the initiator of that eventless
+evaluation.
 Starting a later CEL-selected cycle makes the earlier result historical and
 the run's current state in progress. When that cycle ends, its validated
 result or explicit skip, failure, or cancellation is the current outcome;
