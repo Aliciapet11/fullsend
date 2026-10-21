@@ -244,7 +244,8 @@ func newInstallCmd() *cobra.Command {
 		Short: "Install fullsend in a repository (deprecated)",
 		Deprecated: "use 'fullsend inference provision' + 'fullsend github setup <owner/repo>' " +
 			"(GitHub; create apps with 'fullsend mint add-role') or " +
-			"'fullsend repos install <group/project> --forge gitlab' (GitLab) instead",
+			"declaring the project under gitlab.repos with 'fullsend repos set', then " +
+			"'fullsend repos install <group/project>' (GitLab) instead",
 		Long: `Sets up the fullsend agentic development pipeline for a single repository.
 
 The argument is owner/repo (e.g. "acme/widget"). The repository is
