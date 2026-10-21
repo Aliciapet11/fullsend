@@ -7,7 +7,7 @@ This guide provides implementation details for fullsend CLI internals: command s
 ```
 fullsend
 ├── admin                                    # Manage fullsend installation for a repository
-│   ├── install      <org|owner/repo>        # Full infrastructure setup
+│   ├── install      <owner/repo>            # Deprecated: use inference provision + github setup / repos install (GitLab)
 │   └── foreign                              # Cross-org mint authorization (FULLSEND_FOREIGN_<ROLE>_REPOS)
 │       ├── allow                            # Authorize a foreign org/repo to mint for a role
 │       ├── list                             # List foreign caller allowlists
@@ -213,7 +213,8 @@ fullsend
     ├── --forge <platform>                   #   Forge platform (github, gitlab); auto-detected from CI env
     ├── --fullsend-dir <path>                #   Path to fullsend config directory (completion mode detection and tracker routing)
     ├── --job-status <string>                #   Job outcome from CI runner (e.g. success, failure, cancelled)
-    └── --was-skipped                        #   Pre-script decided to skip the run; forces synthesis under on_failure
+    ├── --was-skipped                        #   Pre-script decided to skip the run; forces synthesis under on_failure
+    └── --review-run                         #   Built-in GitHub review agent; enables current-HEAD-aware cancellation guidance
 ```
 
 ### Command Decomposition
@@ -240,7 +241,8 @@ The `mint`, `inference`, and `github` subcommands decompose setup into role-spec
 The typical handoff: a GCP admin runs `mint deploy`, `mint enroll`, and `inference provision`, then passes the mint URL and WIF provider resource name to a GitHub maintainer who runs `github setup --mint-url=... --inference-wif-provider=...`. See [Advanced setup](../infrastructure/advanced-setup.md).
 
 > **Deprecated:** The `admin install` command is deprecated. Use the
-> standalone commands above instead. See the
+> standalone commands above instead (GitLab projects: see
+> [Installing Fullsend](../getting-started/configuring-gitlab.md#installing-fullsend)). See the
 > [Unified Installation Flow](#unified-installation-flow) section below for
 > how the phases are structured internally.
 

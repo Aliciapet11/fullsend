@@ -613,7 +613,15 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
 		case timedOut:
 			// The create may have landed before the deadline cut it off.
+			// The org is slow or throttling whatever the lookup finds,
+			// adoption included.
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
+			until := a.blockOrg(slot.Org, client, err)
+			if ownErr != nil && isBackoffError(ownErr) {
+				// Honour a rate-limit deadline the lookup observed too;
+				// the longer window wins.
+				until = a.blockOrg(slot.Org, client, ownErr)
+			}
 			switch own {
 			case ownMine:
 				l.orgLock = membership
@@ -631,21 +639,19 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				// The create may still land after this lookup.
 				a.addPending(slot, desc)
 			}
-			if ownErr != nil && isBackoffError(ownErr) {
-				// Honour a rate-limit deadline the lookup observed too;
-				// the longer window wins.
-				a.blockOrg(slot.Org, client, ownErr)
-			}
-			until := a.blockOrg(slot.Org, client, err)
 			a.logf("[slots] creating %s did not finish within %v, backing off %s until %s: %v",
 				slot, claimCreateTimeout, slot.Org, until.UTC().Format(time.RFC3339), err)
 			capErr.RateLimited[slot.Org] = until
-		case isDeniedError(err):
-			a.recordOrgError(slot, client, err, capErr)
-		default:
-			// A connection reset or a decode failure after a 201 can hide
-			// a create that landed: look for our nonce before giving up.
+		case createMayHaveLanded(err):
+			// The create, or an earlier attempt in the client's retry
+			// loop, may have landed: look for our nonce before giving up.
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
+			backoff := isBackoffError(err)
+			if backoff {
+				// The org is throttling whatever the lookup found, adoption
+				// included.
+				a.recordOrgError(slot, client, err, capErr)
+			}
 			switch own {
 			case ownMine:
 				l.orgLock = membership
@@ -661,11 +667,6 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				a.clearPending(slot, nonces)
 				a.logf("[slots] %s create failed and the name is held by another lease: %v", slot, err)
 				capErr.noteOccupied(slot.Org)
-				if isBackoffError(err) {
-					// The create error still says the org is throttling;
-					// the foreign repo must not hide it.
-					a.recordOrgError(slot, client, err, capErr)
-				}
 				continue
 			}
 			// The create may still land after this lookup.
@@ -673,10 +674,26 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			if ctx.Err() != nil {
 				return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
 			}
-			a.recordOrgError(slot, client, err, capErr)
+			if !backoff {
+				a.recordOrgError(slot, client, err, capErr)
+			}
 			if ownErr != nil && isBackoffError(ownErr) {
 				a.recordOrgError(slot, client, ownErr, capErr)
 			}
+		case isHTTPStatus(err, http.StatusUnprocessableEntity):
+			// GitHub documents this 422 as "Validation failed, or the
+			// endpoint has been spammed" with no body that tells the two
+			// apart, so back off rather than retry the org at once. Keep
+			// the nonce: an earlier attempt in the client's retry loop may
+			// have landed.
+			a.addPending(slot, desc)
+			until := a.blockOrg(slot.Org, client, err)
+			a.logf("[slots] creating %s was rejected, backing off %s until %s: %v",
+				slot, slot.Org, until.UTC().Format(time.RFC3339), err)
+			capErr.RateLimited[slot.Org] = until
+		default:
+			// The server refused the create, so nothing landed.
+			a.recordOrgError(slot, client, err, capErr)
 		}
 	}
 	// Nothing could be leased: collect orgs whose occupied claims crossed
@@ -1104,6 +1121,23 @@ func (a *slotAllocator) quotaSummary(org string) string {
 // slow to answer, so claims should move to another org for a while.
 func isBackoffError(err error) bool {
 	return gh.IsRateLimitError(err) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// createMayHaveLanded reports whether a failed CreateRepo can hide a
+// create the server applied: an earlier attempt in the client's retry loop
+// may have landed before a transport error, an undecodable response, a
+// 5xx, or a rate-limit rejection. Any other 4xx means the final attempt
+// was refused. Rate limits are checked first because a rate-limit 403 is
+// not a denial.
+func createMayHaveLanded(err error) bool {
+	if gh.IsRateLimitError(err) {
+		return true
+	}
+	var apiErr *gh.APIError
+	if !errors.As(err, &apiErr) {
+		return !forge.IsForbidden(err)
+	}
+	return apiErr.StatusCode < http.StatusBadRequest || apiErr.StatusCode >= http.StatusInternalServerError
 }
 
 // isDeniedError reports whether err means the credentials or the call
