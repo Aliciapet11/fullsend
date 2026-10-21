@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestGenerateGitLabForgeProfile(t *testing.T) {
@@ -94,6 +96,19 @@ func TestGenerateGitLabForgeProfile(t *testing.T) {
 			assert.Contains(t, content, tc.wantPort)
 			assert.Contains(t, content, "category: source_control")
 			assert.Contains(t, content, "**/node")
+
+			// The stock GitLab agents call the API with curl, so curl
+			// must be allowed, and access must stay scoped to exactly
+			// the configured forge host and port (#8683).
+			var spec gitlabForgeProfileSpec
+			require.NoError(t, yaml.Unmarshal(data, &spec))
+			assert.ElementsMatch(t,
+				[]string{"**/curl", "**/git", "**/glab", "**/node", "**/pre-commit"},
+				spec.Binaries)
+			require.Len(t, spec.Endpoints, 1)
+			assert.Equal(t, tc.wantHost, "host: "+spec.Endpoints[0].Host)
+			assert.Equal(t, tc.wantPort, fmt.Sprintf("port: %d", spec.Endpoints[0].Port))
+			assert.NotContains(t, spec.Endpoints[0].Host, "*")
 			if tc.notContains != "" {
 				assert.NotContains(t, content, tc.notContains)
 			}
