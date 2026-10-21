@@ -59,6 +59,7 @@ jobs:
       FULLSEND_INFERENCE_GATEWAY_API_KEY: ${{ secrets.FULLSEND_INFERENCE_GATEWAY_API_KEY }}
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_TRACES_HEADERS }}
       OTEL_EXPORTER_OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
+      FULLSEND_GITHUB_RUNNER_SECRETS: ${{ secrets.FULLSEND_GITHUB_RUNNER_SECRETS }}
 
   stop-fix:
     # Job-level if: is intentionally coarse — it only screens for the
@@ -128,7 +129,7 @@ jobs:
           fi
           gh label create "fullsend-no-fix" --repo "$REPO" \
             --description "Skip bot-triggered fix agent runs" --color "FBCA04" \
-            --force 2>/dev/null || true
+            2>/dev/null || true
           gh pr edit "$PR_NUMBER" --repo "$REPO" \
             --add-label "fullsend-no-fix"
           gh pr comment "$PR_NUMBER" --repo "$REPO" \

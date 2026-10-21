@@ -2242,7 +2242,7 @@ func TestListRepoVariables_WildcardScopeWinsOverEnvironmentScope(t *testing.T) {
 }
 
 func TestCreateRepoSecret_WebhookCredentialsRequireMasking(t *testing.T) {
-	for _, name := range []string{forge.SecretTriggerToken, forge.SecretWebhookSecret, forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken, "FULLSEND_GITLAB_ROLE_REVIEWER_TOKEN"} {
+	for _, name := range []string{forge.SecretTriggerToken, forge.SecretWebhookSecret, forge.SecretGitLabTriggerAccountToken, forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken, "FULLSEND_GITLAB_ROLE_REVIEWER_TOKEN"} {
 		t.Run(name, func(t *testing.T) {
 			client, mux := setupTest(t)
 			ctx := context.Background()
@@ -2265,7 +2265,7 @@ func TestCreateRepoSecret_WebhookCredentialsRequireMasking(t *testing.T) {
 }
 
 func TestUpdateRepoSecret_WebhookCredentialsRequireMasking(t *testing.T) {
-	for _, name := range []string{forge.SecretTriggerToken, forge.SecretWebhookSecret, forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken, "FULLSEND_GITLAB_ROLE_REVIEWER_TOKEN"} {
+	for _, name := range []string{forge.SecretTriggerToken, forge.SecretWebhookSecret, forge.SecretGitLabTriggerAccountToken, forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken, forge.SecretGitLabCoderToken, "FULLSEND_GITLAB_ROLE_REVIEWER_TOKEN"} {
 		t.Run(name, func(t *testing.T) {
 			client, mux := setupTest(t)
 			ctx := context.Background()
@@ -2502,6 +2502,37 @@ func TestCreatePipelineSchedule_NoVariables(t *testing.T) {
 	assert.Equal(t, int64(456), id)
 }
 
+func TestCreatePipelineScheduleWithActive_SendsActiveStateInCreateRequest(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	var bodies []map[string]any
+	var otherRequests int
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/pipeline_schedules", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodies = append(bodies, body)
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": 789})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/pipeline_schedules/789", func(http.ResponseWriter, *http.Request) {
+		otherRequests++
+	})
+
+	id, err := client.CreatePipelineScheduleWithActive(ctx, "myorg", "myrepo", "main", "Disabled", "0 0 * * 0", nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, int64(789), id)
+	_, err = client.CreatePipelineScheduleWithActive(ctx, "myorg", "myrepo", "main", "Enabled", "0 0 * * 0", nil, true)
+	require.NoError(t, err)
+	_, err = client.CreatePipelineSchedule(ctx, "myorg", "myrepo", "main", "Default", "0 0 * * 0", nil)
+	require.NoError(t, err)
+
+	require.Len(t, bodies, 3)
+	assert.Equal(t, false, bodies[0]["active"], "a disabled schedule is created disabled")
+	assert.NotContains(t, bodies[1], "active", "an active schedule keeps GitLab's default")
+	assert.NotContains(t, bodies[2], "active", "CreatePipelineSchedule is unchanged")
+	assert.Zero(t, otherRequests, "no separate request edits the schedule")
+}
+
 func TestDeletePipelineSchedule(t *testing.T) {
 	client, mux := setupTest(t)
 	ctx := context.Background()
@@ -2553,6 +2584,7 @@ func TestListPipelineSchedules(t *testing.T) {
 		writeJSON(t, w, http.StatusOK, []map[string]any{
 			{
 				"id":            int64(1),
+				"owner":         map[string]any{"id": int64(42)},
 				"description":   "Nightly",
 				"ref":           "main",
 				"cron":          "0 0 * * *",
@@ -2575,6 +2607,7 @@ func TestListPipelineSchedules(t *testing.T) {
 	require.Len(t, schedules, 2)
 
 	assert.Equal(t, int64(1), schedules[0].ID)
+	assert.Equal(t, int64(42), schedules[0].OwnerID)
 	assert.Equal(t, "Nightly", schedules[0].Description)
 	assert.Equal(t, "main", schedules[0].Ref)
 	assert.Equal(t, "0 0 * * *", schedules[0].Cron)
@@ -2582,6 +2615,7 @@ func TestListPipelineSchedules(t *testing.T) {
 	assert.True(t, schedules[0].Active)
 
 	assert.Equal(t, int64(2), schedules[1].ID)
+	assert.Zero(t, schedules[1].OwnerID)
 	assert.False(t, schedules[1].Active)
 }
 
@@ -3425,6 +3459,16 @@ func TestErrNotSupported_OrgMethods(t *testing.T) {
 
 	t.Run("DeleteOrgVariable", func(t *testing.T) {
 		err := client.DeleteOrgVariable(ctx, "org", "var")
+		require.ErrorIs(t, err, forge.ErrNotSupported)
+	})
+}
+
+func TestErrNotSupported_FileMethods(t *testing.T) {
+	client, _ := setupTest(t)
+	ctx := context.Background()
+
+	t.Run("UpdateFileIfMatch", func(t *testing.T) {
+		err := client.UpdateFileIfMatch(ctx, "org", "repo", "f", "m", []byte("x"), "")
 		require.ErrorIs(t, err, forge.ErrNotSupported)
 	})
 }
@@ -4919,6 +4963,103 @@ func TestUpdateRepoSecret_MaskingRequiredNoUnmaskedFallback(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must not be stored unmasked")
 	assert.Equal(t, 1, callCount, "must not retry with masked:false")
+}
+
+// genericValueInvalid is the 400 body some GitLab instances return when a
+// value cannot be masked (e.g. it is shorter than 8 characters), without
+// mentioning masking.
+var genericValueInvalid = map[string]any{"message": map[string]any{"value": []string{"is invalid"}}}
+
+func TestCreateRepoSecret_MaskedFallbackOnGenericValueInvalid(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	callCount := 0
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/variables", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var body map[string]any
+		readJSONBody(t, r, &body)
+		if body["masked"] == true {
+			writeJSON(t, w, http.StatusBadRequest, genericValueInvalid)
+			return
+		}
+		assert.Equal(t, "seqe-ai", body["value"])
+		assert.Equal(t, true, body["protected"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"key": forge.SecretGCPProjectID})
+	})
+
+	err := client.CreateRepoSecret(ctx, "myorg", "myrepo", forge.SecretGCPProjectID, "seqe-ai")
+	require.NoError(t, err)
+	assert.Equal(t, 2, callCount, "should retry with masked:false after generic value error")
+}
+
+func TestUpdateRepoSecret_MaskedFallbackOnGenericValueInvalid(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/variables", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusConflict, map[string]string{
+			"message": forge.SecretGCPProjectID + " has already been taken",
+		})
+	})
+
+	callCount := 0
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/variables/"+forge.SecretGCPProjectID, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		assert.Equal(t, http.MethodPut, r.Method)
+		var body map[string]any
+		readJSONBody(t, r, &body)
+		if body["masked"] == true {
+			writeJSON(t, w, http.StatusBadRequest, genericValueInvalid)
+			return
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{"key": forge.SecretGCPProjectID})
+	})
+
+	err := client.CreateRepoSecret(ctx, "myorg", "myrepo", forge.SecretGCPProjectID, "seqe-ai")
+	require.NoError(t, err)
+	assert.Equal(t, 2, callCount, "should retry PUT with masked:false after generic value error")
+}
+
+func TestCreateRepoSecret_MaskingRequiredGenericValueInvalid(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	callCount := 0
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/variables", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var body map[string]any
+		readJSONBody(t, r, &body)
+		assert.Equal(t, true, body["masked"], "must never send masked:false")
+		writeJSON(t, w, http.StatusBadRequest, genericValueInvalid)
+	})
+
+	err := client.CreateRepoSecret(ctx, "myorg", "myrepo", forge.SecretOpenAIAPIKey, "short")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be stored unmasked")
+	assert.Equal(t, 1, callCount, "must not retry with masked:false")
+}
+
+func TestIsMaskingError(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		msg    string
+		want   bool
+	}{
+		{name: "explicit mask message", status: http.StatusBadRequest, msg: "This variable can not be masked", want: true},
+		{name: "generic value invalid", status: http.StatusBadRequest, msg: "value: [is invalid]", want: true},
+		{name: "value invalid among other fields", status: http.StatusBadRequest, msg: "key: [is too long]; value: [is invalid]", want: true},
+		{name: "key invalid", status: http.StatusBadRequest, msg: "key: [is invalid]", want: false},
+		{name: "plain key is invalid", status: http.StatusBadRequest, msg: "key is invalid", want: false},
+		{name: "value too long", status: http.StatusBadRequest, msg: "value: [is too long]", want: false},
+		{name: "value invalid wrong status", status: http.StatusUnprocessableEntity, msg: "value: [is invalid]", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isMaskingError(&APIError{StatusCode: tt.status, Message: tt.msg}))
+		})
+	}
 }
 
 func TestCreatePipelineSchedule_CleansUpOnVariableFailure(t *testing.T) {

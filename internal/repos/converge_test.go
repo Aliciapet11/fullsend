@@ -81,11 +81,9 @@ func convergeCfgWithDefaults(m *Manifest) ConvergeConfig {
 	return ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 }
 
@@ -116,7 +114,6 @@ func TestConverge_AllFresh(t *testing.T) {
 func withoutInferenceInputs(cfg ConvergeConfig) ConvergeConfig {
 	cfg.InferenceProject = ""
 	cfg.InferenceProjectNumber = ""
-	cfg.InferenceRegion = ""
 	cfg.WIFProvider = ""
 	cfg.OpenAIAPIKey = ""
 	return cfg
@@ -136,7 +133,7 @@ func TestConverge_FreshInstallWithoutGCPFailsBeforeWrites(t *testing.T) {
 		t.Fatalf("want one failed repo, got %d", len(failed))
 	}
 	msg := failed[0].Error.Error()
-	for _, want := range []string{"acme/api", InferenceAuthVertexWIF, forge.SecretGCPProjectID, forge.SecretGCPWIFProvider, "--vertex-project", "--vertex-region"} {
+	for _, want := range []string{"acme/api", InferenceAuthVertexWIF, forge.SecretGCPProjectID, forge.SecretGCPWIFProvider, "--vertex-project", "config.inference.project"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q does not mention %q", msg, want)
 		}
@@ -667,22 +664,25 @@ func TestConverge_EmptyRepoFilter(t *testing.T) {
 	}
 }
 
-func TestConverge_IncompleteInferenceFlags(t *testing.T) {
+func TestConverge_UnderivableProjectNumberFailsBeforeWrites(t *testing.T) {
 	m := newConvergeManifest("acme/api")
 	cfg := ConvergeConfig{
 		Manifest:         m,
 		MaxConcurrency:   4,
 		InferenceProject: "test-project",
-		// Missing InferenceProjectNumber and InferenceRegion.
+		// No project number, WIF provider, or resolver to derive one.
 	}
 
 	fc := newFakeClientForBatch("acme/api")
 	_, err := Converge(context.Background(), cfg, newTestClientFactory(fc), nil, noopProgress)
 	if err == nil {
-		t.Fatal("expected error for incomplete inference flags")
+		t.Fatal("expected error when the project number cannot be derived")
 	}
-	if !strings.Contains(err.Error(), "incomplete inference flags") {
+	if !strings.Contains(err.Error(), "cannot derive the project number") || !strings.Contains(err.Error(), "--vertex-wif-provider") {
 		t.Errorf("unexpected error: %v", err)
+	}
+	if len(fc.CreatedSecrets) != 0 || len(fc.Variables) != 0 {
+		t.Errorf("expected no writes, got secrets=%v vars=%v", fc.CreatedSecrets, fc.Variables)
 	}
 }
 
@@ -699,7 +699,6 @@ func TestConverge_ExistingSecretsSkipInference(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:       m,
 		MaxConcurrency: 4,
-		Roles:          []string{"triage"},
 		Direct:         true,
 		// No inference flags — should work because secrets already exist.
 	}
@@ -1075,7 +1074,6 @@ func TestConverge_DefaultRoles(t *testing.T) {
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
@@ -1187,22 +1185,6 @@ func TestResolveTargetRef(t *testing.T) {
 		}
 		if rr.manifestRef != "v2.0.0" {
 			t.Errorf("manifestRef = %q, want %q", rr.manifestRef, "v2.0.0")
-		}
-	})
-}
-
-func TestDefaultRoles(t *testing.T) {
-	t.Run("returns provided roles", func(t *testing.T) {
-		roles := defaultRoles([]string{"triage", "coder"})
-		if len(roles) != 2 || roles[0] != "triage" || roles[1] != "coder" {
-			t.Errorf("unexpected roles: %v", roles)
-		}
-	})
-
-	t.Run("returns defaults when empty", func(t *testing.T) {
-		roles := defaultRoles(nil)
-		if len(roles) == 0 {
-			t.Error("expected non-empty default roles")
 		}
 	})
 }
@@ -1324,7 +1306,6 @@ func TestConverge_InvalidGCPProjectID(t *testing.T) {
 		MaxConcurrency:         4,
 		InferenceProject:       "INVALID_PROJECT!!",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	fc := newFakeClientForBatch("acme/api")
@@ -1349,11 +1330,9 @@ func TestConverge_ExistingSecretsWithRegionVar(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-project",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
@@ -1947,7 +1926,6 @@ func TestConverge_InvalidProjectNumber(t *testing.T) {
 		MaxConcurrency:         4,
 		InferenceProject:       "test-project",
 		InferenceProjectNumber: "not-a-number",
-		InferenceRegion:        "us-central1",
 	}
 
 	fc := newFakeClientForBatch("acme/api")
@@ -1960,23 +1938,27 @@ func TestConverge_InvalidProjectNumber(t *testing.T) {
 	}
 }
 
-func TestConverge_InvalidGCPRegion(t *testing.T) {
+func TestConverge_InvalidDeclaredGCPRegionFailsRepoBeforeWrites(t *testing.T) {
 	m := newConvergeManifest("acme/api")
+	m.Defaults.Config = mustManagedConfig(t, "inference:\n  region: INVALID_REGION\n")
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
 		InferenceProject:       "test-project",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "INVALID REGION!!",
 	}
 
 	fc := newFakeClientForBatch("acme/api")
-	_, err := Converge(context.Background(), cfg, newTestClientFactory(fc), nil, noopProgress)
-	if err == nil {
-		t.Fatal("expected error for invalid GCP region")
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), nil, noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not a valid GCP region") {
-		t.Errorf("unexpected error: %v", err)
+	failed := result.Failed()
+	if len(failed) != 1 || !strings.Contains(failed[0].Error.Error(), "not a valid GCP region") {
+		t.Fatalf("expected the repository to fail with an invalid region, got %+v", result.Results)
+	}
+	if len(fc.Variables) != 0 || len(fc.CreatedSecrets) != 0 {
+		t.Errorf("an invalid declared region must fail before writes; vars=%v secrets=%v", fc.Variables, fc.CreatedSecrets)
 	}
 }
 
@@ -2176,7 +2158,6 @@ func gitlabConvergeCfg(repo string) ConvergeConfig {
 			},
 		},
 		MaxConcurrency: 4,
-		Roles:          []string{"triage"},
 		Direct:         true,
 		OpenAIAPIKey:   testOpenAIAPIKey,
 	}
@@ -2229,11 +2210,9 @@ func TestConverge_GitLabFreshInstallReleaseRefWithoutManifestPin(t *testing.T) {
 			},
 		},
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 		UpstreamRef:            "v9.9.9",
 		UpstreamTag:            "v9.9.9",
 	}
@@ -2278,11 +2257,9 @@ func TestConverge_GitLabOnlyReleaseDefaultRefWithoutGitHubClient(t *testing.T) {
 			},
 		},
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 		UpstreamRef:            "v9.9.9",
 		UpstreamTag:            "v9.9.9",
 	}
@@ -3072,11 +3049,9 @@ func TestConverge_GitLab_CreatesMissingSchedules(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -3151,11 +3126,9 @@ func TestConverge_GitLab_SchedulesAlreadyPresent(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -3648,6 +3621,50 @@ func TestActivatePipelineSchedules_ErrorPaths(t *testing.T) {
 		}
 	})
 
+	t.Run("owner-only update is left to the trigger-account stage", func(t *testing.T) {
+		e := readyTriggerDispatchEnv(t)
+		fc := e.state.FakeClient
+		raw, exists, err := fc.GetRepoVariable(ctx, trigOwner, trigRepo, forge.VarGitLabTriggerAccount)
+		require.NoError(t, err)
+		require.True(t, exists)
+		ledger, err := decodeGitLabTriggerAccountState(raw)
+		require.NoError(t, err)
+		fc.PipelineSchedules[trigOwner+"/"+trigRepo] = []forge.PipelineSchedule{
+			{ID: 1, OwnerID: int64(ledger.AccountID), Description: "fullsend slash poll", Active: false},
+		}
+		fc.Errors["UpdatePipelineSchedule"] = forge.ErrForbidden
+		actions := activatePipelineSchedules(ctx, fc, trigOwner, trigRepo, trigOwner+"/"+trigRepo,
+			[]string{"schedule:slash-poll"}, noopProgress)
+		if len(actions) != 1 || actions[0].Action != "none" {
+			t.Fatalf("got %+v, want one none action", actions)
+		}
+		if !strings.Contains(actions[0].Detail, "trigger-account stage") {
+			t.Errorf("detail = %q, want trigger-account wording", actions[0].Detail)
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		ownerID int64
+	}{
+		{"human-owned disabled schedule", 999999},
+		{"owner not reported", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := readyTriggerDispatchEnv(t)
+			fc := e.state.FakeClient
+			fc.PipelineSchedules[trigOwner+"/"+trigRepo] = []forge.PipelineSchedule{
+				{ID: 1, OwnerID: tc.ownerID, Description: "fullsend slash poll", Active: false},
+			}
+			fc.Errors["UpdatePipelineSchedule"] = forge.ErrForbidden
+			actions := activatePipelineSchedules(ctx, fc, trigOwner, trigRepo, trigOwner+"/"+trigRepo,
+				[]string{"schedule:slash-poll"}, noopProgress)
+			require.Len(t, actions, 1)
+			assert.Equal(t, "error", actions[0].Action)
+			assert.Contains(t, actions[0].Detail, "forbidden")
+		})
+	}
+
 	t.Run("inactive not found on re-list", func(t *testing.T) {
 		fc := forge.NewFakeClient()
 		// Probe saw an inactive schedule, but the re-list returns only an active one.
@@ -3663,6 +3680,21 @@ func TestActivatePipelineSchedules_ErrorPaths(t *testing.T) {
 			t.Errorf("detail = %q, want not-found wording", actions[0].Detail)
 		}
 	})
+}
+
+func TestRecordedTriggerScheduleOwner(t *testing.T) {
+	e := readyTriggerDispatchEnv(t)
+	ctx := context.Background()
+	ledger, found := e.ledger(t)
+	require.True(t, found)
+	require.True(t, recordedTriggerScheduleOwner(ctx, e.state, trigOwner, trigRepo, int64(ledger.AccountID)))
+	assert.False(t, recordedTriggerScheduleOwner(ctx, e.state, trigOwner, trigRepo, 0))
+	assert.False(t, recordedTriggerScheduleOwner(ctx, e.state, trigOwner, trigRepo, int64(ledger.AccountID)+100))
+	e.state.Errors["GetRepoVariable"] = fmt.Errorf("unreadable")
+	assert.False(t, recordedTriggerScheduleOwner(ctx, e.state, trigOwner, trigRepo, int64(ledger.AccountID)))
+	delete(e.state.Errors, "GetRepoVariable")
+	e.state.VariableValues[trigOwner+"/"+trigRepo+"/"+forge.VarGitLabTriggerAccount] = "invalid"
+	assert.False(t, recordedTriggerScheduleOwner(ctx, e.state, trigOwner, trigRepo, int64(ledger.AccountID)))
 }
 
 func TestConvergeSchedules_UnrecognizedMissing(t *testing.T) {
@@ -4114,11 +4146,9 @@ workflow:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &spyScaffoldCommit{}
@@ -4215,11 +4245,9 @@ workflow:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &spyScaffoldCommit{}
@@ -4315,11 +4343,9 @@ workflow:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 		DryRun:                 true,
 	}
 
@@ -4396,11 +4422,9 @@ workflow:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -4462,11 +4486,9 @@ stages:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &spyScaffoldCommit{}
@@ -4562,7 +4584,6 @@ workflow:
 	cfg := ConvergeConfig{
 		Manifest:       m,
 		MaxConcurrency: 4,
-		Roles:          []string{"triage"},
 		Direct:         true,
 	}
 
@@ -4680,11 +4701,9 @@ stages:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &spyScaffoldCommit{}
@@ -4761,11 +4780,9 @@ workflow:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &spyScaffoldCommit{}
@@ -4850,12 +4867,10 @@ stages:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		DryRun:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &spyScaffoldCommit{}
@@ -4926,11 +4941,9 @@ stages:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -4993,11 +5006,9 @@ workflow:
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -5049,11 +5060,9 @@ func TestConverge_GitLab_RootCIReadErrorSurfaces(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -5098,12 +5107,10 @@ func TestConverge_GitLab_MissingSchedules_DryRun(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		DryRun:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -5157,11 +5164,9 @@ func TestConverge_GitLab_ScheduleCreationError(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -5205,11 +5210,9 @@ func TestConverge_GitLab_GetRepoError_ScheduleCreation(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
 	}
 
 	sc := &fakeScaffoldCommit{}
@@ -5506,10 +5509,13 @@ func TestConverge_StaticVariableValueCheck(t *testing.T) {
 	// Install correct scaffold content.
 	populateScaffoldContent(t, fc, "acme", "api", "v1.0.0", "https://mint.example.com")
 
-	// Set GCP_REGION to a wrong value — should be detected as drift.
+	// Set GCP_REGION to a value other than the declared region — should be
+	// detected as drift.
 	fc.VariableValues["acme/api/FULLSEND_GCP_REGION"] = "europe-west1"
 
 	m := newConvergeManifest(repoNames...)
+	m.Defaults.Config = mustManagedConfig(t, "inference:\n  region: us-central1\n")
+	fc.FileContents["acme/api/"+preset.OverlayPath] = mustDesiredManaged(t, m, "acme", "api")
 	sc := &fakeScaffoldCommit{}
 	cfg := convergeCfgWithDefaults(m)
 
@@ -5661,10 +5667,8 @@ func TestConverge_ExplicitWIFProviderUsedForAllRepos(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:         m,
 		MaxConcurrency:   4,
-		Roles:            []string{"triage"},
 		Direct:           true,
 		InferenceProject: "test-inference",
-		InferenceRegion:  "us-central1",
 		WIFProvider:      explicitWIF,
 	}
 
@@ -5703,10 +5707,8 @@ func TestConverge_ExplicitWIFProviderSkipsCollisionCheck(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:         m,
 		MaxConcurrency:   4,
-		Roles:            []string{"triage"},
 		Direct:           true,
 		InferenceProject: "test-inference",
-		InferenceRegion:  "us-central1",
 		WIFProvider:      explicitWIF,
 		// No InferenceProjectNumber — not needed with explicit WIF provider.
 	}
@@ -5733,10 +5735,8 @@ func TestConverge_ExplicitWIFProviderNoProjectNumberRequired(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:         m,
 		MaxConcurrency:   4,
-		Roles:            []string{"triage"},
 		Direct:           true,
 		InferenceProject: "test-inference",
-		InferenceRegion:  "us-central1",
 		WIFProvider:      "projects/999/locations/global/workloadIdentityPools/fullsend-inference/providers/github-oidc",
 		// InferenceProjectNumber intentionally empty — should work.
 	}
@@ -5795,18 +5795,24 @@ func TestConverge_WIFProviderRequiresInferenceProject(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:       m,
 		MaxConcurrency: 4,
-		Roles:          []string{"triage"},
 		Direct:         true,
 		WIFProvider:    "projects/999/locations/global/workloadIdentityPools/fullsend-inference/providers/github-oidc",
 		// InferenceProject intentionally empty — should be rejected.
 	}
 
-	_, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
-	if err == nil {
-		t.Fatal("expected error when WIFProvider is set without InferenceProject")
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--vertex-project is required when --vertex-wif-provider is set") {
-		t.Errorf("unexpected error message: %v", err)
+	failed := result.Failed()
+	if len(failed) != 1 {
+		t.Fatalf("expected the repository to fail when a WIF provider has no project, got %+v", result.Results)
+	}
+	if !strings.Contains(failed[0].Error.Error(), "requires a GCP project") {
+		t.Errorf("unexpected error message: %v", failed[0].Error)
+	}
+	if sc.called || len(fc.CreatedSecrets) != 0 {
+		t.Errorf("expected no writes, got committed=%v secrets=%v", sc.called, fc.CreatedSecrets)
 	}
 }
 
@@ -5823,11 +5829,9 @@ func TestConverge_InvalidWIFProviderRejectedBeforeWrites(t *testing.T) {
 			cfg := ConvergeConfig{
 				Manifest:         m,
 				MaxConcurrency:   4,
-				Roles:            []string{"triage"},
 				Direct:           true,
 				DryRun:           dryRun,
 				InferenceProject: "test-inference",
-				InferenceRegion:  "us-central1",
 				WIFProvider:      "not-a-wif-provider",
 			}
 
@@ -5844,31 +5848,6 @@ func TestConverge_InvalidWIFProviderRejectedBeforeWrites(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestConverge_VendorOverrideSetsVendorBinary(t *testing.T) {
-	repoNames := []string{"acme/api"}
-	fc := newFakeClientForBatch(repoNames...)
-	m := newConvergeManifest(repoNames...)
-
-	sc := &spyScaffoldCommit{}
-	cfg := convergeCfgWithDefaults(m)
-	v := true
-	cfg.VendorOverride = &v
-
-	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
-	if err != nil {
-		t.Fatalf("Converge() error: %v", err)
-	}
-
-	installed := result.Installed()
-	if len(installed) != 1 {
-		t.Errorf("expected 1 installed, got %d", len(installed))
-	}
-	if len(result.Failed()) != 0 {
-		t.Errorf("expected 0 failed, got %d", len(result.Failed()))
-	}
-	sc.assertVendoredWorkflow(t)
 }
 
 func TestConverge_ManifestVendorFieldSetsVendorBinary(t *testing.T) {
@@ -5902,23 +5881,22 @@ func TestConverge_ManifestVendorFieldSetsVendorBinary(t *testing.T) {
 	sc.assertVendoredWorkflow(t)
 }
 
-func TestConverge_VendorOverrideFalseDisablesManifestVendor(t *testing.T) {
+func TestConverge_EntryVendorFalseDisablesDefaultsVendor(t *testing.T) {
 	v := true
+	f := false
 	m := &Manifest{
 		Version:  1,
 		Defaults: DefaultsConfig{Vendor: &v, Inference: InferenceSettings{Auth: InferenceAuthVertexWIF}},
 		GitHub: &PlatformConfig{
 			MintURL:     "https://mint.example.com",
 			FullsendRef: "v1.0.0",
-			Repos:       []RepoEntry{{Name: "acme/api"}},
+			Repos:       []RepoEntry{{Name: "acme/api", Vendor: &f}},
 		},
 	}
 
 	fc := newFakeClientForBatch("acme/api")
 	sc := &spyScaffoldCommit{}
 	cfg := convergeCfgWithDefaults(m)
-	f := false
-	cfg.VendorOverride = &f
 
 	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
 	if err != nil {
@@ -5937,9 +5915,11 @@ func TestConverge_VendorOverrideFalseDisablesManifestVendor(t *testing.T) {
 
 func TestConverge_VendorGitLabFailsBeforeCommit(t *testing.T) {
 	v := true
+	defaults := testInferenceDefaults()
+	defaults.Vendor = &v
 	m := &Manifest{
 		Version:  1,
-		Defaults: testInferenceDefaults(),
+		Defaults: defaults,
 		GitLab: &PlatformConfig{
 			URL:         "https://gitlab.example.com",
 			FullsendRef: "v1.0.0",
@@ -5952,12 +5932,9 @@ func TestConverge_VendorGitLabFailsBeforeCommit(t *testing.T) {
 	cfg := ConvergeConfig{
 		Manifest:               m,
 		MaxConcurrency:         4,
-		Roles:                  []string{"triage"},
 		Direct:                 true,
 		InferenceProject:       "test-inference",
 		InferenceProjectNumber: "123456789",
-		InferenceRegion:        "us-central1",
-		VendorOverride:         &v,
 	}
 
 	var warnings []string
@@ -6423,16 +6400,15 @@ func TestConverge_PresetFreshInstallWritesBaseAndOverlay(t *testing.T) {
 		t.Fatal("fresh install must still write config.yaml overlay")
 	}
 
-	// convergeCfgWithDefaults sets Roles to the production cobra-default
-	// ([]string{"triage"}) with RolesExplicit false. The overlay must
-	// leave roles unset so the preset's own roles take effect via the
-	// overlay -> base layered accessor chain, instead of the fleet-wide
-	// default roles shadowing them (converge.go's installRoles = nil
-	// branch). Deleting or inverting that branch would still pass with
-	// only a file-existence assertion, so this asserts both the raw
-	// overlay bytes and the effective layered roles.
+	// The manifest declares no roles. The overlay must leave roles unset
+	// so the preset's own roles take effect via the overlay -> base
+	// layered accessor chain, instead of the fleet-wide default roles
+	// shadowing them (converge.go's installRoles = nil branch). Deleting
+	// or inverting that branch would still pass with only a
+	// file-existence assertion, so this asserts both the raw overlay
+	// bytes and the effective layered roles.
 	if strings.Contains(string(overlayYAML), "roles:") {
-		t.Errorf("overlay must not set roles when the preset owns them (RolesExplicit=false): %s", overlayYAML)
+		t.Errorf("overlay must not set roles when the preset owns them and the manifest declares none: %s", overlayYAML)
 	}
 	effective, err := config.ParsePerRepoConfigWriterLayered(overlayYAML, baseYAML)
 	if err != nil {
@@ -6443,15 +6419,10 @@ func TestConverge_PresetFreshInstallWritesBaseAndOverlay(t *testing.T) {
 	}
 }
 
-// TestConverge_PresetFreshInstallExplicitRolesWritesOverlay is the
-// RolesExplicit=true counterpart to
-// TestConverge_PresetFreshInstallWritesBaseAndOverlay: when the caller
-// explicitly passes --roles, converge.go must not take the
-// installRoles = nil branch, so the caller-supplied roles are written
-// into the overlay and take effect over the preset's own roles.
-// The CLI persists an explicit --roles value in config.roles before
-// converging (EnsureManagedConfigDefaults, #8218), so convergence renders
-// roles from the manifest rather than from ConvergeConfig.Roles.
+// TestConverge_PresetFreshInstallManifestRolesWritesOverlay is the
+// counterpart to TestConverge_PresetFreshInstallWritesBaseAndOverlay for
+// roles declared in the manifest: roles in config.roles of repos.yaml are
+// written into the overlay and take effect over the preset's own roles.
 func TestConverge_PresetFreshInstallManifestRolesWritesOverlay(t *testing.T) {
 	presetPath := writePresetFile(t, presetYAMLWithRoles)
 	repoNames := []string{"acme/api"}
@@ -6485,7 +6456,7 @@ func TestConverge_PresetFreshInstallManifestRolesWritesOverlay(t *testing.T) {
 	}
 
 	if !strings.Contains(string(overlayYAML), "roles:") {
-		t.Errorf("overlay must set roles when the caller explicitly passed --roles: %s", overlayYAML)
+		t.Errorf("overlay must set roles declared in the manifest: %s", overlayYAML)
 	}
 	effective, err := config.ParsePerRepoConfigWriterLayered(overlayYAML, baseYAML)
 	if err != nil {

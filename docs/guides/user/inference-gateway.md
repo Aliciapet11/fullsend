@@ -96,6 +96,13 @@ fails.
   a leaked key works until the operator revokes it. Use `oidc` whenever the gateway supports it
   ([ADR 0138](../../ADRs/0138-inference-gateway-api-key-credential-mode.md)).
 
+By default the key travels as `Authorization: Bearer`. If your operator says the gateway reads the
+key from `x-api-key` on its Messages API, add `messages_auth_header: x-api-key` to an `api-key`
+block. Claude Code and pi `anthropic-messages` models then send it as `x-api-key`, and every other
+model keeps `Authorization: Bearer`. The setting is refused with `auth: oidc`
+([ADR 0142](../../ADRs/0142-inference-gateway-x-api-key-header-for-messages-models.md),
+[config reference](../../reference/config-reference.md)).
+
 The `api-key` mode also applies to local runs: a local `fullsend run` with
 `FULLSEND_INFERENCE_GATEWAY_API_KEY` in its environment takes the same route as CI. The `oidc`
 mode applies only to runs that have a GitHub OIDC endpoint, so a local run without one leaves the
@@ -309,4 +316,5 @@ For pi, the harness-plugin path for local runs is in
 | `pi gateway/ models need a model list: set inference.gateway.models or inference.gateway.models_file (pi runs offline and cannot discover gateway models)` | An agent uses a `gateway/` model, and the block has no model list. | List the models with `--inference-gateway-model id=api` or `--inference-gateway-models-file`. |
 | `inference.gateway.auth is "api-key" but FULLSEND_INFERENCE_GATEWAY_API_KEY is not set; set it as a forge secret (or in the local environment)` | The block is in the `api-key` mode and the run has no key. | Set the repository secret as shown in [Choosing `auth`](#choosing-auth), or export the variable for a local run. |
 | From `status`: `Gateway refused the assertion (HTTP 401)` or `(HTTP 403)`; in a run, the model call fails with the gateway's `401` or `403` | The gateway did not accept the credential: a different audience, a repository not on its allowed list, or a revoked key. | Check the audience and allowed repositories with the operator. The gateway's exact error text and its fixes are in the operator guide's [troubleshooting table](../infrastructure/inference-gateway-operator.md#troubleshooting). |
+| Model calls fail just after the host running the run wakes from sleep (a laptop or a suspended VM), in the `oidc` mode: the gateway's `401` on Claude Code, or an OpenShell `500` on pi and codex | The gateway token expired while the host slept. The refresher checks the wall clock every 30 seconds and refreshes on the first check after wake if the token is due or already expired; requests sent before that check can still fail. Only Claude Code's placeholder carries a run deadline past the token's expiry, so a stale token reaches the gateway and gets its `401`; on pi and codex the placeholder expires with the token and OpenShell answers `500`. | None if the run log then shows `Inference gateway token refreshed for … (next expiry` or `Inference gateway token handed off for …`. If it shows the refresh gave up or stopped, re-run. |
 | Any other gateway error, such as `authentication failure: ...` or `model_authorization_denied` | The gateway refused the request for its own reasons. | See the operator guide's [troubleshooting table](../infrastructure/inference-gateway-operator.md#troubleshooting). |

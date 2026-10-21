@@ -27,7 +27,7 @@ kill_switch: false                   # Emergency stop — disables all agent dis
 keep_history: true                   # Append previous sticky-comment content as collapsed "Previous run" blocks
 
 # ── Runtime ──────────────────────────────────────────────────
-runtime: claude                      # Default agent runtime: claude, pi, codex
+runtime: claude                      # Default agent runtime: claude, pi, codex, opencode
 
 # ── Roles ────────────────────────────────────────────────────
 roles:                               # Agent roles to install (determines which Apps and credentials are provisioned)
@@ -94,6 +94,7 @@ inference:
     url: ""                          # Gateway URL, e.g. https://gateway.example.com or https://gateway.example.com/team-a (optional path prefix, no trailing /v1, port 443 only; plain http only for a loopback test host)
     audience: ""                     # OIDC audience the runner requests for the gateway (oidc mode)
     auth: ""                         # Credential mode: oidc (default) or api-key (ADR 0138)
+    messages_auth_header: ""         # Messages-dialect credential header: authorization (default) or x-api-key (api-key mode only, ADR 0142)
     models: {}                       # Inline model list: id -> {api, compat, contextWindow, maxTokens}
     models_file: ""                  # Or: repository path to a pi-inference-gateway config file
 
@@ -148,7 +149,10 @@ comments are synced to Jira where `<details>` does not render as collapsible.
 ### `runtime`
 
 Default agent runtime for all agents in this repository. Valid values:
-`claude`, `pi`, `codex`. Per-agent overrides in the `agents:` list take
+`claude`, `pi`, `codex`, `opencode`. `opencode` is opt-in and limited to
+read-only agents (`triage`, `prioritize`) until the security-hook adapter
+lands ([#7824](https://github.com/fullsend-ai/fullsend/issues/7824)).
+Per-agent overrides in the `agents:` list take
 precedence. Per-run overrides via `--runtime` flag or `FULLSEND_RUNTIME` env
 var take precedence over both. See
 [Choose a Runtime](../guides/getting-started/choosing-a-runtime.md) for
@@ -273,11 +277,29 @@ set this to their own URL. See
 [Standalone Mint](../guides/infrastructure/standalone-mint.md) and
 [Mint Administration](../guides/infrastructure/mint-administration.md).
 
+For GitHub repositories managed with `fullsend repos install`, a `mint_url`
+declared in the managed configuration (`config.mint_url` in `repos.yaml`) or
+the `config_base` preset also sets the `FULLSEND_MINT_URL` repository
+variable. Install, dry run and `repos status` report a conflict when it
+differs from the manifest's own `mint_url`. See
+[Effective infrastructure values](../cli/repos.md#effective-infrastructure-values).
+
 ### `inference`
 
 Groups inference backend settings under a single key. Each subfield resolves
 independently through the layered config system (an overlay can override
 `project` without restating `provider`).
+
+For repositories managed with `fullsend repos install`, `project`, `region`
+and `wif_provider` in the managed configuration or `config_base` preset
+feed the installed credentials: a declared `region` manages the
+`FULLSEND_GCP_REGION` variable for `vertex-wif` and `openai-wif`
+repositories (with none declared, an existing variable is kept and
+`global` is written only where it is missing), and `project` / `wif_provider` are written to the
+`FULLSEND_GCP_PROJECT_ID` / `FULLSEND_GCP_WIF_PROVIDER` secrets unless
+`--vertex-project` / `--vertex-wif-provider` supply them (a disagreeing
+flag is an error). See
+[Effective infrastructure values](../cli/repos.md#effective-infrastructure-values).
 
 - **`provider`** — Inference backend identifier. Currently only `vertex`.
   Default: `vertex`.
@@ -365,6 +387,27 @@ independently through the layered config system (an overlay can override
     the OIDC token. The key is not rotated, so nothing is re-seeded. The
     block applies on local runs too, so the runner owns the route there
     as well.
+  - `messages_auth_header` — the header the gateway credential travels in
+    on Messages-dialect requests: `authorization` (the default, used when
+    the field is absent) or `x-api-key`
+    ([ADR 0142](../ADRs/0142-inference-gateway-x-api-key-header-for-messages-models.md)).
+    A CLI or reusable workflow from v0.48.0 or earlier ignores the field
+    and sends `Authorization: Bearer`, so an `x-api-key` gateway answers
+    401. Set `x-api-key` for a gateway that
+    reads the caller's key from `x-api-key` on `/v1/messages`, the header
+    Anthropic documents for API keys on that API. It is valid only with
+    `auth: api-key`: a resolved block in the `oidc` mode that sets
+    `x-api-key` is a config error, because an OIDC token is a bearer
+    token. Only the Messages dialect moves: pi `anthropic-messages` models
+    send the key as `x-api-key`, and Claude Code gets it as
+    `ANTHROPIC_API_KEY` instead of `ANTHROPIC_AUTH_TOKEN`. pi
+    `openai-responses` and `openai-completions` models, and codex, keep
+    `Authorization: Bearer`. Each request carries the credential in one
+    header only. The header is configured, never guessed: the runner does
+    not retry in the other header after a 401. A gateway that reads
+    `x-api-key` must remove the caller's key before it sets its own
+    upstream key; see
+    [Header custody for an x-api-key gateway](../guides/infrastructure/inference-gateway-operator.md#header-custody-for-an-x-api-key-gateway).
   - `models` — optional inline model list, a map of model id to settings:
     `api` (one of `openai-responses`, `anthropic-messages`,
     `openai-completions`), and optional `compat`, `contextWindow` and
@@ -406,7 +449,7 @@ independently through the layered config system (an overlay can override
   discover the gateway's models. On codex the list is not used: fullsend
   renders no catalog for codex, so the id after `gateway/` is the model it
   sends (a configured `models_file` must still be readable).
-  `url`, `audience` and `auth` layer
+  `url`, `audience`, `auth` and `messages_auth_header` layer
   independently; the model list (either form) is one unit,
   and a layer that sets it replaces the inherited list. There is no
   runner-variable override for this block. `fullsend github setup

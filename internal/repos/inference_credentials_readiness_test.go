@@ -62,7 +62,6 @@ func TestConverge_RejectsGCPInputsWhenNoRepoUsesVertex(t *testing.T) {
 	cfg := openAIConvergeCfg("acme/api")
 	cfg.InferenceProject = "test-inference"
 	cfg.InferenceProjectNumber = "123456789"
-	cfg.InferenceRegion = "us-central1"
 
 	sc := &fakeScaffoldCommit{}
 	_, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)

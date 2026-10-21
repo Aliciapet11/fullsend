@@ -69,8 +69,9 @@ const (
 // Agent/Task, which is also when Run does not load the extension.
 type piAgentManifest struct {
 	Enabled bool `json:"enabled"`
-	// PiBin is the pi binary the children run, resolved in the sandbox at
-	// Bootstrap ("pi" when the probe found nothing, i.e. PATH lookup).
+	// PiBin is the pi binary the Bootstrap probe found ("pi" when it found
+	// nothing). Children start through the pi and node the launch pinned
+	// instead (piChildLaunchExport).
 	PiBin       string `json:"piBin"`
 	SessionsDir string `json:"sessionsDir"`
 	// Extensions are the -e paths every child gets, in order: the provider
@@ -264,17 +265,8 @@ func (r PiRuntime) Bootstrap(input BootstrapInput) error {
 		return fmt.Errorf("writing %s: %w", piSettingsFile, err)
 	}
 
-	if err := duplicateDestinationNameError("skill", input.SkillDirs()); err != nil {
+	if err := uploadHarnessSkills(sandboxName, cfg+"/skills", input.SkillDirs()); err != nil {
 		return err
-	}
-	for _, skillPath := range input.SkillDirs() {
-		if skillPath == "" {
-			continue
-		}
-		if err := sandbox.Upload(sandboxName, skillPath, cfg+"/skills/"); err != nil {
-			return fmt.Errorf("copying skill %q: %w", skillPath, err)
-		}
-		fmt.Fprintf(os.Stderr, "Skill %q: uploaded to sandbox\n", resolveSkillDisplayName(skillPath))
 	}
 
 	// Extensions land under ConfigDir/extensions/<name>/ — a runner-owned
@@ -330,9 +322,16 @@ func (r PiRuntime) Bootstrap(input BootstrapInput) error {
 		if err := installHookScripts(sandboxName, r.piHooksDir(), hooks); err != nil {
 			return err
 		}
+		// The hook settings, recorded while .env is still exactly what the
+		// runner wrote; the launch re-asserts them after .env.
+		securityEnv, err := bootstrapHookEnv(sandboxName, hooks)
+		if err != nil {
+			return err
+		}
 		if err := appendHookEnv(sandboxName, hooks); err != nil {
 			return err
 		}
+		recordPiHookEnv(sandboxName, securityEnv)
 		if err := uploadBytes(sandboxName, cfg+"/"+piHooksExtensionFile, piHooksExtensionJS); err != nil {
 			return fmt.Errorf("installing hook extension: %w", err)
 		}
@@ -414,6 +413,29 @@ func piManifestHash(sandboxName string) string {
 		}
 	}
 	return ""
+}
+
+// piHookEnvs carries the hook settings Bootstrap recorded (bootstrapHookEnv)
+// to Run through the same seam as piManifestHashes, so the launch re-asserts
+// them after the agent-writable .env. The hook adapter and every sub-agent
+// inherit the launch environment (childEnv copies it), so the one export
+// covers them all.
+var piHookEnvs sync.Map // sandboxName -> []hookEnvPair
+
+func recordPiHookEnv(sandboxName string, env []hookEnvPair) {
+	piHookEnvs.Store(sandboxName, env)
+}
+
+// piHookEnv returns the hook settings recorded for a sandbox, and false when
+// Bootstrap did not run in this process — the same case in which the
+// manifest guard is not emitted.
+func piHookEnv(sandboxName string) ([]hookEnvPair, bool) {
+	v, ok := piHookEnvs.Load(sandboxName)
+	if !ok {
+		return nil, false
+	}
+	env, ok := v.([]hookEnvPair)
+	return env, ok
 }
 
 // piBashAllowlistEnv selects how the extension treats a Bash(a,b) allowlist
@@ -734,7 +756,7 @@ func piAgentModels(defModel string, configAliases map[string]string) map[string]
 
 // piGoogleVertexModels are the model ids pi's built-in google-vertex
 // provider registers, verbatim from the catalog the pinned pi bundles
-// (@earendil-works/pi-ai 0.85.0, dist/providers/data/google-vertex.json).
+// (@earendil-works/pi-ai 1.3.0, dist/providers/data/google-vertex.json).
 // Re-check it on a pi bump, the way the Anthropic ids in pi_run.go are:
 // diff that data file, not the generated wrapper -- 0.85.0 added
 // gemini-3.8-flash and nothing else, and a missed entry means this table
@@ -753,6 +775,7 @@ var piGoogleVertexModels = []string{
 	"gemini-2.5-pro",
 	"gemini-3-flash-preview",
 	"gemini-3.1-flash-lite",
+	"gemini-3.1-flash-lite-image",
 	"gemini-3.1-pro-preview",
 	"gemini-3.1-pro-preview-customtools",
 	"gemini-3.5-flash",
@@ -760,8 +783,7 @@ var piGoogleVertexModels = []string{
 	"gemini-3.6-flash",
 	"gemini-3.7-flash",
 	"gemini-3.8-flash",
-	"gemini-flash-latest",
-	"gemini-flash-lite-latest",
+	"gemini-4-argon",
 }
 
 // piXaiVertexModels are the model ids the vendored xai-vertex extension

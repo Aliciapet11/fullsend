@@ -37,9 +37,13 @@
 #   GITLAB_RUNNER_VERSION — gitlab-runner version to install (default: 19.2.1)
 #
 # Note: The OpenShell version sourced here is the *provisioning* pin
-# (.github/scripts/openshell-version.sh, Renovate-tracked). Per-job prepare.sh
-# re-reads the job image's openshell --version and upgrades the host when they
-# differ, so a VM that was created on an older pin still matches the job.
+# (.github/scripts/openshell-version.sh, Renovate-tracked): the version the
+# host starts on. Per-job prepare.sh does not consult this copy: it reads the
+# job image's org.opencontainers.image.revision label, verifies that Fullsend
+# commit on GitHub, and installs the OpenShell version and commit pinned there
+# (the image's own openshell --version must agree). Images built on different
+# pins therefore alternate on one VM, and new Fullsend releases need no
+# create-*-vm.sh --resume.
 set -euo pipefail
 
 GITLAB_URL="${GITLAB_URL:-}"
@@ -58,7 +62,7 @@ if [ -f "${_openshell_version_sh}" ]; then
   source "${_openshell_version_sh}"
 fi
 # Fallback only when the pin file is absent; keep in step with openshell-version.sh.
-OPENSHELL_VERSION="${OPENSHELL_VERSION:-0.1.2}"
+OPENSHELL_VERSION="${OPENSHELL_VERSION:-0.1.4}"
 
 # Source the executor's gateway helpers (wait_for_openshell_gateway,
 # user_systemctl) so configure_per_job_gateway can wait for the seed start

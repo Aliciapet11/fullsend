@@ -82,8 +82,8 @@ ownership marker; a pre-existing `config.yaml` that lacks the marker requires
 adoption — `repos status` reports "managed configuration (adoption
 required)" with the proposed `repos.yaml` entry, the file difference and the
 effective layered-configuration change instead of ordinary drift, and
-install/convergence stop before any write (including for a fresh install) and
-leave that file untouched until it is adopted. Once a file carries
+install/convergence skip that repository before any write (including for a fresh install),
+leave that file untouched until it is adopted, and converge the other repositories. Once a file carries
 the marker, `repos install` writes the canonical sparse configuration,
 `repos status` reports whole-file managed-configuration drift, and
 convergence rewrites a drifted file unless the candidate would become less
@@ -153,6 +153,7 @@ the overlay → base → code defaults chain.
 | `inference.gateway.url` | `string` (nested) | Scalar override | `""` (empty) |
 | `inference.gateway.audience` | `string` (nested) | Scalar override | `""` (empty) |
 | `inference.gateway.auth` | `string` (nested) | Scalar override | `""` (empty; means `oidc`) |
+| `inference.gateway.messages_auth_header` | `string` (nested) | Scalar override | `""` (empty; means `authorization`) |
 | `inference.gateway.models` / `inference.gateway.models_file` | `map` / `string` (nested) | Model list replaced as one unit | `nil` (none) |
 | `models.aliases` | `map[string]string` (nested) | Per-key merge | `nil` (fleet defaults) |
 | `create_issues` | `*CreateIssuesConfig` | Replace whole object if set | `nil` |
@@ -204,8 +205,8 @@ unset, the accessor falls through to the base layer, then to code defaults.
 - **`version`**: Schema version string. Unset (`""`) falls through to parent.
   Code default is `"1"`.
 - **`runtime`**: Agent runtime identifier. Unset (`""`) falls through to
-  parent. Code default is `"claude"`. Valid values: `claude`, `pi`, `codex`, `dummy`,
-  `dummy-playback`.
+  parent. Code default is `"claude"`. Valid values: `claude`, `pi`, `codex`,
+  `opencode`, `dummy`, `dummy-playback`.
 - **`kill_switch`**: Pointer to bool (`*bool`). Using a pointer allows
   distinguishing between three states:
   - `nil` (key omitted) — unset, falls through to parent.
@@ -254,7 +255,7 @@ unset (`""`) falls through to parent, then to code default
   `openai-wif` repos. Each resolves independently through
   the layers; a run needs all three from one source. The `FULLSEND_OPENAI_*`
   runner variables, when any is set, replace the resolved block entirely.
-- **`inference.gateway.{url,audience,auth}`**: the inference gateway
+- **`inference.gateway.{url,audience,auth,messages_auth_header}`**: the inference gateway
   credential route (ADR 0137), written by `fullsend github setup
   --inference-gateway-*`. `auth` selects the credential mode, `oidc` (the
   default) or `api-key` (ADR 0138). In the `oidc` mode the runner owns the
@@ -265,7 +266,13 @@ unset (`""`) falls through to parent, then to code default
   Each resolves independently through the layers, so an org preset can carry
   `url` and `audience` while each repository opts in its own models or its
   own `auth`. The resolved block needs `url`, plus `audience` in the `oidc`
-  mode. There is no runner-variable override.
+  mode. `messages_auth_header` selects the header the credential travels in
+  on Messages-dialect requests: `authorization` (the default when empty) or
+  `x-api-key` (ADR 0142). The resolved block accepts `x-api-key` only with
+  `auth: api-key`, and the two fields can come from different layers, so the
+  check runs on the resolved block: an org preset that sets `x-api-key` while a
+  repository resolves to the `oidc` mode is a config error. There is no
+  runner-variable override.
 - **`inference.gateway.models` / `inference.gateway.models_file`**: the
   gateway model list. The two forms are one unit: a layer that sets either
   replaces the inherited list, so the forms never combine across layers.
@@ -296,6 +303,18 @@ inference:
 #   inference.region: us-central1 (from base)
 #   inference.wif_provider: ...base... (from base)
 ```
+
+`fullsend repos install` resolves `mint_url`, `inference.project`,
+`inference.region`, and `inference.wif_provider` the same way from the
+managed configuration layered over the declared preset (the layers it
+commits), and uses the declared values for the installed
+`FULLSEND_MINT_URL` and `FULLSEND_GCP_REGION` variables and the
+`FULLSEND_GCP_PROJECT_ID` / `FULLSEND_GCP_WIF_PROVIDER` secrets, so the
+committed configuration and the repository variables agree. Install, dry
+run and `repos status` use the same values. The code-default `global`
+region is not treated as declared: without a declared `inference.region`,
+install keeps an existing `FULLSEND_GCP_REGION`. See
+[Effective infrastructure values](../../cli/repos.md#effective-infrastructure-values).
 
 ### `models.aliases` — per-key merge
 
@@ -335,9 +354,10 @@ models:
 commands (`github`, `gitlab`, or `jira`). Unset (`""`) means no default
 — `--tracker` is required on every `fullsend issues` invocation. When
 set, it is used as the default for `--tracker` on `fullsend issues
-get`, `fullsend issues post-comment`, and `fullsend issues link` (`link`
-supports only Jira, so a `github` or `gitlab` default makes it fail with a
-not-supported error unless `--tracker jira` is passed); an
+get`, `fullsend issues create`, `fullsend issues post-comment`, and
+`fullsend issues link` (`link` supports only Jira, so a `github` or
+`gitlab` default makes it fail with a not-supported error unless
+`--tracker jira` is passed); an
 explicit `--tracker` flag overrides it. Distinct from `forge`: a repo's hosting forge does not
 imply its issue tracker (e.g. a GitHub-hosted repo may track issues in
 Jira).

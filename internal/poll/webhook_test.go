@@ -386,8 +386,8 @@ func TestBuildWebhookEvents_IssueLifecycle(t *testing.T) {
 		if !ne.Actor.IsEntityAuthor {
 			t.Error("expected issue author to be entity author")
 		}
-		if len(got[0].Stages) != 0 {
-			t.Errorf("issue open must not route, got %v", got[0].Stages)
+		if len(got[0].Stages) != 1 || got[0].Stages[0] != "triage" {
+			t.Errorf("issue open must route to triage, got %v", got[0].Stages)
 		}
 	})
 	t.Run("close", func(t *testing.T) {
@@ -446,6 +446,21 @@ func TestBuildWebhookEvents_IssueLifecycle(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+}
+
+func TestBuildWebhookEvents_ServiceAccountIssueOpenFiltered(t *testing.T) {
+	mc := newMockClient()
+	author := UserRef{ID: 205, Username: "release-automation"}
+	mc.issue[9] = &Issue{IID: 9, State: "opened", Author: author, CreatedAt: recent}
+	mc.userBot[author.ID] = true
+
+	got, err := newWebhookPoller(mc).BuildWebhookEvents(context.Background(), issuePayload(t, "open", author.ID, 9, nil))
+	if err != nil {
+		t.Fatalf("BuildWebhookEvents: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("events = %+v, want no bot-authored issue opens", got)
+	}
 }
 
 func TestBuildWebhookEvents_MergeRequest(t *testing.T) {

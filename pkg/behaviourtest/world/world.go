@@ -116,6 +116,17 @@ type World struct {
 	// not listed in OWNERS. Nil when TEST_ACTOR_WRITE_PAT is not set.
 	WriteSCM   scm.Driver
 	WriteLogin string
+	// WriteToken is the write actor's PAT (TEST_ACTOR_WRITE_PAT). The
+	// CLI mint status steps hand it to the fullsend CLI as GH_TOKEN so
+	// the CLI's normal GitHub credential discovery picks it up. Empty
+	// when the PAT is not set. Shared across scenarios, never reset;
+	// never log it.
+	WriteToken string
+
+	// CLIBinary is the path of the fullsend CLI built for the suite.
+	// Steps that exercise the CLI as an operator would run it. Empty
+	// when the bootstrap did not build one.
+	CLIBinary string
 
 	// TriageSCM is an SCM driver authenticated as a GitHub User with
 	// triage-level access to the pool-org repos. Used by scenarios that
@@ -128,6 +139,14 @@ type World struct {
 	// repo-level kill switch. CleanupScenario uses this to deactivate
 	// the switch so the next scenario on this slot is not affected.
 	KillSwitchActivated bool
+
+	// KillSwitchBaseActivated records whether this scenario activated
+	// the kill switch via .fullsend/config.base.yaml (the central/base
+	// layer) rather than config.yaml. CleanupScenario uses this to
+	// deactivate it so the next scenario on this slot is not affected.
+	// Tracked separately from KillSwitchActivated because the two
+	// files are independent.
+	KillSwitchBaseActivated bool
 
 	// RuntimeOverridden records that this scenario changed the repo's
 	// `runtime:` in .fullsend/config.yaml; RuntimeOriginal is the value
@@ -227,6 +246,36 @@ type World struct {
 	// not probe the mint. CleanupScenario deletes the repositories it
 	// lists; the probe's shim branch is tracked in CreatedBranches.
 	MintProbe *MintProbe
+
+	// MintStatus holds the CLI mint status scenario state, set by the
+	// mint status steps (steps/mint_status.go). Nil when the scenario
+	// does not run `fullsend mint status`.
+	MintStatus *MintStatus
+}
+
+// MintStatus is the state of one CLI mint status scenario: the mint
+// address the operator knows, the credential the CLI was given, and
+// what the CLI reported. Output never holds a credential: it is
+// redacted before it is stored.
+type MintStatus struct {
+	// MintURL is the mint address passed as --mint-url.
+	MintURL string
+	// Credential names the credential the CLI ran with, as in step
+	// text (e.g. "write actor credential").
+	Credential string
+
+	// Ran records that the CLI was run.
+	Ran bool
+	// ExitCode is the CLI's exit code; -1 when it did not exit
+	// normally (e.g. killed on timeout).
+	ExitCode int
+	// TimedOut records that the CLI was killed at the step's deadline.
+	TimedOut bool
+	// Output is the CLI's combined stdout and stderr, redacted.
+	Output string
+	// CredentialInOutput records that the raw output contained the
+	// credential, before redaction.
+	CredentialInOutput bool
 }
 
 // MintProbe is the state of one mint-probe scenario: a reusable probe
