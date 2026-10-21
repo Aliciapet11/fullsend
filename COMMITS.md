@@ -66,10 +66,12 @@ Some type/scope pairs are **enforced as errors** by gitlint (rule `UC1`). These 
 
 Breaking changes **must** be marked in both commit messages and PR titles.
 GoReleaser builds release notes from the subject line of every commit in the
-release range (`use: github` in `.goreleaser.yml`), and a squash merge uses
-the PR title as that subject. A breaking commit whose subject lacks `!` is
-filed under Features, Bug Fixes, or Refactoring instead of **Breaking
-Changes**, so users reading the release notes get no warning. This has caused
+release range (`use: github` in `.goreleaser.yml`). PRs land through the merge
+queue as merge commits, whose `Merge pull request …` subjects are excluded, so
+the PR title does not appear in the release notes: each breaking commit's own
+subject must carry the `!`. A breaking commit whose subject lacks `!` is filed
+under Features, Bug Fixes, or Refactoring instead of **Breaking Changes**, so
+users reading the release notes get no warning. This has caused
 real incidents — users upgraded with no warning that their agents would stop
 working (#8366).
 
@@ -130,4 +132,4 @@ When reviewing PRs, check that commit messages and PR titles use the correct typ
   existing usage, the PR title and commit messages **must** carry the `!`
   suffix. Flag a missing `!` as an important-severity finding. Every commit
   subject matters because GoReleaser lists each one in the user-facing release
-  notes, and the PR title becomes the subject on a squash merge.
+  notes. The PR title is not one of them, because PRs land as merge commits.

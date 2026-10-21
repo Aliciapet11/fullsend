@@ -15,8 +15,8 @@ Fullsend is a platform for fully autonomous agentic development for Git-hosted o
 - When invoking the fullsend CLI from this checkout, **prefer** `go run ./cmd/fullsend …` from the repo root. Do **not** use a `fullsend` binary from mise, `$PATH`, `go install`, or another checkout — those often lag this tree. A stale CLI once rewrote hosted-mint `ALLOWED_ROLES` during enrollment (dropping `e2e`/`fix`) and broke e2e. Details: [Go Code](docs/contributing/go-code.md#running-the-fullsend-cli).
 - You **must** read and follow [COMMITS.md](COMMITS.md) when writing or
   reviewing commit messages and PR titles. Getting the prefix right is not
-  optional — GoReleaser uses commit subjects (the PR title on a squash merge)
-  to build release notes. Breaking changes **must** carry the `!` suffix in
+  optional — GoReleaser uses commit subjects, not PR titles, to build release
+  notes. Breaking changes **must** carry the `!` suffix in
   both commit messages and PR titles; a missing `!` is an important-severity
   review finding.
 - This repository requires a [Developer Certificate of Origin (DCO)](https://developercertificate.org/). Human-proposed commits **must** be signed off: use `git commit -s` (or add `Signed-off-by: Your Name <email>` as a trailer). Human-driven agent sessions (e.g., using Claude Code locally) should also sign off — the human directing the session is the one certifying the DCO. **Autonomous agent commits are exempt** and must never supply the DCO with `-s` or with `Signed-off-by`. These agents commit using the GitHub App's bot identity, which the [Probot DCO app](https://github.com/apps/dco) auto-skips.

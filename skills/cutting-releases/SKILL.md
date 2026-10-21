@@ -284,9 +284,8 @@ installs the binary as `fullsend-<tag>` so multiple versions can coexist.
   conventional commit format). GoReleaser uses `changelog.use: github` in
   `.goreleaser.yml`, which lists every commit in the release range, so
   individual commit subjects — not PR titles — are the source of release-note
-  entries. A PR title only appears when it becomes a commit subject through a
-  squash merge. Subjects with `!` are grouped first under **Breaking
-  Changes**.
+  entries. PRs land as merge commits, which are excluded, so PR titles never
+  appear. Subjects with `!` are grouped first under **Breaking Changes**.
 - **The `v0` tag** is a moving tag consumed by downstream orgs for reusable
   workflows. It is automatically moved by the release workflow after
   GoReleaser completes (skipped for pre-release tags).
