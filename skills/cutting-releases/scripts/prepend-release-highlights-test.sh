@@ -132,8 +132,10 @@ expect_reject "rejects standalone \$(...) line" "unexpanded shell expression"
 run_case $'**Feature** lands.\n  ${EXISTING_BODY}\n' "${OLD_BODY}"
 expect_reject "rejects standalone \${...} line" "unexpanded shell expression"
 
-run_case $'See below: $(cat /tmp/body.txt)\n' "${OLD_BODY}"
-expect_reject "rejects inline \$(cat ...)" "unexpanded shell expression"
+# A migration snippet with an inline $(cat ...) is legitimate (#8649 review).
+HL=$'**Token** handling changed:\n\n```bash\nGH_TOKEN=$(cat ~/.token) fullsend run\n```\n'
+run_case "${HL}" "${OLD_BODY}"
+expect_prepended "allows inline \$(cat file) in a code block" "${HL}"
 
 run_case $'**Feature** lands.\n\n<existing body>\n' "${OLD_BODY}"
 expect_reject "rejects old template placeholder" "template placeholder"

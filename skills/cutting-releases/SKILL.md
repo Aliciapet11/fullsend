@@ -257,9 +257,15 @@ summary highlighting the changes that matter most to end users.
    re-reads the notes just before and after that write; if they changed or
    do not match, it stops without overwriting anything and says which case it
    hit, so check the release by hand before re-running. It also rejects
-   placeholders such as a `$(cat ...)` line. Never
-   compose the body by hand with `gh release edit --notes`: v0.33.0 shipped a
-   literal `$(cat ...)` line in place of its changelog that way (#8366).
+   placeholders: a line that is only `$(...)` or `${...}`, or the template's
+   `<highlights>` or `<existing body>`. Never compose the body by hand with
+   `gh release edit --notes`: v0.33.0 shipped a literal `$(cat ...)` line in
+   place of its changelog that way (#8366).
+
+   If the script refuses highlights you believe are correct, stop and show
+   the user its error. The user can reword the highlights and you re-run the
+   script, or the user can paste them above the changelog in the GitHub web
+   UI's release editor, where no shell is involved.
 
 ### 12. Install the binary locally
 

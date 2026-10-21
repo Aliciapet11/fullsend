@@ -44,11 +44,13 @@ if ! grep -q '[^[:space:]]' "$HIGHLIGHTS"; then
 fi
 
 # Placeholders that mean the highlights were templated instead of written:
-# a line that is only a shell expansion (the v0.33.0 signature), any
-# `$(cat ...)`, or the old skill template's <existing body>/<highlights>.
-# Inline expansions in prose (e.g. `${OPENAI_API_KEY}` in v0.38.0) are fine.
+# a line that is only a shell expansion (the v0.33.0 signature) or the old
+# skill template's <existing body>/<highlights>. Inline expansions are fine,
+# in prose (e.g. `${OPENAI_API_KEY}` in v0.38.0) or in a migration snippet
+# like `GH_TOKEN=$(cat ~/.token)`: this script fetches the existing notes
+# itself, so a stray inline one cannot drop the changelog.
 # shellcheck disable=SC2016  # the pattern matches a literal, unexpanded $(
-placeholder='^[[:space:]]*\$(\(.*\)|\{.*\})[[:space:]]*$|\$\(cat[[:space:]]|<(existing body|highlights)>'
+placeholder='^[[:space:]]*\$(\(.*\)|\{.*\})[[:space:]]*$|<(existing body|highlights)>'
 if grep -Eq "$placeholder" "$HIGHLIGHTS"; then
   echo "ERROR: highlights contain an unexpanded shell expression or template placeholder" >&2
   exit 1
