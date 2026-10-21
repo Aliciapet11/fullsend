@@ -351,6 +351,9 @@ func (e *installEmulation) handle(w http.ResponseWriter, r *http.Request) bool {
 	case r.Method == http.MethodGet && (p == proj+"forks" || p == proj+"merge_requests" || p == proj+"hooks" ||
 		p == proj+"resource_groups" || p == proj+"protected_branches" || p == proj+"protected_tags"):
 		tahJSON(w, http.StatusOK, []any{})
+	case r.Method == http.MethodGet && p == proj+"push_rule":
+		// GitLab Free has no push rules; the install preflight skips the check.
+		tahJSON(w, http.StatusNotFound, map[string]any{"message": "404 Not Found"})
 	case r.Method == http.MethodPost && p == proj+"merge_requests":
 		tahJSON(w, http.StatusCreated, map[string]any{"iid": 1, "web_url": "https://gitlab.example.com/g/p/-/merge_requests/1"})
 	case r.Method == http.MethodPost && p == proj+"pipeline_schedules":

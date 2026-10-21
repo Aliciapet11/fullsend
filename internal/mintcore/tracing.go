@@ -202,6 +202,28 @@ func NewTracer(cfg TracingConfig) (*Tracer, error) {
 	return t, nil
 }
 
+// NewStampedTracer builds the tracer for a CLI-deployed serverless mint.
+// The endpoint and deployment identity are stamped into the build
+// artifact at deploy time; rawHeaders (OTEL_EXPORTER_OTLP_HEADERS syntax)
+// comes from the platform secret store. It returns (nil, nil) when
+// endpoint is empty. Export stays synchronous because serverless runtimes
+// cannot run work after the response is returned.
+func NewStampedTracer(backend, deployment, endpoint, rawHeaders string) (*Tracer, error) {
+	if strings.TrimSpace(endpoint) == "" {
+		return nil, nil
+	}
+	headers, err := ParseOTLPHeaders(rawHeaders)
+	if err != nil {
+		return nil, err
+	}
+	return NewTracer(TracingConfig{
+		Endpoint:   endpoint,
+		Headers:    headers,
+		Backend:    backend,
+		Deployment: deployment,
+	})
+}
+
 // ResolveOTLPTracesEndpoint applies the OpenTelemetry exporter precedence:
 // a signal-specific OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is used verbatim;
 // otherwise OTEL_EXPORTER_OTLP_ENDPOINT is used as a base URL with

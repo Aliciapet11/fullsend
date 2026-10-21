@@ -981,6 +981,10 @@ func TestDispatchPerStageAuthorization(t *testing.T) {
 				"human PR auto-fix requires write+ on the PR author")
 			assert.Regexp(t, `(?s)PR_USER_LOGIN.*\[bot\].*STAGE="fix".*fullsend-fix.*has_repo_permission "\$\{PR_USER_LOGIN\}" write`, s)
 
+			// Fix iteration count comes from the tested filter in .github/scripts,
+			// which trusts the Authored-by trailer only from the App bot.
+			assert.Contains(t, s, `jq -s --arg bot_email "${GIT_BOT_EMAIL}" -f .defaults/.github/scripts/count-fix-commits.jq`)
+
 			// ready-to-code is a mutation path: bot handoff OR write+ (default min)
 			assert.Regexp(t, `(?s)ready-to-code".*\\\[bot\\\]\$.*is_event_actor_authorized "\$\{EVENT_SENDER_LOGIN\}"`, s,
 				"ready-to-code must check bot bypass before write+ gate")
@@ -1183,9 +1187,6 @@ func TestDispatchPRHeadResolution(t *testing.T) {
 			assert.Contains(t, s, "id: pr-head",
 				"resolve step must have id: pr-head")
 
-			assert.Contains(t, s, `steps.pr-check.outputs.skipped != 'true'`,
-				"resolve step if: must include pr-check guard")
-
 			assert.Contains(t, s, `'.pull_request = $pr'`,
 				"must merge PR JSON into event_payload via jq")
 
@@ -1197,41 +1198,6 @@ func TestDispatchPRHeadResolution(t *testing.T) {
 
 			assert.Contains(t, s, "continuing without PR context",
 				"API failure for non-fix/review stages must warn and continue")
-		})
-	}
-}
-
-// TestDispatchPRCheckBotFilter validates that the existing-PR guard in both
-// dispatch workflows uses __typename + login for bot detection (not bare login
-// string comparison), and includes matched PR numbers in the skip notice (#5974).
-func TestDispatchPRCheckBotFilter(t *testing.T) {
-	type workflowCase struct {
-		name    string
-		content func(t *testing.T) []byte
-	}
-
-	cases := []workflowCase{
-		{
-			"reusable-dispatch.yml",
-			loadRepoFile(".github/workflows/reusable-dispatch.yml"),
-		},
-	}
-
-	for _, wc := range cases {
-		t.Run(wc.name, func(t *testing.T) {
-			s := string(wc.content(t))
-
-			assert.Contains(t, s, `author { login __typename }`,
-				"GraphQL query must request both login and __typename for bot detection")
-
-			assert.Contains(t, s, `select(.author.__typename != "Bot" or .author.login != "fullsend-ai-coder")`,
-				"bot filter must exclude only the code-agent bot via __typename + login — see docs/contributing/bot-identities.md")
-
-			assert.Contains(t, s, `map("#\(.number)") | join(", ")`,
-				"jq must format PR numbers as #N, #M — bare .[].number silently truncates multi-PR notices")
-
-			assert.Regexp(t, `::notice::.*\$\{LINKED_PRS\}`, s,
-				"skip notice must include the matched PR number(s)")
 		})
 	}
 }

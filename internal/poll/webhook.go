@@ -133,6 +133,9 @@ func (p *Poller) BuildWebhookEvents(ctx context.Context, raw []byte) ([]WebhookE
 	if err != nil {
 		return nil, err
 	}
+	if err := p.enrichIssueOpenBots(ctx, events); err != nil {
+		return nil, fmt.Errorf("check issue-open authors: %w", err)
+	}
 	events = p.filterBotEvents(events)
 
 	out := make([]WebhookEvent, 0, len(events))

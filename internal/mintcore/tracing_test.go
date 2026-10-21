@@ -624,6 +624,60 @@ func TestNewTracer_Validation(t *testing.T) {
 	}
 }
 
+func TestNewStampedTracer(t *testing.T) {
+	t.Run("empty endpoint disables tracing", func(t *testing.T) {
+		tr, err := NewStampedTracer(TraceBackendCloudflare, "w", " ", "Authorization=x")
+		if err != nil || tr != nil {
+			t.Fatalf("expected nil tracer and no error, got %v, %v", tr, err)
+		}
+	})
+	t.Run("invalid headers are rejected without leaking values", func(t *testing.T) {
+		_, err := NewStampedTracer(TraceBackendCloudflare, "w", "https://collector/v1/traces", "no-equals-"+testCollectorAuth)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if strings.Contains(err.Error(), testCollectorAuth) {
+			t.Fatalf("error leaks header material: %v", err)
+		}
+	})
+	t.Run("invalid endpoint is rejected", func(t *testing.T) {
+		if _, err := NewStampedTracer(TraceBackendCloudflare, "w", "ftp://collector", ""); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+	t.Run("exports synchronously with secret headers", func(t *testing.T) {
+		collector := newTestCollector(t, http.StatusOK, 0)
+		tr, err := NewStampedTracer(TraceBackendCloudflare, "bt-mint@bt-1234",
+			collector.server.URL+"/v1/traces", "Authorization=Bearer%20"+testCollectorAuth)
+		if err != nil || tr == nil {
+			t.Fatalf("NewStampedTracer: %v", err)
+		}
+		if tr.async {
+			t.Fatal("stamped tracer must export synchronously")
+		}
+		h := newTracedFullFlowHandler(t, tr)
+		if rec := serveToken(h, "", ""); rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		// Synchronous export: the spans have arrived when ServeHTTP returns.
+		if got := collector.requests(); got != 1 {
+			t.Fatalf("expected 1 export request, got %d", got)
+		}
+		if got := collector.headers[0].Get("Authorization"); got != "Bearer "+testCollectorAuth {
+			t.Fatal("collector auth header not sent")
+		}
+		raw := collector.raw[0]
+		for _, want := range []string{`"` + TraceBackendCloudflare + `"`, `"bt-mint@bt-1234"`} {
+			if !strings.Contains(raw, want) {
+				t.Errorf("export missing resource attribute value %s", want)
+			}
+		}
+		if strings.Contains(raw, testCollectorAuth) {
+			t.Fatal("exported spans contain the collector header value")
+		}
+	})
+}
+
 func TestResolveOTLPTracesEndpoint(t *testing.T) {
 	cases := []struct{ traces, base, want string }{
 		{"https://a/custom", "https://b", "https://a/custom"},

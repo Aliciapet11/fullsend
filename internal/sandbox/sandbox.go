@@ -581,7 +581,7 @@ func ImportProfileVerified(ctx context.Context, id, profilePath string) error {
 // credential keys. Credential keys become env vars in the openshell child
 // process; allowing security-sensitive names would let a URL-fetched provider
 // definition influence process loading or shell behavior.
-// NOTE: see also reservedSandboxKeys in internal/cli/run.go for the sandbox env blocklist.
+// NOTE: internal/cli's env.sandbox gate checks this list too (#3373).
 var reservedCredentialKeys = map[string]bool{
 	// Process loading / shell behavior
 	"PATH":            true,
@@ -627,6 +627,42 @@ var reservedCredentialKeys = map[string]bool{
 	"GIT_ASKPASS":       true,
 }
 
+// ReservedCredentialKeys returns the names reservedCredentialKeys refuses as
+// provider credential keys. Production code checks membership through
+// IsReservedCredentialKey; this accessor exists so tests in other packages
+// (internal/cli's env.sandbox gate tests) can enumerate the live list
+// instead of copying it.
+//
+// A name is on this list because letting harness-supplied configuration set it
+// in a child process could change process loading, shell behavior, TLS trust
+// or git behavior. The doors differ: a credential name reaches the host-side
+// `openshell provider` environment, while harness `env.sandbox` is exported
+// inside the sandbox. The exposure is the same once the name is in a child's
+// environment, so every name here is blocked on both sides — internal/cli's
+// env.sandbox gate checks it through IsReservedCredentialKey, so the two
+// cannot drift apart (#3373). Absence from this list is not a statement that
+// a name is safe — the plugin-env deny-list is deliberately broader, in the
+// direction reserved_env_drift_test.go pins: every credential name is also a
+// plugin-env name, not the converse. The cross-door invariant is pinned by
+// TestReservedSandboxKeys_CoversReservedCredentialKeys in internal/cli.
+//
+// The result is a fresh sorted slice, so callers cannot edit the blocklist
+// and subtests run in a stable order.
+func ReservedCredentialKeys() []string {
+	keys := make([]string, 0, len(reservedCredentialKeys))
+	for k := range reservedCredentialKeys {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// IsReservedCredentialKey reports, case-insensitively, whether name is
+// refused as a provider credential key.
+func IsReservedCredentialKey(name string) bool {
+	return reservedCredentialKeys[strings.ToUpper(name)]
+}
+
 // EnsureProvider creates or updates a provider on the gateway. Credential
 // values may contain ${VAR} references which are expanded from the host
 // environment before being passed to openshell.
@@ -645,7 +681,7 @@ var reservedCredentialKeys = map[string]bool{
 func EnsureProvider(ctx context.Context, name, providerType string, credentials, config map[string]string, fromURL bool) error {
 	if fromURL {
 		for k := range credentials {
-			if reservedCredentialKeys[strings.ToUpper(k)] {
+			if IsReservedCredentialKey(k) {
 				return fmt.Errorf("provider %q: credential key %q is a reserved environment variable name", name, k)
 			}
 		}
@@ -665,7 +701,7 @@ func EnsureProvider(ctx context.Context, name, providerType string, credentials,
 // form in the child process environment, never on the command line.
 func EnsureProviderLiteral(ctx context.Context, name, providerType string, credentials map[string]string) error {
 	for k := range credentials {
-		if reservedCredentialKeys[strings.ToUpper(k)] {
+		if IsReservedCredentialKey(k) {
 			return fmt.Errorf("provider %q: credential key %q is a reserved environment variable name", name, k)
 		}
 	}

@@ -228,7 +228,9 @@ call `mintHTTP` include:
 - `github.go` — GitHub App installation token creation
 - `jwks_verifier.go` — JWKS key fetching
 - `sts_verifier.go` — GCP STS token exchange
-- `gcp_pem.go` — GCP Secret Manager access
+- `gcp_pem.go` — GCP Secret Manager access (`AccessGCPSecret` is the
+  one exception to request-time calls: the native-only GCF load site
+  calls it once in `init()` to read the collector headers)
 - `tracing.go` — OTLP span export (end of request, bounded timeout)
 
 This is intentional: on WASM, the JS event loop must be free for
@@ -300,8 +302,24 @@ through `mintHTTP`, so it works unchanged on every target.
   the endpoint is empty, and a nil tracer is a no-op. `cmd/mint` reads
   `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`
   (resolved with `ResolveOTLPTracesEndpoint`) and collector headers from
-  `MINT_OTLP_HEADERS_FILE` (parsed with `ParseOTLPHeaders`). The GCF and
-  Worker load sites do not configure a tracer yet.
+  `MINT_OTLP_HEADERS_FILE` (parsed with `ParseOTLPHeaders`).
+  `cmd/mint-wasm` calls `NewStampedTracer` with the endpoint and
+  deployment stamped into `main.otlpTracesEndpoint` /
+  `main.traceDeployment` via `-ldflags` (`traceLDFlags` in
+  `internal/dispatch/cf`) and the Worker secret named by
+  `main.otlpHeadersSecret` (default `MINT_OTLP_HEADERS`; durable deploys
+  stamp a unique per-deploy name), read through the getEnv callback. A bad configuration is logged and leaves
+  tracing off rather than failing `mintcoreInitMint`. Header values are
+  never stamped. The GCF load site (`internal/mint`) calls
+  `NewStampedTracer` from `buildTracer` with the endpoint and deployment
+  stamped into `trace_consts.go` (`writeTraceConstsGoToZip` in
+  `internal/dispatch/gcf`). When `otlpHeadersSecret` is stamped, it reads
+  the collector headers once in `init()` from that Secret Manager secret
+  (`fullsend-mint-otlp-headers-<random>`, a new ID per deploy so a
+  revision's endpoint and headers can never be mismatched) through
+  `AccessGCPSecret`, with a 5s
+  timeout. An unreadable secret or a bad configuration is logged and
+  leaves tracing off; it never fails `init()`.
 - **Adding spans:** call `startSpan(ctx, name, stage)` and use the
   returned context for downstream calls. Call `recordError(err)` and then
   `end()`. Spans are nil-safe, so call sites need no enabled checks. The
@@ -321,8 +339,15 @@ through `mintHTTP`, so it works unchanged on every target.
   the server stops to drain it. Never let an export error affect the
   response.
 - **No redirects:** export marks its request with `withNoRedirect`. The
-  native `mintHTTP` honors it; the `js` `mintHTTP` refuses such requests
-  because the host fetch bridge cannot disable redirects.
+  native `mintHTTP` honors it. The `js` `mintHTTP` passes it as the fifth
+  `noRedirect` argument of the host fetch callback, and the Worker
+  adapter then fetches with `redirect: "manual"`.
+- **Bounded fetch:** for `noRedirect` requests, the `js` `mintHTTP` also
+  passes the remaining context deadline as a sixth `timeoutMs` argument.
+  The Worker adapter aborts the underlying fetch at that deadline (never
+  later than its 20 s host-fetch budget), so a stalled collector cannot
+  keep fetches and payloads alive after the exporter releases its export
+  slot. The adapter discards the collector's response body unread.
 
 ## Embed sync and `make wasm-build`
 
@@ -358,14 +383,21 @@ provisioner writes `mintcore/version.go` into the function source zip
 at bundle time (`writeVersionGoToZip` in
 `internal/dispatch/gcf/provisioner.go`) with version and commit values
 baked in. The same technique stamps GitHub status-auth config into
-`mintcore/status_consts.go`. On-disk copies of these generated files
-are skipped during bundling so stale source cannot overwrite the
-stamped values.
+`mintcore/status_consts.go`, and the tracing endpoint, deployment
+identity and headers secret ID into the function package's
+`trace_consts.go` (`internal/mint/trace_consts.go` on disk, embedded as
+`mintsrc/trace_consts.go.embed`, with tracing disabled). On-disk copies
+of these generated files are skipped during bundling so stale source
+cannot overwrite the stamped values. Collector header values are never
+stamped: they live in Secret Manager.
 
 The Cloudflare Worker follows the same principle: `wasmLDFlags` in
 `internal/dispatch/cf/provisioner.go` stamps `mintcore.Version`,
 `mintcore.Commit`, and status-auth config into the WASM binary via
 `-ldflags` at compile time rather than injecting runtime env vars.
+`traceLDFlags` adds the tracing endpoint and deployment identity the same
+way. A traces endpoint always forces a rebuild of a pre-staged
+`mintcore.wasm`, because a staged binary does not carry the stamp.
 
 This keeps metadata in lockstep with the deployed code. Follow this
 pattern for any future build metadata the function needs — never use
