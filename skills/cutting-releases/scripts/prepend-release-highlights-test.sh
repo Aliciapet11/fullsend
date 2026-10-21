@@ -19,6 +19,9 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 #   MOCK_MANGLE_FIRST  when set, the first edit stores an altered body
 #   MOCK_EDIT_FAIL     when set, edits fail without storing anything
 #   MOCK_EDIT_LATE_FAIL when set, edits store the body and then fail
+#   MOCK_CHANGE_ON_VIEW N: before read N, another editor stores MOCK_OTHER_BODY
+#   MOCK_VIEW_FAIL_ON  N: read N fails
+# Reads by the script: 1 = initial, 2 = just before the edit, 3 = after it.
 MOCK_BIN="${TMPDIR}/bin"
 mkdir -p "${MOCK_BIN}"
 cat > "${MOCK_BIN}/gh" <<'MOCKEOF'
@@ -26,6 +29,12 @@ cat > "${MOCK_BIN}/gh" <<'MOCKEOF'
 echo "$*" >> "${MOCK_STATE}/calls.log"
 case "$*" in
   "release view v9.9.9 --repo fullsend-ai/fullsend --json body --template {{.body}}")
+    views=$(( $(cat "${MOCK_STATE}/views" 2>/dev/null || echo 0) + 1 ))
+    echo "${views}" > "${MOCK_STATE}/views"
+    if [[ "${views}" == "${MOCK_CHANGE_ON_VIEW:-}" ]]; then
+      printf '%s' "${MOCK_OTHER_BODY}" > "${MOCK_STATE}/body"
+    fi
+    [[ "${views}" != "${MOCK_VIEW_FAIL_ON:-}" ]] || { echo "gh: HTTP 502" >&2; exit 1; }
     cat "${MOCK_STATE}/body"
     ;;
   "release edit v9.9.9 --repo fullsend-ai/fullsend --notes-file "*)
@@ -68,6 +77,13 @@ run_case() {
   ) || EXIT=$?
 }
 
+# writes prints how many `gh release edit` calls the script made.
+writes() {
+  local n
+  n=$(grep -c '^release edit' "${STATE}/calls.log") || true
+  echo "${n:-0}"
+}
+
 # body_is succeeds when the stored body equals $1 byte for byte.
 body_is() {
   [[ "$(cat "${STATE}/body"; printf x)" == "$1x" ]]
@@ -91,10 +107,12 @@ expect_reject() {
   fi
 }
 
-# expect_prepended asserts success with highlights, rule, then the old body.
+# expect_prepended asserts success with highlights, rule, then the old body,
+# written in exactly one edit.
 expect_prepended() {
   local name="$1" highlights="$2"
-  if [[ "${EXIT}" -eq 0 ]] && body_is "${highlights}"$'\n\n---\n\n'"${OLD_BODY}"; then
+  if [[ "${EXIT}" -eq 0 && "$(writes)" -eq 1 ]] \
+    && body_is "${highlights}"$'\n\n---\n\n'"${OLD_BODY}"; then
     echo "PASS: ${name}"
   else
     fail "${name}"
@@ -163,21 +181,48 @@ expect_reject "refuses empty highlights" "empty or blank"
 run_case $'\n  \n\t\n' "${OLD_BODY}"
 expect_reject "refuses whitespace-only highlights" "empty or blank"
 
-# Stored body differs from what was sent: restore the original exactly.
-run_case $'Highlights\n' "${OLD_BODY}" MOCK_MANGLE_FIRST=1
-if [[ "${EXIT}" -ne 0 && "${OUTPUT}" == *"restoring the original"* ]] && body_is "${OLD_BODY}"; then
-  echo "PASS: restores original exactly when verification fails"
+# Another editor changes the notes after the first read: no write at all.
+OTHER=$'## Changelog\n* zzz: fix: someone else (@c)\n'
+run_case $'Highlights\n' "${OLD_BODY}" MOCK_CHANGE_ON_VIEW=2 MOCK_OTHER_BODY="${OTHER}"
+if [[ "${EXIT}" -ne 0 && "${OUTPUT}" == *"nothing edited"* && "$(writes)" -eq 0 ]] \
+  && body_is "${OTHER}"; then
+  echo "PASS: change before the edit stops with no write"
 else
-  fail "restores original exactly when verification fails"
+  fail "change before the edit stops with no write"
 fi
 
-# Edit fails without applying: script fails and the body is unchanged.
+# Stored body differs after the edit: report, never overwrite, keep copies.
+run_case $'Highlights\n' "${OLD_BODY}" MOCK_MANGLE_FIRST=1
+kept=$(sed -n 's/^Copies kept in \([^:]*\):.*/\1/p' <<< "${OUTPUT}")
+if [[ "${EXIT}" -ne 0 && "${OUTPUT}" == *"nothing overwritten"* && "$(writes)" -eq 1 ]] \
+  && [[ "$(cat "${STATE}/body")" == *mangled ]] \
+  && [[ -n "${kept}" && -f "${kept}/old.md" && -f "${kept}/new.md" && -f "${kept}/after.md" ]]; then
+  echo "PASS: mismatch after the edit keeps the other text and the copies"
+else
+  fail "mismatch after the edit keeps the other text and the copies"
+fi
+[[ -z "${kept}" ]] || rm -rf "${kept}"
+
+# Edit fails without applying: reported, body unchanged, no second write.
 run_case $'Highlights\n' "${OLD_BODY}" MOCK_EDIT_FAIL=1
-if [[ "${EXIT}" -ne 0 ]] && body_is "${OLD_BODY}"; then
+if [[ "${EXIT}" -ne 0 && "${OUTPUT}" == *"did not apply"* && "$(writes)" -eq 1 ]] \
+  && body_is "${OLD_BODY}"; then
   echo "PASS: failed edit leaves body unchanged"
 else
   fail "failed edit leaves body unchanged"
 fi
+
+# Re-read after the edit fails: no further write, copies kept.
+HL=$'Highlights\n'
+run_case "${HL}" "${OLD_BODY}" MOCK_VIEW_FAIL_ON=3
+kept=$(sed -n 's/^Copies kept in \([^:]*\):.*/\1/p' <<< "${OUTPUT}")
+if [[ "${EXIT}" -ne 0 && "${OUTPUT}" == *"could not re-read"* && "$(writes)" -eq 1 && -n "${kept}" ]] \
+  && body_is "${HL}"$'\n\n---\n\n'"${OLD_BODY}"; then
+  echo "PASS: failed re-read stops with no further write"
+else
+  fail "failed re-read stops with no further write"
+fi
+[[ -z "${kept}" ]] || rm -rf "${kept}"
 
 # Edit applied but gh reported an error: the result is still verified.
 HL=$'Highlights\n'

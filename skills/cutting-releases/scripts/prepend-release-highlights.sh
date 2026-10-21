@@ -13,9 +13,9 @@
 # The script fetches the existing notes itself, and they move between gh and
 # disk through files only. v0.33.0 shipped a literal
 # `$(cat /tmp/release-body-existing.txt)` in place of its changelog because
-# the notes were pasted into a quoted heredoc by hand (#8366). After the edit
-# the notes are re-read and must match byte for byte; otherwise the original
-# notes are restored and the script fails.
+# the notes were pasted into a quoted heredoc by hand (#8366). The script
+# writes at most once: it re-reads the notes just before the edit and after
+# it, and on any mismatch it reports and stops instead of overwriting.
 set -euo pipefail
 
 usage="Usage: prepend-release-highlights.sh <tag> <<'HIGHLIGHTS_EOF' ... HIGHLIGHTS_EOF"
@@ -88,19 +88,42 @@ fi
   cat "$WORKDIR/old.md"
 } > "$WORKDIR/new.md"
 
+# The edit below is the script's only write. GitHub has no conditional
+# release update, so re-read just before writing to keep the window in which
+# another editor's change could be overwritten as small as possible.
+fetch_body "$WORKDIR/pre.md"
+if ! cmp -s "$WORKDIR/old.md" "$WORKDIR/pre.md"; then
+  echo "ERROR: release $TAG notes changed while the highlights were prepared; nothing edited, re-run" >&2
+  exit 1
+fi
+
+# keep_files leaves the copies on disk for manual review after a failed check.
+keep_files() {
+  trap - EXIT
+  echo "Copies kept in $WORKDIR: old.md (before), new.md (sent), after.md (now)" >&2
+}
+
 # An edit can fail after GitHub applied it (e.g. a timeout), so a failure
 # falls through to the check below instead of exiting unverified.
 if ! gh release edit "$TAG" --repo fullsend-ai/fullsend --notes-file "$WORKDIR/new.md" > /dev/null; then
   echo "WARNING: gh release edit failed; checking what the release now holds" >&2
 fi
 
-if ! fetch_body "$WORKDIR/after.md" || ! cmp -s "$WORKDIR/new.md" "$WORKDIR/after.md"; then
-  echo "ERROR: release $TAG notes do not match what was sent; restoring the original" >&2
-  if ! gh release edit "$TAG" --repo fullsend-ai/fullsend --notes-file "$WORKDIR/old.md" > /dev/null; then
-    trap - EXIT
-    echo "ERROR: restore failed; original notes saved at $WORKDIR/old.md" >&2
-  fi
+# Never write again from here: a mismatch most likely means someone else
+# edited the notes, and their change must not be overwritten.
+if ! fetch_body "$WORKDIR/after.md"; then
+  echo "ERROR: could not re-read release $TAG notes; check them by hand" >&2
+  keep_files
   exit 1
 fi
-
-echo "Prepended highlights to release $TAG"
+if cmp -s "$WORKDIR/new.md" "$WORKDIR/after.md"; then
+  echo "Prepended highlights to release $TAG"
+  exit 0
+fi
+if cmp -s "$WORKDIR/old.md" "$WORKDIR/after.md"; then
+  echo "ERROR: the edit did not apply; release $TAG notes are unchanged" >&2
+  exit 1
+fi
+echo "ERROR: release $TAG notes differ from what was sent (edited by someone else?); nothing overwritten, review them by hand" >&2
+keep_files
+exit 1

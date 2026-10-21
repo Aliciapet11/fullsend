@@ -253,9 +253,11 @@ summary highlighting the changes that matter most to end users.
    Pass the highlights only, never the existing body or a command that
    produces it. Keep the quotes around `'HIGHLIGHTS_EOF'` so the shell expands
    nothing. The script fetches the current body itself, prepends the
-   highlights and a horizontal rule (`---`), and re-reads the release to
-   confirm it matches. If it does not, the script restores the original body
-   and fails. It also rejects placeholders such as a `$(cat ...)` line. Never
+   highlights and a horizontal rule (`---`), and writes the release once. It
+   re-reads the notes just before and after that write; if they changed or
+   do not match, it stops without overwriting anything and says which case it
+   hit, so check the release by hand before re-running. It also rejects
+   placeholders such as a `$(cat ...)` line. Never
    compose the body by hand with `gh release edit --notes`: v0.33.0 shipped a
    literal `$(cat ...)` line in place of its changelog that way (#8366).
 
