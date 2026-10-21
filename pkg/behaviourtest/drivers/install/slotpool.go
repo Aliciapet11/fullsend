@@ -613,7 +613,15 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 			return Slot{}, nil, fmt.Errorf("claiming pool slot %s: %w", slot, ctx.Err())
 		case timedOut:
 			// The create may have landed before the deadline cut it off.
+			// The org is slow or throttling whatever the lookup finds,
+			// adoption included.
 			l, own, ownErr := a.findOwn(ctx, client, slot, nonces)
+			until := a.blockOrg(slot.Org, client, err)
+			if ownErr != nil && isBackoffError(ownErr) {
+				// Honour a rate-limit deadline the lookup observed too;
+				// the longer window wins.
+				until = a.blockOrg(slot.Org, client, ownErr)
+			}
 			switch own {
 			case ownMine:
 				l.orgLock = membership
@@ -631,12 +639,6 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 				// The create may still land after this lookup.
 				a.addPending(slot, desc)
 			}
-			if ownErr != nil && isBackoffError(ownErr) {
-				// Honour a rate-limit deadline the lookup observed too;
-				// the longer window wins.
-				a.blockOrg(slot.Org, client, ownErr)
-			}
-			until := a.blockOrg(slot.Org, client, err)
 			a.logf("[slots] creating %s did not finish within %v, backing off %s until %s: %v",
 				slot, claimCreateTimeout, slot.Org, until.UTC().Format(time.RFC3339), err)
 			capErr.RateLimited[slot.Org] = until

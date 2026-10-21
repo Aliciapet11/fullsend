@@ -332,3 +332,70 @@ func TestSlotAllocator_LiveClientUnprocessableAfterLandedCreate(t *testing.T) {
 	a.mu.Unlock()
 	assert.Equal(t, int64(42), l.repoID)
 }
+
+// TestSlotAllocator_LiveClientCreateDeadlineCutsRateLimitWait covers a 502
+// that hid a landed create followed by a secondary-limit 403 whose
+// Retry-After wait outlasts the create deadline: the repo is adopted and
+// the org stays blocked until the server's deadline.
+func TestSlotAllocator_LiveClientCreateDeadlineCutsRateLimitWait(t *testing.T) {
+	shortCreateTimeout(t, 200*time.Millisecond)
+	var (
+		mu      sync.Mutex
+		created string
+		posts   atomic.Int32
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/orgs/halfsend/repos":
+			_, _ = w.Write([]byte("[]"))
+		case r.Method == http.MethodPost && r.URL.Path == "/orgs/halfsend/repos":
+			if posts.Add(1) == 1 {
+				var body struct {
+					Description string `json:"description"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				mu.Lock()
+				created = body.Description
+				mu.Unlock()
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/halfsend/test-repo-01":
+			mu.Lock()
+			desc := created
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": 42, "name": "test-repo-01", "full_name": "halfsend/test-repo-01", "description": desc,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// The 5xx backoff fires at once; the Retry-After wait never does, so
+	// the create deadline cuts it off.
+	client := gh.New("test-token").WithBaseURL(srv.URL).WithAfterFunc(func(d time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		if d < time.Minute {
+			ch <- time.Now()
+		}
+		return ch
+	})
+	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
+	require.NoError(t, err)
+	a.orgLock = nil
+	a.gc = nil
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return now }
+
+	_, _, err = a.Claim(context.Background())
+	require.NoError(t, err, "the repo the first attempt created is adopted")
+	assert.Equal(t, int32(2), posts.Load())
+	until, blocked := a.orgBlockedUntil("halfsend")
+	require.True(t, blocked, "the rate limit backs the org off despite the adoption")
+	assert.Equal(t, now.Add(120*time.Second), until)
+}
