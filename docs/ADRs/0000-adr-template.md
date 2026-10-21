@@ -27,8 +27,10 @@ Date: YYYY-MM-DD
 What is the issue that we're seeing that motivates this decision or change?
 
 _When describing how fullsend works today, cite the implementing file or
-function on `main` (e.g., `internal/cli/repos.go`) and confirm the description
-matches the code._
+function at a specific commit SHA, not just `main`, which changes over time
+(e.g., `internal/cli/repos.go` at `<SHA>`, or a permalink such as
+`https://github.com/fullsend-ai/fullsend/blob/<SHA>/internal/cli/repos.go`).
+Confirm the description matches the code at that SHA._
 
 ## Options
 
