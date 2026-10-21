@@ -635,15 +635,18 @@ that covered only the first.
 
 **Custom-port CE qualification.** The CE fixture served GitLab on an HTTPS
 port other than 443. The stock agents GitLab triage helper rejected that URL,
-so the CE triage runs used an isolated, unpushed agents patch
-(`371fdf36cef0`). The patch accepts an optional HTTPS port and sends API calls
+so the CE triage runs used an isolated agents patch (`371fdf36cef0`, never
+pushed). The gap is tracked in
+[fullsend-ai/agents#1732](https://github.com/fullsend-ai/agents/issues/1732).
+The patch accepts an optional HTTPS port and sends API calls
 to `CI_SERVER_URL`. The CE runs therefore verify the Fullsend install,
 webhook, polling, rotation, and cleanup paths on CE with that patch. They do
 not verify stock agents on a custom-port CE instance. The port fix has since
 merged in
 [fullsend-ai/agents#1733](https://github.com/fullsend-ai/agents/pull/1733),
 but no CE issue-open or natural scheduled-polling retest with stock agents is
-recorded yet. Until that retest passes, the
+recorded yet. The qualification lifts once that retest passes with stock
+agents main. Until then, the
 [#8245](https://github.com/fullsend-ai/fullsend/issues/8245) live-validation
 gate stays open.
 
