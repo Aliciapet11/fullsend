@@ -68,17 +68,32 @@ or one entity eligibility check and at most one sandbox run in `run`, then
 exits. The **poll** lifecycle repeats checks and waits for work; a bound `run`
 exits after a finite platform-configured idle period, while `fullsend poll` may
 remain resident until stopped. The **timed** lifecycle also repeats checks but
-has a hard deadline; a bound `run` still exits on idle. The deadline bounds
-elapsed time, not a numeric cycle count.
+has a hard deadline; a bound `run` still exits on idle. Its effective deadline
+is the earlier of its configured or derived timed deadline and any known outer
+platform deadline. At command entry, the time remaining MUST accommodate at
+least one complete initial cycle: one discovery and dispatch pass for `poll`,
+or an entity check and, when selected, one full sandbox cycle for a bound
+`run`. Size the reserve for a bound `run` to include current-entity
+acquisition, authorization, CEL evaluation, context staging, scripts, the
+configured sandbox timeout, cleanup, and final result publication; account
+for platform startup in either lifecycle. The first pass or check is due
+immediately, so a timer or shared-cache record cannot consume the reserve by
+postponing it. The deadline bounds elapsed time, not a numeric cycle count.
+
+An explicit timed selection with too little first-cycle budget fails visibly
+before processing an initial event or claiming that work was deferred. The
+automatic CI default does not select timed in that case. If the reserved first
+cycle unexpectedly cannot complete a supplied initial event, the call fails
+and identifies that event as incomplete, not as a protected continuation.
 
 For a bound `run`, idle time starts at command entry or after a sandbox cycle
 ends. False checks, no-op wakeups, and pre-script skips do not reset it. The
-idle window for an entity-source harness MUST cover at least one due check
-after a sandbox, including any shared-cache delay, unless the hard deadline
-or provider backoff intervenes. A timed run starts no sandbox unless its
-remaining budget can accommodate expected execution and teardown; otherwise
-it records a deferral
-for the recovery paths below.
+idle window for an entity-source harness MUST allow the immediate entry check
+and at least one due check after a sandbox, including any shared-cache delay,
+unless the hard deadline or provider backoff intervenes. After its reserved
+first cycle, a timed run starts another sandbox only if its remaining budget can
+accommodate expected execution, teardown, and final reporting; otherwise it
+records a deferral for the recovery paths below.
 
 Resident checks use rate-limit-aware intervals that may favor entities which
 change more often, while retaining periodic reconciliation after missed
@@ -91,9 +106,10 @@ platform executions before checking that entity.
 
 Resident timers MAY share a bounded-TTL cache of due-check records scoped by
 harness identity and revision, repository, canonical entity, and effective
-policy revision. A hit defers another read of that known entity until expiry,
-accepting bounded reconciliation latency to reduce API usage. `poll` still
-enumerates new candidates on its separate rate-aware discovery cadence.
+policy revision. A hit on a later scheduled check defers another read of that
+known entity until expiry, accepting bounded reconciliation latency to reduce
+API usage. `poll` still enumerates new candidates on its separate rate-aware
+discovery cadence.
 Compatible provider reads may be shared, but cached entity or authorization
 data cannot substitute for a due check. An accepted event or eventless wake
 invalidates the affected record and makes a check due. Completion of an
@@ -120,12 +136,12 @@ An explicit lifecycle choice takes precedence for `poll` and bound `run`,
 subject to eligibility.
 `fullsend poll` defaults to once in every environment, preserving external
 cron and CronJob use. A bound `run` defaults to once outside CI. In CI it
-defaults to timed only with a usable job deadline, valid entity sources, and
-effective policy permitting eventless evaluation, plus a recurring
-repository-scoped `fullsend poll` discovery path covering those sources;
-otherwise it defaults to once. An explicitly selected resident bound lifecycle
-that performs
-eventless timer checks requires the same coverage and fails closed without it.
+defaults to timed only when a usable job deadline meets the first-cycle
+reserve above, entity sources are valid, effective policy permits eventless
+evaluation, and a recurring repository-scoped `fullsend poll` discovery path
+covers those sources; otherwise it defaults to once. An explicitly selected
+resident bound lifecycle that performs eventless timer checks requires the
+same coverage and fails closed without it.
 Coverage means a configured recurring invocation or resident discovery cycle
 that can eventually re-enumerate each eligible entity after a bound run exits.
 Event-only harnesses may instead remain resident for verified event-bearing
@@ -252,7 +268,10 @@ continuation. It distinguishes event-backed work protected by an ADR 0106
 pending execution from timer-discovered work awaiting `fullsend poll`
 rediscovery; the latter has no direct platform handoff. Accepted work that
 cannot run before exit does not erase the latest completed cycle's result, but
-the metadata cannot claim the entity is caught up. Chained workflows that
+the metadata cannot claim the entity is caught up. If the reserved first cycle
+fails before completing a supplied initial event, final metadata, when
+writable, identifies the incomplete event and failed call rather than
+classifying it as pending execution or poll rediscovery. Chained workflows that
 discover the artifact and validate its final output can retain that path, but
 must check the latest validation status before acting: a successful
 `workflow_run` conclusion alone can describe a skipped cycle.
