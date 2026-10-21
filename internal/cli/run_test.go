@@ -8212,7 +8212,17 @@ func TestRunAgent_CancelledReviewFinalizesBeforeSandboxTeardown(t *testing.T) {
 	t.Cleanup(func() {
 		statusMintToken, statusNewForgeClientFn = origMint, origNewClient
 	})
-	statusMintToken = func(context.Context, mintclient.MintRequest) (*mintclient.MintResult, error) {
+	var mintCalls atomic.Int32
+	statusMintToken = func(ctx context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		if mintCalls.Add(1) == 3 {
+			// The start-comment and agent-token mints are first; delay only
+			// finalizer minting beyond the HEAD budget but within its deadline.
+			select {
+			case <-time.After(2100 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		return &mintclient.MintResult{Token: "ghs_test_token"}, nil
 	}
 	fc := forge.NewFakeClient()
@@ -8271,6 +8281,84 @@ func TestRunAgent_CancelledReviewFinalizesBeforeSandboxTeardown(t *testing.T) {
 	}
 	assert.True(t, completedBeforeTeardown, "cancelled status must be terminal before sandbox cleanup starts")
 	assert.Len(t, fc.UpdatedComments, 1, "cancelled status must be finalized exactly once")
+	assert.Contains(t, fc.UpdatedComments[0].Body, "superseded by a newer commit")
+	assert.NotContains(t, fc.UpdatedComments[0].Body, "/fs-review")
+}
+
+func TestRunAgent_CancelledReviewLeavesCommentPendingWhenHeadLookupFails(t *testing.T) {
+	useFakeOpenshellProviders(t)
+	dir := t.TempDir()
+	for path, content := range map[string]string{
+		"agents/review.md":                "You are a review agent.",
+		"harness/review.yaml":             "agent: agents/review.md\nrole: review\npolicy: policies/base.yaml\n",
+		"policies/base.yaml":              "version: 1\n",
+		"config.yaml":                     "agents:\n  - harness/review.yaml\n",
+		"behaviour/current-scenario.yaml": "ops:\n  - op: read_file\n    args: agent-run-marker\n  - op: wait\n    args: '1200'\n",
+	} {
+		file := filepath.Join(dir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+		require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+	}
+
+	origMint, origNewClient := statusMintToken, statusNewForgeClientFn
+	t.Cleanup(func() {
+		statusMintToken, statusNewForgeClientFn = origMint, origNewClient
+	})
+	statusMintToken = func(context.Context, mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return &mintclient.MintResult{Token: "ghs_test_token"}, nil
+	}
+	fc := forge.NewFakeClient()
+	fc.Errors["GetPullRequestHeadSHA"] = fmt.Errorf("lookup failed")
+	statusNewForgeClientFn = func(string) forge.Client { return fc }
+
+	t.Setenv("FULLSEND_RUNTIME", "dummy")
+	t.Setenv("GITHUB_RUN_ID", "run-42")
+	t.Setenv("PR_HEAD_SHA", "cancelled-head")
+	t.Setenv("PUSH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN_SOURCE", "")
+	agentExecMarker := filepath.Join(t.TempDir(), "agent-exec")
+	t.Setenv("FULLSEND_TEST_AGENT_EXEC_MARKER", agentExecMarker)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	repoDir := t.TempDir()
+	go func() {
+		done <- runAgent(ctx, "review", dir, "", repoDir, "", nil, false, "", "github", "", resolveFlags{maxDepth: 10, maxResources: 50}, statusOpts{
+			statusRepo:    "org/my-repo",
+			statusNum:     42,
+			mintURL:       "https://mint.example.com",
+			trackerSource: "github",
+		}, ui.New(io.Discard), false, runOverrideFlags{})
+	}()
+	deadline := time.After(15 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(agentExecMarker); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("run stopped before agent execution: %v", err)
+		case <-deadline:
+			cancel()
+			t.Fatal("agent did not reach its first behavior operation")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("cancelled agent did not exit")
+	}
+
+	comments := fc.IssueComments["org/my-repo/42"]
+	require.Len(t, comments, 1, "failed head lookup should leave the existing status comment for always() reconciliation")
+	assert.Contains(t, comments[0].Body, "fullsend:agent-status:run-42")
+	assert.NotContains(t, comments[0].Body, "fullsend:status:terminal")
+	assert.Empty(t, fc.UpdatedComments, "failed head lookup must not terminalize the comment without guidance")
 }
 
 func TestBackendFromConfigFile_MissingUsesDefault(t *testing.T) {

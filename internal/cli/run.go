@@ -1368,25 +1368,34 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 				dCtx, dCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizeTimeout)
 				defer dCancel()
 				if status == "cancelled" && builtInGitHubReview(agentName, forgePlatform, sOpts.trackerSource) {
-					headCtx, headCancel := context.WithTimeout(dCtx, 2*time.Second)
 					parts := strings.SplitN(sOpts.statusRepo, "/", 2)
-					client, err := newStatusGitHubForgeClient(headCtx, sOpts.mintURL, h.Role, parts[1])
+					client, err := newStatusGitHubForgeClient(dCtx, sOpts.mintURL, h.Role, parts[1])
 					if err == nil {
 						// Reuse this freshly minted write client for completion so
 						// cancellation cleanup does not spend time on a second mint.
 						notifier.SetClientFactory(func(context.Context) (tracker.Client, error) {
 							return tracker.NewForgeClient(client), nil
 						})
+						// Minting exchanges the OIDC token and can take longer than
+						// the short HEAD lookup window. Start that window only after
+						// the client is ready so mint latency cannot consume it.
+						headCtx, headCancel := context.WithTimeout(dCtx, 2*time.Second)
 						var guidance string
 						guidance, err = resolveBuiltInGitHubReviewCancellationGuidance(
 							headCtx, client, agentName, forgePlatform, sOpts.trackerSource,
 							sOpts.statusRepo, sOpts.statusNum, reviewedPRHeadSHA(),
 						)
-						notifier.SetCancellationGuidance(guidance)
+						headCancel()
+						if err == nil {
+							notifier.SetCancellationGuidance(guidance)
+						}
 					}
-					headCancel()
 					if err != nil {
-						printer.StepWarn("Could not determine whether cancelled review was superseded; omitting retry guidance: " + err.Error())
+						printer.StepWarn("Could not determine whether cancelled review was superseded; leaving the status comment for always() reconciliation to retry: " + err.Error())
+						// Do not terminalize the comment without verified guidance.
+						// The action's always() reconciliation gets a fresh mint and
+						// context, and can retry before finalizing the orphaned comment.
+						return
 					}
 				}
 				if err := notifier.PostCompletionWithDetail(dCtx, description, status, detail); err != nil {
