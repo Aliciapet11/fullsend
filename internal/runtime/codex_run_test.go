@@ -22,7 +22,7 @@ var testRunnerHeldDigests = codexRunnerHeldDigestSet{
 	ConfigTOML:  "aaaa000000000000000000000000000000000000000000000000000000000000",
 	HooksJSON:   "bbbb000000000000000000000000000000000000000000000000000000000000",
 	HookScripts: testCodexHookScripts(),
-	SecurityEnv: []codexEnvPair{
+	SecurityEnv: []hookEnvPair{
 		{"TIRITH_REQUIRED", "1"},
 		{"FULLSEND_EGRESS_ALLOWLIST", "api.github.com:443"},
 	},
@@ -235,7 +235,8 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 
 	// The prompt goes in on stdin behind codex's explicit `-` sentinel, never
 	// on argv: on a retry iteration it carries the previous failure's text.
-	assert.Contains(t, cmd, "printf '%s' '"+DefaultAgentPrompt+"' | \"$FULLSEND_CODEX_BIN\"")
+	// codex is npm's node launcher, so it runs through the pinned node.
+	assert.Contains(t, cmd, "printf '%s' '"+DefaultAgentPrompt+`' | ${FULLSEND_CODEX_NODE:+"$FULLSEND_CODEX_NODE"} "$FULLSEND_CODEX_BIN"`)
 
 	// PATH is captured before .env and restored after it for codex itself;
 	// the hook children take the trusted PATH exported below.
@@ -247,15 +248,18 @@ func TestBuildCodexRunCommand_OrderAndFlags(t *testing.T) {
 	assert.Less(t, pinAt, envAt, "PATH is captured before .env")
 	assert.Greater(t, restoreAt, envAt, "and restored after it")
 
-	// The hook adapter's children take the trusted PATH, which envDataLoad
-	// records read-only before .env (inside codexEnvLoad); it is exported
-	// after .env and before codex starts, and nothing unsets it.
-	trustedAt := strings.Index(cmd, codexEnvLoad)
+	// The hook adapter's children take the trusted PATH, which the codex
+	// pin records read-only, once, before .env (codexBinaryPin); it is
+	// exported after .env and before codex starts, and nothing unsets it.
+	trustedAt := strings.Index(cmd, "readonly "+envDataTrustedPathVar+"=")
 	exportAt := strings.Index(cmd, "export "+envDataTrustedPathVar)
-	execAt := strings.Index(cmd, `| "$FULLSEND_CODEX_BIN"`)
+	execAt := strings.Index(cmd, `"$FULLSEND_CODEX_BIN" exec`)
 	require.Positive(t, trustedAt)
 	require.Positive(t, exportAt)
-	assert.Contains(t, codexEnvLoad, "readonly "+envDataTrustedPathVar+"=")
+	require.Positive(t, execAt)
+	assert.Equal(t, 1, strings.Count(cmd, "readonly "+envDataTrustedPathVar+"="), "recorded once per launch")
+	assert.Less(t, trustedAt, strings.Index(cmd, "readonly "+codexBinaryVar+"="), "before the codex pin")
+	assert.NotContains(t, codexEnvLoad, "readonly "+envDataTrustedPathVar+"=")
 	assert.Greater(t, exportAt, envAt, "exported after .env")
 	assert.Less(t, exportAt, execAt, "and before codex starts")
 	assert.NotRegexp(t, `unset [^&]*\b`+envDataTrustedPathVar+`\b`, cmd)
@@ -773,7 +777,7 @@ func TestCodexSecurityEnv_PinsWhatTheRunnerKnows(t *testing.T) {
 			Tirith: &harness.TirithConfig{Enabled: &on, FailOn: "medium"},
 		}},
 	})
-	got := codexSecurityEnv(cfg)
+	got := configHookEnv(cfg)
 
 	keys := map[string]string{}
 	for _, p := range got {
@@ -782,15 +786,14 @@ func TestCodexSecurityEnv_PinsWhatTheRunnerKnows(t *testing.T) {
 	assert.Equal(t, "medium", keys["TIRITH_FAIL_ON"])
 
 	// FULLSEND_CANARY_TOKEN and FULLSEND_TOOL_ALLOWLIST come from the
-	// harness's own env/host_files, not from the hook config, so the runtime
-	// has no runner-side copy to re-export — the exposure Claude Code and pi
-	// have stays for those two, which the matrix says.
+	// harness's own env/host_files, not from the hook config, so Bootstrap
+	// reads them back from .env instead (readHarnessHookEnv).
 	assert.NotContains(t, keys, "FULLSEND_CANARY_TOKEN")
 	assert.NotContains(t, keys, "FULLSEND_TOOL_ALLOWLIST")
 
 	// Stable order, so the launch command does not churn between iterations.
 	for range 5 {
-		assert.Equal(t, got, codexSecurityEnv(cfg))
+		assert.Equal(t, got, configHookEnv(cfg))
 	}
 }
 

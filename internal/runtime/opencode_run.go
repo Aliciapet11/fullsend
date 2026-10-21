@@ -100,6 +100,7 @@ const openCodeHooksMissingExit = 97
 
 const (
 	openCodeBinaryVar             = "FULLSEND_OPENCODE_BIN"
+	openCodeNodeVar               = "FULLSEND_OPENCODE_NODE"
 	openCodeTestVar               = "FULLSEND_OPENCODE_TEST_BIN"
 	openCodeSHA256Var             = "FULLSEND_OPENCODE_SHA256SUM_BIN"
 	openCodeCutVar                = "FULLSEND_OPENCODE_CUT_BIN"
@@ -118,6 +119,7 @@ const (
 // them: eval'ing one would abort the shell on the read-only variable.
 var openCodeEnvDataDrop = []string{
 	openCodeBinaryVar,
+	openCodeNodeVar,
 	openCodeTestVar,
 	openCodeSHA256Var,
 	openCodeCutVar,
@@ -236,7 +238,7 @@ func buildOpenCodeRunCommand(params RunParams, agentName string, trustedEnv open
 	}
 
 	invocation := []string{
-		`"$` + openCodeBinaryVar + `"`,
+		cliLaunch(openCodeBinaryVar, openCodeNodeVar),
 	}
 	if params.Debug != "" {
 		// Global flags, so they go before `run`; --print-logs sends logs to
@@ -291,9 +293,11 @@ func openCodeExitPipeline(invocation []string, rcFile, transcript string) string
 		` && exit "$FULLSEND_OPENCODE_RC"`
 }
 
+// openCodeBinaryPin is the POSIX sh fragment that records where opencode is,
+// held to the trusted-PATH rule; see binaryPin. In the sandbox image opencode
+// is an ELF binary, so openCodeNodeVar is pinned empty there.
 func openCodeBinaryPin() string {
-	return `readonly ` + openCodeBinaryVar + `="$(command -v opencode)" && if test -n "$` + openCodeBinaryVar +
-		`"; then :; else echo 'fullsend: opencode not found on PATH' >&2; exit 127; fi`
+	return binaryPin(openCodeBinaryVar, openCodeNodeVar, "opencode")
 }
 
 // openCodeCloudLocationExport exports GOOGLE_CLOUD_LOCATION only when

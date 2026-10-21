@@ -485,3 +485,65 @@ func TestRateLimitedUnlessCancelled(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	assert.False(t, rateLimited, "429 with a cancelled context is not a rate limit")
 }
+
+// seedSharedLock lays out a shared lock the way the behaviour install
+// driver's bridge (pkg/behaviourtest/drivers/install/orglock.go, #8620)
+// writes it: README.md holds a generation UUID, and the shared-mode flag
+// and holder state live in separate files.
+func seedSharedLock(t *testing.T, fake *forge.FakeClient, org, generation string) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := fake.CreateRepo(ctx, org, LockRepo, "E2E test lock — do not delete manually", false)
+	require.NoError(t, err)
+	_, err = fake.CommitFiles(ctx, org, LockRepo, "create shared e2e lock", []forge.TreeFile{
+		{Path: "README.md", Content: []byte(generation)},
+		{Path: "SHARED_LOCK", Content: []byte("shared e2e-lock: legacy suites treat this lock as held (#8620)\n")},
+		{Path: "holders.json", Content: []byte(`{"generation":"` + generation + `","closed":false,"holders":{"h1":"2026-10-20T00:00:00Z"}}`)},
+	})
+	require.NoError(t, err)
+}
+
+// Legacy runners must treat a shared lock as held by someone else: they
+// neither acquire, delete as invalid, nor release it.
+func TestLegacyRunner_TreatsSharedLockAsHeld(t *testing.T) {
+	const generation = "11111111-2222-3333-4444-555555555555"
+
+	t.Run("acquireLock keeps the UUID holder and waits", func(t *testing.T) {
+		fake := forge.NewFakeClient()
+		seedSharedLock(t, fake, testLockOrg, generation)
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+
+		err := acquireLock(ctx, fake, "", testLockOrg, "our-run", 5*time.Minute, t.Logf)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Empty(t, fake.DeletedRepos, "a UUID README must not be deleted as an invalid holder")
+		content, err := fake.GetFileContent(context.Background(), testLockOrg, LockRepo, "README.md")
+		require.NoError(t, err)
+		assert.Equal(t, generation, string(content))
+	})
+
+	t.Run("acquireLock deletes a non-UUID README as invalid", func(t *testing.T) {
+		fake := forge.NewFakeClient()
+		seedLock(t, fake, testLockOrg, "# e2e-lock")
+
+		require.NoError(t, acquireLock(context.Background(), fake, "", testLockOrg, "our-run", 5*time.Minute, t.Logf))
+		assert.Contains(t, fake.DeletedRepos, testLockOrg+"/"+LockRepo)
+	})
+
+	t.Run("acquireOrg does not acquire the org", func(t *testing.T) {
+		fake := forge.NewFakeClient()
+		seedSharedLock(t, fake, testLockOrg, generation)
+
+		_, err := acquireOrgWithClient(context.Background(), fake, "", "our-run", []string{testLockOrg}, time.Millisecond, t.Logf)
+		require.Error(t, err)
+		assert.Empty(t, fake.DeletedRepos)
+	})
+
+	t.Run("releaseLock leaves the shared lock", func(t *testing.T) {
+		fake := forge.NewFakeClient()
+		seedSharedLock(t, fake, testLockOrg, generation)
+
+		releaseLock(context.Background(), fake, testLockOrg, "our-run", t)
+		assert.Empty(t, fake.DeletedRepos)
+	})
+}

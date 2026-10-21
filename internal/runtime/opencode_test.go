@@ -398,7 +398,7 @@ func TestOpenCodeBinaryPin(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), ".env")
 	require.NoError(t, os.WriteFile(envFile, []byte("opencode() { echo FAKE; }\nexport "+openCodeBinaryVar+"=/evil\nexport PATH=/nonexistent\n"), 0o644))
 
-	cmd := exec.Command("sh", "-c", openCodeBinaryPin()+" && "+envDataLoad(envFile, openCodeEnvDataDrop...)+` && "$`+openCodeBinaryVar+`"`)
+	cmd := exec.Command("sh", "-c", protectedDirsShell(t, bin)+openCodeBinaryPin()+" && "+envDataLoad(envFile, openCodeEnvDataDrop...)+" && "+cliLaunch(openCodeBinaryVar, openCodeNodeVar))
 	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -443,9 +443,9 @@ func TestOpenCodeLaunch_HostileEnvDoesNotExecute(t *testing.T) {
 		envDataLoadWith(f.envFile, control, openCodeEnvDataDrop),
 		strings.Join(OpenCodeRuntime{}.EnvExports(), " && "),
 		openCodeTrustedEnvRestore(),
-		`"$` + openCodeBinaryVar + `"`,
+		cliLaunch(openCodeBinaryVar, openCodeNodeVar),
 	}, " && ")
-	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd := exec.Command("/bin/sh", "-c", protectedDirsShell(t, bin)+script)
 	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=/home/agent"}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -564,7 +564,7 @@ func TestOpenCodeTrustedEnvRestore(t *testing.T) {
 	// Set a known HOME and PATH so the pin captures them.
 	command := "HOME=" + shellQuote(origHome) + " PATH=" + shellQuote(origPath) +
 		" sh -c " + shellQuote(
-		openCodeTrustedEnvPin(trustedEnv)+" && "+envDataLoad(envFile, openCodeEnvDataDrop...)+" && "+openCodeTrustedEnvRestore()+
+		openCodeTrustedEnvPin(trustedEnv)+" && "+envDataTrustedPin()+" && "+envDataLoad(envFile, openCodeEnvDataDrop...)+" && "+openCodeTrustedEnvRestore()+
 			` && printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$OPENCODE_CONFIG_CONTENT" "$GOOGLE_APPLICATION_CREDENTIALS" "$HOME" "$PATH" "$OPENCODE_PERMISSION" "$OPENCODE_CONFIG" "$LD_PRELOAD"`,
 	)
 	cmd := exec.Command("sh", "-c", command)

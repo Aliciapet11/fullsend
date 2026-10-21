@@ -38,10 +38,14 @@ import (
 // hooks.json (hookPreflightInterpreter), so the hooks.json digest covers
 // them.
 //
-// Out of scope here, and unchanged: Claude Code's own settings.json under the
-// config directory (plugin enablement written by bootstrapPlugins), and the
-// target repo's <repo>/.claude/settings.json. Both are settings sources Claude
-// Code reads beneath --settings; neither is pinned by this guard.
+// Not hashed here: Claude Code's own settings.json under the config directory
+// (plugin enablement written by bootstrapPlugins), and the target repo's
+// <repo>/.claude/settings.json and .claude/settings.local.json. All are
+// settings sources Claude Code reads beneath --settings, which wins only for
+// the keys it sets. So the keys the runner owns are set in the hooks.json
+// document this guard pins (claudeRunnerSettings): the hook settings and the
+// variables the launch clears after .env in env, and disableAllHooks. Any
+// other key in those files still applies.
 
 // claudeHooksMissingExit is the exit code the run command uses when hooks.json
 // or the hook scripts are not what Bootstrap installed. It matches the codex
@@ -56,6 +60,9 @@ type claudeHookDigests struct {
 	// of its embedded bytes. Non-nil once Bootstrap installed hooks, even when
 	// the harness disabled every individual hook.
 	HookScripts map[string]string
+	// SecurityEnv is the hook configuration Bootstrap recorded
+	// (bootstrapHookEnv), which the launch re-asserts after .env.
+	SecurityEnv []hookEnvPair
 }
 
 // claudeHookDigestsBySandbox maps a sandbox name to the digests Bootstrap
@@ -123,8 +130,10 @@ func claudeHooksGuard(d claudeHookDigests, settingsFile bool) string {
 // #8498) and then, as a second layer from when .env was sourced, undoes what
 // .env could do to the launch:
 // `unset -f` (a special builtin a .env-defined function cannot shadow) drops
-// any function standing in for claude or the guard's utilities, and
-// claudeLoaderEnvUnset clears the loader variables. claude itself is started
+// any function standing in for claude or the guard's utilities,
+// claudeLoaderEnvUnset clears the loader variables, and
+// claudeSettingsEnvUnset the Claude Code settings-loading and hook-command
+// variables. claude itself is started
 // through the binary pinned before .env (claudeBinaryPin), so neither a
 // function nor a PATH entry from .env decides what runs.
 //
@@ -150,9 +159,9 @@ func claudeHooksGuard(d claudeHookDigests, settingsFile bool) string {
 func claudeGuardedEnv(envFile string, hooksEnabled, settingsFile bool, d claudeHookDigests) string {
 	// .env is read as data, never sourced (envDataLoad, #8498); the unsets
 	// and the second guard pass below stay as a second layer.
-	source := envDataLoad(envFile, claudeBinaryVar, claudeGatewayPlaceholderVar)
+	source := envDataLoad(envFile, claudeBinaryVar, claudeNodeVar, claudeGatewayPlaceholderVar)
 	if !hooksEnabled {
-		return strings.Join([]string{source, "unset -f claude", claudeLoaderEnvUnset}, " && ")
+		return strings.Join([]string{source, "unset -f claude", claudeLoaderEnvUnset, claudeSettingsEnvUnset}, " && ")
 	}
 	guard := claudeHooksGuard(d, settingsFile)
 	return strings.Join([]string{
@@ -162,6 +171,7 @@ func claudeGuardedEnv(envFile string, hooksEnabled, settingsFile bool, d claudeH
 		// as a function name, but another launch shell may not.
 		"unset -f claude test [ command cut wc sha256sum find echo",
 		claudeLoaderEnvUnset,
+		claudeSettingsEnvUnset,
 		guard,
 	}, " && ")
 }

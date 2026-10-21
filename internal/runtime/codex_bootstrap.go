@@ -248,19 +248,13 @@ func (r CodexRuntime) Bootstrap(input BootstrapInput) error {
 		}
 		// Exactly what was installed, by name: Run cannot re-derive the set
 		// because it does not see the harness's hook config.
-		securityEnv := codexSecurityEnv(hooks)
-		// FULLSEND_CANARY_TOKEN and FULLSEND_TOOL_ALLOWLIST are harness-supplied
-		// (env.sandbox / host_files) rather than derived from SandboxHookConfig,
-		// so the runner has no typed copy to re-export. It can still read them
-		// here: the runner writes .env and then calls Bootstrap, and no agent
-		// iteration has run yet, so the file is still exactly what the runner
-		// put there. Reading them later — in Run — would read whatever the
-		// previous iteration left behind, which is the problem.
-		harnessEnv, err := codexReadHarnessSecurityEnv(sandboxName)
+		// The hook settings, recorded while .env is still exactly what the
+		// runner wrote (bootstrapHookEnv).
+		securityEnv, err := bootstrapHookEnv(sandboxName, hooks)
 		if err != nil {
 			return err
 		}
-		digests.SecurityEnv = append(securityEnv, harnessEnv...)
+		digests.SecurityEnv = securityEnv
 		digests.HookScripts = map[string]string{}
 		for name, content := range security.HookFiles(hooks) {
 			digests.HookScripts[name] = codexAssetSHA256(content)
@@ -493,63 +487,6 @@ func codexPreflightCatalog(sandboxName string) (codexCatalog, error) {
 // whole "codex-cli <pin>" string), so a change here shows up as a build
 // failure before it reaches a run.
 const codexVersionPrefix = "codex-cli "
-
-// codexHarnessSecurityEnvKeys are the hook-configuration variables the harness
-// supplies through the sandbox environment rather than through
-// SandboxHookConfig, so the runner learns them by reading the file it just
-// wrote rather than from its own state.
-var codexHarnessSecurityEnvKeys = []string{"FULLSEND_CANARY_TOKEN", "FULLSEND_TOOL_ALLOWLIST"}
-
-// codexEnvReadSeparator delimits the values read back, chosen so a plausible
-// token or allowlist cannot contain it.
-const codexEnvReadSeparator = "|fullsend-env-sep|"
-
-// codexReadHarnessSecurityEnvCmd reads envFile as data, as the launch does
-// (envDataLoad, #8574), so no .env or .env.d line runs and nothing lands in
-// front of the first value, and prints the codexHarnessSecurityEnvKeys values
-// joined by codexEnvReadSeparator. A .env (or a file it names) that exists
-// but cannot be read prints nothing and exits non-zero, so it fails Bootstrap
-// instead of pinning the values as unset; a line the loader does not take is
-// skipped, as at launch. The loader reports a dropped line by file and line
-// only, never by content, so its stderr is kept for the error message. The
-// references are double-quoted, not shellQuote'd: single quotes would print
-// the literal "${KEY:-}" text instead of expanding it.
-func codexReadHarnessSecurityEnvCmd(envFile string) string {
-	var refs []string
-	for _, key := range codexHarnessSecurityEnvKeys {
-		refs = append(refs, fmt.Sprintf("${%s:-}", key))
-	}
-	return fmt.Sprintf(`%s && printf '%%s' "%s"`,
-		envDataLoad(envFile), strings.Join(refs, codexEnvReadSeparator))
-}
-
-// codexReadHarnessSecurityEnv reads the harness-supplied hook variables from
-// the workspace .env, which at Bootstrap time is still exactly what the runner
-// wrote — no agent iteration has run. Unset values are re-asserted as empty,
-// which every hook treats as unset, so an agent that sets one in .env later
-// cannot supply an allowlist the harness left out.
-func codexReadHarnessSecurityEnv(sandboxName string) ([]codexEnvPair, error) {
-	cmd := codexReadHarnessSecurityEnvCmd(sandbox.SandboxWorkspace + "/.env")
-	stdout, stderr, exitCode, err := sandbox.Exec(sandboxName, cmd, 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("reading the harness hook environment: %w", err)
-	}
-	if exitCode != 0 {
-		return nil, fmt.Errorf("reading the harness hook environment: exited %d: %s",
-			exitCode, strings.TrimSpace(sanitizeOutput(stderr)))
-	}
-
-	values := strings.Split(stdout, codexEnvReadSeparator)
-	if len(values) != len(codexHarnessSecurityEnvKeys) {
-		return nil, fmt.Errorf("reading the harness hook environment: expected %d values, got %d",
-			len(codexHarnessSecurityEnvKeys), len(values))
-	}
-	var env []codexEnvPair
-	for i, key := range codexHarnessSecurityEnvKeys {
-		env = append(env, codexEnvPair{key, strings.TrimSpace(values[i])})
-	}
-	return env, nil
-}
 
 // hookInterpreterSep separates the interpreter from the PATH on the line
 // hookInterpreterProbe prints.

@@ -61,6 +61,17 @@ const (
 	rateLimitBackoffMax = 2 * time.Minute
 )
 
+const (
+	// LockRepo is the name of the per-org lock repository. The behaviour
+	// install driver's shared-lock bridge (#8620) coordinates through the
+	// same repository so legacy runners keep seeing its locks as held.
+	LockRepo = lockRepo
+
+	// StaleLockTimeout is the creation age after which legacy runners
+	// reclaim a lock without checking its holder.
+	StaleLockTimeout = staleLockTimeout
+)
+
 // orgPool is the set of GitHub orgs available for parallel e2e test runs.
 // Each run acquires a lock on one org before proceeding.
 var orgPool = []string{

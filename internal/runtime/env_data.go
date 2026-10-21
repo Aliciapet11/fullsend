@@ -60,6 +60,9 @@ const (
 	// envDataTrustedPathVar is the read-only launch PATH with every directory
 	// the agent user could write (or that has a writable ancestor) left out.
 	envDataTrustedPathVar = "FULLSEND_TRUSTED_PATH"
+	// envDataReadlinkVar is the read-only readlink the trusted lookups
+	// resolve symlinks with (envDataTrustedPin), empty when there is none.
+	envDataReadlinkVar = "FULLSEND_READLINK"
 	// envDataRunnerPathVar is the read-only variable the runner's PATH capture
 	// line sets. envDataLoaderScript takes the name from this constant.
 	envDataRunnerPathVar = "FULLSEND_RUNNER_PATH"
@@ -78,7 +81,7 @@ var envDataDropNames = []string{
 	"PYTHON*",
 	"BASH_ENV", "ENV",
 	"IFS",
-	envDataPythonVar, envDataExportsVar, envDataTrustedPathVar,
+	envDataPythonVar, envDataExportsVar, envDataTrustedPathVar, envDataReadlinkVar,
 }
 
 // EnvDataControlLines are the runner-written .env lines the launch-time
@@ -145,20 +148,49 @@ func envDataReadlink() string {
 		`test -n "$rl" || echo 'fullsend: no readlink that is a regular file in a PATH directory the agent cannot write' >&2`
 }
 
-// envDataPin records where python3 is before anything the agent wrote can
-// influence the lookup; see binaryPin. It takes the first python3 on the
-// trusted PATH whose resolved file, and every directory above it, the agent
-// user cannot write: a root-owned bin directory can still hold a symlink to
-// an interpreter the agent owns. The resolved path is what gets pinned, and
-// with no such python3 the launch stops (exit 127). The symlinks are
-// resolved with a readlink held to the same rule (envDataReadlink).
-func envDataPin() string {
-	return envDataTrustedPath() + ` && { readonly ` + envDataPythonVar + `="$(IFS=:; set -f; ` + envDataReadlink() + `; ` +
-		`test -n "$rl" || exit 1; for d in $` + envDataTrustedPathVar +
-		`; do test -x "$d/python3" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" "$rl" -f "$d/python3" 2>/dev/null)" || continue; ` +
+// envDataTrustedPin records, read-only, the trusted PATH (envDataTrustedPath)
+// and the readlink the trusted lookups run (envDataReadlink). Both are taken
+// once per launch shell, before anything the agent wrote is read: a launch
+// runs it ahead of its CLI pin (binaryPin), a probe ahead of its .env read
+// (EnvDataLoad). A second `readonly` of either name aborts dash, so nothing
+// may run it twice. With no qualifying readlink it prints why and records an
+// empty value; each lookup then fails on its own (envDataBinaryPin).
+func envDataTrustedPin() string {
+	return envDataTrustedPath() + ` && { readonly ` + envDataReadlinkVar + `="$(IFS=:; set -f; ` + envDataReadlink() +
+		`; printf '%s' "$rl")"; }`
+}
+
+// envDataBinaryPin records, read-only in varName, where the executable name
+// is before anything the agent wrote can influence the lookup. It takes the
+// first name on the trusted PATH whose resolved file, and every directory
+// above it, the agent user cannot write: a root-owned bin directory can
+// still hold a symlink to a file the agent owns. The symlinks are resolved
+// with the readlink envDataTrustedPin pinned, run with only the trusted PATH.
+// The resolved path is what gets pinned, and with none the launch stops
+// (exit 127). As root nothing is protected, so it takes the first match. It
+// needs envDataTrustedPin earlier in the same shell.
+//
+// `readonly` is a special builtin, so a later assignment is an error: under
+// a POSIX sh such as dash (what `sh -c` is in the sandbox image) it aborts
+// the shell, and under any shell the assignment fails and the pinned value
+// stands. The case refuses anything that is not an absolute path. The whole
+// fragment is one brace group, so in `cd <repo> && <pin> && …` a failed cd
+// ends the chain with cd's own error instead of reaching the "not found"
+// branch.
+func envDataBinaryPin(varName, name string) string {
+	return `{ readonly ` + varName + `="$(IFS=:; set -f; test -n "$` + envDataReadlinkVar + `" || exit 1; for d in $` + envDataTrustedPathVar +
+		`; do test -x "$d/` + name + `" || continue; r="$(PATH="$` + envDataTrustedPathVar + `" "$` + envDataReadlinkVar + `" -f "$d/` + name + `" 2>/dev/null)" || continue; ` +
 		`if ! test -O /; then p=$r; ` + envDataWritableAncestor + `; fi; printf '%s' "$r"; break; done)" && ` +
-		`case "$` + envDataPythonVar + `" in /*) ;; *) false ;; esac || ` +
-		`{ echo 'fullsend: python3 not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
+		`case "$` + varName + `" in /*) ;; *) false ;; esac || ` +
+		`{ echo 'fullsend: ` + name + ` not found in a PATH directory the agent cannot write' >&2; exit 127; }; }`
+}
+
+// envDataPin records the trusted PATH and readlink (envDataTrustedPin) and
+// then python3 (envDataBinaryPin), for a shell that pins nothing else: the
+// probes. A launch has already run envDataTrustedPin for its CLI pin, so
+// its .env read (envDataLoad) pins only python3.
+func envDataPin() string {
+	return envDataTrustedPin() + " && " + envDataBinaryPin(envDataPythonVar, "python3")
 }
 
 // envDataLoad is the POSIX sh fragment that replaces `. envFile`. The
@@ -168,6 +200,9 @@ func envDataPin() string {
 // in for it, and it only ever sees the loader's single-quoted
 // `[export ]NAME='value'` lines.
 // extraDrop are names the calling runtime pins read-only before the load.
+// It pins python3 with the trusted PATH and readlink that envDataTrustedPin
+// recorded, so that must run earlier in the same shell: a launch runs it in
+// its CLI pin (binaryPin), and a probe with no CLI pin puts it in front.
 func envDataLoad(envFile string, extraDrop ...string) string {
 	return envDataLoadWith(envFile, EnvDataControlLines(), extraDrop)
 }
@@ -175,9 +210,10 @@ func envDataLoad(envFile string, extraDrop ...string) string {
 // EnvDataLoad is envDataLoad for the runner's in-sandbox probes in
 // internal/cli (the pre-agent context scan and the GitHub preflight), which
 // read the run's environment from .env before they run a command (#8574).
-// The probe shell pins nothing read-only, so no extra names are dropped.
+// The probe shell pins no CLI, so it records the trusted PATH itself
+// (envDataTrustedPin), and no extra names are dropped.
 func EnvDataLoad(envFile string) string {
-	return envDataLoad(envFile)
+	return envDataTrustedPin() + " && " + envDataLoad(envFile)
 }
 
 // EnvDataTrustedPathVar names the read-only trusted PATH EnvDataLoad records
@@ -194,7 +230,7 @@ func envDataLoadWith(envFile string, control []string, extraDrop []string) strin
 		args = append(args, shellQuote(line))
 	}
 	args = append(args, shellQuote(strings.Join(drop, " ")))
-	return envDataPin() + " && " + envDataExportsVar + `="$("$` + envDataPythonVar + `" -I -S -c ` +
+	return envDataBinaryPin(envDataPythonVar, "python3") + " && " + envDataExportsVar + `="$("$` + envDataPythonVar + `" -I -S -c ` +
 		shellQuote(envDataLoaderScript) + " " + strings.Join(args, " ") + `)" && eval "$` +
 		envDataExportsVar + `" && unset ` + envDataExportsVar
 }
