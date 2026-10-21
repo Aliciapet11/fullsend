@@ -385,20 +385,23 @@ The existing design principle is that [the repo is the coordinator](problems/age
   as webhooks ([ADR 0063](ADRs/0063-polling-based-work-discovery.md)). Initial
   scope is per-repo mode only.
 - Process lifecycle (target state): bound `fullsend run` and `fullsend poll`
-  support once, resident polling, and deadline-bounded polling. CI uses the
-  timed lifecycle when a job deadline is known and otherwise runs once;
-  non-CI defaults to resident polling. Timed processes also exit after an idle
-  period, and resident processes can accept authenticated wakeups. The
-  invocation layer preserves one active run per harness, repository, and
-  canonical entity; each sandbox attempt is fresh, and a resident run reports
-  results when it becomes idle. Current CLI and workflows remain one-shot
+  support once, resident polling, and deadline-bounded polling. Bare
+  `fullsend poll` and non-CI bound runs default to once; a CI bound run with
+  entity sources, eventless eligibility, and a usable job deadline defaults
+  to timed. Its internal timer checks only its bound entity, independently of
+  optional private Fullsend-to-Fullsend wake delivery. Each sandbox attempt is
+  fresh, while one `fullsend run` call publishes only its latest
+  invocation's result through the existing artifact shape and joins all
+  sandbox traces under a run-level parent. A long-lived poll lifecycle may
+  update that result at idle or within a response window. Current CLI and
+  workflows remain one-shot
   ([ADR 0144](ADRs/0144-reuse-poll-and-entity-bound-run-processes.md)).
 - Harness routing uses one CEL predicate over a required normalized entity and
   an optional prompting event. Webhooks provide low-latency candidates;
   `fullsend poll` and its input drivers enumerate and resolve scheduled
   candidates without reconstructing a complete event stream. Entity activity
-  retains actor and authorization provenance, while harness-defined evidence —
-  existing entity activity or explicit receipts — distinguishes handled work
+  retains actor and authorization provenance; harness CEL can use entity state
+  or explicit receipts to decide whether work has already been handled
   ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md), partially
   superseding [ADR 0063](ADRs/0063-polling-based-work-discovery.md)).
 - GitLab dispatch uses a native webhook fast-path for low-latency candidates and the cron-poller as the authoritative reconciliation backstop ([ADR 0125](ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md)). Native `merge_request_event` dispatch stays removed ([#7322](https://github.com/fullsend-ai/fullsend/issues/7322)). No external webhook bridge (see [ADR 0067](ADRs/0067-gitlab-cron-polling-event-dispatch.md) for the poller, credentials, and in-job gate).
