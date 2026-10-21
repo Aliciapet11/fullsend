@@ -2064,7 +2064,7 @@ func TestInstallCmd_Deprecated(t *testing.T) {
 	assert.Contains(t, installCmd.Deprecated, "fullsend github setup")
 	assert.Contains(t, installCmd.Deprecated, "fullsend mint add-role")
 	assert.Contains(t, installCmd.Deprecated, "fullsend repos install")
-	assert.Contains(t, installCmd.Deprecated, "gitlab.repos")
+	assert.Contains(t, installCmd.Deprecated, "repos.yaml")
 	assert.NotContains(t, installCmd.Deprecated, "--forge")
 }
 

@@ -103,7 +103,7 @@ does not create, copy, or modify PEM secrets or app ID mappings.
 
 Apps must be installed on the target org before the mint can produce tokens.
 An org admin installs via `https://github.com/apps/{slug}/installations/new`
-or by running `go run ./cmd/fullsend admin install <owner/repo>`.
+or by running the deprecated `go run ./cmd/fullsend admin install <owner/repo>`.
 
 ## Enrollment Steps
 

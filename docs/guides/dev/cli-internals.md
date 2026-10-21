@@ -7,7 +7,7 @@ This guide provides implementation details for fullsend CLI internals: command s
 ```
 fullsend
 ├── admin                                    # Manage fullsend installation for a repository
-│   ├── install      <owner/repo>            # Deprecated: use inference provision + github setup / repos set gitlab.repos + repos install
+│   ├── install      <owner/repo>            # Deprecated: use inference provision + github setup / repos install (GitLab)
 │   └── foreign                              # Cross-org mint authorization (FULLSEND_FOREIGN_<ROLE>_REPOS)
 │       ├── allow                            # Authorize a foreign org/repo to mint for a role
 │       ├── list                             # List foreign caller allowlists
@@ -240,8 +240,8 @@ The `mint`, `inference`, and `github` subcommands decompose setup into role-spec
 The typical handoff: a GCP admin runs `mint deploy`, `mint enroll`, and `inference provision`, then passes the mint URL and WIF provider resource name to a GitHub maintainer who runs `github setup --mint-url=... --inference-wif-provider=...`. See [Advanced setup](../infrastructure/advanced-setup.md).
 
 > **Deprecated:** The `admin install` command is deprecated. Use the
-> standalone commands above instead (GitLab projects declare the project under `gitlab.repos` with
-> `fullsend repos set`, then run `fullsend repos install <group/project>`). See the
+> standalone commands above instead (GitLab projects: see
+> [Installing Fullsend](../getting-started/configuring-gitlab.md#installing-fullsend)). See the
 > [Unified Installation Flow](#unified-installation-flow) section below for
 > how the phases are structured internally.
 
