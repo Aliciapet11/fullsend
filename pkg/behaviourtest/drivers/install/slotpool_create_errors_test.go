@@ -99,7 +99,7 @@ func TestSlotAllocator_Unprocessable422BacksOffOrg(t *testing.T) {
 	assert.Empty(t, capErr.Failed)
 	assert.Equal(t, 1, c.createCalls(), "the rest of the pass skips the backed-off org")
 	assert.Zero(t, lc.lookups.Load())
-	assert.Empty(t, a.pendingFor(layout.Slots()[0]))
+	assert.Len(t, a.pendingFor(layout.Slots()[0]), 1, "an earlier attempt may have landed")
 
 	// A later pass inside the window still skips it.
 	c.createErr = nil
@@ -254,4 +254,81 @@ func TestSlotAllocator_LiveClientUnprocessableCreateBacksOff(t *testing.T) {
 	assert.Contains(t, capErr.RateLimited, "halfsend")
 	assert.Equal(t, int32(1), posts.Load(), "the backed-off org gets no second create in the pass")
 	assert.Zero(t, lookups.Load())
+}
+
+// TestSlotAllocator_LiveClientUnprocessableAfterLandedCreate covers a 502
+// that hid a landed create followed by a 422 on the client's retry: the org
+// backs off without a lookup, and a later pass adopts the repo through the
+// pending nonce.
+func TestSlotAllocator_LiveClientUnprocessableAfterLandedCreate(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		created string
+		posts   atomic.Int32
+		lookups atomic.Int32
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		desc := created
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/orgs/halfsend/repos":
+			if desc == "" {
+				_, _ = w.Write([]byte("[]"))
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 42, "name": "test-repo-01", "full_name": "halfsend/test-repo-01"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/orgs/halfsend/repos":
+			if posts.Add(1) == 1 {
+				var body struct {
+					Description string `json:"description"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				mu.Lock()
+				created = body.Description
+				mu.Unlock()
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"resource":"Repository","code":"custom","message":"try again later"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/halfsend/test-repo-01":
+			lookups.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": 42, "name": "test-repo-01", "full_name": "halfsend/test-repo-01", "description": desc,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.New("test-token").WithBaseURL(srv.URL).WithAfterFunc(func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	})
+	a, err := newSlotAllocator(StagePoolLayout(1), func(context.Context, string) (forge.Client, error) { return client, nil }, t.Logf)
+	require.NoError(t, err)
+	a.orgLock = nil
+	a.gc = nil
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return now }
+
+	_, _, err = a.Claim(context.Background())
+	var capErr *CapacityError
+	require.ErrorAs(t, err, &capErr)
+	assert.Contains(t, capErr.RateLimited, "halfsend")
+	assert.Equal(t, int32(2), posts.Load(), "the client retried after the 502")
+	assert.Zero(t, lookups.Load())
+
+	now = now.Add(2 * defaultRateLimitWindow)
+	s, _, err := a.Claim(context.Background())
+	require.NoError(t, err, "the repo the first attempt created is adopted")
+	assert.Equal(t, int32(2), posts.Load(), "the listed name is re-checked, not created again")
+	assert.Equal(t, int32(1), lookups.Load())
+	a.mu.Lock()
+	l := a.held[s]
+	a.mu.Unlock()
+	assert.Equal(t, int64(42), l.repoID)
 }

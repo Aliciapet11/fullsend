@@ -681,7 +681,10 @@ func (a *slotAllocator) Claim(ctx context.Context) (Slot, forge.Client, error) {
 		case isHTTPStatus(err, http.StatusUnprocessableEntity):
 			// GitHub documents this 422 as "Validation failed, or the
 			// endpoint has been spammed" with no body that tells the two
-			// apart, so back off rather than retry the org at once.
+			// apart, so back off rather than retry the org at once. Keep
+			// the nonce: an earlier attempt in the client's retry loop may
+			// have landed.
+			a.addPending(slot, desc)
 			until := a.blockOrg(slot.Org, client, err)
 			a.logf("[slots] creating %s was rejected, backing off %s until %s: %v",
 				slot, slot.Org, until.UTC().Format(time.RFC3339), err)
@@ -1121,8 +1124,9 @@ func isBackoffError(err error) bool {
 // createMayHaveLanded reports whether a failed CreateRepo can hide a
 // create the server applied: an earlier attempt in the client's retry loop
 // may have landed before a transport error, an undecodable response, a
-// 5xx, or a rate-limit rejection. Any other 4xx is a definitive refusal.
-// Rate limits are checked first because a rate-limit 403 is not a denial.
+// 5xx, or a rate-limit rejection. Any other 4xx means the final attempt
+// was refused. Rate limits are checked first because a rate-limit 403 is
+// not a denial.
 func createMayHaveLanded(err error) bool {
 	if gh.IsRateLimitError(err) {
 		return true
