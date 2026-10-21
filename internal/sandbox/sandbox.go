@@ -1889,27 +1889,54 @@ func SafeDownload(sandboxName, remoteDir, localDir string) error {
 
 		if err := Download(sandboxName, remoteDir, stagingDir); err != nil {
 			errs = append(errs, fmt.Errorf("attempt %d/%d: %w", attempt, safeDownloadAttempts, err))
-			if removeErr := os.RemoveAll(stagingDir); removeErr != nil {
-				errs = append(errs, fmt.Errorf("cleaning staging directory after failed attempt: %w", removeErr))
+			if cleanupErr := cleanupStagingDir(stagingDir); cleanupErr != nil {
+				errs = append(errs, fmt.Errorf("cleaning staging directory after failed attempt: %w", cleanupErr))
 			}
 			continue
 		}
 
 		if err := sanitizeDownload(stagingDir); err != nil {
-			_ = os.RemoveAll(stagingDir)
-			return fmt.Errorf("sanitizing downloaded directory: %w", err)
+			cleanupErr := cleanupStagingDir(stagingDir)
+			if cleanupErr == nil {
+				return fmt.Errorf("sanitizing downloaded directory: %w", err)
+			}
+			return errors.Join(
+				fmt.Errorf("sanitizing downloaded directory: %w", err),
+				fmt.Errorf("cleaning staging directory after sanitization failure: %w", cleanupErr),
+			)
 		}
 		if err := replaceDownload(stagingDir, localDir); err != nil {
-			_ = os.RemoveAll(stagingDir)
-			return err
+			cleanupErr := cleanupStagingDir(stagingDir)
+			if cleanupErr == nil {
+				return err
+			}
+			return errors.Join(err, fmt.Errorf("cleaning staging directory after publish failure: %w", cleanupErr))
 		}
-		if attempt > 1 {
-			fmt.Fprintf(os.Stderr, "sandbox download succeeded on attempt %d/%d\n", attempt, safeDownloadAttempts)
-		}
+		fmt.Fprintf(os.Stderr, "sandbox download succeeded on attempt %d/%d\n", attempt, safeDownloadAttempts)
 		return nil
 	}
 
 	return fmt.Errorf("safe download from sandbox failed after %d attempts: %w", safeDownloadAttempts, errors.Join(errs...))
+}
+
+func cleanupStagingDir(stagingDir string) error {
+	filepath.WalkDir(stagingDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			parent := filepath.Dir(path)
+			if info, err := os.Lstat(parent); err == nil && info.IsDir() {
+				_ = os.Chmod(parent, 0o755)
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			_ = os.Chmod(path, 0o755)
+		}
+		return nil
+	})
+	if err := os.RemoveAll(stagingDir); err != nil {
+		return fmt.Errorf("removing staging directory %s: %w", stagingDir, err)
+	}
+	return nil
 }
 
 // replaceDownload atomically publishes a sanitized staging directory at

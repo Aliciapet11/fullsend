@@ -640,6 +640,9 @@ func TestSafeDownload_ReturnsErrorWhenSanitizationFails(t *testing.T) {
 if [ "$2" = "download" ]; then
   printf 'safe\n' > "$5/safe.txt"
   /bin/ln -s /etc/passwd "$5/dangerous-link"
+  /bin/mkdir "$5/readonly"
+  printf 'nested\n' > "$5/readonly/nested.txt"
+  /bin/chmod 0555 "$5/readonly"
   /bin/chmod 0555 "$5"
   exit 0
 fi
@@ -671,6 +674,50 @@ exit 0
 
 	_, statErr := os.Lstat(localDir)
 	assert.True(t, os.IsNotExist(statErr), "unsafe download must not be published")
+
+	entries, readErr := os.ReadDir(parent)
+	require.NoError(t, readErr)
+	for _, entry := range entries {
+		assert.False(t, strings.HasPrefix(entry.Name(), ".fullsend-safe-download-"),
+			"staging directory must be removed after sanitization failure: %s", entry.Name())
+	}
+}
+
+func TestSafeDownload_ReturnsErrorWhenSanitizationCleanupFails(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "download" ]; then
+  printf 'safe\n' > "$5/safe.txt"
+  /bin/ln -s /etc/passwd "$5/dangerous-link"
+  /bin/chmod 0555 "$5"
+  staging_parent="${5%/*}"
+  /bin/chmod 0555 "$staging_parent"
+  exit 0
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	parent := t.TempDir()
+	t.Cleanup(func() {
+		require.NoError(t, os.Chmod(parent, 0o755))
+	})
+	localDir := filepath.Join(parent, "repo")
+
+	err := SafeDownload("test-sandbox", "/sandbox/workspace/repo", localDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sanitizing downloaded directory")
+	assert.Contains(t, err.Error(), "cleaning staging directory after sanitization failure")
+	assert.Contains(t, err.Error(), "removing staging directory")
+}
+
+func TestCleanupStagingDir_MissingPath(t *testing.T) {
+	require.NoError(t, cleanupStagingDir(filepath.Join(t.TempDir(), "missing")))
 }
 
 func TestEffectiveReadyTimeout_Default(t *testing.T) {
