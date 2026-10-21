@@ -26,11 +26,11 @@ Date: YYYY-MM-DD
 
 What is the issue that we're seeing that motivates this decision or change?
 
-_When describing how fullsend works today, cite the implementing file or
-function at a specific commit SHA, not just `main`, which changes over time
-(e.g., `internal/cli/repos.go` at `<SHA>`, or a permalink such as
+_When describing current behavior, cite the implementing file or function at a
+commit SHA, not `main` (e.g., `internal/cli/repos.go` at `<SHA>`, or a
+permalink such as
 `https://github.com/fullsend-ai/fullsend/blob/<SHA>/internal/cli/repos.go`).
-Confirm the description matches the code at that SHA._
+Confirm the code at that SHA matches your description._
 
 ## Options
 
