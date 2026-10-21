@@ -1170,7 +1170,9 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// Run lint checks before merging env.runner into RunnerEnv so that
 	// Lint() sees the original YAML state and only warns when runner_env
 	// was actually declared (not when env.runner entries are merged in).
-	for _, diag := range h.Lint() {
+	// reservedSandboxEnvDiagnostics rides along: it names the env.sandbox
+	// keys this run will drop instead of exporting them (#3373).
+	for _, diag := range append(h.Lint(), reservedSandboxEnvDiagnostics(h)...) {
 		emitDiagnostic(printer, diag)
 	}
 
@@ -3290,6 +3292,10 @@ func harnessEnvLookup(key string) (string, bool) {
 // vars that could influence sandbox execution (e.g. shared library injection,
 // auto-sourced shell startup files). OIDC credential vars from oidcDenyKeys
 // are merged in by init() to prevent re-injection into the sandbox (#5832).
+// The sandbox credential deny-list is checked beside this map by
+// isReservedSandboxKey, not merged into it, because runnerSecretNameRefused
+// reads this map too and must accept those names (ADR 0145).
+// Entries are matched case-insensitively; every name in the map is uppercase.
 // NOTE: keep in sync with bootstrapEnv exports below for FULLSEND_* keys.
 var reservedSandboxKeys = map[string]bool{
 	"PATH":                        true,
@@ -3346,10 +3352,22 @@ func init() {
 	}
 }
 
+// isReservedSandboxKey reports whether an env.sandbox key is blocked by name:
+// a runner-reserved name, or one the sandbox credential deny-list refuses, so
+// a name unsafe as a provider credential is not exported here either (#3373).
+// Matching is case-insensitive. The gate and reservedSandboxEnvDiagnostics
+// both call this, so they cannot disagree about what a run drops.
+func isReservedSandboxKey(k string) bool {
+	return reservedSandboxKeys[strings.ToUpper(k)] || sandbox.IsReservedCredentialKey(k)
+}
+
 // buildSandboxEnvLines generates export lines for env.sandbox values (ADR 0055).
 // Values have already been expanded by the caller. Each value is single-quoted
-// with internal single quotes escaped. Keys that are not valid shell identifiers
-// are silently skipped.
+// with internal single quotes escaped. Keys that are not valid POSIX
+// identifiers, and keys that isReservedSandboxKey rejects, are skipped with a
+// warning on stderr; reservedSandboxEnvDiagnostics reports the reserved ones
+// again as a lint diagnostic, so they also surface with the other harness
+// warnings when the harness loads (#3373).
 func buildSandboxEnvLines(h *harness.Harness) []string {
 	if h.Env == nil || len(h.Env.Sandbox) == 0 {
 		return nil
@@ -3360,8 +3378,15 @@ func buildSandboxEnvLines(h *harness.Harness) []string {
 			fmt.Fprintf(os.Stderr, "WARNING: env.sandbox key %q is not a valid POSIX identifier; skipping\n", k)
 			continue
 		}
-		if reservedSandboxKeys[k] {
-			fmt.Fprintf(os.Stderr, "WARNING: env.sandbox key %q is reserved for runner infrastructure; skipping\n", k)
+		// Case-folded, like the credential and plugin doors. The two spellings
+		// are not interchangeable for the tools that read them: libcurl
+		// documents http_proxy as lowercase-only while other scheme proxies
+		// are also checked uppercase, and which of https_proxy and HTTPS_PROXY
+		// wins is upstream curl behavior, not something this repo controls.
+		// Blocking one spelling while exporting the other would make the
+		// strength of this blocklist depend on tool internals (#3373).
+		if isReservedSandboxKey(k) {
+			fmt.Fprintf(os.Stderr, "WARNING: env.sandbox key %q is reserved (runner infrastructure or security deny-list); skipping\n", k)
 			continue
 		}
 		keys = append(keys, k)
@@ -5698,15 +5723,18 @@ func buildScanContextCommand(repoDir, traceID string) string {
 	sort.Strings(inames) // deterministic ordering
 	inameExpr := strings.Join(inames, " -o ")
 
-	// Source .env for the run's environment. The scanner is the binary
-	// bootstrapCommon uploaded, named by its absolute path so the version
-	// that runs matches the runner whatever PATH .env ends up with.
+	// Read .env as data for the run's environment, as the launch does
+	// (EnvDataLoad, #8574): no .env or .env.d line runs as shell. find runs
+	// with the trusted PATH recorded before .env, so a PATH that .env sets
+	// cannot choose it. The scanner is the binary bootstrapCommon uploaded,
+	// named by its absolute path so the version that runs matches the
+	// runner.
 	envFile := sandbox.SandboxWorkspace + "/.env"
 	scanner := sandbox.SandboxWorkspace + "/bin/fullsend"
 
 	return fmt.Sprintf(
-		". %s && FULLSEND_TRACE_ID='%s' find '%s' -maxdepth %d -type f \\( %s \\) -exec %s scan context {} +",
-		envFile, traceID, escapedDir, maxContextScanDepth, inameExpr, scanner,
+		"%s && FULLSEND_TRACE_ID='%s' PATH=\"$%s\" find '%s' -maxdepth %d -type f \\( %s \\) -exec %s scan context {} +",
+		agentruntime.EnvDataLoad(envFile), traceID, agentruntime.EnvDataTrustedPathVar, escapedDir, maxContextScanDepth, inameExpr, scanner,
 	)
 }
 

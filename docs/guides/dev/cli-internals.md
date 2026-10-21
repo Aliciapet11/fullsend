@@ -142,6 +142,14 @@ fullsend
 │   │   ├── --project <project>              #     Project: owner/repo (GitHub/GitLab) or key (Jira)
 │   │   ├── --number <int>                   #     Issue number
 │   │   └── --fields <ids>                   #     Jira custom field IDs (customfield_<digits>) to include under custom_fields (Jira only)
+│   ├── create                               #   Create an issue (prints number, key, URL as JSON)
+│   │   ├── --tracker <tracker>              #     Tracker backend: github, gitlab, or jira
+│   │   ├── --project <project>              #     Project: owner/repo (GitHub/GitLab) or key (Jira)
+│   │   ├── --title <string>                 #     Issue title
+│   │   ├── --body <string>                  #     Issue description (Markdown), or '-' for stdin
+│   │   ├── --type <id-or-name>              #     Jira issue type ID or name (required for Jira; Jira only)
+│   │   ├── --parent <key>                   #     Jira parent issue key for sub-tasks (Jira only)
+│   │   └── --fullsend-dir <path>            #     .fullsend config directory (default --tracker from config.yaml)
 │   ├── post-comment                         #   Post or update a sticky comment on an issue
 │   │   ├── --tracker <tracker>              #     Tracker backend: github, gitlab, or jira
 │   │   ├── --project <project>              #     Project: owner/repo (GitHub/GitLab) or key (Jira)
@@ -224,7 +232,7 @@ The `mint`, `inference`, and `github` subcommands decompose setup into role-spec
 
 | Install Phase | Standalone Command | Required Access |
 |---------------|--------------------|-----------------|
-| Phases 1-3: Mint deployment | `fullsend mint deploy` | GCP project (mint): `roles/iam.serviceAccountAdmin`, `roles/iam.workloadIdentityPoolAdmin`, `roles/cloudfunctions.developer`, `roles/run.admin`; with `--pem-dir` also `roles/secretmanager.admin`, `roles/resourcemanager.projectIamAdmin` |
+| Phases 1-3: Mint deployment | `fullsend mint deploy` | GCP project (mint): `roles/iam.serviceAccountAdmin`, `roles/iam.workloadIdentityPoolAdmin`, `roles/cloudfunctions.developer`, `roles/run.admin`; with `--pem-dir` also `roles/secretmanager.admin`, `roles/resourcemanager.projectIamAdmin`; with `--otlp-headers-file` also `roles/secretmanager.admin` |
 | Phases 1-3: Mint enrollment | `fullsend mint enroll` | GCP project (mint): `roles/cloudfunctions.viewer`, `roles/run.admin`, `roles/iam.workloadIdentityPoolAdmin` |
 | Phase 4: WIF provisioning | `fullsend inference provision` | GCP project (inference): `roles/iam.workloadIdentityPoolAdmin`, `roles/resourcemanager.projectIamAdmin` |
 | Phases 5-7: GitHub setup + enrollment | `fullsend github setup` | GitHub only |
@@ -480,13 +488,17 @@ Vendoring commit messages use title + body (upload and stale delete). `admin ins
 │  │                                          │                   │
 │  │ Command built by buildRunCommand():      │                   │
 │  │  cd {repoDir} &&                         │                   │
-│  │  { readonly FULLSEND_CLAUDE_BIN=         │                   │
-│  │    "$(command -v claude)" (absolute,     │                   │
-│  │    else exit 127); } &&                  │                   │
-│  │  . {envFile} &&                          │                   │
+│  │  { readonly FULLSEND_CLAUDE_BIN= first   │                   │
+│  │    claude on the trusted PATH that the   │                   │
+│  │    agent cannot write, else exit 127;    │                   │
+│  │    node too for a node script } &&       │                   │
+│  │  envDataLoad {envFile} (pinned python3   │                   │
+│  │    reads .env as data; eval its exports)&&│                  │
 │  │  unset -f claude &&                      │                   │
 │  │  unset LD_* PYTHON* NODE_* BUN_OPTIONS &&│                   │
-│  │  "$FULLSEND_CLAUDE_BIN" --print          │                   │
+│  │  unset CLAUDE_CODE_{SAFE_MODE,SIMPLE,    │                   │
+│  │    SHELL_PREFIX,SUBPROCESS_ENV_SCRUB} && │                   │
+│  │  [$NODE] "$FULLSEND_CLAUDE_BIN" --print  │                   │
 │  │    --verbose                             │                   │
 │  │    --output-format stream-json           │                   │
 │  │    [--settings {hooksSettingsPath}]      │                   │
@@ -765,7 +777,7 @@ var executableFiles = map[string]struct{}{
 | `internal/cli/inference_openai.go` | ~900 | OpenAI WIF enrolment: request document, reply import, status/exchange |
 | `internal/cli/github.go` | ~966 | GitHub setup/set/status/uninstall/sync-scaffold/enroll/unenroll |
 | `internal/cli/github_client.go` | ~130 | GitHub token resolution and authenticated client construction |
-| `internal/cli/issues.go` | ~765 | Issue read/write commands (`fullsend issues get`, `post-comment`, `link`) |
+| `internal/cli/issues.go` | ~971 | Issue read/write commands (`fullsend issues get`, `create`, `post-comment`, `link`) |
 | `internal/cli/tracker_client.go` | ~122 | Tracker client factory (GitHub/GitLab/Jira) |
 | `internal/cli/run.go` | ~1923 | Agent execution lifecycle |
 | `internal/mint/main.go` | ~95 | GCF token mint entry point (wiring only) |

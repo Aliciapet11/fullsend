@@ -182,6 +182,24 @@ type APIError struct {
 	StatusCode int
 	Message    string
 	Errors     []APIErrorDetail
+	// RetryAfter is the wait the final response's Retry-After header
+	// asked for, uncapped. Zero when the header was absent or not a
+	// positive number of seconds.
+	RetryAfter time.Duration
+	// cause is the context error that cut a rate-limit backoff short; it
+	// keeps errors.Is(err, context.DeadlineExceeded) working for callers
+	// that bound the request with their own deadline.
+	cause error
+}
+
+// RetryAfterFromError returns the Retry-After wait carried by an
+// APIError in err's chain. ok is false when err carries none.
+func RetryAfterFromError(err error) (d time.Duration, ok bool) {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.RetryAfter <= 0 {
+		return 0, false
+	}
+	return apiErr.RetryAfter, true
 }
 
 // APIErrorDetail is one validation error entry returned by GitHub.
@@ -209,9 +227,15 @@ func (e *APIError) Error() string {
 
 // IsTransient reports whether the API error represents a transient
 // failure that may succeed on retry: server errors (500–504) and
-// rate limits (429). This method satisfies the transientReporter
-// interface used by forge.IsTransient.
+// rate limits (429). An error whose rate-limit backoff was cut short by
+// the caller's context (cause set) is not transient: retrying after the
+// context was cancelled or its deadline passed would defy caller intent.
+// This method satisfies the transientReporter interface used by
+// forge.IsTransient.
 func (e *APIError) IsTransient() bool {
+	if e.cause != nil {
+		return false
+	}
 	return e.StatusCode == http.StatusTooManyRequests ||
 		(e.StatusCode >= 500 && e.StatusCode <= 504)
 }
@@ -231,6 +255,9 @@ func (e *APIError) IsTransient() bool {
 // failures. The wrapping happens at call sites (e.g., CreateBranch)
 // where the operation context disambiguates the cause.
 func (e *APIError) Unwrap() error {
+	if e.cause != nil {
+		return e.cause
+	}
 	if e.StatusCode == http.StatusNotFound {
 		return forge.ErrNotFound
 	}
@@ -276,6 +303,51 @@ func IsPATForbiddenError(err error) bool {
 
 const maxRetries = 5
 
+type noAmbiguousRetryKey struct{}
+
+// WithoutAmbiguousRetry returns a context that stops the client from
+// retrying a request after an ambiguous failure: a transport timeout or a
+// 5xx response, where the server may already have applied the request.
+// Rate-limit rejections (429, rate-limit 403) are still retried because
+// the server did not process those. Use it for requests that must not be
+// replayed blindly, such as deleting a repository by name that another
+// party may have recreated; the caller re-checks state after the error.
+func WithoutAmbiguousRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noAmbiguousRetryKey{}, true)
+}
+
+func ambiguousRetryDisabled(ctx context.Context) bool {
+	v, _ := ctx.Value(noAmbiguousRetryKey{}).(bool)
+	return v
+}
+
+type retryGuardKey struct{}
+
+// WithRetryGuard returns a context under which the client calls guard
+// after every retry wait (including rate-limit waits, repository-race
+// waits and commit-retry delays) and before resending the request or
+// rerunning the operation. A non-nil error from guard stops the retry:
+// nothing is resent and that error is returned, wrapped. Use it for requests
+// whose target may change while the client waits, such as deleting a
+// repository by name that another party may have deleted and recreated.
+// guard receives the request context; requests it makes on that context
+// are subject to the same guard, so it should use its own context.
+func WithRetryGuard(ctx context.Context, guard func(context.Context) error) context.Context {
+	return context.WithValue(ctx, retryGuardKey{}, guard)
+}
+
+// checkRetryGuard runs the WithRetryGuard guard on ctx, if any.
+func checkRetryGuard(ctx context.Context, method, path string) error {
+	guard, _ := ctx.Value(retryGuardKey{}).(func(context.Context) error)
+	if guard == nil {
+		return nil
+	}
+	if err := guard(ctx); err != nil {
+		return fmt.Errorf("%s %s: not retried: %w", method, path, err)
+	}
+	return nil
+}
+
 // requestHeader is one extra header to set on a do() request. Only
 // getConditional uses this today (If-None-Match); it exists as a variadic
 // option rather than a new do() overload so the other 28 call sites
@@ -312,6 +384,11 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 	}
 
 	for attempt := range maxRetries {
+		if attempt > 0 {
+			if err := checkRetryGuard(ctx, method, path); err != nil {
+				return nil, err
+			}
+		}
 		var reqBody io.Reader
 		if open != nil {
 			rc, err := open()
@@ -361,6 +438,9 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 			// HTTP client timeout (Client.Timeout exceeded): retry
 			// with exponential backoff, same as transient server errors.
 			if isTimeoutError(ctx, err) {
+				if ambiguousRetryDisabled(ctx) {
+					return nil, fmt.Errorf("http %s %s: %w (not retried: the request may have been applied)", method, path, err)
+				}
 				if attempt == maxRetries-1 {
 					return nil, fmt.Errorf("http %s %s: %w (after %d attempts)", method, path, err, maxRetries)
 				}
@@ -391,6 +471,13 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 		// Body already read or drained by isRetryable.
 		resp.Body.Close()
 
+		if resp.StatusCode >= 500 && ambiguousRetryDisabled(ctx) {
+			return nil, &APIError{
+				StatusCode: resp.StatusCode,
+				Message:    fmt.Sprintf("server error on %s %s (not retried: the request may have been applied)", method, path),
+			}
+		}
+
 		delay := retryDelay(resp, attempt)
 		retryAfter := resp.Header.Get("Retry-After")
 
@@ -420,11 +507,35 @@ func (c *LiveClient) doRequest(ctx context.Context, method, path string, content
 					msg += " [rate-limit headers absent; no prior observation]"
 				}
 			}
-			return nil, &APIError{StatusCode: resp.StatusCode, Message: msg}
+			apiErr := &APIError{StatusCode: resp.StatusCode, Message: msg}
+			if secs, convErr := strconv.Atoi(retryAfter); convErr == nil && secs > 0 {
+				apiErr.RetryAfter = time.Duration(secs) * time.Second
+			}
+			return nil, apiErr
 		}
 		select {
 		case <-c.afterFunc(delay):
 		case <-ctx.Done():
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
+				// Keep the server-provided Retry-After deadline the
+				// client was waiting out so the caller can honour it
+				// after cutting the wait short. The client's own
+				// backoff delay is not a server deadline, so it goes
+				// in the message only and RetryAfter stays zero when
+				// the header was absent.
+				wait := delay
+				var serverWait time.Duration
+				if secs, convErr := strconv.Atoi(retryAfter); convErr == nil && secs > 0 {
+					serverWait = time.Duration(secs) * time.Second
+					wait = serverWait
+				}
+				return nil, &APIError{
+					StatusCode: resp.StatusCode,
+					Message:    fmt.Sprintf("rate limit: interrupted while waiting %s to retry %s %s: %v", wait, method, path, ctx.Err()),
+					RetryAfter: serverWait,
+					cause:      ctx.Err(),
+				}
+			}
 			return nil, ctx.Err()
 		}
 	}
@@ -886,20 +997,26 @@ func (c *LiveClient) CreateRepo(ctx context.Context, org, name, description stri
 	}
 
 	var repo struct {
-		Name          string `json:"name"`
-		FullName      string `json:"full_name"`
-		DefaultBranch string `json:"default_branch"`
-		Private       bool   `json:"private"`
+		ID            int64     `json:"id"`
+		Name          string    `json:"name"`
+		FullName      string    `json:"full_name"`
+		Description   string    `json:"description"`
+		DefaultBranch string    `json:"default_branch"`
+		Private       bool      `json:"private"`
+		CreatedAt     time.Time `json:"created_at"`
 	}
 	if err := decodeJSON(resp, &repo); err != nil {
 		return nil, fmt.Errorf("decode create repo response: %w", err)
 	}
 
 	return &forge.Repository{
+		ID:            repo.ID,
 		Name:          repo.Name,
 		FullName:      repo.FullName,
+		Description:   repo.Description,
 		DefaultBranch: repo.DefaultBranch,
 		Private:       repo.Private,
+		CreatedAt:     repo.CreatedAt,
 	}, nil
 }
 
@@ -915,13 +1032,15 @@ func (c *LiveClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Re
 	}
 
 	var r struct {
-		ID            int64  `json:"id"`
-		Name          string `json:"name"`
-		FullName      string `json:"full_name"`
-		DefaultBranch string `json:"default_branch"`
-		Private       bool   `json:"private"`
-		Archived      bool   `json:"archived"`
-		Fork          bool   `json:"fork"`
+		ID            int64     `json:"id"`
+		Name          string    `json:"name"`
+		FullName      string    `json:"full_name"`
+		Description   string    `json:"description"`
+		DefaultBranch string    `json:"default_branch"`
+		Private       bool      `json:"private"`
+		Archived      bool      `json:"archived"`
+		Fork          bool      `json:"fork"`
+		CreatedAt     time.Time `json:"created_at"`
 	}
 	if err := decodeJSON(resp, &r); err != nil {
 		return nil, fmt.Errorf("decode repo: %w", err)
@@ -931,10 +1050,12 @@ func (c *LiveClient) GetRepo(ctx context.Context, owner, repo string) (*forge.Re
 		ID:            r.ID,
 		Name:          r.Name,
 		FullName:      r.FullName,
+		Description:   r.Description,
 		DefaultBranch: r.DefaultBranch,
 		Private:       r.Private,
 		Archived:      r.Archived,
 		Fork:          r.Fork,
+		CreatedAt:     r.CreatedAt,
 	}, nil
 }
 
@@ -1243,6 +1364,10 @@ func (c *LiveClient) retryOnRepoRaceIf(ctx context.Context, label string, transi
 			case <-ctx.Done():
 				return ctx.Err()
 			}
+			// The target may have changed during the wait.
+			if err := checkRetryGuard(ctx, "retry", label); err != nil {
+				return err
+			}
 		}
 	}
 	return fmt.Errorf("%s: %w (after %d attempts)", label, lastErr, attempts)
@@ -1361,6 +1486,12 @@ func retryCommitOp[T any](ctx context.Context, c *LiveClient, label string, op f
 				var zero T
 				return zero, ctx.Err()
 			case <-c.afterFunc(jitter):
+			}
+			// The op rereads the branch head, so a target replaced since
+			// the last attempt would be written to instead of rejected.
+			if guardErr := checkRetryGuard(ctx, "retry", label); guardErr != nil {
+				var zero T
+				return zero, guardErr
 			}
 			log.Printf("retrying %s (attempt %d/%d): %v", label, attempt+1, maxAttempts, err)
 		}
@@ -1862,6 +1993,50 @@ func (c *LiveClient) GetFileContent(ctx context.Context, owner, repo, path strin
 		return nil, fmt.Errorf("decode base64 content: %w", err)
 	}
 	return data, nil
+}
+
+// UpdateFileIfMatch writes content through the Contents API with
+// expectedSHA as the "sha" precondition (omitted to create only). GitHub
+// rejects a stale SHA with 409 and a create over an existing file with a
+// 422 naming the missing "sha"; both are returned wrapping
+// forge.ErrConflict. The PUT is sent once: it bypasses retryOnRepoRace
+// (which would replay a 409) and runs with WithoutAmbiguousRetry so a
+// timeout or 5xx is not replayed either.
+func (c *LiveClient) UpdateFileIfMatch(ctx context.Context, owner, repo, path, message string, content []byte, expectedSHA string) error {
+	payload := map[string]any{
+		"message": message,
+		"content": base64.StdEncoding.EncodeToString(content),
+	}
+	if expectedSHA != "" {
+		payload["sha"] = expectedSHA
+	}
+	apiPath := fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, escapePathSegments(path))
+	resp, err := c.do(WithoutAmbiguousRetry(ctx), http.MethodPut, apiPath, payload)
+	if err != nil {
+		return fmt.Errorf("conditional update of %s: %w", path, err)
+	}
+	if err := checkStatus(resp, http.StatusOK, http.StatusCreated); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && isFileConflict(apiErr) {
+			apiErr.cause = forge.ErrConflict
+		}
+		return fmt.Errorf("conditional update of %s: %w", path, err)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// isFileConflict reports whether a Contents API write was rejected
+// because the file's current SHA did not match the request's precondition.
+func isFileConflict(e *APIError) bool {
+	switch e.StatusCode {
+	case http.StatusConflict:
+		return true
+	case http.StatusUnprocessableEntity:
+		return strings.Contains(lowerAPIErrorText(e), "sha")
+	default:
+		return false
+	}
 }
 
 // escapePathSegments URL-escapes each segment of a slash-separated path
@@ -3004,17 +3179,18 @@ func (c *LiveClient) DispatchWorkflow(ctx context.Context, owner, repo, workflow
 // if GitHub rejects the create because a label is unavailable in the target
 // repo, the request is retried without labels so issue creation still succeeds.
 func (c *LiveClient) CreateIssue(ctx context.Context, owner, repo, title, body string, labels ...string) (*forge.Issue, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues", url.PathEscape(owner), url.PathEscape(repo))
 	payload := map[string]any{"title": title, "body": body}
 	if len(labels) > 0 {
 		payload["labels"] = labels
 	}
-	resp, err := c.post(ctx, fmt.Sprintf("/repos/%s/%s/issues", owner, repo), payload)
+	resp, err := c.post(ctx, path, payload)
 	if err != nil {
 		var apiErr *APIError
 		if len(labels) == 0 || !errors.As(err, &apiErr) || !isValidationErrorForField(apiErr, "labels") {
 			return nil, fmt.Errorf("create issue: %w", err)
 		}
-		resp, err = c.post(ctx, fmt.Sprintf("/repos/%s/%s/issues", owner, repo), map[string]any{"title": title, "body": body})
+		resp, err = c.post(ctx, path, map[string]any{"title": title, "body": body})
 		if err != nil {
 			return nil, fmt.Errorf("create issue without labels after label rejection: %w", err)
 		}
@@ -4792,6 +4968,11 @@ func (c *LiveClient) SetPipelineVariablesMinimumOverrideRole(_ context.Context, 
 // GetJobTokenRepositoryPushAllowed is not supported on GitHub.
 func (c *LiveClient) GetJobTokenRepositoryPushAllowed(_ context.Context, _, _ string) (bool, error) {
 	return false, forge.ErrNotSupported
+}
+
+// GetPushRuleBranchNameRegex is not supported on GitHub.
+func (c *LiveClient) GetPushRuleBranchNameRegex(_ context.Context, _, _ string) (string, error) {
+	return "", forge.ErrNotSupported
 }
 
 // ForceCommitFileToBranch is not supported on GitHub.
