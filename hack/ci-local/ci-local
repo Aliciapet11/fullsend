@@ -205,7 +205,9 @@ build_image() {
 # containers.conf. Podman < 4.5 ignores CONTAINERS_CONF_OVERRIDE silently, so
 # refuse it. Only a local Podman reads mounts.conf, through the hidden
 # --default-mounts-file flag (containers.conf's default_mounts_file is
-# ignored); a remote client has no such flag. A remote client on Linux talks
+# ignored); a remote client has no such flag. The flag reaches build RUN steps
+# too: checked with a planted mounts.conf secret on Podman 4.5.1 to 6.2.0-dev,
+# rootless and rootful (#8489). A remote client on Linux talks
 # to a service on that host (CONTAINER_HOST, --remote, podman-remote), which
 # applies the host's containers.conf env and mounts.conf itself, so refuse it.
 # Rootful Podman maps keep-id to root, so it gets Docker's --user uid:gid.
