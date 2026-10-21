@@ -44,6 +44,7 @@ func NewFakeClient() *FakeClient {
 		ProjectLeases:            make(map[string]string),
 
 		JobTokenRepositoryPushAllowed: make(map[string]bool),
+		PushRuleBranchNameRegexes:     make(map[string]string),
 		// New trigger tokens are owned by a Developer-level user unless a
 		// test says otherwise.
 		TriggerTokenOwnerID: 1001,
