@@ -61,7 +61,7 @@ The `make wasm-build` target enforces these limits automatically — run it afte
 
 When making changes to Go code under `cmd/`, `internal/`, or `pkg/`:
 
-1. **Unit tests:** Run `make go-test` (or `go test ./...`) and fix any failures before committing.
+1. **Unit tests:** Run `make go-test` (or `go test ./...`) and fix any failures before committing. On macOS or a Linux distribution other than Ubuntu, `make ci-local T=go-test` runs the same tests in a container that matches the CI runner (see [`hack/ci-local`](../../hack/ci-local/README.md)).
 2. **Coverage:** CI enforces thresholds via [Codecov](https://about.codecov.io/) (see [`.codecov.yml`](../../.codecov.yml)). **Patch coverage** on changed lines has an **80% target** and a **75% enforced floor** (5% threshold). Codecov PR comments mark ✗ below 80% even when the `codecov/patch` status check is green. **Project coverage** must not drop more than **1%** below the base branch. `make go-test` alone does **not** enforce these thresholds — you must verify coverage locally before committing. See [Verifying patch coverage locally](#verifying-patch-coverage-locally) below for the exact commands.
 3. **Vet:** Run `make go-vet` to catch common issues.
 4. **Behaviour tests:** Run `make behaviour-test` (and `make playback-test` for multi-agent pipeline changes) if your changes affect the end-to-end behaviour covered by the Gherkin suites. These tests install fullsend per-repo on live GitHub pool repositories using mint/OIDC authentication. See [Behaviour testing](../guides/dev/behaviour-testing.md).
@@ -73,6 +73,15 @@ changed lines meet the **80% patch coverage** target (75% enforced floor)
 from [`.codecov.yml`](../../.codecov.yml). You must approximate this check
 yourself before committing. Skipping this step is the most common cause
 of `codecov/patch` failures on first push.
+
+On macOS or a Linux distribution other than Ubuntu,
+`hack/ci-local/ci-local coverage` runs `make go-test` in a container that
+matches the CI runner, then prints the coverage of each Go file you changed
+against `origin/main` (see [`hack/ci-local`](../../hack/ci-local/README.md)).
+These are **whole-file** statement percentages, not coverage of the lines you
+changed: a well-covered file can hide poorly covered new code. Treat them as
+a rough signal only, and use the step-by-step check below to verify patch
+coverage.
 
 ### Step-by-step
 
