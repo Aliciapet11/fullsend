@@ -241,16 +241,26 @@ func TestClaudeRunnerSettings(t *testing.T) {
 			"FULLSEND_TOOL_ALLOWLIST":   "",
 		}
 	}
+	// pinned are the names the launch clears after .env, set "" as well.
+	pinned := strings.Fields(strings.TrimPrefix(claudeLoaderEnvUnset, "unset ") + " " + strings.TrimPrefix(claudeSettingsEnvUnset, "unset "))
+	withPinned := func(env map[string]any) map[string]any {
+		for _, key := range pinned {
+			env[key] = ""
+		}
+		return env
+	}
 
 	t.Run("non-gateway", func(t *testing.T) {
-		assert.Equal(t, map[string]any{"env": hookEnv(), "disableAllHooks": false}, claudeRunnerSettings(recorded, nil))
+		assert.Equal(t, map[string]any{"env": withPinned(hookEnv()), "disableAllHooks": false}, claudeRunnerSettings(recorded, nil))
+		assert.Contains(t, pinned, "CLAUDE_CODE_SHELL_PREFIX")
+		assert.Contains(t, pinned, "LD_PRELOAD")
 	})
 
 	t.Run("nothing recorded pins every name empty", func(t *testing.T) {
 		env, ok := claudeRunnerSettings(nil, nil)["env"].(map[string]any)
 		require.True(t, ok)
-		require.Len(t, env, len(hookEnvManagedKeys))
-		for _, key := range hookEnvManagedKeys {
+		require.Len(t, env, len(hookEnvManagedKeys)+len(pinned))
+		for _, key := range append(append([]string{}, hookEnvManagedKeys...), pinned...) {
 			assert.Equal(t, "", env[key], key)
 		}
 	})
@@ -258,7 +268,7 @@ func TestClaudeRunnerSettings(t *testing.T) {
 	t.Run("gateway env is merged, not replaced", func(t *testing.T) {
 		routeEnv := map[string]any{"ANTHROPIC_BASE_URL": "https://gw.example.com", "CLAUDE_CODE_USE_VERTEX": ""}
 		extra := map[string]any{"apiKeyHelper": "helper", "env": routeEnv}
-		want := hookEnv()
+		want := withPinned(hookEnv())
 		want["ANTHROPIC_BASE_URL"] = "https://gw.example.com"
 		want["CLAUDE_CODE_USE_VERTEX"] = ""
 		assert.Equal(t, map[string]any{"apiKeyHelper": "helper", "env": want, "disableAllHooks": false}, claudeRunnerSettings(recorded, extra))
@@ -289,6 +299,11 @@ func TestInstallClaudeHooks_PinsRunnerSettings(t *testing.T) {
 		"FULLSEND_EGRESS_ALLOWLIST": "api.github.com:443",
 		"FULLSEND_CANARY_TOKEN":     "canary-value",
 		"FULLSEND_TOOL_ALLOWLIST":   "",
+	}
+	for _, unset := range []string{claudeLoaderEnvUnset, claudeSettingsEnvUnset} {
+		for _, key := range strings.Fields(strings.TrimPrefix(unset, "unset ")) {
+			wantHookEnv[key] = ""
+		}
 	}
 
 	install := func(t *testing.T, sb string, extra map[string]any) (map[string]any, []byte) {
@@ -329,7 +344,7 @@ func TestInstallClaudeHooks_PinsRunnerSettings(t *testing.T) {
 			}
 			assert.Equal(t, "https://gw.example.com", env["ANTHROPIC_BASE_URL"], "the route env is kept")
 			assert.Equal(t, "", env["CLAUDE_CODE_USE_VERTEX"])
-			assert.Len(t, env, len(extra["env"].(map[string]any))+len(hookEnvManagedKeys))
+			assert.Len(t, env, len(extra["env"].(map[string]any))+len(wantHookEnv))
 			assert.Equal(t, extra["apiKeyHelper"], doc["apiKeyHelper"])
 
 			cmd := buildRunCommand(RunParams{SandboxName: sb, AgentBaseName: "agent", RepoDir: "/r", Model: "gateway/m", HooksSettingsPath: security.SandboxHooksSettings})

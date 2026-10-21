@@ -55,10 +55,14 @@ const claudeLoaderEnvUnset = "unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPA
 // claudeSettingsEnvUnset clears, after .env and next to claudeLoaderEnvUnset,
 // the Claude Code variables that change how it loads settings and runs hook
 // commands: CLAUDE_CODE_SAFE_MODE (--safe-mode) and CLAUDE_CODE_SIMPLE
-// (--bare) narrow what Claude Code loads, and CLAUDE_CODE_SHELL_PREFIX wraps
-// the shell commands it runs, hook commands included. None of them belongs
-// to the harness, so a value .env sets never reaches claude.
-const claudeSettingsEnvUnset = "unset CLAUDE_CODE_SAFE_MODE CLAUDE_CODE_SIMPLE CLAUDE_CODE_SHELL_PREFIX"
+// (--bare) narrow what Claude Code loads, CLAUDE_CODE_SHELL_PREFIX wraps
+// the shell commands it runs, hook commands included, and
+// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB removes credential-named variables, such
+// as FULLSEND_CANARY_TOKEN, from the hooks' environment. None of them belongs
+// to the harness, so a value .env sets never reaches claude, and the settings
+// document pins each to "" (claudeRunnerSettings) so a settings file's env
+// block cannot set one either.
+const claudeSettingsEnvUnset = "unset CLAUDE_CODE_SAFE_MODE CLAUDE_CODE_SIMPLE CLAUDE_CODE_SHELL_PREFIX CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
 
 // ClaudeRuntime implements Runtime using the Claude Code CLI.
 type ClaudeRuntime struct{}
@@ -993,11 +997,15 @@ func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, ex
 // over them only for the keys it sets, so each key is set explicitly:
 //
 //   - env holds every hookEnvManagedKeys name, with the value Bootstrap
-//     recorded (securityEnv) or "" — which Claude Code treats as unset —
+//     recorded (securityEnv) or "" — which every hook treats as unset —
 //     for a name the runner has no value for, as hookEnvExports does at
 //     launch. A settings file's env block is applied inside Claude Code,
 //     after that export. On a gateway run the names are added to the
 //     route's env block rather than replacing it.
+//   - env also sets each claudeLoaderEnvUnset and claudeSettingsEnvUnset
+//     name to "": the launch unsets them after .env, and a settings file's
+//     env block would otherwise set them again inside Claude Code, for the
+//     hook commands it starts.
 //   - disableAllHooks is false, so no other file can switch off the hooks
 //     this document wires.
 //
@@ -1017,6 +1025,11 @@ func claudeRunnerSettings(securityEnv []hookEnvPair, extra map[string]any) map[s
 	}
 	for _, key := range hookEnvManagedKeys {
 		env[key] = values[key]
+	}
+	for _, unset := range []string{claudeLoaderEnvUnset, claudeSettingsEnvUnset} {
+		for _, key := range strings.Fields(strings.TrimPrefix(unset, "unset ")) {
+			env[key] = ""
+		}
 	}
 	out["env"] = env
 	out["disableAllHooks"] = false

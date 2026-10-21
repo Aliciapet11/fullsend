@@ -489,7 +489,7 @@ Vendoring commit messages use title + body (upload and stale delete). `admin ins
 │  │  unset -f claude &&                      │                   │
 │  │  unset LD_* PYTHON* NODE_* BUN_OPTIONS &&│                   │
 │  │  unset CLAUDE_CODE_{SAFE_MODE,SIMPLE,    │                   │
-│  │    SHELL_PREFIX} &&                      │                   │
+│  │    SHELL_PREFIX,SUBPROCESS_ENV_SCRUB} && │                   │
 │  │  [$NODE] "$FULLSEND_CLAUDE_BIN" --print  │                   │
 │  │    --verbose                             │                   │
 │  │    --output-format stream-json           │                   │

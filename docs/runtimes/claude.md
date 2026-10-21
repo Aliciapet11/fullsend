@@ -265,7 +265,7 @@ credentials, comes from the sandbox.
 | Run | Cleared after `.env` | Sources it covers |
 |---|---|---|
 | Every run | `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUSERBASE`, `NODE_OPTIONS`, `NODE_PATH`, `BUN_OPTIONS`: code-loading variables, not routing ones | all |
-| Every run | `CLAUDE_CODE_SAFE_MODE`, `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_SHELL_PREFIX`: they change how Claude Code loads settings and runs hook commands | all |
+| Every run | `CLAUDE_CODE_SAFE_MODE`, `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`: they change how Claude Code loads settings, runs hook commands and passes the environment to them | all |
 | Gateway runs | `ANTHROPIC_BASE_URL`, `ANTHROPIC_UNIX_SOCKET`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_IDENTITY_TOKEN`, `ANTHROPIC_IDENTITY_TOKEN_FILE`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`, `ANTHROPIC_PROFILE`, `ANTHROPIC_FEDERATION_RULE_ID`, `CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, `CLAUDE_CODE_HOST_AUTH_ENV_VAR`, `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER`, `AGENT_PROXY_AUTH_TOKEN`, and the provider selectors `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`, `CLAUDE_CODE_USE_GATEWAY`; then the runner exports its own values | all: `env.sandbox`, host-file env files, the agent's `.env` writes, and providers |
 
 On non-gateway runs no `ANTHROPIC_*` variable is cleared. A value the harness sets is honoured.
@@ -283,13 +283,17 @@ again after it reads `.env`, and unsets any of them the harness did not set. A
 value in `.env`, including one the agent wrote there, cannot change them.
 
 Whether the hooks run at all is also the runner's choice. The `--settings`
-document the runner passes sets those five variables in its `env` block, empty
-for any the harness did not set, and sets `"disableAllHooks": false`. On
-gateway runs these are added to the route's `env` block in the inline document.
-`--settings` ranks above `$CLAUDE_CONFIG_DIR/settings.json` and the
-repository's `.claude/settings.json` and `.claude/settings.local.json` for the
-keys it sets. None of those lower-priority files can change the hook settings
-or turn the hooks off.
+document the runner passes pins these keys:
+
+- `env`: the five hook variables, empty for any the harness did not set, and
+  every variable in the "Every run" rows of the table above, set empty.
+- `"disableAllHooks": false`.
+
+On gateway runs the `env` entries are added to the route's `env` block in the
+inline document. `--settings` ranks above `$CLAUDE_CONFIG_DIR/settings.json`
+and the repository's `.claude/settings.json` and `.claude/settings.local.json`
+for the keys it sets, so a value for one of these keys in those files has no
+effect. Other keys in those files still apply.
 
 ## Behaviour differences worth knowing
 

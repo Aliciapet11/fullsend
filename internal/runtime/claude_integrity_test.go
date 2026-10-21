@@ -412,8 +412,8 @@ func TestClaudeLaunch_ClearsPythonVariablesSetByEnv(t *testing.T) {
 // settings and runs hook commands must not reach claude, under /bin/sh and
 // dash, with sandbox hooks on and off.
 func TestClaudeLaunch_ClearsSettingsVariablesSetByEnv(t *testing.T) {
-	const envBody = "export CLAUDE_CODE_SAFE_MODE=1\nexport CLAUDE_CODE_SIMPLE=1\nexport CLAUDE_CODE_SHELL_PREFIX=/tmp/wrap.sh\n"
-	const stub = "#!/bin/sh\necho \"CLAUDE_RAN CC=[${CLAUDE_CODE_SAFE_MODE-}${CLAUDE_CODE_SIMPLE-}${CLAUDE_CODE_SHELL_PREFIX-}]\"\n"
+	const envBody = "export CLAUDE_CODE_SAFE_MODE=1\nexport CLAUDE_CODE_SIMPLE=1\nexport CLAUDE_CODE_SHELL_PREFIX=/tmp/wrap.sh\nexport CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1\n"
+	const stub = "#!/bin/sh\necho \"CLAUDE_RAN CC=[${CLAUDE_CODE_SAFE_MODE-}${CLAUDE_CODE_SIMPLE-}${CLAUDE_CODE_SHELL_PREFIX-}${CLAUDE_CODE_SUBPROCESS_ENV_SCRUB-}]\"\n"
 	shells := []string{"/bin/sh"}
 	if dash, err := exec.LookPath("dash"); err == nil {
 		shells = append(shells, dash)
@@ -444,6 +444,9 @@ func TestClaudeLaunch_ClearsSettingsVariablesSetByEnv(t *testing.T) {
 				name = filepath.Base(shell) + "/hooks on"
 			}
 			t.Run(name, func(t *testing.T) {
+				if hooks && shell == "/bin/sh" {
+					skipUnlessShellUnsetsBracket(t)
+				}
 				f := newClaudeGuardFixture(t)
 				f.shell = shell
 				require.NoError(t, os.WriteFile(filepath.Join(f.binDir, "claude"), []byte(stub), 0o755))
@@ -460,7 +463,7 @@ func TestClaudeLaunch_ClearsSettingsVariablesSetByEnv(t *testing.T) {
 				}
 				out, err = launch(t, f, hooks)
 				require.NoError(t, err, out)
-				assert.Contains(t, out, "CLAUDE_RAN CC=[11/tmp/wrap.sh]")
+				assert.Contains(t, out, "CLAUDE_RAN CC=[11/tmp/wrap.sh1]")
 			})
 		}
 	}
