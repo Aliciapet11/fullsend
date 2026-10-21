@@ -822,7 +822,7 @@ func TestRunAgent_BareBuiltinProviderResolvesEmbeddedDefinitionAndProfile(t *tes
 	var buf bytes.Buffer
 	printer := ui.New(&buf)
 	repoDir := t.TempDir()
-	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", repoDir, fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
 	// The stub cannot bootstrap an agent past sandbox creation, but the run
 	// must get past the provider/profile orchestration steps without error.
 	require.Error(t, err)
@@ -858,7 +858,7 @@ func runAgentWithProviderFiles(t *testing.T, harnessYAML string, files map[strin
 	}
 	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
 	var buf bytes.Buffer
-	err := runAgent(context.Background(), "code", dir, "", t.TempDir(), "", nil, false, "", "", "", rFlags, statusOpts{}, ui.New(&buf), false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", t.TempDir(), fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, ui.New(&buf), false, runOverrideFlags{})
 	// The stub fails the first in-sandbox exec, after provider setup.
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "importing")
@@ -967,7 +967,7 @@ func TestRunAgent_UnlistedProfileDirectoryFileIsNotImported(t *testing.T) {
 	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
 	printer := ui.New(io.Discard)
 	repoDir := t.TempDir()
-	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", repoDir, fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
 	// The stub cannot bootstrap an agent past sandbox creation, but the run
 	// must get past the profile-import step without error.
 	require.Error(t, err)
@@ -1767,6 +1767,8 @@ func TestTryAgentsRepoMeasurementManifest_NetworkFailure(t *testing.T) {
 	tlsCfg := srv.TLS.Clone()
 	tlsCfg.InsecureSkipVerify = true
 	policy := fetch.NewTestPolicy(tlsCfg, []string{hostname}, []string{port})
+	// The 502 is retried; keep the backoff between attempts negligible.
+	policy.RetryBackoff = time.Millisecond
 
 	orig := defaultAgentsRepoURLPrefix
 	defaultAgentsRepoURLPrefix = srv.URL + "/"
@@ -4522,7 +4524,9 @@ func TestRunAgent_PreflightCheck_Timeout(t *testing.T) {
 	// A preflight_check that exceeds the context deadline should abort
 	// with a "timed out" error, not hang indefinitely.
 	useFakeOpenshell(t)
-	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"sleep 5\"\n  max_iterations: 2\n")
+	// exec replaces the shell, so the context kill reaches sleep itself;
+	// a forked sleep would keep the output pipe open for the full 5s.
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"exec sleep 5\"\n  max_iterations: 2\n")
 
 	// Shrink the real timeout so the "sleep 5" command genuinely outlives
 	// it, exercising the actual DeadlineExceeded branch rather than
