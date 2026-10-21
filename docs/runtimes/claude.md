@@ -286,7 +286,8 @@ Whether the hooks run at all is also the runner's choice. The `--settings`
 document the runner passes pins these keys:
 
 - `env`: the five hook variables, empty for any the harness did not set, and
-  every variable in the "Every run" rows of the table above, set empty.
+  every variable in the "Every run" rows of the table above, and `BASH_ENV`
+  and `ENV`, set empty.
 - `"disableAllHooks": false`.
 
 On gateway runs the `env` entries are added to the route's `env` block in the

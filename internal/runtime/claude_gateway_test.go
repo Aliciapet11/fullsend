@@ -242,7 +242,7 @@ func TestClaudeRunnerSettings(t *testing.T) {
 		}
 	}
 	// pinned are the names the launch clears after .env, set "" as well.
-	pinned := strings.Fields(strings.TrimPrefix(claudeLoaderEnvUnset, "unset ") + " " + strings.TrimPrefix(claudeSettingsEnvUnset, "unset "))
+	pinned := append(strings.Fields(strings.TrimPrefix(claudeLoaderEnvUnset, "unset ")+" "+strings.TrimPrefix(claudeSettingsEnvUnset, "unset ")), claudeShellStartupEnv...)
 	withPinned := func(env map[string]any) map[string]any {
 		for _, key := range pinned {
 			env[key] = ""
@@ -254,6 +254,7 @@ func TestClaudeRunnerSettings(t *testing.T) {
 		assert.Equal(t, map[string]any{"env": withPinned(hookEnv()), "disableAllHooks": false}, claudeRunnerSettings(recorded, nil))
 		assert.Contains(t, pinned, "CLAUDE_CODE_SHELL_PREFIX")
 		assert.Contains(t, pinned, "LD_PRELOAD")
+		assert.Contains(t, pinned, "BASH_ENV")
 	})
 
 	t.Run("nothing recorded pins every name empty", func(t *testing.T) {
@@ -304,6 +305,9 @@ func TestInstallClaudeHooks_PinsRunnerSettings(t *testing.T) {
 		for _, key := range strings.Fields(strings.TrimPrefix(unset, "unset ")) {
 			wantHookEnv[key] = ""
 		}
+	}
+	for _, key := range claudeShellStartupEnv {
+		wantHookEnv[key] = ""
 	}
 
 	install := func(t *testing.T, sb string, extra map[string]any) (map[string]any, []byte) {

@@ -64,6 +64,11 @@ const claudeLoaderEnvUnset = "unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPA
 // block cannot set one either.
 const claudeSettingsEnvUnset = "unset CLAUDE_CODE_SAFE_MODE CLAUDE_CODE_SIMPLE CLAUDE_CODE_SHELL_PREFIX CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
 
+// claudeShellStartupEnv are the shell startup variables envDataDropNames
+// refuses from .env. The settings document sets them to "" as well, so a
+// settings file's env block cannot hand one to the shells Claude Code starts.
+var claudeShellStartupEnv = []string{"BASH_ENV", "ENV"}
+
 // ClaudeRuntime implements Runtime using the Claude Code CLI.
 type ClaudeRuntime struct{}
 
@@ -1003,7 +1008,8 @@ func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, ex
 //     after that export. On a gateway run the names are added to the
 //     route's env block rather than replacing it.
 //   - env also sets each claudeLoaderEnvUnset and claudeSettingsEnvUnset
-//     name to "": the launch unsets them after .env, and a settings file's
+//     name, and claudeShellStartupEnv, to "": the launch unsets or refuses
+//     them after .env, and a settings file's
 //     env block would otherwise set them again inside Claude Code, for the
 //     hook commands it starts.
 //   - disableAllHooks is false, so no other file can switch off the hooks
@@ -1030,6 +1036,9 @@ func claudeRunnerSettings(securityEnv []hookEnvPair, extra map[string]any) map[s
 		for _, key := range strings.Fields(strings.TrimPrefix(unset, "unset ")) {
 			env[key] = ""
 		}
+	}
+	for _, key := range claudeShellStartupEnv {
+		env[key] = ""
 	}
 	out["env"] = env
 	out["disableAllHooks"] = false
