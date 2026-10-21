@@ -42,8 +42,9 @@ and native-webhook input, and **Jira poll** input:
   `gitlab-webhook` is the shipped GitLab native-webhook fast-path adapter,
   provisioned at install time once its readiness gates hold
   ([ADR 0125](../../../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md)).
-  Live validation is partial: dispatch is demonstrated on GitLab.com Free and
-  self-managed EE, while other environments remain unverified (see
+  Live issue-to-agent validation covers GitLab.com Free, self-managed EE, and
+  self-managed CE. The CE runs used a patched agents helper, so stock agents
+  on a custom-port CE instance remain unverified (see
   [Validation status](#gitlab-webhook-validation-status));
   `jira-poll` is the production Jira poll adapter; `json` supports tests and
   replay.
@@ -102,7 +103,7 @@ Input drivers map native forge events into this struct:
 |--------|--------|-----------|
 | `gha-event` | `GITHUB_EVENT_PATH` + `gh` snapshot for labels and change-proposal metadata | Production; Discussions → `entity.kind: conversation` planned ([ADR 0086](../../../ADRs/0086-conversation-surface-for-agent-participation.md)) |
 | `gitlab-poll` | GitLab CI event payload (cron-polled; [ADR 0067](../../../ADRs/0067-gitlab-cron-polling-event-dispatch.md)) | Production (poll) |
-| `gitlab-webhook` | `TRIGGER_PAYLOAD`, a file-type CI/CD variable whose value is a path to the webhook body delivered by a native "use a webhook" pipeline trigger pinned to the protected default branch: the file's contents are **untrusted hinting only** (resource IDs, event type). The adapter MUST accept only GitLab's own file-type `TRIGGER_PAYLOAD` variable — never a caller-supplied path override, and never following a symlink out of the runner-provided location — read the file, and re-fetch the referenced entities from the GitLab API. Provenance splits by field: `entity`, `state`, `actor`, and `state.labels` MUST come **solely** from the project-pinned API re-fetch, failing closed on any missing or mismatched resource. `transition.kind` (and `source.raw_type`/`raw_action`) has no API-snapshot equivalent — a resource `GET` cannot distinguish opened/labeled/synchronized/merged for an MR, or added/edited for a note — so it MAY be taken from the payload's object-kind/action hint **only after** the payload action is mapped onto the v1 transition vocabulary and validated by the fail-closed consistency checks enumerated in [GitLab webhook transition provenance](#gitlab-webhook-transition-provenance-gitlab-webhook) below. Any action that contradicts the snapshot, or that cannot be checked against it, MUST fail closed. Required transition sub-objects follow the same field-split: `transition.comment` and `transition.review` MUST be populated from the re-fetch, while `transition.label` (`name` and `action`, which a current-state snapshot cannot recover) is taken from the payload's `changes.labels` diff and admitted only after the present/absent snapshot check — see the subsection for the per-label fan-out. This is **not** a pure snapshot re-fetch — the payload action is untrusted until the check passes. The enumerated checks are *current-state* predicates and do not by themselves prove the action just occurred, so **snapshot-consistent replay** remains a named residual trigger-token risk (see the subsection); the adapter MUST use event-time evidence to bind the action **and the actor that performed it** to a recent occurrence and fail closed when no matching event links them. For transitions whose snapshot carries no actor (e.g. `label_changed`), GitLab's resource label/state events — which record user, action, and time — are a **required** part of the re-fetch; a users/members `GET` of the payload-named actor is **not** sufficient actor provenance. **Actor-to-transition attribution** is a distinct requirement, separate from replay (see the subsection). Any identifier read from the payload MUST be validated against its expected format before use in an API path; moreover every re-fetch URL MUST be constructed from the pinned API host (the `CI_JOB_TOKEN` job record's project, plus the pinned API root described below) combined with those validated identifiers, and the adapter MUST NOT follow any URL, host, or `path_with_namespace` taken from the payload (e.g. `project.web_url`, `object_attributes.url`, `repository.git_http_url`, `project.path_with_namespace`) — doing so would turn the payload into SSRF against the PAT-bearing client and would bypass the API-root pin. The payload's contents MUST NOT be logged or echoed. **Project identity** MUST come from the running job's `CI_JOB_TOKEN` job record (`GET /api/v4/job`) as the **sole** project-identity source — never from the trigger-overridable `CI_PROJECT_ID`, `CI_API_V4_URL`, `CI_SERVER_URL`, or `FULLSEND_GITLAB_URL` environment values, which the adapter MUST ignore for identity. An `id_tokens` JWT is **not** an independent or interchangeable identity source (it lands in an ordinary env var a same-named trigger variable can outrank); if a JWT is used at all it MUST be **bound** to the `CI_JOB_TOKEN`-authenticated job record by matching its `job_id`/`project_id` claims — in addition to JWKS signature verification — and MUST NOT stand alone. **Host/base-URL:** the adapter MUST target the API root from the same identity pin, never `CI_API_V4_URL`, `CI_SERVER_URL`, or `FULLSEND_GITLAB_URL` directly, and MUST fail closed when no pinned API root is available. The shipped dispatcher passes the validated https API root that bootstrapped the `CI_JOB_TOKEN` job lookup (`FULLSEND_PINNED_GITLAB_URL`). That bootstrap value is still in the overridable class, so its trust rests on the `ci_pipeline_variables_minimum_override_role=no_one_allowed` restriction, which install verifies before it provisions the webhook, and on the inherited CI/CD variable trust assumption in the [GitLab configuration guide](../../../guides/getting-started/configuring-gitlab.md#inherited-cicd-variable-trust). A base-URL pin independent of that restriction is not specified ([ADR 0125](../../../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md), Consequences) | Shipped (webhook fast-path); live validation partial — see [Validation status](#gitlab-webhook-validation-status) |
+| `gitlab-webhook` | `TRIGGER_PAYLOAD`, a file-type CI/CD variable whose value is a path to the webhook body delivered by a native "use a webhook" pipeline trigger pinned to the protected default branch: the file's contents are **untrusted hinting only** (resource IDs, event type). The adapter MUST accept only GitLab's own file-type `TRIGGER_PAYLOAD` variable — never a caller-supplied path override, and never following a symlink out of the runner-provided location — read the file, and re-fetch the referenced entities from the GitLab API. Provenance splits by field: `entity`, `state`, `actor`, and `state.labels` MUST come **solely** from the project-pinned API re-fetch, failing closed on any missing or mismatched resource. `transition.kind` (and `source.raw_type`/`raw_action`) has no API-snapshot equivalent — a resource `GET` cannot distinguish opened/labeled/synchronized/merged for an MR, or added/edited for a note — so it MAY be taken from the payload's object-kind/action hint **only after** the payload action is mapped onto the v1 transition vocabulary and validated by the fail-closed consistency checks enumerated in [GitLab webhook transition provenance](#gitlab-webhook-transition-provenance-gitlab-webhook) below. Any action that contradicts the snapshot, or that cannot be checked against it, MUST fail closed. Required transition sub-objects follow the same field-split: `transition.comment` and `transition.review` MUST be populated from the re-fetch, while `transition.label` (`name` and `action`, which a current-state snapshot cannot recover) is taken from the payload's `changes.labels` diff and admitted only after the present/absent snapshot check — see the subsection for the per-label fan-out. This is **not** a pure snapshot re-fetch — the payload action is untrusted until the check passes. The enumerated checks are *current-state* predicates and do not by themselves prove the action just occurred, so **snapshot-consistent replay** remains a named residual trigger-token risk (see the subsection); the adapter MUST use event-time evidence to bind the action **and the actor that performed it** to a recent occurrence and fail closed when no matching event links them. For transitions whose snapshot carries no actor (e.g. `label_changed`), GitLab's resource label/state events — which record user, action, and time — are a **required** part of the re-fetch; a users/members `GET` of the payload-named actor is **not** sufficient actor provenance. **Actor-to-transition attribution** is a distinct requirement, separate from replay (see the subsection). Any identifier read from the payload MUST be validated against its expected format before use in an API path; moreover every re-fetch URL MUST be constructed from the pinned API host (the `CI_JOB_TOKEN` job record's project, plus the pinned API root described below) combined with those validated identifiers, and the adapter MUST NOT follow any URL, host, or `path_with_namespace` taken from the payload (e.g. `project.web_url`, `object_attributes.url`, `repository.git_http_url`, `project.path_with_namespace`) — doing so would turn the payload into SSRF against the PAT-bearing client and would bypass the API-root pin. The payload's contents MUST NOT be logged or echoed. **Project identity** MUST come from the running job's `CI_JOB_TOKEN` job record (`GET /api/v4/job`) as the **sole** project-identity source — never from the trigger-overridable `CI_PROJECT_ID`, `CI_API_V4_URL`, `CI_SERVER_URL`, or `FULLSEND_GITLAB_URL` environment values, which the adapter MUST ignore for identity. An `id_tokens` JWT is **not** an independent or interchangeable identity source (it lands in an ordinary env var a same-named trigger variable can outrank); if a JWT is used at all it MUST be **bound** to the `CI_JOB_TOKEN`-authenticated job record by matching its `job_id`/`project_id` claims — in addition to JWKS signature verification — and MUST NOT stand alone. **Host/base-URL:** the adapter MUST target the API root from the same identity pin, never `CI_API_V4_URL`, `CI_SERVER_URL`, or `FULLSEND_GITLAB_URL` directly, and MUST fail closed when no pinned API root is available. The shipped dispatcher passes the validated https API root that bootstrapped the `CI_JOB_TOKEN` job lookup (`FULLSEND_PINNED_GITLAB_URL`). That bootstrap value is still in the overridable class, so its trust rests on the `ci_pipeline_variables_minimum_override_role=no_one_allowed` restriction, which install verifies before it provisions the webhook, and on the inherited CI/CD variable trust assumption in the [GitLab configuration guide](../../../guides/getting-started/configuring-gitlab.md#inherited-cicd-variable-trust). A base-URL pin independent of that restriction is not specified ([ADR 0125](../../../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md), Consequences) | Shipped (webhook fast-path); live-validated on GitLab.com Free, self-managed EE, and self-managed CE, with stock agents on custom-port CE unverified — see [Validation status](#gitlab-webhook-validation-status) |
 | `jira-poll` | Jira issue search + changelog/comments since `lastCheck` ([jira-poll-adapter.md](jira-poll-adapter.md), [ADR 0063](../../../ADRs/0063-polling-based-work-discovery.md)) | Production (poll) |
 | `json` | stdin or `--input-file` | Tests, replay |
 
@@ -416,7 +417,7 @@ GitLab is a normative v1 source system ([gitlab-implementation.md](../../../prob
 
 | Concern | Mapping |
 |---------|---------|
-| Input driver | `gitlab-poll` (production, cron-polled; [ADR 0067](../../../ADRs/0067-gitlab-cron-polling-event-dispatch.md)) and `gitlab-webhook` (shipped fast-path, provisioned at install time behind readiness gates, with live validation partial — see [Validation status](#gitlab-webhook-validation-status); reads the file `TRIGGER_PAYLOAD` points to, re-fetched with a `CI_JOB_TOKEN`-pinned project identity and API root, and fail-closed on mismatch; see the Adapters table above; [ADR 0125](../../../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md)) |
+| Input driver | `gitlab-poll` (production, cron-polled; [ADR 0067](../../../ADRs/0067-gitlab-cron-polling-event-dispatch.md)) and `gitlab-webhook` (shipped fast-path, provisioned at install time behind readiness gates, live-validated with stock agents on custom-port CE unverified — see [Validation status](#gitlab-webhook-validation-status); reads the file `TRIGGER_PAYLOAD` points to, re-fetched with a `CI_JOB_TOKEN`-pinned project identity and API root, and fail-closed on mismatch; see the Adapters table above; [ADR 0125](../../../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md)) |
 | `source.system` | `gitlab` |
 | `repo` slug | Nested group path (`group/subgroup/project`) — `repo_path` pattern supports multi-segment paths |
 | MR events | Cron-polled MR → `entity.kind: change_proposal` (native `merge_request_event` dispatch removed in [#7322](https://github.com/fullsend-ai/fullsend/issues/7322); see [ADR 0067](../../../ADRs/0067-gitlab-cron-polling-event-dispatch.md)) |
@@ -573,24 +574,81 @@ bind its actor the same way or fail closed.
 
 #### GitLab webhook validation status
 
-Live validation on `main` at `acd2ff4` (recorded in
-[#8245](https://github.com/fullsend-ai/fullsend/issues/8245#issuecomment-6280859593))
-demonstrated the fast path on disposable GitLab.com Free and self-managed EE
-19.2.7-ee projects. On both, a newly opened issue started a webhook-triggered
-dispatcher pipeline within about two seconds, and the dispatcher launched an
-agent pipeline. Runtime identities stayed at Developer level. The run also
-covered the poller backstop with the webhook removed, rotation and reinstall,
-and uninstall cleanup.
+**GitLab.com Free and self-managed EE.** The
+[2026-10-20 run](https://github.com/fullsend-ai/fullsend/issues/8245#issuecomment-6301468961)
+on `main` at `a87815b6c` passed the same flows on disposable projects in both
+environments. A newly opened issue started a webhook-triggered dispatcher
+within about two seconds, and its inference-backed triage agent succeeded.
+With the webhook removed, the polling schedule dispatched a new issue to a
+triage agent that succeeded, and replay found no further dispatches. Trigger
+account rotation moved both active schedules to the replacement account
+without a second install, and a post-rotation issue reached a successful
+triage agent through the webhook. `repos status` reported no drift, and the
+trigger deploy key was the only protected-branch push grant Fullsend added,
+separate from the Poller identity. Uninstall left no managed hooks,
+schedules, variables, trigger tokens, or deploy keys.
 
-The following remain **unverified**, so the full #8245 live-validation gate is
-still open:
+**Self-managed CE.** Runs on an isolated GitLab CE 19.4.1 instance exercised
+the same real GitLab CI paths, with inference-backed triage using GitLab CI
+OIDC workload identity federation:
 
-- **Self-managed CE.** No CE instance was available.
-- **The instrumented Phase A pause harness.** It depends on server-side
-  request pauses in isolated GitLab instances, which were not available.
-- **GitLab.com inference-backed agent completion.** The agent jobs started
-  on GitLab.com Free, but inference failed because of a test credential
-  mismatch. The self-managed EE triage agent pipeline completed.
+- The
+  [first CE run](https://github.com/fullsend-ai/fullsend/issues/8245#issuecomment-6307934978)
+  on `main` at `6cd9caa58496` passed install and `repos status` with zero
+  drift. The Poller, Analyst, Coder, and trigger account had Developer
+  access. A newly opened issue reached the webhook dispatcher and a triage
+  agent that succeeded. An interrupted trigger-account rotation was
+  recovered by a normal `repos install`, after which `repos status` again
+  reported zero drift. Uninstall left no managed variables, hooks, triggers,
+  schedules, memberships, trigger deploy keys, or trigger push grants.
+- The
+  [second CE run](https://github.com/fullsend-ai/fullsend/issues/8245#issuecomment-6316757216)
+  on `main` at `5740e70511d8` covered the scenarios the first left open.
+  With the webhook absent, the event-poll schedule's natural run dispatched
+  an issue to a triage agent that succeeded. After
+  `--rotate-gitlab-trigger-account` replaced the trigger account, deploy key,
+  protected-branch grant, and trigger token, a newly opened issue reached the
+  dispatcher and a triage agent that succeeded. The Poller stayed a separate
+  Developer identity, `repos status` reported zero drift, and uninstall again
+  removed all managed resources.
+
+**Phase A pause scenarios.** The
+[instrumented pause run](https://github.com/fullsend-ai/fullsend/issues/8245#issuecomment-6306072289)
+on CE 19.4.1, using `main` at `a87815b6c`, recorded all four
+scenarios. It supersedes an
+[earlier partial run](https://github.com/fullsend-ai/fullsend/issues/8245#issuecomment-6302935339)
+that covered only the first.
+
+1. A paused old-Poller trigger-create request, resumed after the fresh
+   account was elevated and the old PAT revoked, returned 403.
+2. A paused old-Poller PAT self-rotation returned a new PAT, but that PAT
+   belonged to the old Developer user and could not create a trigger.
+3. When a test proxy dropped the successful response to a bootstrap
+   trigger create, Fullsend quarantined that generation, and the next
+   `repos install` did not repeat the create. A request paused *after*
+   GitLab's final trigger-creation authorization check still completed
+   after the bootstrap PAT was revoked and the account demoted. The trigger
+   it created was owned by the replacement account, now at Developer level.
+4. A paused bootstrap PAT self-rotation, resumed after revocation and
+   demotion, returned a PAT for the Developer-level replacement user, which
+   could not create a trigger.
+
+**Custom-port CE qualification.** The CE fixture served GitLab on an HTTPS
+port other than 443. The stock agents GitLab triage helper rejected that URL,
+so the CE triage runs used an isolated agents patch (`371fdf36cef0`, never
+pushed). The gap is tracked in
+[fullsend-ai/agents#1732](https://github.com/fullsend-ai/agents/issues/1732).
+The patch accepts an optional HTTPS port and sends API calls
+to `CI_SERVER_URL`. The CE runs therefore verify the Fullsend install,
+webhook, polling, rotation, and cleanup paths on CE with that patch. They do
+not verify stock agents on a custom-port CE instance. The port fix has since
+merged in
+[fullsend-ai/agents#1733](https://github.com/fullsend-ai/agents/pull/1733),
+but no CE issue-open or natural scheduled-polling retest with stock agents is
+recorded yet. The qualification lifts once that retest passes with stock
+agents main. Until then, the
+[#8245](https://github.com/fullsend-ai/fullsend/issues/8245) live-validation
+gate stays open.
 
 Demonstrated dispatch does not relax any MUST in this section. The
 fail-closed provenance, identity-pin, and actor-binding requirements above
