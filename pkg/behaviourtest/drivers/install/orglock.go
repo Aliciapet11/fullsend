@@ -610,11 +610,3 @@ func (b *sharedOrgLock) age(repo *forge.Repository) (time.Duration, bool) {
 	}
 	return b.now().Sub(repo.CreatedAt), true
 }
-
-// truncateID shortens a UUID for log lines.
-func truncateID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
-}
