@@ -636,7 +636,7 @@ details, see [Agent runtimes](../../runtimes.md).
 | `Upload()` | `openshell sandbox upload ...` | Copy files into sandbox |
 | `UploadDir()` | tar -czf + Upload + Exec extract | Copy directory preserving symlinks |
 | `Download()` | `openshell sandbox download ...` | Copy files out of sandbox |
-| `SafeDownload()` | Download + sanitize | Remove dangerous symlinks (absolute or repo-escaping), .git/hooks |
+| `SafeDownload()` | Staged download + sanitize | Retry into a fresh staging directory, remove dangerous symlinks (absolute or repo-escaping) and `.git/hooks/`, then publish the sanitized tree |
 | `CollectLogs()` | Download logs dir | Extract sandbox logs |
 | `ExtractTranscripts()` | Download transcripts | Extract conversation transcripts |
 | `Delete()` | `openshell sandbox delete` | Destroy container |
