@@ -1875,6 +1875,7 @@ func DownloadFile(sandboxName, remotePath, localPath string) error {
 // a later one. The sanitized staging directory replaces localDir only after
 // both download and sanitization succeed.
 func SafeDownload(sandboxName, remoteDir, localDir string) error {
+	localDir = filepath.Clean(localDir)
 	parent := filepath.Dir(localDir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("creating download parent %s: %w", parent, err)
@@ -1912,15 +1913,18 @@ func SafeDownload(sandboxName, remoteDir, localDir string) error {
 			}
 			return errors.Join(err, fmt.Errorf("cleaning staging directory after publish failure: %w", cleanupErr))
 		}
-		fmt.Fprintf(os.Stderr, "sandbox download succeeded on attempt %d/%d\n", attempt, safeDownloadAttempts)
+		fmt.Fprintf(os.Stderr, "  sandbox download succeeded on attempt %d/%d\n", attempt, safeDownloadAttempts)
 		return nil
 	}
 
 	return fmt.Errorf("safe download from sandbox failed after %d attempts: %w", safeDownloadAttempts, errors.Join(errs...))
 }
 
+// cleanupStagingDir removes a staging tree after restoring write permission
+// to its directories. Permission restoration is best effort and does not
+// follow symlinks; os.RemoveAll provides the authoritative cleanup result.
 func cleanupStagingDir(stagingDir string) error {
-	filepath.WalkDir(stagingDir, func(path string, entry os.DirEntry, walkErr error) error {
+	_ = filepath.WalkDir(stagingDir, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			parent := filepath.Dir(path)
 			if info, err := os.Lstat(parent); err == nil && info.IsDir() {
@@ -1939,9 +1943,10 @@ func cleanupStagingDir(stagingDir string) error {
 	return nil
 }
 
-// replaceDownload atomically publishes a sanitized staging directory at
-// localDir. The staging directory is created in localDir's parent, so the
-// rename stays on the same filesystem.
+// replaceDownload publishes a sanitized staging directory at localDir by
+// removing the existing destination and renaming the staged tree. The staging
+// directory is created in localDir's parent, so the rename stays on the same
+// filesystem; replacement is not failure-preserving.
 func replaceDownload(stagingDir, localDir string) error {
 	if err := os.RemoveAll(localDir); err != nil {
 		return fmt.Errorf("replacing existing download directory %s: %w", localDir, err)

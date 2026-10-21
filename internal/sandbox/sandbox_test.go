@@ -518,6 +518,7 @@ func TestSafeDownload_RetriesIntoFreshDirectoryAfterPartialExtraction(t *testing
 	counterPath := filepath.Join(binDir, "attempt-count")
 
 	script := fmt.Sprintf(`#!/bin/sh
+set -e
 if [ "$2" != "download" ]; then
   exit 0
 fi
@@ -536,7 +537,7 @@ if [ "$attempt" -eq 1 ]; then
   exit 1
 fi
 printf 'safe\n' > "$dest/safe.txt"
-ln -s /etc/passwd "$dest/dangerous-link"
+/bin/ln -s /etc/passwd "$dest/dangerous-link"
 exit 0
 `, logPath, counterPath, counterPath, counterPath)
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
@@ -567,6 +568,32 @@ exit 0
 		assert.False(t, strings.HasPrefix(entry.Name(), ".fullsend-safe-download-"),
 			"staging directory must be removed after success: %s", entry.Name())
 	}
+}
+
+func TestSafeDownload_CleansTrailingSeparator(t *testing.T) {
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "download" ]; then
+  printf 'safe\n' > "$5/safe.txt"
+  exit 0
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	parent := t.TempDir()
+	localDir := filepath.Join(parent, "repo") + string(os.PathSeparator)
+	require.NoError(t, SafeDownload("test-sandbox", "/sandbox/workspace/repo", localDir))
+
+	content, err := os.ReadFile(filepath.Join(parent, "repo", "safe.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "safe\n", string(content))
+
+	entries, readErr := os.ReadDir(parent)
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "repo", entries[0].Name())
 }
 
 func TestSafeDownload_ExhaustsRetries(t *testing.T) {
