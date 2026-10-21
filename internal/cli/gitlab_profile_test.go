@@ -316,21 +316,78 @@ func TestBindGitLabForgeHost_Unchanged(t *testing.T) {
 	})
 }
 
-func TestBindGitLabForgeHost_NoEndpointsUsesReadOnlyDefaults(t *testing.T) {
+func TestBindGitLabForgeHost_NoEndpointsLeftUnchanged(t *testing.T) {
 	dir := t.TempDir()
-	path := writeTestProfile(t, dir, "p.yaml", "id: my-gitlab\ncredentials:\n  - name: api_token\n    env_vars: [GITLAB_TOKEN]\nbinaries:\n  - \"**/curl\"\n")
-	out, cleanup, err := bindGitLabForgeHost([]resolve.ResolvedProfile{{ID: "my-gitlab", LocalPath: path}}, "gitlab.custom.example", "443")
+	for name, content := range map[string]string{
+		"missing endpoints": "id: my-gitlab\ncredentials:\n  - name: api_token\n    env_vars: [GITLAB_TOKEN]\nbinaries:\n  - \"**/curl\"\n",
+		"empty endpoints":   "id: my-gitlab\ncredentials:\n  - name: api_token\n    env_vars: [GITLAB_TOKEN]\nendpoints: []\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeTestProfile(t, dir, "p.yaml", content)
+			in := []resolve.ResolvedProfile{{ID: "my-gitlab", LocalPath: path}}
+			out, cleanup, err := bindGitLabForgeHost(in, "gitlab.custom.example", "443")
+			require.NoError(t, err)
+			defer cleanup()
+			assert.Equal(t, in, out, "a profile with no endpoints never authorized access, so none is synthesized")
+		})
+	}
+}
+
+func TestBindGitLabForgeHost_AliasedCredentialDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestProfile(t, dir, "p.yaml", `id: aliased
+x-token: &token_env GITLAB_TOKEN
+x-vars: &vars [*token_env]
+credentials:
+  - name: api_token
+    env_vars: *vars
+endpoints:
+  - host: gitlab.com
+    port: 443
+    protocol: rest
+    access: read-only
+    enforcement: enforce
+`)
+	out, cleanup, err := bindGitLabForgeHost([]resolve.ResolvedProfile{{ID: "aliased", LocalPath: path}}, "gitlab.custom.example", "443")
 	require.NoError(t, err)
 	defer cleanup()
 	data, err := os.ReadFile(out[0].LocalPath)
 	require.NoError(t, err)
 	p := parseBoundTestProfile(t, data)
-	require.Len(t, p.Endpoints, 1)
-	assert.Equal(t, "gitlab.custom.example", p.Endpoints[0].Host)
-	assert.Equal(t, 443, p.Endpoints[0].Port)
-	assert.Equal(t, "rest", p.Endpoints[0].Protocol)
-	assert.Equal(t, "read-only", p.Endpoints[0].Access)
-	assert.Equal(t, "enforce", p.Endpoints[0].Enforcement)
+	require.Len(t, p.Endpoints, 2)
+	assert.Equal(t, "gitlab.custom.example", p.Endpoints[1].Host)
+}
+
+func TestBindGitLabForgeHost_RejectsNonConcreteDestination(t *testing.T) {
+	dir := t.TempDir()
+	good := writeTestProfile(t, dir, "rw.yaml", stockGitLabRWProfile)
+	in := []resolve.ResolvedProfile{{ID: "fullsend-gitlab-rw", LocalPath: good}}
+	for _, tc := range []struct{ name, host, port string }{
+		{"wildcard subdomain", "*.example.com", "443"},
+		{"bare wildcard", "*", "443"},
+		{"glob in middle", "gitlab.*.example", "443"},
+		{"question mark", "gitlab?.example", "443"},
+		{"empty label", "gitlab..example", "443"},
+		{"leading dot", ".example.com", "443"},
+		{"port zero", "gitlab.custom.example", "0"},
+		{"port too large", "gitlab.custom.example", "70000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, cleanup, err := bindGitLabForgeHost(in, tc.host, tc.port)
+			require.Error(t, err)
+			assert.Nil(t, out)
+			require.NotNil(t, cleanup)
+			cleanup()
+		})
+	}
+
+	for _, host := range []string{"gitlab.custom.example", "gitlab_internal.corp", "10.0.0.5", "::1"} {
+		t.Run("accepts "+host, func(t *testing.T) {
+			_, cleanup, err := bindGitLabForgeHost(in, host, "443")
+			require.NoError(t, err)
+			cleanup()
+		})
+	}
 }
 
 func TestBindGitLabForgeHost_Errors(t *testing.T) {

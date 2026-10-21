@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -106,8 +107,10 @@ const gitlabTokenEnvVar = "GITLAB_TOKEN"
 //
 // The added endpoint is cloned from the profile's first endpoint, with only
 // host and port replaced. A profile that already names the forge host and
-// port, or that does not issue GITLAB_TOKEN, is returned unchanged, and
-// source files are never modified: a changed profile is written to a new
+// port, that does not issue GITLAB_TOKEN, or that declares no endpoints to
+// mirror is returned unchanged. A host that is not a concrete hostname or
+// IP (for example a wildcard) is an error before any profile is read. Source
+// files are never modified: a changed profile is written to a new
 // temporary file. The returned cleanup removes those files and is never
 // nil. host == "" returns profiles unchanged.
 func bindGitLabForgeHost(profiles []resolve.ResolvedProfile, host, port string) ([]resolve.ResolvedProfile, func(), error) {
@@ -118,6 +121,9 @@ func bindGitLabForgeHost(profiles []resolve.ResolvedProfile, host, port string) 
 	portNum, err := strconv.Atoi(port)
 	if err != nil {
 		return nil, noop, fmt.Errorf("GitLab port %q is not a valid integer", port)
+	}
+	if err := validateForgeDestination(host, portNum); err != nil {
+		return nil, noop, err
 	}
 
 	var tmpDir string
@@ -159,6 +165,32 @@ func bindGitLabForgeHost(profiles []resolve.ResolvedProfile, host, port string) 
 	return out, cleanup, nil
 }
 
+// validateForgeDestination rejects a forge destination that is not a single
+// concrete endpoint. The host comes from operator-set environment variables
+// and is bound to a credential, so wildcard or glob syntax (which url.Parse
+// accepts in a host) must never reach a policy endpoint. The host must be an
+// IP address or a DNS name made of letters, digits, hyphens, underscores,
+// and dots, and the port must be in 1-65535.
+func validateForgeDestination(host string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("GitLab port %d is out of range 1-65535", port)
+	}
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	if strings.HasPrefix(host, ".") || strings.Contains(host, "..") {
+		return fmt.Errorf("GitLab forge host %q is not a concrete hostname", host)
+	}
+	for _, r := range host {
+		ok := r == '-' || r == '_' || r == '.' ||
+			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !ok {
+			return fmt.Errorf("GitLab forge host %q is not a concrete hostname (wildcards and special characters are not allowed)", host)
+		}
+	}
+	return nil
+}
+
 // addGitLabForgeEndpoint adds host:port to the endpoints of a provider
 // profile document that issues the GITLAB_TOKEN credential. It reports
 // changed == false, with the input returned as is, when the profile does
@@ -179,9 +211,9 @@ func addGitLabForgeEndpoint(data []byte, host string, port int) ([]byte, bool, e
 	portStr := strconv.Itoa(port)
 	endpoints := yamlMappingValue(root, "endpoints")
 	if endpoints == nil {
-		endpoints = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-		root.Content = append(root.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "endpoints"}, endpoints)
+		// No endpoints to mirror: the profile never authorized any access,
+		// so do not synthesize one for it.
+		return data, false, nil
 	}
 	if endpoints.Kind != yaml.SequenceNode {
 		return nil, false, fmt.Errorf("endpoints is not a list")
@@ -200,16 +232,10 @@ func addGitLabForgeEndpoint(data []byte, host string, port int) ([]byte, bool, e
 		}
 	}
 
-	var ep *yaml.Node
-	if template != nil {
-		ep = cloneYAMLNode(template)
-	} else {
-		// No endpoint to mirror: fall back to the most restrictive shape.
-		ep = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		setYAMLMappingScalar(ep, "protocol", "rest", "!!str")
-		setYAMLMappingScalar(ep, "access", "read-only", "!!str")
-		setYAMLMappingScalar(ep, "enforcement", "enforce", "!!str")
+	if template == nil {
+		return data, false, nil
 	}
+	ep := cloneYAMLNode(template)
 	setYAMLMappingScalar(ep, "host", host, "!!str")
 	setYAMLMappingScalar(ep, "port", portStr, "!!int")
 	endpoints.Content = append(endpoints.Content, ep)
@@ -230,25 +256,42 @@ func addGitLabForgeEndpoint(data []byte, host string, port int) ([]byte, bool, e
 // declares a credential delivered through envVar
 // (credentials[].env_vars).
 func profileIssuesCredential(root *yaml.Node, envVar string) bool {
-	creds := yamlMappingValue(root, "credentials")
+	creds := resolveYAMLAlias(yamlMappingValue(root, "credentials"))
 	if creds == nil || creds.Kind != yaml.SequenceNode {
 		return false
 	}
 	for _, c := range creds.Content {
-		if c.Kind != yaml.MappingNode {
+		c = resolveYAMLAlias(c)
+		if c == nil || c.Kind != yaml.MappingNode {
 			continue
 		}
-		vars := yamlMappingValue(c, "env_vars")
+		vars := resolveYAMLAlias(yamlMappingValue(c, "env_vars"))
 		if vars == nil || vars.Kind != yaml.SequenceNode {
 			continue
 		}
 		for _, v := range vars.Content {
-			if v.Kind == yaml.ScalarNode && v.Value == envVar {
+			v = resolveYAMLAlias(v)
+			if v != nil && v.Kind == yaml.ScalarNode && v.Value == envVar {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// maxYAMLAliasDepth bounds alias chains so a malformed document cannot make
+// resolveYAMLAlias loop forever.
+const maxYAMLAliasDepth = 16
+
+// resolveYAMLAlias follows YAML alias nodes (*anchor) to the node they
+// reference. A nil node, or a chain deeper than maxYAMLAliasDepth, is
+// returned as is (the latter is still an alias node, which callers skip
+// because its Kind matches no expected shape).
+func resolveYAMLAlias(n *yaml.Node) *yaml.Node {
+	for i := 0; n != nil && n.Kind == yaml.AliasNode && n.Alias != nil && i < maxYAMLAliasDepth; i++ {
+		n = n.Alias
+	}
+	return n
 }
 
 // yamlMappingValue returns the value node for key in mapping m, or nil.
