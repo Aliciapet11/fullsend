@@ -90,7 +90,7 @@ func TestBuildRunCommand_HooksGuardPlacement(t *testing.T) {
 
 	t.Run("hooks disabled leaves the launch unchanged", func(t *testing.T) {
 		cmd := buildRunCommand(RunParams{AgentBaseName: "agent", RepoDir: "/repo"})
-		assert.True(t, strings.HasPrefix(cmd, "cd '/repo' && "+claudeBinaryPin()+" && "+envSource+" && unset -f claude && "+claudeLoaderEnvUnset+" && "+launch+" --print"), cmd)
+		assert.True(t, strings.HasPrefix(cmd, "cd '/repo' && "+claudeBinaryPin()+" && "+envSource+" && unset -f claude && "+claudeLoaderEnvUnset+" && "+claudeSettingsEnvUnset+" && "+launch+" --print"), cmd)
 		assert.NotContains(t, cmd, "sha256sum")
 	})
 
@@ -104,7 +104,7 @@ func TestBuildRunCommand_HooksGuardPlacement(t *testing.T) {
 		guard := claudeHooksGuard(d, true)
 		want := "cd '/repo' && " + claudeBinaryPin() + " && " + guard + " && " + envSource +
 			" && unset -f claude test [ command cut wc sha256sum find echo && " + claudeLoaderEnvUnset +
-			" && " + guard + " && " + hookEnvExports(nil) + " && " + launch + " --print"
+			" && " + claudeSettingsEnvUnset + " && " + guard + " && " + hookEnvExports(nil) + " && " + launch + " --print"
 		assert.True(t, strings.HasPrefix(cmd, want), cmd)
 		assert.Greater(t, strings.Index(cmd, "unset LD_PRELOAD"), strings.Index(cmd, envSource),
 			"the LD_* unset must come after .env is sourced")
@@ -126,6 +126,8 @@ type claudeGuardFixture struct {
 	repoDir   string
 	hookPath  string // the PATH pinned into hooks.json
 	extraEnv  []string
+	shell     string              // the launch shell; /bin/sh when empty
+	editCmd   func(string) string // applied to the launch command when set
 }
 
 func newClaudeGuardFixture(t *testing.T) *claudeGuardFixture {
@@ -181,7 +183,14 @@ func (f *claudeGuardFixture) launch(t *testing.T, d claudeHookDigests) (string, 
 	}, d)
 	cmd = strings.ReplaceAll(cmd, sandbox.SandboxWorkspace+"/.env", f.envFile)
 	cmd = strings.ReplaceAll(cmd, sandbox.SandboxClaudeConfig, f.configDir)
-	c := exec.Command("/bin/sh", "-c", protectedDirsShell(t, f.binDir)+cmd)
+	if f.editCmd != nil {
+		cmd = f.editCmd(cmd)
+	}
+	shell := f.shell
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	c := exec.Command(shell, "-c", protectedDirsShell(t, f.binDir)+cmd)
 	c.Env = append(os.Environ(), "PATH="+f.binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	c.Env = append(c.Env, f.extraEnv...)
 	out, err := c.CombinedOutput()
@@ -399,6 +408,64 @@ func TestClaudeLaunch_ClearsPythonVariablesSetByEnv(t *testing.T) {
 	assert.Contains(t, out, "CLAUDE_RAN PY=[]")
 }
 
+// A .env that exports the Claude Code variables that change how it loads
+// settings and runs hook commands must not reach claude, under /bin/sh and
+// dash, with sandbox hooks on and off.
+func TestClaudeLaunch_ClearsSettingsVariablesSetByEnv(t *testing.T) {
+	const envBody = "export CLAUDE_CODE_SAFE_MODE=1\nexport CLAUDE_CODE_SIMPLE=1\nexport CLAUDE_CODE_SHELL_PREFIX=/tmp/wrap.sh\n"
+	const stub = "#!/bin/sh\necho \"CLAUDE_RAN CC=[${CLAUDE_CODE_SAFE_MODE-}${CLAUDE_CODE_SIMPLE-}${CLAUDE_CODE_SHELL_PREFIX-}]\"\n"
+	shells := []string{"/bin/sh"}
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shells = append(shells, dash)
+	}
+
+	// launch runs the launch for the fixture's layout, with hooks on through
+	// the fixture itself, or off through a command built without them.
+	launch := func(t *testing.T, f *claudeGuardFixture, hooks bool) (string, error) {
+		t.Helper()
+		if hooks {
+			return f.launch(t, f.digests)
+		}
+		cmd := buildRunCommand(RunParams{AgentBaseName: "agent", RepoDir: f.repoDir})
+		cmd = strings.ReplaceAll(cmd, sandbox.SandboxWorkspace+"/.env", f.envFile)
+		if f.editCmd != nil {
+			cmd = f.editCmd(cmd)
+		}
+		c := exec.Command(f.shell, "-c", protectedDirsShell(t, f.binDir)+cmd)
+		c.Env = append(os.Environ(), "PATH="+f.binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		out, err := c.CombinedOutput()
+		return string(out), err
+	}
+
+	for _, shell := range shells {
+		for _, hooks := range []bool{true, false} {
+			name := filepath.Base(shell) + "/hooks off"
+			if hooks {
+				name = filepath.Base(shell) + "/hooks on"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newClaudeGuardFixture(t)
+				f.shell = shell
+				require.NoError(t, os.WriteFile(filepath.Join(f.binDir, "claude"), []byte(stub), 0o755))
+				require.NoError(t, os.WriteFile(f.envFile, []byte(envBody), 0o644))
+
+				out, err := launch(t, f, hooks)
+				require.NoError(t, err, out)
+				assert.Contains(t, out, "CLAUDE_RAN CC=[]")
+
+				// Without the unset the .env values do reach claude, so the
+				// check above is not passing on a .env the launch ignores.
+				f.editCmd = func(cmd string) string {
+					return strings.Replace(cmd, " && "+claudeSettingsEnvUnset, "", 1)
+				}
+				out, err = launch(t, f, hooks)
+				require.NoError(t, err, out)
+				assert.Contains(t, out, "CLAUDE_RAN CC=[11/tmp/wrap.sh]")
+			})
+		}
+	}
+}
+
 // .env runs after both guard passes could see it, so a `claude` function it
 // defines, or a `claude` wrapper on a PATH it prepends, would otherwise run in
 // place of the real CLI and could rewrite hooks.json before --settings loads
@@ -551,10 +618,14 @@ func TestInstallClaudeHooks_RecordsDigests(t *testing.T) {
 	require.True(t, ok)
 	hooksJSON, err := security.GenerateHooksConfigPinned(hooks, "/usr/bin/python3", "/usr/local/bin:/usr/bin:/bin")
 	require.NoError(t, err)
-	want := claudeHookDigestsFor(hooks, hooksJSON)
 	// The stub answers the harness read with both values unset.
-	want.SecurityEnv = append(configHookEnv(hooks),
+	securityEnv := append(configHookEnv(hooks),
 		hookEnvPair{"FULLSEND_CANARY_TOKEN", ""}, hookEnvPair{"FULLSEND_TOOL_ALLOWLIST", ""})
+	// The digest covers the runner settings merged into the document.
+	hooksJSON, err = mergeClaudeSettings(hooksJSON, claudeRunnerSettings(securityEnv, nil))
+	require.NoError(t, err)
+	want := claudeHookDigestsFor(hooks, hooksJSON)
+	want.SecurityEnv = securityEnv
 	assert.Equal(t, want, got)
 }
 
