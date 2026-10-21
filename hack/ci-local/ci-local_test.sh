@@ -78,6 +78,7 @@ STUB
   echo "${dir}/$1"
 }
 PODMAN=$(write_engine podman)
+PODMAN_REMOTE=$(write_engine podman-remote)
 DOCKER=$(write_engine docker)
 
 # Shims for tools the container command calls when STUB_EXEC=1.
@@ -1081,6 +1082,29 @@ if [ "${RC}" -ne 0 ] && grep -q 'would run the tests as root' <<< "${OUT}" && ! 
   pass "rootful podman as root: stops before any build or run"
 else
   fail "rootful podman as root: rc=${RC} out=[${OUT}]"
+fi
+
+# podman-remote is Podman: the same isolation, and the same Linux refusal.
+STUB_REMOTE=true STUB_UNAME_S=Linux run_ci_local "${PODMAN_REMOTE}" go-vet
+if [ "${RC}" -ne 0 ] && grep -q 'remote Podman client on Linux' <<< "${OUT}" && ! grep -qxE 'ARG (run|build)' "${ENGINE_LOG}"; then
+  pass "podman-remote on Linux: stops before any build or run"
+else
+  fail "podman-remote on Linux: rc=${RC} out=[${OUT}]"
+fi
+STUB_IMAGE_RC=1 STUB_REMOTE=true STUB_UNAME_S=Darwin run_ci_local "${PODMAN_REMOTE}" go-vet
+if [ "${RC}" -eq 0 ] && [ "$(override_of run)" = "${OVR}" ] && [ "$(override_of build)" = "${OVR}" ] &&
+  grep -qx -- '--http-proxy=false' <<< "$(last_run_args)" && grep -qx -- '--userns=keep-id' <<< "$(last_run_args)"; then
+  pass "podman-remote on macOS: the Podman override, --http-proxy=false and keep-id"
+else
+  fail "podman-remote on macOS: rc=${RC} override=[$(override_of run)] args=[$(last_run_args | tr '\n' ' ')]"
+fi
+# Any other engine would run with none of the isolation.
+NERDCTL=$(write_engine nerdctl)
+run_ci_local "${NERDCTL}" go-vet
+if [ "${RC}" -ne 0 ] && grep -q 'unsupported engine' <<< "${OUT}" && [ ! -s "${ENGINE_LOG}" ]; then
+  pass "an unknown engine stops before calling it"
+else
+  fail "unknown engine: rc=${RC} out=[${OUT}] log=[$(tr '\n' ' ' < "${ENGINE_LOG}")]"
 fi
 
 if [ "${FAILURES}" -ne 0 ]; then

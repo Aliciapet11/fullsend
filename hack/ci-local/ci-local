@@ -57,7 +57,7 @@ Options:
             needs Rosetta, e.g. Docker Desktop: uv segfaults under QEMU)
 
 Environment:
-  CI_LOCAL_ENGINE  podman or docker (default: podman if installed)
+  CI_LOCAL_ENGINE  podman, podman-remote or docker (default: podman if installed)
   CI_LOCAL_DNS     resolvers for the container, space-separated, tried in order
                    (default: the host's own; empty = the engine's own; see README)
 
@@ -109,6 +109,14 @@ esac
 PLATFORM=${PLATFORM:-$NATIVE}
 
 die() { echo "ci-local: $*" >&2; exit 1; }
+
+# Every engine check keys on this: an engine named otherwise (podman-remote,
+# nerdctl) must not slip past the Podman isolation below.
+case "$(basename "$ENGINE")" in
+podman | podman-remote) ENGINE_KIND=podman ;;
+docker) ENGINE_KIND=docker ;;
+*) die "unsupported engine $ENGINE; set CI_LOCAL_ENGINE to podman, podman-remote or docker" ;;
+esac
 
 # short_hash: first 12 hex chars of the SHA256 of stdin.
 short_hash() {
@@ -169,7 +177,7 @@ resolve_versions() {
 # only into variables not already set, so each one is set empty.
 # $1: -e for runs, --build-arg for builds.
 noproxy_args() {
-  if [ "$(basename "$ENGINE")" = podman ]; then echo --http-proxy=false; return; fi
+  if [ "$ENGINE_KIND" = podman ]; then echo --http-proxy=false; return; fi
   local v
   for v in HTTP_PROXY http_proxy HTTPS_PROXY https_proxy FTP_PROXY ftp_proxy \
     NO_PROXY no_proxy ALL_PROXY all_proxy; do
@@ -205,7 +213,7 @@ build_image() {
 PODMAN_GLOBAL=()
 KEEP_ID=""
 podman_isolation() {
-  [ "$(basename "$ENGINE")" = podman ] || return 0
+  [ "$ENGINE_KIND" = podman ] || return 0
   local info remote rootless ver major minor cache="$HOME/.cache/ci-local" f
   info=$("$ENGINE" info --format '{{.Host.ServiceIsRemote}} {{.Host.Security.Rootless}}') || die "cannot query $ENGINE; is it running?"
   read -r remote rootless <<< "$info"
@@ -424,7 +432,7 @@ dns_args() {
   for s in $servers; do printf '%s\n' --dns "$s"; done
   # Docker Desktop's "kernel networking for UDP" sends UDP straight from its
   # VM, bypassing host routes such as a VPN's; TCP goes through the host.
-  if [ "$(basename "$ENGINE")" != podman ] &&
+  if [ "$ENGINE_KIND" = docker ] &&
     "$ENGINE" info --format '{{.OperatingSystem}}' 2>/dev/null | grep -q 'Docker Desktop'; then
     printf '%s\n' --dns-option use-vc
   fi

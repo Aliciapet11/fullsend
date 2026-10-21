@@ -61,7 +61,7 @@ the host.
   the container. With a local Podman, `ci-local` also passes
   `--default-mounts-file=/dev/null`; a remote client has no such flag and
   reads no `mounts.conf`. A remote client on Linux (`CONTAINER_HOST`,
-  `--remote`, or a podman-remote-only install) is refused: its service runs
+  `--remote`, or `CI_LOCAL_ENGINE=podman-remote`) is refused: its service runs
   on that host and applies the host's `containers.conf` `env` and
   `mounts.conf` itself, out of the override's reach. Unset `CONTAINER_HOST`
   and drop `--remote`, or use Docker. Podman before 4.5 silently ignores
