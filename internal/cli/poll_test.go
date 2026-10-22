@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,9 +11,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
+	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/dispatch"
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/normevent"
 )
 
 // clearPollEnv clears every environment variable that newPollCmd/runJiraPoll
@@ -103,6 +107,43 @@ func TestBuildRouter_WithConfigAgents(t *testing.T) {
 	if len(stages) != 0 {
 		t.Fatalf("expected no stages for disabled code agent, got %v", stages)
 	}
+}
+
+// TestCELMatcher_JiraBuiltinAgentDispatched verifies the poll path still
+// dispatches agents registered under built-in names. Only GitHub events
+// drop built-in names (their stage jobs route them); Jira has no such
+// routing, so a "code" entry with a Jira trigger must keep dispatching.
+func TestCELMatcher_JiraBuiltinAgentDispatched(t *testing.T) {
+	dir := t.TempDir()
+	harnessDir := filepath.Join(dir, "harness")
+	require.NoError(t, os.MkdirAll(harnessDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(harnessDir, "code.yaml"), []byte(`agent: agents/code.md
+role: coder
+slug: fullsend-ai-coder
+model: opus
+image: ghcr.io/fullsend-ai/fullsend-sandbox:latest
+trigger: |
+  event.source.system == "jira"
+  && event.transition.kind == "comment_added"
+`), 0o644))
+	cfg := config.NewPerRepoConfig(nil, "acme/platform")
+	cfg.SetAgents([]config.AgentEntry{{Name: "code", Source: "harness/code.yaml"}})
+	data, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), data, 0o644))
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "normative", "normalized-event", "v1", "examples", "jira-fs-triage-comment.json"))
+	require.NoError(t, err)
+	ev, err := normevent.ParseJSON(raw)
+	require.NoError(t, err)
+	require.Equal(t, normevent.SystemJira, ev.Source.System)
+
+	m, err := newCELMatcher(context.Background(), dir)
+	require.NoError(t, err)
+	records, err := m.Match(context.Background(), ev)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, "code", records[0].Agent)
 }
 
 func TestValidateJiraPollArgs(t *testing.T) {

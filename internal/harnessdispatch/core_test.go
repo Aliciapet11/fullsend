@@ -1,7 +1,9 @@
 package harnessdispatch
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,6 +65,71 @@ func TestDispatch_CELIssueDoesNotMatchPR(t *testing.T) {
 	refs, err := Dispatch(context.Background(), Options{ConfigDir: dir, Event: ev})
 	require.NoError(t, err)
 	assert.Empty(t, refs)
+}
+
+// captureLog redirects the standard logger for the duration of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &buf
+}
+
+// readyForPingEvent returns a GitHub label-added event matched by
+// issuePingHarnessYAML's trigger.
+func readyForPingEvent(t *testing.T) *normevent.Event {
+	t.Helper()
+	ev := mustEvent(t, "ready-to-code-labeled.json")
+	ev.Transition.Label.Name = "ready-for-ping"
+	ev.State.Labels = []string{"ready-for-ping"}
+	return ev
+}
+
+func TestDispatch_GitHubBuiltinAgentDropped(t *testing.T) {
+	for _, name := range []string{"review", "Review", "CODE"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeNamedHarnessConfig(t, dir, name, issuePingHarnessYAML())
+			logs := captureLog(t)
+
+			ev := readyForPingEvent(t)
+			require.Equal(t, normevent.SystemGitHub, ev.Source.System)
+			refs, err := Dispatch(context.Background(), Options{ConfigDir: dir, Event: ev})
+			require.NoError(t, err)
+			assert.Empty(t, refs, "built-in agents are routed by GitHub stage jobs, not CEL dispatch")
+			assert.Contains(t, logs.String(),
+				"harness dispatch: "+name+" is a built-in agent; its GitHub stage routing handles this event")
+		})
+	}
+}
+
+func TestDispatch_GitHubCustomAgentNotDropped(t *testing.T) {
+	dir := t.TempDir()
+	writeNamedHarnessConfig(t, dir, "review-extra", issuePingHarnessYAML())
+	logs := captureLog(t)
+
+	refs, err := Dispatch(context.Background(), Options{ConfigDir: dir, Event: readyForPingEvent(t)})
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	assert.Equal(t, "review-extra", refs[0].Agent)
+	assert.NotContains(t, logs.String(), "is a built-in agent")
+}
+
+func TestDropGitHubRoutedBuiltins(t *testing.T) {
+	matched := []TriggeredHarness{{Name: "code"}, {Name: "issue-ping"}, {Name: "Triage"}}
+	captureLog(t)
+
+	gh := &normevent.Event{Source: normevent.Source{System: normevent.SystemGitHub}}
+	kept := dropGitHubRoutedBuiltins(matched, gh)
+	require.Len(t, kept, 1)
+	assert.Equal(t, "issue-ping", kept[0].Name)
+
+	for _, sys := range []normevent.SourceSystem{normevent.SystemJira, normevent.SystemGitLab} {
+		ev := &normevent.Event{Source: normevent.Source{System: sys}}
+		assert.Equal(t, matched, dropGitHubRoutedBuiltins(matched, ev), "source %s must not be filtered", sys)
+	}
 }
 
 func TestProjectExecutionRef_Issue(t *testing.T) {
@@ -221,11 +288,18 @@ func TestMergedConfigAgents_InvalidYAML(t *testing.T) {
 
 func writeHarnessConfig(t *testing.T, dir, harnessYAML string, opts ...func(config.PerRepoConfigWriter)) {
 	t.Helper()
+	writeNamedHarnessConfig(t, dir, "issue-ping", harnessYAML, opts...)
+}
+
+// writeNamedHarnessConfig registers a single sourced agent called name whose
+// harness file contains harnessYAML.
+func writeNamedHarnessConfig(t *testing.T, dir, name, harnessYAML string, opts ...func(config.PerRepoConfigWriter)) {
+	t.Helper()
 	harnessDir := filepath.Join(dir, "harness")
 	require.NoError(t, os.MkdirAll(harnessDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(harnessDir, "issue-ping.yaml"), []byte(harnessYAML), 0o644))
 	cfg := config.NewPerRepoConfig(nil, "fullsend-ai/demo")
-	cfg.SetAgents([]config.AgentEntry{{Name: "issue-ping", Source: "harness/issue-ping.yaml"}})
+	cfg.SetAgents([]config.AgentEntry{{Name: name, Source: "harness/issue-ping.yaml"}})
 	for _, opt := range opts {
 		opt(cfg)
 	}
