@@ -7,9 +7,10 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/forge"
 )
 
-// mintDriver deploys and tears down the mint serving one pool org. The
-// shared driver deploys one per org, the first time a slot in that org
-// is leased, and tears them all down at Finalize.
+// mintDriver deploys and tears down a mint serving pool orgs. The
+// shared driver deploys one per mint group (see mintPlan), the first
+// time a slot in any of the group's orgs is leased, and tears them all
+// down at Finalize.
 //
 // This is an unexported interface used internally by concrete driver
 // implementations. The suite does not construct or reference it directly.
@@ -84,6 +85,16 @@ type RepoLease struct {
 	Token   string
 	Client  forge.Client
 	MintURL string
+
+	// MintStatusGroup is the ORG/TEAM the mint was deployed with as
+	// --status-github-group: one pool org's mint-status team, picked
+	// once per job and shared by every mint. It need not be the lease's
+	// org. Empty when the driver does not configure status auth.
+	MintStatusGroup string
+	// MintWorkflowHostRepos is the mint's WORKFLOW_HOST_REPOS: every
+	// workflow host of the mint group serving the lease's org. Nil when
+	// the driver does not configure the mint's workflow hosts.
+	MintWorkflowHostRepos []string
 }
 
 // LeaseDriver is a Driver that leases slots across pool orgs. Callers
