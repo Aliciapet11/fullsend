@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"debug/elf"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,6 +37,8 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/resolve"
 	agentruntime "github.com/fullsend-ai/fullsend/internal/runtime"
 	"github.com/fullsend-ai/fullsend/internal/security"
+	"github.com/fullsend-ai/fullsend/internal/statuscomment"
+	"github.com/fullsend-ai/fullsend/internal/tracker"
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
@@ -221,6 +225,29 @@ func useFakeOpenshellProviders(t *testing.T) {
 	require.NoError(t, err)
 	origPath := os.Getenv("PATH")
 	t.Setenv("PATH", stubDir+string(filepath.ListSeparator)+origPath)
+}
+
+// fakeSandboxBinary writes a minimal ELF header for the sandbox arch and
+// returns its path, to pass as runAgent's fullsendBinary in tests whose
+// run reaches bootstrapCommon. With no binary given, bootstrapCommon
+// copies, tars and gzips the running executable — the whole test binary,
+// tens of megabytes — which costs seconds per run.
+func fakeSandboxBinary(t *testing.T) string {
+	t.Helper()
+	machine := map[string]elf.Machine{"amd64": elf.EM_X86_64, "arm64": elf.EM_AARCH64}[sandboxArch()]
+	hdr := make([]byte, 64) // an ELF64 header with no program or section headers
+	copy(hdr, elf.ELFMAG)
+	hdr[elf.EI_CLASS] = byte(elf.ELFCLASS64)
+	hdr[elf.EI_DATA] = byte(elf.ELFDATA2LSB)
+	hdr[elf.EI_VERSION] = byte(elf.EV_CURRENT)
+	hdr[16] = byte(elf.ET_EXEC) // e_type
+	hdr[18], hdr[19] = byte(machine), byte(machine>>8)
+	hdr[20] = byte(elf.EV_CURRENT) // e_version
+	hdr[52] = 64                   // e_ehsize
+	path := filepath.Join(t.TempDir(), "fullsend")
+	require.NoError(t, os.WriteFile(path, hdr, 0o755))
+	require.NoError(t, binary.ValidateLinuxBinary(path, sandboxArch()), "the fake binary must pass bootstrapCommon's check")
+	return path
 }
 
 func TestRunAgent_HarnessLoadPipeline(t *testing.T) {
@@ -757,7 +784,7 @@ openshell:
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "config.yaml"),
-		[]byte(fmt.Sprintf("allowed_remote_resources:\n  - \"%s/\"\n", srv.URL)),
+		[]byte(fmt.Sprintf("agents:\n  - harness/code.yaml\nallowed_remote_resources:\n  - \"%s/\"\n", srv.URL)),
 		0o644,
 	))
 
@@ -821,7 +848,7 @@ func TestRunAgent_BareBuiltinProviderResolvesEmbeddedDefinitionAndProfile(t *tes
 	var buf bytes.Buffer
 	printer := ui.New(&buf)
 	repoDir := t.TempDir()
-	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", repoDir, fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
 	// The stub cannot bootstrap an agent past sandbox creation, but the run
 	// must get past the provider/profile orchestration steps without error.
 	require.Error(t, err)
@@ -857,7 +884,7 @@ func runAgentWithProviderFiles(t *testing.T, harnessYAML string, files map[strin
 	}
 	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
 	var buf bytes.Buffer
-	err := runAgent(context.Background(), "code", dir, "", t.TempDir(), "", nil, false, "", "", "", rFlags, statusOpts{}, ui.New(&buf), false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", t.TempDir(), fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, ui.New(&buf), false, runOverrideFlags{})
 	// The stub fails the first in-sandbox exec, after provider setup.
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "importing")
@@ -966,7 +993,7 @@ func TestRunAgent_UnlistedProfileDirectoryFileIsNotImported(t *testing.T) {
 	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
 	printer := ui.New(io.Discard)
 	repoDir := t.TempDir()
-	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", repoDir, fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
 	// The stub cannot bootstrap an agent past sandbox creation, but the run
 	// must get past the profile-import step without error.
 	require.Error(t, err)
@@ -1041,12 +1068,16 @@ func TestRunAgent_URLBaseMalformedOrgConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "loading fullsend config")
 }
 
-func TestBuildScanContextCommand_SourcesEnv(t *testing.T) {
+// The pre-agent scan reads .env as data, as the launch does (#8574): no .env
+// or .env.d line runs as shell in the probe.
+func TestBuildScanContextCommand_ReadsEnvAsData(t *testing.T) {
 	traceID := "aabbccdd-1122-4334-8556-aabbccddeeff"
 	cmd := buildScanContextCommand("/sandbox/workspace/repo", traceID)
-	assert.Contains(t, cmd, ". /sandbox/workspace/.env &&")
+	assert.True(t, strings.HasPrefix(cmd, agentruntime.EnvDataLoad("/sandbox/workspace/.env")+" && "), cmd)
+	assert.NotContains(t, cmd, ". /sandbox/workspace/.env")
 	assert.Contains(t, cmd, "FULLSEND_TRACE_ID='"+traceID+"'")
 	assert.Contains(t, cmd, "-exec /sandbox/workspace/bin/fullsend scan context")
+	assert.Contains(t, cmd, `PATH="$FULLSEND_TRUSTED_PATH" find `, "find runs on the trusted PATH")
 }
 
 func TestBuildScanContextCommand_AcceptsAdoptedTraceID(t *testing.T) {
@@ -1762,6 +1793,8 @@ func TestTryAgentsRepoMeasurementManifest_NetworkFailure(t *testing.T) {
 	tlsCfg := srv.TLS.Clone()
 	tlsCfg.InsecureSkipVerify = true
 	policy := fetch.NewTestPolicy(tlsCfg, []string{hostname}, []string{port})
+	// The 502 is retried; keep the backoff between attempts negligible.
+	policy.RetryBackoff = time.Millisecond
 
 	orig := defaultAgentsRepoURLPrefix
 	defaultAgentsRepoURLPrefix = srv.URL + "/"
@@ -2489,8 +2522,9 @@ func TestBuildSandboxEnvLines_SkipsOIDCVars(t *testing.T) {
 		},
 	}
 	lines := buildSandboxEnvLines(h)
-	require.Len(t, lines, 1)
-	assert.Equal(t, "export CUSTOM_VAR='allowed'", lines[0])
+	assert.Equal(t, []string{
+		"export CUSTOM_VAR='allowed'",
+	}, lines)
 }
 
 // TestStripOIDCEnv verifies that stripOIDCEnv removes OIDC credential entries
@@ -2537,7 +2571,12 @@ func TestOIDCDenyKeys_Completeness(t *testing.T) {
 		"FULLSEND_INFERENCE_GATEWAY_API_KEY",
 		// The GitLab webhook fast-path credentials must stay runner-only.
 		"FULLSEND_TRIGGER_TOKEN",
+		"FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN",
 		"FULLSEND_WEBHOOK_SECRET",
+		// The runner secrets bundle must never be expandable as a whole (ADR 0136).
+		"FULLSEND_GITHUB_RUNNER_SECRETS",
+		// Nor may a harness or script learn where the bundle file was staged.
+		"FULLSEND_GITHUB_RUNNER_SECRETS_FILE",
 	}
 	for _, key := range expected {
 		assert.True(t, oidcDenyKeys[key], "oidcDenyKeys must include %s", key)
@@ -2551,7 +2590,7 @@ func TestOIDCDenyKeys_Completeness(t *testing.T) {
 // commands, harness ${VAR} expansion, or sandbox injection, even if GitLab
 // injected the protected variable into the runner process.
 func TestGitLabWebhookCredentials_RunnerOnly(t *testing.T) {
-	for _, key := range []string{forge.SecretTriggerToken, forge.SecretWebhookSecret} {
+	for _, key := range []string{forge.SecretTriggerToken, forge.SecretGitLabTriggerAccountToken, forge.SecretWebhookSecret} {
 		t.Run(key, func(t *testing.T) {
 			const value = "webhook-credential-value"
 			t.Setenv(key, value)
@@ -3193,6 +3232,19 @@ func TestTruncateUTF8_ShortInputUnchanged(t *testing.T) {
 	assert.NotContains(t, truncateUTF8("short", maxFeedbackBytes), "[truncated]")
 }
 
+func TestReplaceEnvSecrets_LongerValuesGoFirst(t *testing.T) {
+	// One value inside another: replacing the short one first would leave
+	// the rest of the long one in the text, and map order would pick.
+	short := strings.Repeat("v", minRedactableSecretLen)
+	long := short + "-and-more"
+	env := map[string]string{"A_TOKEN": short, "B_TOKEN": long}
+	for range 50 {
+		got, keys := replaceEnvSecrets("x "+long+" y "+short, env)
+		require.Equal(t, "x [REDACTED:B_TOKEN] y [REDACTED:A_TOKEN]", got)
+		require.Equal(t, []string{"B_TOKEN", "A_TOKEN"}, keys)
+	}
+}
+
 func TestRedactFeedback_RedactsRunnerCredentialLiterals(t *testing.T) {
 	// The validation script runs with the full runner env, which for the code
 	// and fix harnesses includes PUSH_TOKEN \u2014 a credential that must never
@@ -3252,6 +3304,43 @@ func TestWriteValidationFeedback_RedactsBeforeWritingFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "s3cret-push-value-1234")
 	assert.Contains(t, string(data), "[REDACTED:PUSH_TOKEN]")
+}
+
+func TestReplaceEnvSecrets_OneLongestFirstPassOverBothSources(t *testing.T) {
+	short := strings.Repeat("v", minRedactableSecretLen)
+	long := short + "-and-more"
+	for name, tc := range map[string]struct{ runner, process string }{
+		"runner value inside the provider value": {short, long},
+		"provider value inside the runner value": {long, short},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(workflowTokenEnv, tc.process)
+			env := map[string]string{"PUSH_TOKEN": tc.runner}
+			got, _ := replaceEnvSecrets("a "+long+" b "+short, env)
+			longKey, shortKey := "PUSH_TOKEN", workflowTokenEnv
+			if tc.process == long {
+				longKey, shortKey = workflowTokenEnv, "PUSH_TOKEN"
+			}
+			assert.Equal(t, "a [REDACTED:"+longKey+"] b [REDACTED:"+shortKey+"]", got)
+			assert.Equal(t, got, redactFeedback("a "+long+" b "+short, env), "redactFeedback runs the same pass")
+		})
+	}
+}
+
+func TestReplaceEnvSecrets_ProviderOnlyValues(t *testing.T) {
+	t.Setenv(workflowTokenEnv, "abcdefgh")
+	got, keys := replaceEnvSecrets("x abcdefgh y", nil)
+	assert.Equal(t, "x [REDACTED:"+workflowTokenEnv+"] y", got)
+	assert.Equal(t, []string{workflowTokenEnv}, keys)
+
+	got, keys = replaceEnvSecrets("nothing here", nil)
+	assert.Equal(t, "nothing here", got)
+	assert.Empty(t, keys, "a value absent from the text is not reported")
+
+	t.Setenv(workflowTokenEnv, "abcdefg") // under minRedactableSecretLen
+	got, keys = replaceEnvSecrets("x abcdefg y", nil)
+	assert.Equal(t, "x abcdefg y", got)
+	assert.Empty(t, keys)
 }
 
 func TestRedactFeedback_RedactsWorkflowTokenFromProcessEnv(t *testing.T) {
@@ -3978,6 +4067,28 @@ func TestPRHeadSHAFromEventPath_NoInputs(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestPRHeadSHAFromEventPath_NativePullRequest(t *testing.T) {
+	eventJSON := `{"action":"synchronize","pull_request":{"number":7,"head":{"sha":"native-head"}}}`
+	f := filepath.Join(t.TempDir(), "event.json")
+	require.NoError(t, os.WriteFile(f, []byte(eventJSON), 0o644))
+
+	assert.Equal(t, "native-head", prHeadSHAFromEventPath(f))
+}
+
+func TestReviewedPRHeadSHA_UsesOnlyVerifiedHead(t *testing.T) {
+	eventFile := filepath.Join(t.TempDir(), "event.json")
+	require.NoError(t, os.WriteFile(eventFile, []byte(`{"pull_request":{"number":7}}`), 0o644))
+	t.Setenv("GITHUB_EVENT_PATH", eventFile)
+	t.Setenv("PR_HEAD_SHA", "")
+	t.Setenv("GITHUB_SHA", "merge-or-base")
+
+	assert.Empty(t, reviewedPRHeadSHA(), "GITHUB_SHA is not a verified PR head")
+	assert.Equal(t, "merge-or-base", githubStatusSHA(), "status display retains its fallback")
+
+	t.Setenv("PR_HEAD_SHA", "explicit-head")
+	assert.Equal(t, "explicit-head", reviewedPRHeadSHA())
+}
+
 // --- detectForgePlatform tests ---
 
 func TestDetectForgePlatform_ExplicitFlag(t *testing.T) {
@@ -4228,6 +4339,79 @@ func TestBootstrapEnv_ValidationLoopSchemaPrecedence(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A failed output-schema upload must fail bootstrap rather than continue
+// without FULLSEND_OUTPUT_SCHEMA in the sandbox (#8484).
+func TestBootstrapEnv_SchemaUploadFailureIsError(t *testing.T) {
+	schemaFile := filepath.Join(t.TempDir(), "schema.json")
+	require.NoError(t, os.WriteFile(schemaFile, []byte(`{"type":"object"}`), 0o644))
+
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$2\" = \"upload\" ]; then echo 'Git filtering selected no files' >&2; exit 1; fi\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	h := &harness.Harness{
+		Agent:          "agents/test.md",
+		ValidationLoop: &harness.ValidationLoop{Script: "scripts/validate.sh", Schema: schemaFile},
+	}
+	err := bootstrapEnv("test-sandbox", "/workspace/repo", h, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "uploading output schema "+schemaFile)
+	assert.Contains(t, err.Error(), "Git filtering selected no files")
+}
+
+// A successful schema upload exports FULLSEND_OUTPUT_SCHEMA in the .env.
+func TestBootstrapEnv_SchemaUploadExportsEnv(t *testing.T) {
+	schemaFile := filepath.Join(t.TempDir(), "schema.json")
+	require.NoError(t, os.WriteFile(schemaFile, []byte(`{"type":"object"}`), 0o644))
+
+	store := t.TempDir()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$2\" = \"upload\" ]; then cp \"$5\" " + shellQuoteForTest(store) + "/; fi\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	h := &harness.Harness{
+		Agent:          "agents/test.md",
+		ValidationLoop: &harness.ValidationLoop{Script: "scripts/validate.sh", Schema: schemaFile},
+	}
+	require.NoError(t, bootstrapEnv("test-sandbox", "/workspace/repo", h, nil))
+
+	entries, err := os.ReadDir(store)
+	require.NoError(t, err)
+	var exported bool
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(store, e.Name()))
+		require.NoError(t, err)
+		if strings.Contains(string(data), "export FULLSEND_OUTPUT_SCHEMA=/sandbox/workspace/.fullsend/output-schema.json") {
+			exported = true
+		}
+	}
+	assert.True(t, exported, "FULLSEND_OUTPUT_SCHEMA should be exported in the uploaded .env")
+}
+
+// Failing to create the schema directory in the sandbox is also an error.
+func TestBootstrapEnv_SchemaMkdirFailureIsError(t *testing.T) {
+	schemaFile := filepath.Join(t.TempDir(), "schema.json")
+	require.NoError(t, os.WriteFile(schemaFile, []byte(`{"type":"object"}`), 0o644))
+	// No openshell on PATH: the mkdir exec cannot start.
+	t.Setenv("PATH", t.TempDir())
+
+	h := &harness.Harness{
+		Agent:          "agents/test.md",
+		ValidationLoop: &harness.ValidationLoop{Script: "scripts/validate.sh", Schema: schemaFile},
+	}
+	err := bootstrapEnv("test-sandbox", "/workspace/repo", h, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creating .fullsend dir for output schema")
+}
+
 func TestBootstrapEnv_ValidationLoopSchemaFallback(t *testing.T) {
 	h := &harness.Harness{
 		Agent: "agents/test.md",
@@ -4389,7 +4573,9 @@ func TestRunAgent_PreflightCheck_Timeout(t *testing.T) {
 	// A preflight_check that exceeds the context deadline should abort
 	// with a "timed out" error, not hang indefinitely.
 	useFakeOpenshell(t)
-	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"sleep 5\"\n  max_iterations: 2\n")
+	// exec replaces the shell, so the context kill reaches sleep itself;
+	// a forked sleep would keep the output pipe open for the full 5s.
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"exec sleep 5\"\n  max_iterations: 2\n")
 
 	// Shrink the real timeout so the "sleep 5" command genuinely outlives
 	// it, exercising the actual DeadlineExceeded branch rather than
@@ -4593,6 +4779,31 @@ func TestIterationEnvSourceLine(t *testing.T) {
 	assert.Equal(t,
 		"if [ -f /sandbox/workspace/.fullsend/iteration.env ]; then . /sandbox/workspace/.fullsend/iteration.env; fi",
 		iterationEnvSourceLine())
+}
+
+// TestEnvDataControlLinesMatchRunner keeps the .env lines bootstrapEnv writes
+// as shell in step with the lines the launch-time loader reads as data
+// (runtime.EnvDataControlLines, #8498): a line the loader does not recognize
+// is dropped, which would lose the .env.d files, the PATH restore or
+// iteration.env at launch.
+func TestEnvDataControlLinesMatchRunner(t *testing.T) {
+	t.Parallel()
+	lines := append(runnerPathLines(), harnessEnvLines(&harness.Harness{})...)
+	want := agentruntime.EnvDataControlLines()
+	require.Len(t, want, 4)
+	assert.Equal(t, runnerPathCaptureLine(), want[0])
+	assert.Equal(t, "for f in /sandbox/workspace/.env.d/*.env; do [ -f \"$f\" ] && . \"$f\"; done", want[1])
+	assert.Equal(t, runnerPathRestoreLine(), want[2])
+	assert.Equal(t, iterationEnvSourceLine(), want[3])
+	// Each line appears in what bootstrapEnv writes, in the loader's order,
+	// wherever the runner places it.
+	prev := -1
+	for _, line := range want {
+		idx := slices.Index(lines, line)
+		require.GreaterOrEqual(t, idx, 0, "the runner does not write %q", line)
+		assert.Greater(t, idx, prev, "%q is out of order", line)
+		prev = idx
+	}
 }
 
 // TestIterationEnvCommand pins the shell the runner executes before every
@@ -6616,6 +6827,7 @@ func TestMintAgentToken_WarnsWhenNoPreMintTokenInActions(t *testing.T) {
 	t.Setenv("REPO_FULL_NAME", "org/my-repo")
 	t.Setenv("GITHUB_ACTIONS", "true")
 	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv(workflowTokenEnv, "")
 
 	var buf bytes.Buffer
@@ -6625,7 +6837,7 @@ func TestMintAgentToken_WarnsWhenNoPreMintTokenInActions(t *testing.T) {
 	defer cleanup()
 	assert.True(t, minted)
 
-	assert.Contains(t, buf.String(), "no pre-mint GH_TOKEN was found")
+	assert.Contains(t, buf.String(), "no pre-mint GH_TOKEN or GITHUB_TOKEN was found")
 	assert.Equal(t, "", os.Getenv(workflowTokenEnv), "must not preserve a workflow token when none was found")
 }
 
@@ -6725,6 +6937,307 @@ func TestMintAgentToken_RemintDoesNotClobberWorkflowToken(t *testing.T) {
 	cleanup()
 	assert.Equal(t, realWorkflowToken, os.Getenv("GH_TOKEN"), "cleanup restores the pre-mint value set by the test")
 	assert.Equal(t, "", os.Getenv(workflowTokenEnv), "cleanup unsets the workflow token that was empty before the first mint")
+}
+
+// unsetEnvForTest unsets key for the rest of the test and restores its
+// prior state afterwards (t.Setenv registers the restore).
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	require.NoError(t, os.Unsetenv(key))
+}
+
+// TestMintAgentToken_SwapsGitHubTokenSetBefore covers #8530: a caller that
+// exports GITHUB_TOKEN gets the minted token in it for the run, and cleanup
+// restores each name to its own pre-mint value.
+func TestMintAgentToken_SwapsGitHubTokenSetBefore(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return &mintclient.MintResult{Token: "ghs_minted_app_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("GH_TOKEN", "ghp_caller_gh_token")
+	t.Setenv("GITHUB_TOKEN", "ghp_caller_github_token")
+
+	printer := ui.New(io.Discard)
+	minted, cleanup, err := mintAgentToken(context.Background(), "triage", "https://mint.example.com", "", printer)
+	require.NoError(t, err)
+	require.True(t, minted)
+	require.NotNil(t, cleanup)
+	defer cleanup()
+
+	assert.Equal(t, "ghs_minted_app_token", os.Getenv("GH_TOKEN"))
+	assert.Equal(t, "ghs_minted_app_token", os.Getenv("GITHUB_TOKEN"), "GITHUB_TOKEN must not keep the caller's token")
+
+	cleanup()
+	assert.Equal(t, "ghp_caller_gh_token", os.Getenv("GH_TOKEN"), "cleanup restores GH_TOKEN to its own pre-mint value")
+	assert.Equal(t, "ghp_caller_github_token", os.Getenv("GITHUB_TOKEN"), "cleanup restores GITHUB_TOKEN to its own pre-mint value")
+}
+
+// TestMintAgentToken_SetsGitHubTokenUnsetBefore covers #8530: GITHUB_TOKEN
+// is set to the minted token even when the caller did not export it, and
+// cleanup unsets (rather than empties) a name that was unset before.
+func TestMintAgentToken_SetsGitHubTokenUnsetBefore(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return &mintclient.MintResult{Token: "ghs_minted_app_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GITHUB_ACTIONS", "")
+	unsetEnvForTest(t, "GH_TOKEN")
+	unsetEnvForTest(t, "GITHUB_TOKEN")
+
+	printer := ui.New(io.Discard)
+	minted, cleanup, err := mintAgentToken(context.Background(), "triage", "https://mint.example.com", "", printer)
+	require.NoError(t, err)
+	require.True(t, minted)
+	require.NotNil(t, cleanup)
+	defer cleanup()
+
+	assert.Equal(t, "ghs_minted_app_token", os.Getenv("GH_TOKEN"))
+	assert.Equal(t, "ghs_minted_app_token", os.Getenv("GITHUB_TOKEN"), "GITHUB_TOKEN is set even when the caller did not export it")
+
+	cleanup()
+	_, ghSet := os.LookupEnv("GH_TOKEN")
+	_, githubSet := os.LookupEnv("GITHUB_TOKEN")
+	assert.False(t, ghSet, "cleanup must unset GH_TOKEN that was unset before the mint")
+	assert.False(t, githubSet, "cleanup must unset GITHUB_TOKEN that was unset before the mint")
+}
+
+// TestMintAgentToken_NestedRemintRestoresGitHubTokenPerMint covers #8530's
+// nested case: remintAgentTokenForPostScript mints on top of the first mint,
+// so its cleanup must restore the first mint's token and the first mint's
+// cleanup must restore the pre-mint state (a set value, or unset).
+func TestMintAgentToken_NestedRemintRestoresGitHubTokenPerMint(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	var calls int
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		calls++
+		if calls == 1 {
+			return &mintclient.MintResult{Token: "ghs_first_app_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+		}
+		return &mintclient.MintResult{Token: "ghs_second_app_token", ExpiresAt: "2026-06-15T13:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("GH_TOKEN", "ghp_caller_gh_token")
+	unsetEnvForTest(t, "GITHUB_TOKEN")
+	t.Setenv("PUSH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN_SOURCE", "")
+
+	printer := ui.New(io.Discard)
+	minted, cleanup, err := mintAgentToken(context.Background(), "coder", "https://mint.example.com", "", printer)
+	require.NoError(t, err)
+	require.True(t, minted)
+	require.NotNil(t, cleanup)
+	defer cleanup()
+	require.Equal(t, "ghs_first_app_token", os.Getenv("GITHUB_TOKEN"))
+
+	h := &harness.Harness{Role: "coder"}
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
+	require.Equal(t, 2, calls)
+	assert.Equal(t, "ghs_second_app_token", os.Getenv("GH_TOKEN"))
+	assert.Equal(t, "ghs_second_app_token", os.Getenv("GITHUB_TOKEN"))
+
+	remintCleanup()
+	assert.Equal(t, "ghs_first_app_token", os.Getenv("GH_TOKEN"), "remintCleanup restores the first mint's GH_TOKEN")
+	assert.Equal(t, "ghs_first_app_token", os.Getenv("GITHUB_TOKEN"), "remintCleanup restores the first mint's GITHUB_TOKEN")
+
+	cleanup()
+	assert.Equal(t, "ghp_caller_gh_token", os.Getenv("GH_TOKEN"), "cleanup restores the pre-mint GH_TOKEN")
+	_, githubSet := os.LookupEnv("GITHUB_TOKEN")
+	assert.False(t, githubSet, "cleanup unsets GITHUB_TOKEN that was unset before the first mint")
+}
+
+// TestMintAgentToken_PreservesWorkflowTokenFromGitHubToken covers #8530: on
+// Actions, a caller that exports only GITHUB_TOKEN (GH_TOKEN unset or empty)
+// still gets GH_WORKFLOW_TOKEN preserved, masked and registered.
+func TestMintAgentToken_PreservesWorkflowTokenFromGitHubToken(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ghToken func(t *testing.T)
+	}{
+		{"GH_TOKEN unset", func(t *testing.T) { unsetEnvForTest(t, "GH_TOKEN") }},
+		{"GH_TOKEN empty", func(t *testing.T) { t.Setenv("GH_TOKEN", "") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			origMint := statusMintToken
+			defer func() { statusMintToken = origMint }()
+
+			const jobToken = "ghs_workflow_job_token_only"
+			const mintedToken = "ghs_minted_app_token"
+			statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+				return &mintclient.MintResult{Token: mintedToken, ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+			}
+
+			t.Setenv("REPO_FULL_NAME", "org/my-repo")
+			t.Setenv("GITHUB_ACTIONS", "true")
+			tc.ghToken(t)
+			t.Setenv("GITHUB_TOKEN", jobToken)
+			t.Setenv(workflowTokenEnv, "")
+
+			oldStderr := os.Stderr
+			r, w, _ := os.Pipe()
+			os.Stderr = w
+
+			var out bytes.Buffer
+			printer := ui.New(&out)
+			minted, cleanup, err := mintAgentToken(context.Background(), "triage", "https://mint.example.com", "", printer)
+
+			w.Close()
+			os.Stderr = oldStderr
+			var stderrBuf bytes.Buffer
+			_, _ = io.Copy(&stderrBuf, r)
+
+			require.NoError(t, err)
+			require.True(t, minted)
+			require.NotNil(t, cleanup)
+			defer cleanup()
+
+			assert.Equal(t, jobToken, os.Getenv(workflowTokenEnv), "pre-mint GITHUB_TOKEN is preserved when GH_TOKEN is unset or empty")
+			assert.Equal(t, mintedToken, os.Getenv("GITHUB_TOKEN"))
+			assert.Equal(t, mintedToken, os.Getenv("GH_TOKEN"))
+			assert.Contains(t, stderrBuf.String(), "::add-mask::"+jobToken)
+			assert.NotContains(t, out.String(), "no pre-mint", "no warning when GITHUB_TOKEN supplies the workflow token")
+
+			scan := security.NewSecretRedactor().Scan("log " + jobToken + " here")
+			assert.NotContains(t, scan.Sanitized, jobToken, "preserved value is registered as a runtime secret")
+
+			cleanup()
+			assert.Equal(t, jobToken, os.Getenv("GITHUB_TOKEN"), "cleanup restores the pre-mint GITHUB_TOKEN")
+			assert.Equal(t, "", os.Getenv(workflowTokenEnv), "cleanup unsets GH_WORKFLOW_TOKEN when it was not preset")
+		})
+	}
+}
+
+// TestMintAgentToken_WorkflowTokenPrefersGHToken checks GH_TOKEN keeps
+// precedence over GITHUB_TOKEN for the preserve step (#8530).
+func TestMintAgentToken_WorkflowTokenPrefersGHToken(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return &mintclient.MintResult{Token: "ghs_minted_app_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("GH_TOKEN", "ghs_pre_mint_gh_token")
+	t.Setenv("GITHUB_TOKEN", "ghs_pre_mint_github_token")
+	t.Setenv(workflowTokenEnv, "")
+
+	oldStderr := os.Stderr
+	_, w, _ := os.Pipe()
+	os.Stderr = w
+
+	printer := ui.New(io.Discard)
+	minted, cleanup, err := mintAgentToken(context.Background(), "triage", "https://mint.example.com", "", printer)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	require.NoError(t, err)
+	require.True(t, minted)
+	defer cleanup()
+	assert.Equal(t, "ghs_pre_mint_gh_token", os.Getenv(workflowTokenEnv))
+}
+
+// TestMintAgentToken_WarnsWhenPreMintGitHubTokenMalformed checks the
+// GITHUB_TOKEN fallback gets the same format check as GH_TOKEN (#8530).
+func TestMintAgentToken_WarnsWhenPreMintGitHubTokenMalformed(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return &mintclient.MintResult{Token: "ghs_minted_app_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GITHUB_ACTIONS", "true")
+	unsetEnvForTest(t, "GH_TOKEN")
+	t.Setenv("GITHUB_TOKEN", "not a valid token\nwith control chars")
+	t.Setenv(workflowTokenEnv, "")
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+	minted, cleanup, err := mintAgentToken(context.Background(), "triage", "https://mint.example.com", "", printer)
+
+	w.Close()
+	os.Stderr = oldStderr
+	var stderrBuf bytes.Buffer
+	_, _ = io.Copy(&stderrBuf, r)
+
+	require.NoError(t, err)
+	require.True(t, minted)
+	defer cleanup()
+
+	assert.Contains(t, buf.String(), "pre-mint GITHUB_TOKEN has an unexpected format")
+	assert.Equal(t, "", os.Getenv(workflowTokenEnv), "malformed pre-mint GITHUB_TOKEN must not be preserved")
+	assert.NotContains(t, stderrBuf.String(), "::add-mask::not a valid token", "malformed token must not reach add-mask")
+}
+
+// TestRemintAgentTokenForPostScript_PostScriptGitHubTokenIsMinted covers
+// #8530: a pre-set GITHUB_TOKEN reaches the post-script environment only as
+// the minted value, whether the script inherits it from the process env or
+// the harness declares it in runner_env (expanded after the first mint).
+func TestRemintAgentTokenForPostScript_PostScriptGitHubTokenIsMinted(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	const jobToken = "ghs_preset_caller_job_token"
+	var calls int
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		calls++
+		if calls == 1 {
+			return &mintclient.MintResult{Token: "ghs_original_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+		}
+		return &mintclient.MintResult{Token: "ghs_refreshed_token", ExpiresAt: "2026-06-15T13:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", jobToken)
+	t.Setenv("PUSH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN_SOURCE", "")
+
+	printer := ui.New(io.Discard)
+	minted, cleanup, err := mintAgentToken(context.Background(), "coder", "https://mint.example.com", "", printer)
+	require.NoError(t, err)
+	require.True(t, minted)
+	defer cleanup()
+
+	declared := &harness.Harness{
+		Role:      "coder",
+		RunnerEnv: map[string]string{"GITHUB_TOKEN": os.Getenv("GITHUB_TOKEN")},
+	}
+	inherited := &harness.Harness{Role: "coder"}
+
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), declared, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
+	defer remintCleanup()
+	require.Equal(t, 2, calls)
+
+	for name, h := range map[string]*harness.Harness{"declared": declared, "inherited": inherited} {
+		env := postScriptEnv(h, "")
+		assert.NotContains(t, env, "GITHUB_TOKEN="+jobToken, "%s: the pre-set GITHUB_TOKEN must not reach the post-script", name)
+		assert.Equal(t, "ghs_refreshed_token", envLast(env, "GITHUB_TOKEN"), "%s: post-script GITHUB_TOKEN is the freshly minted token", name)
+	}
 }
 
 func TestMintAgentToken_CoderRole_GitLabSetsPAT(t *testing.T) {
@@ -7668,6 +8181,244 @@ func TestRunAgent_StatusNotifierSetup(t *testing.T) {
 	assert.Contains(t, err.Error(), "openshell")
 }
 
+func TestRunAgent_CancelledReviewUsesCurrentHeadGuidance(t *testing.T) {
+	useFakeOpenshell(t)
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+	writePolicyFixture(t, dir)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "agents", "review.md"),
+		[]byte("You are a review agent."),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "harness", "review.yaml"),
+		[]byte("agent: agents/review.md\nrole: review\npolicy: policies/base.yaml\n"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "config.yaml"),
+		[]byte("agents:\n  - harness/review.yaml\n"),
+		0o644,
+	))
+
+	origMint := statusMintToken
+	origNewClient := statusNewForgeClientFn
+	t.Cleanup(func() {
+		statusMintToken = origMint
+		statusNewForgeClientFn = origNewClient
+	})
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return &mintclient.MintResult{Token: "ghs_test_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancel()
+	fc := forge.NewFakeClient()
+	fc.PullRequestHeadSHA = "new-head"
+	statusNewForgeClientFn = func(token string) forge.Client {
+		assert.Equal(t, "ghs_test_token", token)
+		return fc
+	}
+
+	t.Setenv("GITHUB_RUN_ID", "run-42")
+	t.Setenv("PR_HEAD_SHA", "cancelled-head")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN_SOURCE", "")
+
+	var buf bytes.Buffer
+	err := runAgent(ctx, "review", dir, "", t.TempDir(), "", nil, false, "", "github", "", resolveFlags{maxDepth: 10, maxResources: 50}, statusOpts{
+		statusRepo:    "org/my-repo",
+		statusNum:     42,
+		mintURL:       "https://mint.example.com",
+		trackerSource: "github",
+	}, ui.New(&buf), false, runOverrideFlags{})
+	require.Error(t, err)
+	comments := fc.IssueComments["org/my-repo/42"]
+	require.NotEmpty(t, comments, "output: %s; all comments: %#v", buf.String(), fc.IssueComments)
+	body := comments[len(comments)-1].Body
+	assert.Contains(t, body, "superseded by a newer commit")
+	assert.NotContains(t, body, "/fs-review")
+}
+
+type runStatusEventWriter func(string)
+
+func (w runStatusEventWriter) Write(p []byte) (int, error) {
+	w(string(p))
+	return len(p), nil
+}
+
+func TestRunAgent_CancelledReviewFinalizesBeforeSandboxTeardown(t *testing.T) {
+	useFakeOpenshellProviders(t)
+	dir := t.TempDir()
+	for path, content := range map[string]string{
+		"agents/review.md":                "You are a review agent.",
+		"harness/review.yaml":             "agent: agents/review.md\nrole: review\npolicy: policies/base.yaml\n",
+		"policies/base.yaml":              "version: 1\n",
+		"config.yaml":                     "agents:\n  - harness/review.yaml\n",
+		"behaviour/current-scenario.yaml": "ops:\n  - op: read_file\n    args: agent-run-marker\n  - op: wait\n    args: '1200'\n",
+	} {
+		file := filepath.Join(dir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+		require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+	}
+
+	origMint, origNewClient := statusMintToken, statusNewForgeClientFn
+	t.Cleanup(func() {
+		statusMintToken, statusNewForgeClientFn = origMint, origNewClient
+	})
+	var mintCalls atomic.Int32
+	statusMintToken = func(ctx context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		if mintCalls.Add(1) == 3 {
+			// The start-comment and agent-token mints are first; delay only
+			// finalizer minting beyond the HEAD budget but within its deadline.
+			select {
+			case <-time.After(2100 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return &mintclient.MintResult{Token: "ghs_test_token"}, nil
+	}
+	fc := forge.NewFakeClient()
+	fc.PullRequestHeadSHA = "new-head"
+	statusNewForgeClientFn = func(string) forge.Client { return fc }
+
+	t.Setenv("FULLSEND_RUNTIME", "dummy")
+	t.Setenv("GITHUB_RUN_ID", "run-42")
+	t.Setenv("PR_HEAD_SHA", "cancelled-head")
+	t.Setenv("PUSH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN_SOURCE", "")
+	agentExecMarker := filepath.Join(t.TempDir(), "agent-exec")
+	t.Setenv("FULLSEND_TEST_AGENT_EXEC_MARKER", agentExecMarker)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	completedBeforeTeardown := false
+	printer := ui.New(runStatusEventWriter(func(line string) {
+		if strings.Contains(line, "Cleaning up sandbox") {
+			comments, _ := fc.ListIssueComments(context.Background(), "org", "my-repo", 42)
+			for _, comment := range comments {
+				completedBeforeTeardown = completedBeforeTeardown || strings.Contains(comment.Body, "fullsend:status:terminal")
+			}
+		}
+	}))
+	done := make(chan error, 1)
+	repoDir := t.TempDir()
+	go func() {
+		done <- runAgent(ctx, "review", dir, "", repoDir, "", nil, false, "", "github", "", resolveFlags{maxDepth: 10, maxResources: 50}, statusOpts{
+			statusRepo:    "org/my-repo",
+			statusNum:     42,
+			mintURL:       "https://mint.example.com",
+			trackerSource: "github",
+		}, printer, false, runOverrideFlags{})
+	}()
+	deadline := time.After(15 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(agentExecMarker); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("run stopped before agent execution: %v", err)
+		case <-deadline:
+			cancel()
+			t.Fatal("agent did not reach its first behavior operation")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("cancelled agent did not exit")
+	}
+	assert.True(t, completedBeforeTeardown, "cancelled status must be terminal before sandbox cleanup starts")
+	assert.Len(t, fc.UpdatedComments, 1, "cancelled status must be finalized exactly once")
+	assert.Contains(t, fc.UpdatedComments[0].Body, "superseded by a newer commit")
+	assert.NotContains(t, fc.UpdatedComments[0].Body, "/fs-review")
+}
+
+func TestRunAgent_CancelledReviewLeavesCommentPendingWhenHeadLookupFails(t *testing.T) {
+	useFakeOpenshellProviders(t)
+	dir := t.TempDir()
+	for path, content := range map[string]string{
+		"agents/review.md":                "You are a review agent.",
+		"harness/review.yaml":             "agent: agents/review.md\nrole: review\npolicy: policies/base.yaml\n",
+		"policies/base.yaml":              "version: 1\n",
+		"config.yaml":                     "agents:\n  - harness/review.yaml\n",
+		"behaviour/current-scenario.yaml": "ops:\n  - op: read_file\n    args: agent-run-marker\n  - op: wait\n    args: '1200'\n",
+	} {
+		file := filepath.Join(dir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+		require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+	}
+
+	origMint, origNewClient := statusMintToken, statusNewForgeClientFn
+	t.Cleanup(func() {
+		statusMintToken, statusNewForgeClientFn = origMint, origNewClient
+	})
+	statusMintToken = func(context.Context, mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return &mintclient.MintResult{Token: "ghs_test_token"}, nil
+	}
+	fc := forge.NewFakeClient()
+	fc.Errors["GetPullRequestHeadSHA"] = fmt.Errorf("lookup failed")
+	statusNewForgeClientFn = func(string) forge.Client { return fc }
+
+	t.Setenv("FULLSEND_RUNTIME", "dummy")
+	t.Setenv("GITHUB_RUN_ID", "run-42")
+	t.Setenv("PR_HEAD_SHA", "cancelled-head")
+	t.Setenv("PUSH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN_SOURCE", "")
+	agentExecMarker := filepath.Join(t.TempDir(), "agent-exec")
+	t.Setenv("FULLSEND_TEST_AGENT_EXEC_MARKER", agentExecMarker)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	repoDir := t.TempDir()
+	go func() {
+		done <- runAgent(ctx, "review", dir, "", repoDir, "", nil, false, "", "github", "", resolveFlags{maxDepth: 10, maxResources: 50}, statusOpts{
+			statusRepo:    "org/my-repo",
+			statusNum:     42,
+			mintURL:       "https://mint.example.com",
+			trackerSource: "github",
+		}, ui.New(io.Discard), false, runOverrideFlags{})
+	}()
+	deadline := time.After(15 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(agentExecMarker); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("run stopped before agent execution: %v", err)
+		case <-deadline:
+			cancel()
+			t.Fatal("agent did not reach its first behavior operation")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("cancelled agent did not exit")
+	}
+
+	comments := fc.IssueComments["org/my-repo/42"]
+	require.Len(t, comments, 1, "failed head lookup should leave the existing status comment for always() reconciliation")
+	assert.Contains(t, comments[0].Body, "fullsend:agent-status:run-42")
+	assert.NotContains(t, comments[0].Body, "fullsend:status:terminal")
+	assert.Empty(t, fc.UpdatedComments, "failed head lookup must not terminalize the comment without guidance")
+}
+
 func TestBackendFromConfigFile_MissingUsesDefault(t *testing.T) {
 	t.Parallel()
 
@@ -8003,7 +8754,7 @@ func TestMergeProviderDefs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, shadowed := mergeProviderDefs(tt.local, tt.url)
+			got, _, shadowed := mergeProviderDefs(tt.local, dedupResolvedProviders(tt.url))
 			var names []string
 			for _, d := range got {
 				names = append(names, d.Name)
@@ -8702,4 +9453,50 @@ func TestDoBridgeAgentsMDToHome_ReportsExitAndStderr(t *testing.T) {
 	doBridgeAgentsMDToHome("sb", "/sandbox/workspace/repo", "/sandbox/codex-config/AGENTS.md", ui.New(&buf), execFn)
 	assert.Contains(t, buf.String(), "exit 1: head: write error: No space left on device")
 	assert.NotContains(t, buf.String(), "<nil>")
+}
+
+func TestBuiltInGitHubReviewCancellationGuidance(t *testing.T) {
+	const reviewedSHA = "abc1234567890abcdef1234567890abcdef123456"
+
+	for _, tt := range []struct {
+		name, agent, forgePlatform, source string
+		reviewedSHA, currentSHA            string
+		headErr                            error
+		wantRetry, wantSuperseded, wantErr bool
+	}{
+		{name: "current GitHub review", agent: "review", forgePlatform: "github", source: "github", reviewedSHA: reviewedSHA, currentSHA: reviewedSHA, wantRetry: true},
+		{name: "superseded GitHub review", agent: "review", forgePlatform: "github", source: "github", reviewedSHA: reviewedSHA, currentSHA: "def4567890abcdef1234567890abcdef12345678", wantSuperseded: true},
+		{name: "head lookup failure", agent: "review", forgePlatform: "github", source: "github", reviewedSHA: reviewedSHA, headErr: fmt.Errorf("lookup failed"), wantErr: true},
+		{name: "missing reviewed SHA", agent: "review", forgePlatform: "github", source: "github", currentSHA: reviewedSHA},
+		{name: "Jira source with GitHub forge", agent: "review", forgePlatform: "github", source: "jira", reviewedSHA: reviewedSHA, headErr: fmt.Errorf("must not fetch")},
+		{name: "custom review", agent: "custom-review", forgePlatform: "github", source: "github", reviewedSHA: reviewedSHA, headErr: fmt.Errorf("must not fetch")},
+		{name: "GitLab review", agent: "review", forgePlatform: "gitlab", source: "gitlab", reviewedSHA: reviewedSHA, headErr: fmt.Errorf("must not fetch")},
+		{name: "Forgejo review", agent: "review", forgePlatform: "forgejo", source: "forgejo", reviewedSHA: reviewedSHA, headErr: fmt.Errorf("must not fetch")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Exercise the cancellation comment consumer, so a routing mistake
+			// is caught as unusable retry guidance in the posted body.
+			fc := forge.NewFakeClient()
+			fc.PullRequestHeadSHA = tt.currentSHA
+			if tt.headErr != nil {
+				fc.Errors["GetPullRequestHeadSHA"] = tt.headErr
+			}
+			guidance, err := resolveBuiltInGitHubReviewCancellationGuidance(
+				context.Background(), fc, tt.agent, tt.forgePlatform, tt.source,
+				"org/repo", 7, tt.reviewedSHA,
+			)
+			assert.Equal(t, tt.wantErr, err != nil)
+
+			n := statuscomment.New(tracker.NewForgeClient(fc), config.StatusNotificationConfig{},
+				"org/repo", 7, "", tt.reviewedSHA, "run-42")
+			n.SetCancellationGuidance(guidance)
+			require.NoError(t, n.PostStart(context.Background(), "Review"))
+			require.NoError(t, n.PostCompletion(context.Background(), "Review", "cancelled"))
+			require.Len(t, fc.UpdatedComments, 1)
+			body := fc.UpdatedComments[0].Body
+			assert.Contains(t, body, "Cancelled")
+			assert.Equal(t, tt.wantRetry, strings.Contains(body, "If no review is queued or running, comment `/fs-review` to retry."), body)
+			assert.Equal(t, tt.wantSuperseded, strings.Contains(body, "superseded by a newer commit"), body)
+		})
+	}
 }

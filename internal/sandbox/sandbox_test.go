@@ -512,6 +512,241 @@ func TestSanitizeDownload_RemoveFailureReturnsErrSymlink(t *testing.T) {
 	assert.NoError(t, statErr, "second symlink should remain after walk aborted on first error")
 }
 
+func TestSafeDownload_RetriesIntoFreshDirectoryAfterPartialExtraction(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "download-paths.log")
+	counterPath := filepath.Join(binDir, "attempt-count")
+
+	script := fmt.Sprintf(`#!/bin/sh
+set -e
+if [ "$2" != "download" ]; then
+  exit 0
+fi
+dest=$5
+printf '%%s\n' "$dest" >> "%s"
+attempt=0
+if [ -f "%s" ]; then
+  attempt=$(/bin/cat "%s")
+fi
+attempt=$((attempt + 1))
+printf '%%s\n' "$attempt" > "%s"
+if [ "$attempt" -eq 1 ]; then
+  /bin/mkdir -p "$dest/node_modules/@esbuild/linux-x64/bin" "$dest/node_modules/esbuild/bin"
+  printf 'esbuild' > "$dest/node_modules/@esbuild/linux-x64/bin/esbuild"
+  /bin/ln "$dest/node_modules/@esbuild/linux-x64/bin/esbuild" "$dest/node_modules/esbuild/bin/esbuild"
+  exit 1
+fi
+printf 'safe\n' > "$dest/safe.txt"
+/bin/ln -s /etc/passwd "$dest/dangerous-link"
+exit 0
+`, logPath, counterPath, counterPath, counterPath)
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	parent := t.TempDir()
+	localDir := filepath.Join(parent, "repo")
+	require.NoError(t, SafeDownload("test-sandbox", "/sandbox/workspace/repo", localDir))
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	paths := strings.Split(strings.TrimSpace(string(log)), "\n")
+	require.Len(t, paths, 2)
+	assert.NotEqual(t, paths[0], paths[1], "retry must use a fresh staging directory")
+
+	content, err := os.ReadFile(filepath.Join(localDir, "safe.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "safe\n", string(content))
+
+	_, lstatErr := os.Lstat(filepath.Join(localDir, "dangerous-link"))
+	assert.True(t, os.IsNotExist(lstatErr), "dangerous symlink must be removed before publishing")
+	_, statErr := os.Lstat(filepath.Join(localDir, "node_modules"))
+	assert.True(t, os.IsNotExist(statErr), "partial first attempt must not leak into the published directory")
+
+	entries, err := os.ReadDir(parent)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		assert.False(t, strings.HasPrefix(entry.Name(), ".fullsend-safe-download-"),
+			"staging directory must be removed after success: %s", entry.Name())
+	}
+}
+
+func TestSafeDownload_CleansTrailingSeparator(t *testing.T) {
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "download" ]; then
+  printf 'safe\n' > "$5/safe.txt"
+  exit 0
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	parent := t.TempDir()
+	localDir := filepath.Join(parent, "repo") + string(os.PathSeparator)
+	require.NoError(t, SafeDownload("test-sandbox", "/sandbox/workspace/repo", localDir))
+
+	content, err := os.ReadFile(filepath.Join(parent, "repo", "safe.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "safe\n", string(content))
+
+	entries, readErr := os.ReadDir(parent)
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "repo", entries[0].Name())
+}
+
+func TestSafeDownload_ExhaustsRetries(t *testing.T) {
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "download" ]; then
+  exit 1
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	parent := t.TempDir()
+	localDir := filepath.Join(parent, "repo")
+	err := SafeDownload("test-sandbox", "/sandbox/workspace/repo", localDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "safe download from sandbox failed after 2 attempts")
+	assert.Contains(t, err.Error(), "attempt 1/2")
+	assert.Contains(t, err.Error(), "attempt 2/2")
+
+	_, statErr := os.Lstat(localDir)
+	assert.True(t, os.IsNotExist(statErr), "failed download must not publish a partial directory")
+
+	entries, readErr := os.ReadDir(parent)
+	require.NoError(t, readErr)
+	for _, entry := range entries {
+		assert.False(t, strings.HasPrefix(entry.Name(), ".fullsend-safe-download-"),
+			"staging directory must be removed after failure: %s", entry.Name())
+	}
+}
+
+func TestSafeDownload_ReturnsErrorWhenReplacingExistingDownloadFails(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "download" ]; then
+  printf 'safe\n' > "$5/safe.txt"
+  exit 0
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	parent := t.TempDir()
+	localDir := filepath.Join(parent, "repo")
+	readonlyDir := filepath.Join(localDir, "readonly")
+	require.NoError(t, os.MkdirAll(readonlyDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(readonlyDir, "file.txt"), []byte("keep"), 0o644))
+	require.NoError(t, os.Chmod(readonlyDir, 0o555))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chmod(readonlyDir, 0o755))
+	})
+
+	err := SafeDownload("test-sandbox", "/sandbox/workspace/repo", localDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replacing existing download directory")
+}
+
+func TestSafeDownload_ReturnsErrorWhenSanitizationFails(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "download" ]; then
+  printf 'safe\n' > "$5/safe.txt"
+  /bin/ln -s /etc/passwd "$5/dangerous-link"
+  /bin/mkdir "$5/readonly"
+  printf 'nested\n' > "$5/readonly/nested.txt"
+  /bin/chmod 0555 "$5/readonly"
+  /bin/chmod 0555 "$5"
+  exit 0
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	parent := t.TempDir()
+	localDir := filepath.Join(parent, "repo")
+	t.Cleanup(func() {
+		entries, readErr := os.ReadDir(parent)
+		if readErr != nil {
+			return
+		}
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), ".fullsend-safe-download-") {
+				continue
+			}
+			stagingDir := filepath.Join(parent, entry.Name())
+			_ = os.Chmod(stagingDir, 0o755)
+			_ = os.RemoveAll(stagingDir)
+		}
+	})
+
+	err := SafeDownload("test-sandbox", "/sandbox/workspace/repo", localDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sanitizing downloaded directory")
+
+	_, statErr := os.Lstat(localDir)
+	assert.True(t, os.IsNotExist(statErr), "unsafe download must not be published")
+
+	entries, readErr := os.ReadDir(parent)
+	require.NoError(t, readErr)
+	for _, entry := range entries {
+		assert.False(t, strings.HasPrefix(entry.Name(), ".fullsend-safe-download-"),
+			"staging directory must be removed after sanitization failure: %s", entry.Name())
+	}
+}
+
+func TestSafeDownload_ReturnsErrorWhenSanitizationCleanupFails(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$2" = "download" ]; then
+  printf 'safe\n' > "$5/safe.txt"
+  /bin/ln -s /etc/passwd "$5/dangerous-link"
+  /bin/chmod 0555 "$5"
+  staging_parent="${5%/*}"
+  /bin/chmod 0555 "$staging_parent"
+  exit 0
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	parent := t.TempDir()
+	t.Cleanup(func() {
+		require.NoError(t, os.Chmod(parent, 0o755))
+	})
+	localDir := filepath.Join(parent, "repo")
+
+	err := SafeDownload("test-sandbox", "/sandbox/workspace/repo", localDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sanitizing downloaded directory")
+	assert.Contains(t, err.Error(), "cleaning staging directory after sanitization failure")
+	assert.Contains(t, err.Error(), "removing staging directory")
+}
+
+func TestCleanupStagingDir_MissingPath(t *testing.T) {
+	require.NoError(t, cleanupStagingDir(filepath.Join(t.TempDir(), "missing")))
+}
+
 func TestEffectiveReadyTimeout_Default(t *testing.T) {
 	t.Setenv("FULLSEND_SANDBOX_READY_TIMEOUT", "")
 	got := effectiveReadyTimeout(0)
@@ -1139,7 +1374,7 @@ func installFileUploadFake(t *testing.T) {
 	bin := t.TempDir()
 	script := `#!/bin/sh
 if [ "$2" = upload ]; then
-  mkdir -p -- "$5" && cp -- "$4" "$5/"
+  mkdir -p -- "$6" && cp -- "$5" "$6/"
   exit $?
 fi
 if [ "$2" = exec ]; then
@@ -1279,7 +1514,8 @@ func TestTarRootMembers_RejectsNestedExclude(t *testing.T) {
 }
 
 // fakeOpenshell writes a script that logs every invocation's full argv to
-// logPath, and — when invoked as "sandbox upload <name> <local> <remote>" —
+// logPath, and — when invoked as
+// "sandbox upload --no-git-ignore <name> <local> <remote>" —
 // copies <local> to sentinelPath so the test can inspect exactly what bytes
 // would have been shipped to the sandbox. It always exits 0. The real system
 // tar (found via the pre-existing PATH) is used for archive creation, so
@@ -1289,7 +1525,7 @@ func fakeOpenshell(t *testing.T, binDir, logPath, sentinelPath string) {
 	t.Helper()
 	script := "#!/bin/sh\n" +
 		"echo \"$@\" >> " + shellQuote(logPath) + "\n" +
-		"if [ \"$2\" = \"upload\" ]; then cp \"$4\" " + shellQuote(sentinelPath) + "; fi\n" +
+		"if [ \"$2\" = \"upload\" ]; then cp \"$5\" " + shellQuote(sentinelPath) + "; fi\n" +
 		"exit 0\n"
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
 }
@@ -1409,8 +1645,8 @@ func TestUpload_SymlinkToRegularFile_UploadsFileDirectly(t *testing.T) {
 	require.NoError(t, err)
 	log, readErr := os.ReadFile(logPath)
 	require.NoError(t, readErr)
-	assert.Contains(t, string(log), "upload test-sandbox "+wantPath+" /sandbox/workspace/link.txt")
-	assert.NotContains(t, string(log), "upload test-sandbox "+link+" ",
+	assert.Contains(t, string(log), "upload --no-git-ignore test-sandbox "+wantPath+" /sandbox/workspace/link.txt")
+	assert.NotContains(t, string(log), "test-sandbox "+link+" ",
 		"the symlink path itself should never reach openshell")
 }
 
@@ -1473,7 +1709,7 @@ func TestUpload_MaliciousBasename_ExtractCommandNotInjected(t *testing.T) {
 	// real via the host's own sh. This reproduces, on the test machine,
 	// exactly what UploadDir's extractCmd would do inside the sandbox.
 	script := "#!/bin/sh\n" +
-		"if [ \"$2\" = \"upload\" ]; then cp \"$4\" \"$5\"; exit 0; fi\n" +
+		"if [ \"$2\" = \"upload\" ]; then cp \"$5\" \"$6\"; exit 0; fi\n" +
 		"if [ \"$2\" = \"exec\" ]; then\n" +
 		"  for a in \"$@\"; do last=\"$a\"; done\n" +
 		"  sh -c \"$last\"\n" +
@@ -1519,7 +1755,41 @@ func TestUpload_RegularFile_SkipsTarPath(t *testing.T) {
 
 	log, err := os.ReadFile(logPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(log), "upload test-sandbox "+f+" /sandbox/claude-config/settings.json")
+	assert.Contains(t, string(log), "upload --no-git-ignore test-sandbox "+f+" /sandbox/claude-config/settings.json")
+}
+
+// TestUpload_PassesNoGitIgnore: every "sandbox upload" carries --no-git-ignore
+// so OpenShell >= 0.1.3 never drops a file fullsend already chose because the
+// host checkout's .gitignore matches it (NVIDIA/OpenShell#3957, #8484).
+func TestUpload_PassesNoGitIgnore(t *testing.T) {
+	// A git-ignored path inside a checkout, like the cached output schema.
+	f := filepath.Join(t.TempDir(), ".fullsend-cache", "content.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(f), 0o755))
+	require.NoError(t, os.WriteFile(f, []byte("{}"), 0o644))
+	dir := filepath.Join(t.TempDir(), "skill")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("x"), 0o644))
+
+	binDir := t.TempDir()
+	argvLog := filepath.Join(binDir, "argv.log")
+	script := "#!/bin/sh\n" +
+		"if [ \"$2\" = \"upload\" ]; then printf '%s\\n' \"$*\" >> " + shellQuote(argvLog) + "; fi\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	require.NoError(t, Upload("test-sandbox", f, "/dest/f"))
+	require.NoError(t, UploadDir("test-sandbox", dir, "/dest/skill"))
+
+	data, err := os.ReadFile(argvLog)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 2)
+	assert.Equal(t, "sandbox upload --no-git-ignore test-sandbox "+f+" /dest/f", lines[0])
+	fields := strings.Fields(lines[1])
+	require.Len(t, fields, 6, "UploadDir tarball upload: %s", lines[1])
+	assert.Equal(t, []string{"sandbox", "upload", "--no-git-ignore", "test-sandbox"}, fields[:4])
+	assert.True(t, strings.HasSuffix(fields[4], ".tar.gz"), "UploadDir uploads its tarball: %s", fields[4])
 }
 
 func TestUpload_TrailingDotConvention_CopiesContentsWithoutWrapping(t *testing.T) {
@@ -2814,4 +3084,67 @@ func TestResolvedBasename(t *testing.T) {
 	t.Run("nonexistent path", func(t *testing.T) {
 		assert.Equal(t, "gone.txt", resolvedBasename("/no/such/gone.txt"))
 	})
+}
+
+// stubOpenshellForExtract puts a fake openshell first on PATH. The listing
+// runs "openshell sandbox exec …" and each copy runs
+// "openshell sandbox download <name> <remote> <destDir>", so the script
+// branches on $2.
+func stubOpenshellForExtract(t *testing.T, execBody, downloadBody string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$2\" = \"exec\" ]; then\n" + execBody + "\nfi\n" +
+		"if [ \"$2\" = \"download\" ]; then\n" + downloadBody + "\nfi\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "openshell"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestExtractOutputFiles_OpenshellFailureIsAnError(t *testing.T) {
+	stubOpenshellForExtract(t,
+		"  echo 'sandbox is not ready' >&2\n  exit 1",
+		"  exit 0")
+
+	got, err := ExtractOutputFiles("sb", "/sandbox/output", t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sandbox is not ready")
+	assert.Empty(t, got)
+}
+
+func TestExtractOutputFiles_EmptyOutputIsNotAnError(t *testing.T) {
+	stubOpenshellForExtract(t, "  exit 0", "  exit 0")
+
+	got, err := ExtractOutputFiles("sb", "/sandbox/output", t.TempDir())
+	assert.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestExtractOutputFiles_ListedButNoneCopiedIsAnError(t *testing.T) {
+	stubOpenshellForExtract(t,
+		"  echo /sandbox/output/agent-result.json\n  exit 0",
+		"  echo 'sandbox is not ready' >&2\n  exit 1")
+
+	got, err := ExtractOutputFiles("sb", "/sandbox/output", t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 listed, none copied")
+	assert.Empty(t, got)
+}
+
+func TestExtractOutputFiles_CopiesListedFiles(t *testing.T) {
+	stubOpenshellForExtract(t,
+		"  echo /sandbox/output/agent-result.json\n  exit 0",
+		"  printf '{}' > \"$5/$(basename \"$4\")\"\n  exit 0")
+
+	localDir := t.TempDir()
+	got, err := ExtractOutputFiles("sb", "/sandbox/output", localDir)
+	require.NoError(t, err)
+	want := filepath.Join(localDir, "agent-result.json")
+	assert.Equal(t, []string{want}, got)
+	data, readErr := os.ReadFile(want)
+	require.NoError(t, readErr)
+	assert.Equal(t, "{}", string(data))
 }

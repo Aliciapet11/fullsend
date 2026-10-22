@@ -17,8 +17,8 @@ fullsend run <agent-name> [flags]
 | Flag | Description |
 |------|-------------|
 | `--fullsend-dir` | Path to the `.fullsend` configuration directory (default `.fullsend`; when omitted and `.fullsend` does not exist in the current directory, the command stops and names the flag) |
-| `--runtime` | Override the agent runtime from `config.yaml` for this run (`claude`, `pi`, `codex`, `dummy` or `dummy-playback`); also `FULLSEND_RUNTIME` |
-| `--model` | Override the harness/agent model for this run (alias, model id, or `provider/id` on pi and codex — codex takes OpenAI ids and `gateway/<model>` only); also `FULLSEND_MODEL` |
+| `--runtime` | Override the agent runtime from `config.yaml` for this run (`claude`, `pi`, `codex`, `opencode`, `dummy` or `dummy-playback`); also `FULLSEND_RUNTIME` |
+| `--model` | Override the harness/agent model for this run (alias, model id, or `provider/id` on pi, codex, and opencode — codex takes OpenAI ids and `gateway/<model>` only); also `FULLSEND_MODEL` |
 | `--effort` | Override the harness effort level for this run (`low`…`max`); also `FULLSEND_EFFORT` |
 | `--output-dir` | Base directory for run output (default: `/tmp/fullsend`) |
 | `--target-repo` | Path to the target repository |
@@ -125,7 +125,7 @@ depend on the process cwd.
 
 | Field | Description |
 |-------|-------------|
-| `runtime` | Runtime that executed the run (e.g. `claude`, `pi`, `codex`) |
+| `runtime` | Runtime that executed the run (e.g. `claude`, `pi`, `codex`, `opencode`) |
 | `model` | Model the provider reported using |
 | `requested_runtime` | Runtime selected for the run (config file, or a `--runtime`/`FULLSEND_RUNTIME` override) |
 | `requested_model` | Model the harness/agent requested |
@@ -134,7 +134,7 @@ depend on the process cwd.
 | `total_cost_usd` | Total inference cost in USD, as reported by the runtime (raw floating-point aggregate across all iterations; no fullsend-side pricing-table fallback). See [Cost data contract](../guides/infrastructure/distributed-tracing.md#cost-data-contract) |
 | `num_turns` | Number of conversation turns |
 | `iterations` | Number of agent iterations run; an iteration killed at the budget is not retried (see [Budget and deadline](#budget-and-deadline)) |
-| `per_model_usage` | Per-model breakdown, present only when a runtime reports one (today: `pi` with the `Agent` tool enabled, and `claude` when Claude Code's result carries `modelUsage`). See below |
+| `per_model_usage` | Per-model breakdown, present only when a runtime reports one (today: `pi` with the `Agent` tool enabled, `claude` when Claude Code's result carries `modelUsage`, and `codex` for an agent with registered sub-agent roles or a spawn in its stream). See below |
 | `fallback_from` | Models the run moved off, in the order tried, before `model` took over: models the Vertex project did not serve, and on `claude` any model Claude Code's own `--fallback-model` handling left, for example on overload (`claude` and `pi`; see [Claude Code](../runtimes/claude.md#models)). Absent when the first model ran |
 | `fallback_reasons` | Why the run moved off each `fallback_from` entry, at the same index: `not_served` when the runner retried because the Vertex project does not serve the model, `claude_code:<trigger>` when Claude Code switched models itself (its `model_fallback` trigger, for example `claude_code:last_resort`). Absent when the first model ran |
 
@@ -142,9 +142,12 @@ depend on the process cwd.
 
 A map from model spec to
 `{requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, cost_usd}`.
-On `pi` the key is the pi model spec (`anthropic-vertex/claude-opus-4-6`). It exists because a pi
-sub-agent is a separate `pi` process whose tokens never appear in the parent's stream, so without it
-`total_cost_usd` would grow with no way to attribute it.
+On `pi` the key is the pi model spec (`anthropic-vertex/claude-opus-4-6`); on `codex` it is the
+model id codex ran (`gpt-5.6-luna`, or the id after `gateway/`). It exists because a sub-agent's tokens never appear in the parent's
+stream: a pi sub-agent is a separate `pi` process, and a codex sub-agent is a separate thread whose
+usage codex records only in that thread's rollout. Without it `total_cost_usd` would grow with no
+way to attribute it on pi, and the child tokens the runner adds to the totals on codex could not be
+attributed to a model.
 
 On `claude` the key is the model id Claude Code reports (`claude-haiku-4-5@20251001`), with one
 entry per model that ran, sub-agents included. The token totals come from the result event's
@@ -155,7 +158,8 @@ records its last value rather than adding each result's. `requests` has no count
 Code's result and stays `0`. A result without `modelUsage` keeps the parent-only `usage` totals and
 records no breakdown, and an iteration that ends without a result (cancelled at the budget)
 contributes to the totals but not to the breakdown, so the invariant below can fall short in those
-two cases. The rest of this section describes the `pi` breakdown.
+two cases. The rest of this section describes the `pi` breakdown; `codex` follows it, with the
+differences in the last bullet.
 
 - **What folds.** Tokens and cost, from both the parent and every child, summed across retry
   iterations. Each iteration contributes one `requests` for the parent plus one per sub-agent call,
@@ -169,9 +173,16 @@ two cases. The rest of this section describes the `pi` breakdown.
 - **What stays parent-only.** `num_turns` and `tool_calls` are read from the parent's stream and are
   not broken down or added to per model — a child's turns and tool calls are recorded in its own
   session transcript (`transcripts/<agent>-sub<seq>-*.jsonl`) instead.
-- A model spec of `unknown` is a usage record that carries no model spec at all; its cost is
-  bucketed there rather than dropped. A dispatch rejected *before* a model was resolved writes
-  no record, so it never reaches the breakdown.
+- A model spec of `unknown` is a pi usage record, or a codex child rollout, that carries no model
+  at all; its usage is bucketed there rather than dropped. A dispatch rejected *before* a model was
+  resolved writes no record, so it never reaches the breakdown.
+- **On codex.** `cost_usd` is `0` in every entry: codex reports no dollar cost, so compare tokens
+  there. `requests` counts one per child rollout that reported usage (codex writes one per thread);
+  `wait`, `send_input` and `close_agent` calls add none, and a child that errored before its first
+  response has no usage and adds no `requests`. A codex iteration that exits non-zero, after a
+  failed or interrupted turn, a cancel or a timeout, still counts what its children had recorded
+  when the runner read them: codex writes a child's usage as each response completes. After a
+  cancel or a timeout the run warns that usage recorded after the read is not counted.
 
 ## Budget and deadline
 
@@ -179,7 +190,7 @@ Each agent iteration gets the harness's `timeout_minutes` (30 when it sets none)
 is spent the runner ends the iteration and sweeps the processes the agent left running in the
 sandbox, best effort. Before every iteration the runner rewrites `.fullsend/iteration.env` (sourced
 last by the sandbox `.env`) with the budget, the kill time, and this iteration's W3C trace context,
-on every runtime (claude, pi, codex):
+on every runtime (claude, pi, codex, opencode):
 
 | Variable | Value |
 |---|---|
@@ -293,7 +304,8 @@ For comparison:
 - Child processes inherit both variables. In a pi sub-agent read the deadline, not the budget: the
   deadline is the same wall-clock limit the parent has, while `FULLSEND_TIMEOUT_MINUTES` is the
   parent iteration's whole budget, not the time the child has left.
-- Both names are reserved: an `env.sandbox` entry with either name is dropped. Pre-, post- and
+- Both names are reserved: an `env.sandbox` entry with either name is dropped
+  (see [Reserved `env.sandbox` keys](#reserved-envsandbox-keys)). Pre-, post- and
   validation scripts run on the host and do not see them.
 
 **Pacing from a skill.** Read the deadline, not the budget, and keep the arithmetic in two steps —
@@ -324,7 +336,7 @@ variables is deployed.
 | `validation failed after 2 iteration(s)` with `Agent exited with code 0` above it | The agent finished in time; its output failed validation on every iteration. | Read the `Validation failed:` lines and fix the output, not the budget. |
 | `Could not export the iteration deadline: exit 1: ...` | The runner could not write the variables into the sandbox. The iteration runs without them; the runner still kills it at the budget. | Usually a non-writable sandbox workspace; a sandbox that died mid-run looks the same. Check the sandbox logs and the image. |
 | `clearing stale iteration deadline (iteration N): ...` | The write failed and the previous iteration's file could not be removed either. The run stops rather than let the agent read a stale deadline. | Same as above. |
-| `FULLSEND_ITERATION_DEADLINE` unset inside the agent | The agent's shell was started without sourcing `/sandbox/workspace/.env`. | Runtimes that fullsend ships always source it; a custom command must do the same. |
+| `FULLSEND_ITERATION_DEADLINE` unset inside the agent | The agent's shell was started without sourcing `/sandbox/workspace/.env`. | Runtimes that fullsend ships always load it; a custom command must do the same. |
 
 ## How a run ends
 
@@ -386,7 +398,7 @@ run has a forge OIDC endpoint (a GitHub Actions job with `id-token: write`), the
 - checks after sandbox creation that the sandbox policy reaches the gateway host only through an
   inspected route, and deletes the sandbox if it does not;
 - seeds the provider's placeholder into a runner-owned token file before the agent-writable `.env`
-  is sourced, and refreshes the assertion before each token's own `exp`, re-seeding the file;
+  is loaded, and refreshes the assertion before each token's own `exp`, re-seeding the file;
 - removes the provider when the run ends (or expires it in place under `--keep-sandbox`).
 
 A failure at any step fails the run; the route never falls back to another credential. With no
@@ -413,7 +425,10 @@ and refresh. The runner exports the gateway URL (the origin plus its path prefix
 `--model`, and skips the Vertex credential checks. The credential reaches Claude Code through an
 `apiKeyHelper` that re-reads the re-seeded token file in the `oidc` mode, or as an
 `ANTHROPIC_AUTH_TOKEN` placeholder in the `api-key` mode. Both are sent as `Authorization: Bearer`,
-as on pi. The per-host egress profile is a Claude Code rendering that admits only
+as on pi. An `api-key` block that sets `messages_auth_header: x-api-key`
+([ADR 0142](../ADRs/0142-inference-gateway-x-api-key-header-for-messages-models.md)) instead gets an
+`ANTHROPIC_API_KEY` placeholder, sent as `x-api-key` only, and pi `anthropic-messages` models send
+`x-api-key` too. The per-host egress profile is a Claude Code rendering that admits only
 `POST <prefix>/v1/messages` and `POST <prefix>/v1/messages/count_tokens` (`<prefix>` is empty for a
 bare origin). Claude Code has no plugin-carried
 setup, so a `gateway/` model without a block that applies (no block, or an `oidc` block on a run
@@ -429,11 +444,18 @@ See [GitLab Role-Credential Contract](../contributing/gitlab-role-credentials.md
 ## GitHub Packages credentials
 
 On GitHub Actions, `fullsend run` copies the pre-mint `GH_TOKEN` (the job's workflow token) to
-`GH_WORKFLOW_TOKEN` before replacing `GH_TOKEN` with the minted App token. Provider
+`GH_WORKFLOW_TOKEN` before replacing `GH_TOKEN` with the minted App token. When `GH_TOKEN` is
+unset or empty it copies the pre-mint `GITHUB_TOKEN` instead. Provider
 credentials may expand `${GH_WORKFLOW_TOKEN}`; every other harness `${}` site refuses it, and
 pre/post/validation child environments never receive it. Outside Actions the variable is not
-derived from a local PAT — a caller may set it explicitly. `GH_TOKEN` / `PUSH_TOKEN` still receive
-the minted App identity.
+derived from a local PAT — a caller may set it explicitly. `GH_TOKEN`, `GITHUB_TOKEN` and
+`PUSH_TOKEN` still receive the minted App identity.
+
+Every mint sets both `GH_TOKEN` and `GITHUB_TOKEN` to the minted token, even when the caller
+workflow did not export `GITHUB_TOKEN`. When the mint is cleaned up, each one goes back to the value
+it held before that mint, or is unset if it was unset. A caller workflow that exports
+`GITHUB_TOKEN` for its own pre- or post-script therefore gets the minted App token in that
+variable, not the job token.
 
 Host-side scripts (pre/post and validation) also no longer inherit `JIRA_TOKEN`,
 `JIRA_USER_EMAIL`, or the OTLP collector headers (`OTEL_EXPORTER_OTLP_HEADERS` and
@@ -443,6 +465,38 @@ receives one only when the harness declares it under `env.runner`; see
 
 Repo-level setup (provider, profile, `~/.npmrc`, code/fix overlays):
 [Private registries and GitHub Packages](../guides/user/customizing-agents.md#private-registries-and-github-packages).
+
+## Reserved `env.sandbox` keys
+
+`fullsend run` drops reserved names from `env.sandbox` instead of exporting
+them into the sandbox. Matching is case-insensitive. It warns twice:
+
+- When the harness loads, one warning names every reserved key:
+  `N env.sandbox key(s) are reserved and will be dropped instead of exported into the sandbox: ...`
+- As it writes the sandbox environment, one stderr line per key:
+  `WARNING: env.sandbox key "NAME" is reserved (runner infrastructure or security deny-list); skipping`
+
+`fullsend lock` prints the load-time warning when it composes a harness. A
+current lock entry is not composed; run `fullsend lock --update` to check its
+keys. `lock` composes without event context, so a key added by an overlay
+guarded on `event` is reported only by `fullsend run`. The reserved names are
+listed in the `env.sandbox` note in [Customizing
+agents](../guides/user/customizing-agents.md#reserved-envsandbox-names);
+where blocked proxy and certificate settings go instead is in [Migrating proxy
+and certificate
+settings](../guides/user/customizing-agents.md#migrating-proxy-and-certificate-settings).
+
+## Runner secrets
+
+`fullsend run` reads a JSON object of name → value for host-side scripts
+([ADR 0136](../ADRs/0136-runner-secrets-through-one-stored-secret.md)) from one of two variables:
+
+| Runner environment | Effect |
+|---|---|
+| `FULLSEND_GITHUB_RUNNER_SECRETS_FILE` | Path to a file holding the object. The composite action writes the `FULLSEND_GITHUB_RUNNER_SECRETS` secret to a mode 0600 file and passes only this path. `fullsend run` deletes the file as soon as it has read it, even when the content is invalid, so for a local run point it at a copy. An empty value means no bundle. |
+| `FULLSEND_GITHUB_RUNNER_SECRETS` | The object inline. Use it for local runs only: in CI the value would stay readable in `/proc/<pid>/environ` for the life of the process. |
+
+Set one or the other; both set is an error. `fullsend run` removes both variables from its environment before it starts any child process. Rules and setup: [harness reference § `env.runner`](../reference/harness-reference.md#field-details).
 
 ## Related
 

@@ -500,6 +500,14 @@ Key properties:
   Inference is not available for GitLab instances that are not
   resolvable in public DNS.
 
+  > **Update (2026-10, #8468):**
+  > The last sentence above is incorrect. Uploading the instance's public
+  > JWKS to the WIF provider (`--jwk-json-path`) lets STS verify tokens
+  > without contacting the issuer. This was tested on an internal instance
+  > in [#5897](https://github.com/fullsend-ai/fullsend/issues/5897). The
+  > operator must re-upload the keys whenever the instance rotates them. See
+  > [Configuring GitLab → Private OIDC issuers](../guides/getting-started/configuring-gitlab.md#private-oidc-issuers-uploaded-jwks).
+
 ### Cron poller (`gitlab-poll` input driver)
 
 The `gitlab-poll` input driver runs as `fullsend poll` inside the fullsend
@@ -601,6 +609,13 @@ configuration.
 | MR merged | Cron poll (MR `merged_at` > watermark) | retro |
 | MR closed (unmerged) | Cron poll (MR `closed_at` > watermark, `merged_at` empty) | retro |
 | MR note with `<!-- fullsend:changes-requested -->` | Cron poll (note body marker) | fix (same-project MRs only) |
+
+> **Update (2026-10, [#8553](https://github.com/fullsend-ai/fullsend/issues/8553) / [ADR 0125](0125-gitlab-hybrid-webhook-poller-dispatch.md)):**
+> The events poll also acts as a backstop for a missed webhook issue-open
+> delivery: an issue opened after both the discovery watermark and a persisted
+> installation cutoff is dispatched as an issue-opened event. See the
+> [normalized event README](../normative/normalized-event/v1/README.md) for
+> details.
 
 Bot-authored comments are skipped to prevent re-triggering loops (exception:
 the `changes-requested` marker from the review agent).

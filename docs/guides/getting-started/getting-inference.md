@@ -43,8 +43,13 @@ OpenAI agent run needs no GCP credentials and stores no key on the recommended p
 setup can omit the GCP project and WIF provider pair. If you cannot enrol an OpenAI WIF
 provider, that guide's Route C uses a `FULLSEND_OPENAI_API_KEY` repository secret.
 
-For **GitLab repos**, inference credentials are configured via `repos install --vertex-project`
-rather than the steps below. See [Configuring GitLab](configuring-gitlab.md#inference-setup).
+For **GitLab repos**, create the GCP project as described below, but skip
+`fullsend inference provision`, which is GitHub-only. A platform operator creates a shared
+`gitlab-oidc` provider and its IAM bindings. Declare `inference.project` in
+`repos.yaml` or pass `repos install --vertex-project` to write the CI/CD variables
+that reference it. See [Configuring GitLab](configuring-gitlab.md#inference-setup).
+If GCP cannot reach your GitLab instance over the public internet, see
+[Private OIDC issuers (uploaded JWKS)](configuring-gitlab.md#private-oidc-issuers-uploaded-jwks).
 
 You may need to create a new GCP project or reuse one. The output of this process is a WIF provider
 URL resembling:
@@ -126,7 +131,8 @@ the [operator guide](../infrastructure/inference-gateway-operator.md) for runnin
 Head over to [Configuring GitHub](configuring-github.md) to use your WIF provider URL.
 
 For GitLab repositories, skip this provision output and follow
-[Configuring GitLab](configuring-gitlab.md) instead — GitLab inference credentials
-are written by `repos install --vertex-project`, not by this command.
+[Configuring GitLab](configuring-gitlab.md#inference-setup) instead — a platform operator
+creates the GitLab provider, and `repos install --vertex-project` writes the CI/CD variables
+that reference it. This command does not apply.
 
 To use an inference gateway instead, see [Using an inference gateway](../user/inference-gateway.md).

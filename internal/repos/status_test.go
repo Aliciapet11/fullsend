@@ -470,8 +470,10 @@ func TestStatus_RefDrift(t *testing.T) {
 }
 
 func TestStatus_RegionDrift_NoLongerReported(t *testing.T) {
-	// FULLSEND_GCP_REGION is no longer in the manifest (install-time only),
-	// so status should not report region drift.
+	// With no inference.region declared by the effective configuration, an
+	// existing FULLSEND_GCP_REGION is preserved, so status must not report
+	// region drift (a declared region is enforced; see
+	// TestConverge_DeclaredRegionDriftAgreesAcrossStatusDryRunAndInstall).
 	fc := forge.NewFakeClient()
 	m := newTestManifest()
 
@@ -1341,26 +1343,55 @@ func TestStatus_RepoFilterAllUnmatched(t *testing.T) {
 	}
 }
 
-func TestStatus_RepoFilterPartialUnmatched(t *testing.T) {
+func TestStatus_RepoFilterPartialUnmatchedFails(t *testing.T) {
 	fc := forge.NewFakeClient()
 	m := newTestManifest()
 
 	populateInstalledRepo(t, fc, "acme-corp", "api-server", "v2.3.0",
 		"https://mint.example.com", "us-central1")
 
-	result, err := Status(context.Background(), m, newTestClientFactory(fc), 4,
+	// One valid selector does not rescue an unmatched one: status selects
+	// exactly like install.
+	_, err := Status(context.Background(), m, newTestClientFactory(fc), 4,
 		[]string{"acme-corp/api-server", "org/nonexistent"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error when one selector matches no declared repository")
 	}
-	if result.Summary.Total != 1 {
-		t.Errorf("total = %d, want 1", result.Summary.Total)
+	if !strings.Contains(err.Error(), "org/nonexistent") || strings.Contains(err.Error(), "acme-corp/api-server") {
+		t.Errorf("error should name only the unmatched selector: %v", err)
 	}
-	if len(result.Warnings) != 1 {
-		t.Fatalf("warnings count = %d, want 1", len(result.Warnings))
+}
+
+func TestRequireDeclaredSelections(t *testing.T) {
+	m := &Manifest{
+		Version: 1,
+		GitHub:  &PlatformConfig{Repos: []RepoEntry{{Name: "acme/*"}}},
 	}
-	if result.Warnings[0] != `--repo filter "org/nonexistent" matched no manifest entries` {
-		t.Errorf("warning = %q, want match message", result.Warnings[0])
+	fc := forge.NewFakeClient()
+	fc.Repos = []forge.Repository{
+		{Name: "api", FullName: "acme/api", DefaultBranch: "main"},
+	}
+	clients := newTestClientFactory(fc)
+	ctx := context.Background()
+
+	if err := RequireDeclaredSelections(ctx, m, clients, nil); err != nil {
+		t.Fatalf("empty selection: %v", err)
+	}
+	if err := RequireDeclaredSelections(ctx, m, clients, []string{"acme/api", "acme/*"}); err != nil {
+		t.Fatalf("declared selectors: %v", err)
+	}
+	// A concrete fork/archived repository a glob covers needs no listing.
+	if err := RequireDeclaredSelections(ctx, m, clients, []string{"acme/forked"}); err != nil {
+		t.Fatalf("glob-covered concrete name: %v", err)
+	}
+	// An unrelated glob is not declared because another glob exists, even
+	// next to a valid selector.
+	err := RequireDeclaredSelections(ctx, m, clients, []string{"acme/api", "other/*"})
+	if err == nil || !strings.Contains(err.Error(), "other/*") {
+		t.Fatalf("want error naming other/*, got %v", err)
+	}
+	if err := RequireDeclaredSelections(ctx, m, clients, []string{"acme/api", "*/nope"}); err == nil {
+		t.Fatal("want error for a glob selector that matches no resolved repository")
 	}
 }
 

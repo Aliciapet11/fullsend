@@ -9,7 +9,9 @@ Guides for onboarding organizations and configuring GitHub or GitLab — the fir
 - [Mint enrollment](getting-started/README.md) — Enroll your repo in a token mint before configuring anything else
 - [Getting Inference](getting-started/getting-inference.md) — Provision GCP inference access for your org or repo
 - [Configuring GitHub](getting-started/configuring-github.md) — Install GitHub Apps and run the setup CLI
-- [Configuring GitLab](getting-started/configuring-gitlab.md) — Install via `repos install --forge gitlab`, runners, polling, and role-credential lifecycle
+- [Configuring GitLab](getting-started/configuring-gitlab.md) — Declare the project in `repos.yaml`, install with `repos install`, runners, polling, and role-credential lifecycle
+- [Repo Management](getting-started/repo-management.md) — Manage many repositories from a declarative `repos.yaml` manifest
+- [Migrating to manifest-driven `repos install`](getting-started/migrating-from-github-setup.md) — Move `github setup` installations and flag-driven `repos install` scripts to `repos.yaml`
 
 ## Operations & Advanced Setup
 
@@ -40,7 +42,7 @@ Guides for developers working in repositories where fullsend is active.
 - [How fullsend authenticates](user/how-fullsend-authenticates.md) — Which credential path fullsend uses in each case: the mint, GCP and OpenAI Workload Identity, and the gateway's direct OIDC trust
 - [Using an inference gateway](user/inference-gateway.md) — Reach models through an OpenAI/Anthropic-compatible gateway with direct OIDC trust (no token exchange) or a gateway key
 - [Bugfix workflow](user/bugfix-workflow.md) — End-to-end guide to how fullsend handles a bug report from issue to merge
-- [Issue commands](user/issues-commands.md) — Slash commands and label triggers for interacting with agents
+- [Issue commands](user/issues-commands.md) — Read, create, and post comments on issues across GitHub, GitLab, and Jira (`fullsend issues get`, `create`, `post-comment`)
 - [OWNERS file authorization](user/owners-file-authorization.md) — Authorize agent dispatch via Prow-style OWNERS files
 - [Running agents locally](user/running-agents-locally.md) — Run fullsend agents on your machine using released binaries (macOS + Linux)
 
@@ -75,5 +77,5 @@ Guides for contributors developing and testing fullsend itself.
 - [CLI internals](dev/cli-internals.md) — Command structure, installation pipeline, and sandbox runtime
 - [Behaviour testing](dev/behaviour-testing.md) — Write Gherkin scenarios for end-to-end agent behaviour
 - [Behaviour test drivers](dev/behaviour-drivers.md) — Implement SCM and CI drivers for behaviour tests
-- [Testing workflow changes](dev/testing-workflows.md) — Point a test repository at a branch to test workflow, action, and agent changes before release
+- [Testing workflow changes](dev/testing-workflows.md) — Point a test repository at a branch to test workflow, action, and agent changes before release, and run the PR CI checks locally with `make ci-local`
 - [Tracing internals](dev/tracing.md) — How the distributed tracing implementation works and how to extend it

@@ -131,21 +131,13 @@ func (o ManagedConfig) Clone() ManagedConfig {
 
 // WithCreateIssuesRepos returns a copy of o whose create_issues allowlist
 // permits exactly the given repositories. It is how repos install records
-// the upstream-only cross-repo permission on a manifest entry (#8218).
+// the upstream cross-repo permissions on a manifest entry (#8218, #8504).
 // The receiver is not modified.
 func (o ManagedConfig) WithCreateIssuesRepos(repos []string) ManagedConfig {
 	cp := o.clone()
 	cp.CreateIssues = &CreateIssuesConfig{
 		AllowTargets: AllowTargets{Repos: cloneStringSlice(repos)},
 	}
-	return ManagedConfig{cfg: cp}
-}
-
-// WithRoles returns a copy of o with the given agent roles set. The
-// receiver is not modified.
-func (o ManagedConfig) WithRoles(roles []string) ManagedConfig {
-	cp := o.clone()
-	cp.Roles = cloneStringSlice(roles)
 	return ManagedConfig{cfg: cp}
 }
 
@@ -311,6 +303,43 @@ func LayerOnBase(overlay PerRepoConfigWriter, baseYAML []byte) (PerRepoConfigWri
 	base.parent = &perRepoDefaults{}
 	cloned.parent = &base
 	return cloned, nil
+}
+
+// DeclaredInfrastructure holds the installation infrastructure values that
+// a managed overlay or a config.base.yaml preset explicitly declares.
+// Unlike the layered accessors it never falls back to code defaults: an
+// empty field means no layer declares the value.
+type DeclaredInfrastructure struct {
+	MintURL              string
+	InferenceProject     string
+	InferenceRegion      string
+	InferenceWIFProvider string
+}
+
+// DeclaredInfrastructureValues returns the mint URL and Vertex inference
+// values declared by overlay (which wins) or by baseYAML. baseYAML may be
+// empty. Code defaults are deliberately not consulted, so callers can tell
+// a declared value from an inherited default.
+func DeclaredInfrastructureValues(overlay PerRepoConfigWriter, baseYAML []byte) (DeclaredInfrastructure, error) {
+	layered := clonePerRepo(asPerRepo(overlay))
+	if layered == nil {
+		layered = &perRepoConfig{}
+	}
+	layered.parent = nil
+	if len(bytes.TrimSpace(baseYAML)) > 0 {
+		var base perRepoConfig
+		if err := yaml.Unmarshal(baseYAML, &base); err != nil {
+			return DeclaredInfrastructure{}, fmt.Errorf("parsing base config: %w", err)
+		}
+		base.parent = nil
+		layered.parent = &base
+	}
+	return DeclaredInfrastructure{
+		MintURL:              layered.ConfigMintURL(),
+		InferenceProject:     layered.ConfigInferenceProject(),
+		InferenceRegion:      layered.ConfigInferenceRegion(),
+		InferenceWIFProvider: layered.ConfigInferenceWIFProvider(),
+	}, nil
 }
 
 func asPerRepo(w PerRepoConfigWriter) *perRepoConfig {

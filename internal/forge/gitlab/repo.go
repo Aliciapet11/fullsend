@@ -293,6 +293,49 @@ func (c *LiveClient) SetPipelineVariablesMinimumOverrideRole(ctx context.Context
 	return nil
 }
 
+// GetJobTokenRepositoryPushAllowed reads the GitLab project setting
+// ci_push_repository_for_job_token_allowed. A response that omits the field
+// returns forge.ErrNotSupported, so callers can fail closed instead of
+// treating an unreported setting as disabled.
+func (c *LiveClient) GetJobTokenRepositoryPushAllowed(ctx context.Context, owner, repo string) (bool, error) {
+	resp, err := c.get(ctx, fmt.Sprintf("/projects/%s", projectPath(owner, repo)))
+	if err != nil {
+		return false, fmt.Errorf("get job token repository push setting for %s/%s: %w", owner, repo, err)
+	}
+
+	var p struct {
+		Allowed *bool `json:"ci_push_repository_for_job_token_allowed"`
+	}
+	if err := decodeJSON(resp, &p); err != nil {
+		return false, fmt.Errorf("decode job token repository push setting: %w", err)
+	}
+	if p.Allowed == nil {
+		return false, fmt.Errorf("ci_push_repository_for_job_token_allowed not reported for %s/%s: %w", owner, repo, forge.ErrNotSupported)
+	}
+	return *p.Allowed, nil
+}
+
+// GetPushRuleBranchNameRegex reads the branch_name_regex of the project's
+// push rule. GitLab answers with a JSON null when no push rule exists;
+// that, like a rule without a branch name regex, returns ("", nil).
+func (c *LiveClient) GetPushRuleBranchNameRegex(ctx context.Context, owner, repo string) (string, error) {
+	resp, err := c.get(ctx, fmt.Sprintf("/projects/%s/push_rule", projectPath(owner, repo)))
+	if err != nil {
+		return "", fmt.Errorf("get push rule for %s/%s: %w", owner, repo, err)
+	}
+
+	var rule *struct {
+		BranchNameRegex *string `json:"branch_name_regex"`
+	}
+	if err := decodeJSON(resp, &rule); err != nil {
+		return "", fmt.Errorf("decode push rule: %w", err)
+	}
+	if rule == nil || rule.BranchNameRegex == nil {
+		return "", nil
+	}
+	return *rule.BranchNameRegex, nil
+}
+
 func (c *LiveClient) DeleteRepo(ctx context.Context, owner, repo string) error {
 	return c.delete_(ctx, fmt.Sprintf("/projects/%s", projectPath(owner, repo)))
 }
@@ -658,6 +701,13 @@ func (c *LiveClient) CreateOrUpdateFileOnBranch(ctx context.Context, owner, repo
 
 func (c *LiveClient) GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error) {
 	return c.GetFileContentAtRef(ctx, owner, repo, path, "HEAD")
+}
+
+// UpdateFileIfMatch is not supported on GitLab: its file API has no
+// blob-SHA precondition. The only caller, the GitHub behaviour-test org
+// lock bridge, never runs against GitLab.
+func (c *LiveClient) UpdateFileIfMatch(_ context.Context, _, _, _, _ string, _ []byte, _ string) error {
+	return fmt.Errorf("conditional file update: %w", forge.ErrNotSupported)
 }
 
 func (c *LiveClient) GetFileContentAtRef(ctx context.Context, owner, repo, path, ref string) ([]byte, error) {

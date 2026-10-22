@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/config"
+	"github.com/fullsend-ai/fullsend/internal/skill"
 )
 
 // piPersona is one discovered sub-agent persona: a file under
@@ -18,6 +19,11 @@ type piPersona struct {
 	Model         string   // frontmatter model (alias or id); empty = inherit parent
 	Tools         []string // Claude tool names; nil = parent's set
 	BashAllowlist []string // Bash(a,b) prefixes; nil = unrestricted
+	// Description, Body and Frontmatter are what a Codex role file and its
+	// diagnostics need (#6970). They are not serialized into the pi manifest.
+	Description string
+	Body        string
+	Frontmatter []byte
 }
 
 // piPersonaManifestEntry is one entry in the manifest's personas table,
@@ -100,7 +106,7 @@ func discoverPersonas(skillDirs []string, agentName string) ([]piPersona, []piSk
 			}
 			continue
 		}
-		skillName := filepath.Base(skillDir)
+		skillName := skill.SandboxName(skillDir)
 		for _, e := range entries {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 				continue
@@ -153,6 +159,9 @@ func discoverPersonas(skillDirs []string, agentName string) ([]piPersona, []piSk
 					Model:         def.Model,
 					Tools:         def.Tools,
 					BashAllowlist: def.BashAllowlist,
+					Description:   def.Description,
+					Body:          def.Body,
+					Frontmatter:   def.Frontmatter,
 				})
 			}
 		}

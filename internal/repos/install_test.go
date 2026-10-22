@@ -588,6 +588,23 @@ func TestBuildScaffoldFiles(t *testing.T) {
 	}
 }
 
+func TestBuildScaffoldFiles_GitLabIssueTargets(t *testing.T) {
+	files, err := BuildScaffoldFiles(InstallConfig{Forge: ForgeGitLab, Owner: "acme", Repo: "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if file.Path == ".fullsend/config.yaml" {
+			body := string(file.Content)
+			if !strings.Contains(body, "allow_targets: {}") || strings.Contains(body, "- fullsend-ai/") {
+				t.Fatalf("GitLab config should explicitly allow no cross-project targets:\n%s", body)
+			}
+			return
+		}
+	}
+	t.Fatal("missing config overlay")
+}
+
 func TestBuildScaffoldFiles_WithPreset(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Preset = []byte(testPresetYAML)
@@ -625,13 +642,12 @@ func TestBuildScaffoldFiles_WithPreset(t *testing.T) {
 // the preset's own roles/allowed_remote_resources — the same bug
 // `github setup --config` avoids via buildPresetOverlay's stub overlay.
 // When the caller did not explicitly request roles (cfg.Roles is empty,
-// matching converge.go's fresh-install path when --roles was not
-// passed), the overlay must leave roles/allowed_remote_resources unset
+// matching converge.go's fresh-install path with a declared preset), the overlay must leave roles/allowed_remote_resources unset
 // so the preset's values take effect through the overlay -> base
 // fallback chain.
 func TestBuildScaffoldFiles_PresetOverlayDoesNotShadowPresetRoles(t *testing.T) {
 	cfg := baseCfg()
-	cfg.Roles = nil // no explicit --roles override
+	cfg.Roles = nil // no explicit roles
 	presetYAML := "version: \"1\"\n" +
 		"roles:\n  - triage\n  - review\n" +
 		"allowed_remote_resources:\n  - https://raw.githubusercontent.com/acme/private-agents/\n"

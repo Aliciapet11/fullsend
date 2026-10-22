@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,8 +24,13 @@ import (
 const claudeDebugLog = "claude-debug.log"
 
 // claudeBinaryVar holds the absolute path of the claude binary, resolved before
-// .env is sourced and marked read-only.
+// .env is read and marked read-only.
 const claudeBinaryVar = "FULLSEND_CLAUDE_BIN"
+
+// claudeNodeVar holds the node that starts claude when claude is a
+// `#!/usr/bin/env node` script, empty otherwise (binaryPin). In the sandbox
+// image claude is an ELF binary.
+const claudeNodeVar = "FULLSEND_CLAUDE_NODE"
 
 // claudeBinaryPin is the POSIX sh fragment that records where claude is; see
 // binaryPin for why it holds. The pin runs before .env, which adds the
@@ -32,7 +38,7 @@ const claudeBinaryVar = "FULLSEND_CLAUDE_BIN"
 // files, so neither a `claude` file there nor a PATH change in an env file
 // decides which binary the run starts.
 func claudeBinaryPin() string {
-	return binaryPin(claudeBinaryVar, "claude")
+	return binaryPin(claudeBinaryVar, claudeNodeVar, "claude")
 }
 
 // claudeLoaderEnvUnset clears, after .env, the variables that load code into
@@ -44,7 +50,24 @@ func claudeBinaryPin() string {
 // Bun-compiled binary that honours e.g. `--preload x.js` from it. `unset` is
 // a special builtin, so a function a sourced file defined cannot stand in
 // for it.
-const claudeLoaderEnvUnset = "unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP NODE_OPTIONS NODE_PATH BUN_OPTIONS"
+const claudeLoaderEnvUnset = "unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE NODE_OPTIONS NODE_PATH BUN_OPTIONS"
+
+// claudeSettingsEnvUnset clears, after .env and next to claudeLoaderEnvUnset,
+// the Claude Code variables that change how it loads settings and runs hook
+// commands: CLAUDE_CODE_SAFE_MODE (--safe-mode) and CLAUDE_CODE_SIMPLE
+// (--bare) narrow what Claude Code loads, CLAUDE_CODE_SHELL_PREFIX wraps
+// the shell commands it runs, hook commands included, and
+// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB removes credential-named variables, such
+// as FULLSEND_CANARY_TOKEN, from the hooks' environment. None of them belongs
+// to the harness, so a value .env sets never reaches claude, and the settings
+// document pins each to "" (claudeRunnerSettings) so a settings file's env
+// block cannot set one either.
+const claudeSettingsEnvUnset = "unset CLAUDE_CODE_SAFE_MODE CLAUDE_CODE_SIMPLE CLAUDE_CODE_SHELL_PREFIX CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+
+// claudeShellStartupEnv are the shell startup variables envDataDropNames
+// refuses from .env. The settings document sets them to "" as well, so a
+// settings file's env block cannot hand one to the shells Claude Code starts.
+var claudeShellStartupEnv = []string{"BASH_ENV", "ENV"}
 
 // ClaudeRuntime implements Runtime using the Claude Code CLI.
 type ClaudeRuntime struct{}
@@ -132,18 +155,8 @@ func (r ClaudeRuntime) Bootstrap(input BootstrapInput) error {
 		return fmt.Errorf("copying agent definition: %w", err)
 	}
 
-	if err := duplicateDestinationNameError("skill", input.SkillDirs()); err != nil {
+	if err := uploadHarnessSkills(sandboxName, configDir+"/skills", input.SkillDirs()); err != nil {
 		return err
-	}
-	for _, skillPath := range input.SkillDirs() {
-		if skillPath == "" {
-			continue
-		}
-		if err := sandbox.Upload(sandboxName, skillPath,
-			fmt.Sprintf("%s/skills/", configDir)); err != nil {
-			return fmt.Errorf("copying skill %q: %w", skillPath, err)
-		}
-		fmt.Fprintf(os.Stderr, "Skill %q: uploaded to sandbox\n", resolveSkillDisplayName(skillPath))
 	}
 
 	// Mirror of the pi runtime's skip: a pi extension is code with no
@@ -376,6 +389,24 @@ func (r ClaudeRuntime) claudeRemoveTranscript(sandboxName, sessionID string, tim
 var claudeSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
 
 func (r ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Printer, start time.Time, metrics *RunMetrics) (int, error) {
+	if params.HooksSettingsPath != "" {
+		// The guard hashes security.SandboxHooksSettings, so --settings must
+		// load that same file; any other path would be loaded unchecked.
+		if params.HooksSettingsPath != security.SandboxHooksSettings {
+			return -1, fmt.Errorf(
+				"HooksSettingsPath %q is not %s: the hooks integrity guard only covers the default hooks file",
+				params.HooksSettingsPath, security.SandboxHooksSettings)
+		}
+		// The expected digests are runner-held because nothing in the
+		// agent-writable config directory can be trusted to hold them; a miss
+		// means Bootstrap did not install hooks in this process, and the
+		// guard would have nothing to compare against.
+		if d, ok := lookupClaudeHookDigests(params.SandboxName); !ok || d.HooksJSON == "" || d.HookScripts == nil {
+			return -1, fmt.Errorf(
+				"no runner-held hook digests for sandbox %s: ClaudeRuntime.Run with sandbox hooks enabled requires Bootstrap to have installed them in the same process (internal/cli/run.go does), because the expected digests cannot be read back from the agent-writable config directory",
+				params.SandboxName)
+		}
+	}
 	gw := claudeGatewayRunFor(params.SandboxName)
 
 	handler := params.OnEvent
@@ -435,6 +466,11 @@ func (r ClaudeRuntime) Run(ctx context.Context, params RunParams, printer *ui.Pr
 	}
 	if result.execErr != nil {
 		return result.exitCode, result.execErr
+	}
+	if params.HooksSettingsPath != "" && result.exitCode == claudeHooksMissingExit {
+		return result.exitCode, fmt.Errorf(
+			"claude hooks.json or hook scripts in %s are missing or modified; refusing to run (did the agent change them between iterations?)",
+			sandbox.SandboxClaudeConfig)
 	}
 	if gw != nil && result.exitCode == piCredentialSeedFailedExit {
 		return result.exitCode, fmt.Errorf("the inference gateway credential seed failed (the sandbox's gateway provider placeholder is missing or malformed, or the token file in %s could not be written); this is a runner setup failure, not an agent failure", sandbox.SandboxClaudeConfig)
@@ -607,48 +643,115 @@ var reservedPluginDestNames = []string{"marketplaces", "cache", "known_marketpla
 
 // duplicateDestinationNameError returns an error if two distinct paths in
 // paths share the same basename, or if a basename collides with one of
-// reserved. sandbox.UploadDir replaces its destination wholesale rather than
-// merging into it, so two different skills or plugins resolving to the same
-// sandbox directory name would otherwise upload one, then silently discard
-// it when the second overwrites it — the same "expected content silently
-// isn't there" failure mode as #5247, just reached through a naming
-// collision instead of a broken symlink.
+// reserved. Plugins and pi extensions use it; skills go through
+// skillDestNames, keyed on skill.SandboxName. sandbox.UploadDir replaces its
+// destination wholesale rather than merging into it, so two different plugins
+// resolving to the same sandbox directory name would otherwise upload one,
+// then silently discard it when the second overwrites it — the same "expected
+// content silently isn't there" failure mode as #5247, just reached through a
+// naming collision instead of a broken symlink.
 func duplicateDestinationNameError(kind string, paths []string, reserved ...string) error {
-	reservedSet := make(map[string]bool, len(reserved))
-	for _, r := range reserved {
-		reservedSet[r] = true
-	}
-	seen := make(map[string]string, len(paths))
+	entries := make([]nameEntry, 0, len(paths))
 	for _, p := range paths {
 		if p == "" {
 			continue
 		}
-		base := filepath.Base(p)
-		if reservedSet[base] {
-			return fmt.Errorf("%s path %q resolves to %q, which is reserved for internal use", kind, p, base)
+		entries = append(entries, nameEntry{name: filepath.Base(p), path: p})
+	}
+	return duplicateNameError(kind, entries, reserved...)
+}
+
+// nameEntry pairs a sandbox destination name with the original host path it
+// was derived from. duplicateNameError compares the original paths, not a
+// synthetic rewrite of them, so two distinct paths that happen to produce an
+// identical synthetic string (e.g. the same parent directory plus the same
+// declared name) still register as a collision instead of looking like the
+// same entry seen twice.
+type nameEntry struct {
+	name string
+	path string
+}
+
+// duplicateNameError returns an error if two entries with distinct paths
+// share the same name, or if a name collides with one of reserved.
+// sandbox.UploadDir replaces its destination wholesale rather than merging
+// into it, so two different skills or plugins resolving to the same sandbox
+// directory name would otherwise upload one, then silently discard it when
+// the second overwrites it — the same "expected content silently isn't
+// there" failure mode as #5247, just reached through a naming collision
+// instead of a broken symlink.
+func duplicateNameError(kind string, entries []nameEntry, reserved ...string) error {
+	reservedSet := make(map[string]bool, len(reserved))
+	for _, r := range reserved {
+		reservedSet[r] = true
+	}
+	seen := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.path == "" {
+			continue
 		}
-		if prior, ok := seen[base]; ok && prior != p {
-			return fmt.Errorf("two %s paths both resolve to the sandbox name %q: %q and %q", kind, base, prior, p)
+		if reservedSet[e.name] {
+			return fmt.Errorf("%s path %q resolves to %q, which is reserved for internal use", kind, e.path, e.name)
 		}
-		seen[base] = p
+		if prior, ok := seen[e.name]; ok && prior != e.path {
+			return fmt.Errorf("two %s paths both resolve to the sandbox name %q: %q and %q", kind, e.name, prior, e.path)
+		}
+		seen[e.name] = e.path
 	}
 	return nil
 }
 
-// resolveSkillDisplayName returns a human-friendly name for a skill directory.
-// It reads the SKILL.md frontmatter name if available, falling back to
-// filepath.Base for local skills where the directory name is already correct.
-func resolveSkillDisplayName(skillPath string) string {
-	base := filepath.Base(skillPath)
-	data, err := os.ReadFile(filepath.Join(skillPath, "SKILL.md"))
-	if err != nil {
-		return base
+// skillDestNames pairs each skill directory with its sandbox destination
+// name (skill.SandboxName), so duplicateNameError keys the collision check
+// on the declared identity of the *original* directories. Rewriting to a
+// synthetic joined path (dir + name) instead of keeping the original path
+// would let two distinct directories that share both a parent and a
+// declared name (e.g. skills/issue-labels/github and
+// skills/issue-labels/gitlab both declaring `name: issue-labels`) collapse
+// to the same synthetic string and skip detection entirely.
+func skillDestNames(skillDirs []string) []nameEntry {
+	out := make([]nameEntry, 0, len(skillDirs))
+	for _, p := range skillDirs {
+		if p == "" {
+			continue
+		}
+		out = append(out, nameEntry{name: skill.SandboxName(p), path: p})
 	}
-	meta, err := skill.ParseFrontmatter(data)
-	if err != nil || meta == nil || meta.Name == "" {
-		return base
+	return out
+}
+
+// uploadHarnessSkills copies each skill directory into
+// skillsRoot/<skill.SandboxName(dir)>. Destination identity is
+// skill.SandboxName (declared SKILL.md name, else basename) so nested forge
+// skills that share a leaf directory upload to distinct destinations.
+// Every destination name must be a single sandbox-safe path segment
+// (skill.ValidName) and collisions fail, both before any upload.
+func uploadHarnessSkills(sandboxName, skillsRoot string, skillDirs []string) error {
+	entries := skillDestNames(skillDirs)
+	for _, e := range entries {
+		if !skill.ValidName(e.name) {
+			return fmt.Errorf("skill path %q resolves to invalid sandbox name %q", e.path, e.name)
+		}
 	}
-	return meta.Name
+	if err := duplicateNameError("skill", entries); err != nil {
+		return err
+	}
+	for _, skillPath := range skillDirs {
+		if skillPath == "" {
+			continue
+		}
+		name := skill.SandboxName(skillPath)
+		dest := skillsRoot + "/" + name
+		if err := sandbox.Upload(sandboxName, skillPath, dest); err != nil {
+			return fmt.Errorf("copying skill %q: %w", skillPath, err)
+		}
+		if base := filepath.Base(skillPath); base != name {
+			fmt.Fprintf(os.Stderr, "Skill %q: uploaded to sandbox as %q, its declared SKILL.md name\n", base, name)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "Skill %q: uploaded to sandbox\n", name)
+	}
+	return nil
 }
 
 // remapModel returns the models.aliases target for name when the repo
@@ -676,7 +779,24 @@ func claudeModelID(name string, aliases map[string]string) string {
 	return name
 }
 
+// buildRunCommand renders the in-sandbox command line. When sandbox hooks are
+// enabled (params.HooksSettingsPath set), the launch refuses to start claude
+// unless hooks.json and the hook scripts still match the runner-held digests
+// Bootstrap recorded for this sandbox (claudeHooksGuard), checked before and
+// after the agent-writable .env.
 func buildRunCommand(params RunParams) string {
+	var hookDigests claudeHookDigests
+	if params.HooksSettingsPath != "" {
+		// A miss leaves the digests empty, which renders a guard that can
+		// never pass: the launch fails closed (Run reports the miss first).
+		hookDigests, _ = lookupClaudeHookDigests(params.SandboxName)
+	}
+	return buildRunCommandWithDigests(params, hookDigests)
+}
+
+// buildRunCommandWithDigests is buildRunCommand with the expected hook
+// digests given rather than looked up.
+func buildRunCommandWithDigests(params RunParams, hookDigests claudeHookDigests) string {
 	envFile := sandbox.SandboxWorkspace + "/.env"
 	safe := strings.ReplaceAll(params.AgentBaseName, "'", "'\\''")
 
@@ -690,14 +810,24 @@ func buildRunCommand(params RunParams) string {
 		preEnv = " && " + ClaudeRuntime{}.claudeGatewayPreEnv(gw)
 		postEnv = " && " + claudeGatewayPostEnv(gw)
 	}
+	if params.HooksSettingsPath != "" {
+		// The hook settings, re-asserted after the agent-writable .env from
+		// what Bootstrap recorded; a name the runner has no value for is
+		// unset. Digests from a missed lookup carry none, so every name is
+		// unset — and the guard fails closed anyway.
+		postEnv = " && " + hookEnvExports(hookDigests.SecurityEnv) + postEnv
+	}
 
 	parts := []string{
-		// The pin comes before `. .env`; `unset -f` is a special builtin, which a
-		// function defined in .env (or an .env.d file it sources) cannot
-		// shadow, and the launch goes through the pinned path, which no
-		// function or alias can shadow either.
-		fmt.Sprintf("cd %s && %s%s && . %s && unset -f claude && %s%s && \"$%s\"",
-			params.RepoDir, claudeBinaryPin(), preEnv, envFile, claudeLoaderEnvUnset, postEnv, claudeBinaryVar),
+		// The pin comes before the .env read (envDataLoad); `unset -f` is a
+		// special builtin, which no function can shadow, and the launch goes
+		// through the pinned path, which no function or alias can shadow
+		// either. With sandbox hooks the hooks guard runs on both sides of
+		// .env (claudeGuardedEnv).
+		fmt.Sprintf("cd %s && %s%s && %s%s && %s",
+			shellQuote(params.RepoDir), claudeBinaryPin(), preEnv,
+			claudeGuardedEnv(envFile, params.HooksSettingsPath != "", gw == nil, hookDigests),
+			postEnv, cliLaunch(claudeBinaryVar, claudeNodeVar)),
 		"--print",
 		"--verbose",
 		"--output-format stream-json",
@@ -795,12 +925,15 @@ func buildRunCommand(params RunParams) string {
 // The hooks file is loaded via --settings in buildRunCommand, which takes
 // precedence over project/local settings. Hook scripts and wiring are
 // co-located under the runner-owned config directory, outside the
-// agent-writable workspace tree (#6358).
+// agent-writable workspace tree (#6358). That directory is still writable by
+// the agent between iterations, so the digests of what is uploaded here are
+// recorded runner-side for Run's launch guard (claude_integrity.go).
 //
 // extra are further settings for the same document: Claude Code reads one
 // --settings flag, so a gateway run's settings (claudeGatewaySettings: the
-// pinned route env and the apiKeyHelper) are merged here. On a gateway run
-// the merged document is also recorded, and buildRunCommand passes it
+// pinned route env and the apiKeyHelper) are merged here, together with the
+// settings the runner owns on every run (claudeRunnerSettings). On a gateway
+// run the merged document is also recorded, and buildRunCommand passes it
 // inline instead of the uploaded file.
 func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, extra map[string]any) error {
 	// security.SandboxHooksDir is the directory the generated hooks.json
@@ -809,13 +942,31 @@ func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, ex
 		return err
 	}
 
-	hooksJSON, err := security.GenerateHooksConfig(hooks)
+	// The hook settings, recorded while .env is still exactly what the
+	// runner wrote; the launch re-asserts them after .env (hookEnvExports),
+	// and the settings document below pins them against the settings files
+	// Claude Code reads beneath it.
+	securityEnv, err := bootstrapHookEnv(sandboxName, hooks)
+	if err != nil {
+		return err
+	}
+
+	// The interpreter and PATH the hooks run with are resolved here, from
+	// directories the agent cannot write (hookPreflightInterpreter, which also
+	// asserts the version floor the hook scripts need: datetime.UTC, Python
+	// 3.11), and baked into hooks.json (whose digest the launch guard pins)
+	// rather than left to the PATH a later iteration's .env can set.
+	python, hookPath, err := hookPreflightInterpreter(sandboxName)
+	if err != nil {
+		return err
+	}
+	hooksJSON, err := security.GenerateHooksConfigPinned(hooks, python, hookPath)
 	if err != nil {
 		return fmt.Errorf("generating hooks config: %w", err)
 	}
-	hooksJSON, err = mergeClaudeSettings(hooksJSON, extra)
+	hooksJSON, err = mergeClaudeSettings(hooksJSON, claudeRunnerSettings(securityEnv, extra))
 	if err != nil {
-		return fmt.Errorf("adding the inference gateway settings to the hooks config: %w", err)
+		return fmt.Errorf("adding the runner settings to the hooks config: %w", err)
 	}
 	// A gateway run passes this document inline (claudeGatewaySettingsArg),
 	// not the uploaded file.
@@ -835,7 +986,63 @@ func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, ex
 		return fmt.Errorf("copying hooks.json to sandbox: %w", err)
 	}
 
-	return appendHookEnv(sandboxName, hooks)
+	if err := appendHookEnv(sandboxName, hooks); err != nil {
+		return err
+	}
+	digests := claudeHookDigestsFor(hooks, hooksJSON)
+	digests.SecurityEnv = securityEnv
+	recordClaudeHookDigests(sandboxName, digests)
+	return nil
+}
+
+// claudeRunnerSettings returns extra (a gateway run's claudeGatewaySettings,
+// or nil) with the settings the runner owns on every run added. Claude Code
+// also reads $CLAUDE_CONFIG_DIR/settings.json and the repository's
+// .claude/settings.json and .claude/settings.local.json, and --settings wins
+// over them only for the keys it sets, so each key is set explicitly:
+//
+//   - env holds every hookEnvManagedKeys name, with the value Bootstrap
+//     recorded (securityEnv) or "" — which every hook treats as unset —
+//     for a name the runner has no value for, as hookEnvExports does at
+//     launch. A settings file's env block is applied inside Claude Code,
+//     after that export. On a gateway run the names are added to the
+//     route's env block rather than replacing it.
+//   - env also sets each claudeLoaderEnvUnset and claudeSettingsEnvUnset
+//     name, and claudeShellStartupEnv, to "": the launch unsets or refuses
+//     them after .env, and a settings file's
+//     env block would otherwise set them again inside Claude Code, for the
+//     hook commands it starts.
+//   - disableAllHooks is false, so no other file can switch off the hooks
+//     this document wires.
+//
+// extra is not modified.
+func claudeRunnerSettings(securityEnv []hookEnvPair, extra map[string]any) map[string]any {
+	out := maps.Clone(extra)
+	if out == nil {
+		out = map[string]any{}
+	}
+	env := map[string]any{}
+	if routeEnv, ok := extra["env"].(map[string]any); ok {
+		maps.Copy(env, routeEnv)
+	}
+	values := make(map[string]string, len(securityEnv))
+	for _, pair := range securityEnv {
+		values[pair.Key] = pair.Value
+	}
+	for _, key := range hookEnvManagedKeys {
+		env[key] = values[key]
+	}
+	for _, unset := range []string{claudeLoaderEnvUnset, claudeSettingsEnvUnset} {
+		for _, key := range strings.Fields(strings.TrimPrefix(unset, "unset ")) {
+			env[key] = ""
+		}
+	}
+	for _, key := range claudeShellStartupEnv {
+		env[key] = ""
+	}
+	out["env"] = env
+	out["disableAllHooks"] = false
+	return out
 }
 
 func bootstrapPlugins(sandboxName, configDir string, plugins []string) error {

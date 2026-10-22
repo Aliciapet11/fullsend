@@ -53,6 +53,16 @@ const (
 	// PI_CODING_AGENT_DIR so pi never auto-loads them; PiRuntime.Run passes
 	// each one explicitly with -e.
 	SandboxPiExtensionsDir = "/usr/local/share/pi-extensions"
+	// SandboxOpenCodeConfig is the OpenCode config directory inside the
+	// sandbox. Exported as OPENCODE_CONFIG_DIR (OpenCodeRuntime.EnvExports).
+	// Outside the cloned repo tree, like SandboxClaudeConfig and
+	// SandboxPiConfig, so the target repo cannot pre-seed it and a workspace
+	// reset does not clear it. Unlike pi's config dir, OpenCode takes an
+	// explicit env pointer to it, so the agent-writable workspace .opencode/
+	// is never on the config search path. Path convention pinned by #515
+	// (the hook plugin adapter lives under this dir at plugins/, integrity-
+	// gated before .env is sourced, mirroring pi's piHooksGuard).
+	SandboxOpenCodeConfig = "/sandbox/opencode-config" //nolint:gosec // not a credential
 
 	// KeepAliveCommand is the sandbox's canonical main process, started by
 	// createOnce so the sandbox stays Ready between `sandbox exec` calls
@@ -81,6 +91,15 @@ const (
 	// ("provider was modified concurrently").
 	providerRetries      = 3
 	providerRetryBackoff = 500 * time.Millisecond
+
+	// safeDownloadAttempts is the number of full download attempts
+	// SafeDownload makes into a fresh staging directory. OpenShell retries
+	// every tar-extraction failure internally, including deterministic
+	// failures, and directory retries unpack into the same destination. The
+	// outer attempt can recover only when the earlier failure was transient;
+	// a deterministic failure will repeat. Track NVIDIA/OpenShell#4805 and
+	// remove this workaround once upstream stages each directory retry.
+	safeDownloadAttempts = 2
 )
 
 // RetrySleepFn is the function called between retry attempts in
@@ -571,7 +590,7 @@ func ImportProfileVerified(ctx context.Context, id, profilePath string) error {
 // credential keys. Credential keys become env vars in the openshell child
 // process; allowing security-sensitive names would let a URL-fetched provider
 // definition influence process loading or shell behavior.
-// NOTE: see also reservedSandboxKeys in internal/cli/run.go for the sandbox env blocklist.
+// NOTE: internal/cli's env.sandbox gate checks this list too (#3373).
 var reservedCredentialKeys = map[string]bool{
 	// Process loading / shell behavior
 	"PATH":            true,
@@ -617,6 +636,42 @@ var reservedCredentialKeys = map[string]bool{
 	"GIT_ASKPASS":       true,
 }
 
+// ReservedCredentialKeys returns the names reservedCredentialKeys refuses as
+// provider credential keys. Production code checks membership through
+// IsReservedCredentialKey; this accessor exists so tests in other packages
+// (internal/cli's env.sandbox gate tests) can enumerate the live list
+// instead of copying it.
+//
+// A name is on this list because letting harness-supplied configuration set it
+// in a child process could change process loading, shell behavior, TLS trust
+// or git behavior. The doors differ: a credential name reaches the host-side
+// `openshell provider` environment, while harness `env.sandbox` is exported
+// inside the sandbox. The exposure is the same once the name is in a child's
+// environment, so every name here is blocked on both sides — internal/cli's
+// env.sandbox gate checks it through IsReservedCredentialKey, so the two
+// cannot drift apart (#3373). Absence from this list is not a statement that
+// a name is safe — the plugin-env deny-list is deliberately broader, in the
+// direction reserved_env_drift_test.go pins: every credential name is also a
+// plugin-env name, not the converse. The cross-door invariant is pinned by
+// TestReservedSandboxKeys_CoversReservedCredentialKeys in internal/cli.
+//
+// The result is a fresh sorted slice, so callers cannot edit the blocklist
+// and subtests run in a stable order.
+func ReservedCredentialKeys() []string {
+	keys := make([]string, 0, len(reservedCredentialKeys))
+	for k := range reservedCredentialKeys {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// IsReservedCredentialKey reports, case-insensitively, whether name is
+// refused as a provider credential key.
+func IsReservedCredentialKey(name string) bool {
+	return reservedCredentialKeys[strings.ToUpper(name)]
+}
+
 // EnsureProvider creates or updates a provider on the gateway. Credential
 // values may contain ${VAR} references which are expanded from the host
 // environment before being passed to openshell.
@@ -635,7 +690,7 @@ var reservedCredentialKeys = map[string]bool{
 func EnsureProvider(ctx context.Context, name, providerType string, credentials, config map[string]string, fromURL bool) error {
 	if fromURL {
 		for k := range credentials {
-			if reservedCredentialKeys[strings.ToUpper(k)] {
+			if IsReservedCredentialKey(k) {
 				return fmt.Errorf("provider %q: credential key %q is a reserved environment variable name", name, k)
 			}
 		}
@@ -655,7 +710,7 @@ func EnsureProvider(ctx context.Context, name, providerType string, credentials,
 // form in the child process environment, never on the command line.
 func EnsureProviderLiteral(ctx context.Context, name, providerType string, credentials map[string]string) error {
 	for k := range credentials {
-		if reservedCredentialKeys[strings.ToUpper(k)] {
+		if IsReservedCredentialKey(k) {
 			return fmt.Errorf("provider %q: credential key %q is a reserved environment variable name", name, k)
 		}
 	}
@@ -1598,6 +1653,8 @@ func Upload(sandboxName, localPath, remotePath string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "openshell", "sandbox", "upload",
+		// fullsend always uploads one file it already chose (UploadDir applies its own excludes); OpenShell's Git filtering must not drop it (NVIDIA/OpenShell#3957).
+		"--no-git-ignore",
 		sandboxName,
 		uploadPath,
 		remotePath,
@@ -1814,12 +1871,92 @@ func DownloadFile(sandboxName, remotePath, localPath string) error {
 }
 
 // SafeDownload copies a directory from a sandbox to the local machine and then
-// sanitizes the result by removing dangerous symlinks (absolute or repo-escaping) and .git/hooks/.
+// sanitizes the result by removing dangerous symlinks (absolute or
+// repo-escaping) and .git/hooks/. Each attempt downloads into a fresh staging
+// directory, so a partial extraction from a failed attempt cannot collide with
+// a later one. The sanitized staging directory replaces localDir only after
+// both download and sanitization succeed.
 func SafeDownload(sandboxName, remoteDir, localDir string) error {
-	if err := Download(sandboxName, remoteDir, localDir); err != nil {
-		return err
+	localDir = filepath.Clean(localDir)
+	parent := filepath.Dir(localDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("creating download parent %s: %w", parent, err)
 	}
-	return sanitizeDownload(localDir)
+
+	var errs []error
+	for attempt := 1; attempt <= safeDownloadAttempts; attempt++ {
+		stagingDir, err := os.MkdirTemp(parent, ".fullsend-safe-download-*")
+		if err != nil {
+			return fmt.Errorf("creating download staging directory: %w", err)
+		}
+
+		if err := Download(sandboxName, remoteDir, stagingDir); err != nil {
+			errs = append(errs, fmt.Errorf("attempt %d/%d: %w", attempt, safeDownloadAttempts, err))
+			if cleanupErr := cleanupStagingDir(stagingDir); cleanupErr != nil {
+				errs = append(errs, fmt.Errorf("cleaning staging directory after failed attempt: %w", cleanupErr))
+			}
+			continue
+		}
+
+		if err := sanitizeDownload(stagingDir); err != nil {
+			cleanupErr := cleanupStagingDir(stagingDir)
+			if cleanupErr == nil {
+				return fmt.Errorf("sanitizing downloaded directory: %w", err)
+			}
+			return errors.Join(
+				fmt.Errorf("sanitizing downloaded directory: %w", err),
+				fmt.Errorf("cleaning staging directory after sanitization failure: %w", cleanupErr),
+			)
+		}
+		if err := replaceDownload(stagingDir, localDir); err != nil {
+			cleanupErr := cleanupStagingDir(stagingDir)
+			if cleanupErr == nil {
+				return err
+			}
+			return errors.Join(err, fmt.Errorf("cleaning staging directory after publish failure: %w", cleanupErr))
+		}
+		fmt.Fprintf(os.Stderr, "  sandbox download succeeded on attempt %d/%d\n", attempt, safeDownloadAttempts)
+		return nil
+	}
+
+	return fmt.Errorf("safe download from sandbox failed after %d attempts: %w", safeDownloadAttempts, errors.Join(errs...))
+}
+
+// cleanupStagingDir removes a staging tree after restoring write permission
+// to its directories. Permission restoration is best effort and does not
+// follow symlinks; os.RemoveAll provides the authoritative cleanup result.
+func cleanupStagingDir(stagingDir string) error {
+	_ = filepath.WalkDir(stagingDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			parent := filepath.Dir(path)
+			if info, err := os.Lstat(parent); err == nil && info.IsDir() {
+				_ = os.Chmod(parent, 0o755)
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			_ = os.Chmod(path, 0o755)
+		}
+		return nil
+	})
+	if err := os.RemoveAll(stagingDir); err != nil {
+		return fmt.Errorf("removing staging directory %s: %w", stagingDir, err)
+	}
+	return nil
+}
+
+// replaceDownload publishes a sanitized staging directory at localDir by
+// removing the existing destination and renaming the staged tree. The staging
+// directory is created in localDir's parent, so the rename stays on the same
+// filesystem; replacement is not failure-preserving.
+func replaceDownload(stagingDir, localDir string) error {
+	if err := os.RemoveAll(localDir); err != nil {
+		return fmt.Errorf("replacing existing download directory %s: %w", localDir, err)
+	}
+	if err := os.Rename(stagingDir, localDir); err != nil {
+		return fmt.Errorf("publishing downloaded directory to %s: %w", localDir, err)
+	}
+	return nil
 }
 
 // CollectLogs runs `openshell logs <name> --source <source> -n 0` and returns
@@ -1899,6 +2036,12 @@ func collectPodmanLogs(sandboxName string) string {
 
 // ExtractOutputFiles copies all files under a remote directory in the sandbox
 // to a local output directory, preserving relative paths.
+//
+// A listing that openshell itself failed (non-zero exit, e.g. exec refused for
+// a sandbox that is not Ready) or a listing in which no file could be
+// extracted returns an error, so the caller does not report either as "no
+// output". The remote find still runs with "2>/dev/null || true", so a missing
+// or unreadable remoteDir reads as an empty listing and returns nil, nil.
 func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, error) {
 	if err := os.MkdirAll(localDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating local output dir: %w", err)
@@ -1910,12 +2053,17 @@ func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, erro
 	}
 	defer root.Close()
 
-	stdout, _, _, err := Exec(sandboxName,
+	stdout, stderr, exitCode, err := Exec(sandboxName,
 		fmt.Sprintf("find %s -type f 2>/dev/null || true", remoteDir),
 		10*time.Second,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("listing output files: %w", err)
+	}
+	// The remote command ends in "|| true", so a non-zero exit can only come
+	// from openshell itself (e.g. exec refused for a sandbox that is not Ready).
+	if exitCode != 0 {
+		return nil, fmt.Errorf("listing output files: exit %d: %s", exitCode, strings.TrimSpace(stderr))
 	}
 
 	trimmed := strings.TrimSpace(stdout)
@@ -1925,11 +2073,13 @@ func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, erro
 	lines := strings.Split(trimmed, "\n")
 
 	var extracted []string
+	listed := 0
 	for _, remotePath := range lines {
 		remotePath = strings.TrimSpace(remotePath)
 		if remotePath == "" {
 			continue
 		}
+		listed++
 		relPath := strings.TrimPrefix(remotePath, remoteDir)
 		relPath = strings.TrimPrefix(relPath, "/")
 
@@ -1959,5 +2109,8 @@ func ExtractOutputFiles(sandboxName, remoteDir, localDir string) ([]string, erro
 		extracted = append(extracted, localPath)
 	}
 
+	if listed > 0 && len(extracted) == 0 {
+		return nil, fmt.Errorf("copying output files: %d listed, none copied", listed)
+	}
 	return extracted, nil
 }
