@@ -211,9 +211,10 @@ func addGitLabForgeEndpoint(data []byte, host string, port int) ([]byte, bool, e
 	portStr := strconv.Itoa(port)
 	rawEndpoints := yamlMappingValue(root, "endpoints")
 	endpoints := resolveYAMLAlias(rawEndpoints)
-	if endpoints == nil {
-		// No endpoints to mirror: the profile never authorized any access,
-		// so do not synthesize one for it.
+	if endpoints == nil || (endpoints.Kind == yaml.ScalarNode && endpoints.ShortTag() == "!!null") {
+		// No endpoints to mirror (the key is missing or `endpoints:` /
+		// `endpoints: null` is empty): the profile never authorized any
+		// access, so do not synthesize one for it.
 		return data, false, nil
 	}
 	if endpoints.Kind != yaml.SequenceNode {
@@ -303,7 +304,11 @@ func resolveYAMLAlias(n *yaml.Node) *yaml.Node {
 	return n
 }
 
-// yamlMappingValue returns the value node for key in mapping m, or nil.
+// yamlMappingValue returns the value node for key in mapping m, or nil. It
+// matches literal keys only: YAML merge keys (<<) are not resolved, so a
+// profile that inherits credentials or endpoints through a merge is treated
+// as not declaring them and is left unchanged (fails safe: no access is
+// widened).
 func yamlMappingValue(m *yaml.Node, key string) *yaml.Node {
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		if m.Content[i].Value == key {

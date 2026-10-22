@@ -321,6 +321,8 @@ func TestBindGitLabForgeHost_NoEndpointsLeftUnchanged(t *testing.T) {
 	for name, content := range map[string]string{
 		"missing endpoints": "id: my-gitlab\ncredentials:\n  - name: api_token\n    env_vars: [GITLAB_TOKEN]\nbinaries:\n  - \"**/curl\"\n",
 		"empty endpoints":   "id: my-gitlab\ncredentials:\n  - name: api_token\n    env_vars: [GITLAB_TOKEN]\nendpoints: []\n",
+		"blank endpoints":   "id: my-gitlab\ncredentials:\n  - name: api_token\n    env_vars: [GITLAB_TOKEN]\nendpoints:\n",
+		"null endpoints":    "id: my-gitlab\ncredentials:\n  - name: api_token\n    env_vars: [GITLAB_TOKEN]\nendpoints: null\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := writeTestProfile(t, dir, "p.yaml", content)
