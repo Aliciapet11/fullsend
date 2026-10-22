@@ -14,6 +14,15 @@ const gitlabMaxExtendsDepth = 11
 // gitlabMaxReferenceDepth is GitLab's limit on nested !reference tags.
 const gitlabMaxReferenceDepth = 10
 
+// gitlabMaxReferenceWork bounds the total work of expanding one job's rules:
+// the !reference lookups followed plus the rule entries copied. The depth
+// limit alone does not bound it, because each level can reference the
+// previous one many times, so the work grows exponentially with the depth.
+// Real configurations need a few dozen; exceeding this fails closed.
+const gitlabMaxReferenceWork = 10000
+
+const budgetErr = "rules expand !reference tags into too much work (the references fan out too far)"
+
 // ciTemplateScope is what extends: and !reference are resolved against when
 // the trigger extra-work scan evaluates the jobs of one committed CI file
 // (#8691): that file's own top-level keys. GitLab resolves both against the
@@ -74,7 +83,8 @@ func effectiveJobAdmission(job *yaml.Node, scope ciTemplateScope) (adm jobAdmiss
 	if why != "" || adm.rules == nil {
 		return adm, why
 	}
-	adm.rules, why = expandRuleReferences(adm.rules, scope, 0)
+	budget := gitlabMaxReferenceWork
+	adm.rules, why = expandRuleReferences(adm.rules, scope, 0, &budget)
 	return adm, why
 }
 
@@ -161,10 +171,15 @@ func resolveExtendsAdmission(node *yaml.Node, label string, scope ciTemplateScop
 // against scope: a rules value that is itself a !reference, and !reference
 // entries in a rules list, whose target list GitLab flattens into the
 // surrounding list. The original nodes are not modified. Anything else is
-// returned unchanged for evaluateRules to judge.
-func expandRuleReferences(rules *yaml.Node, scope ciTemplateScope, depth int) (*yaml.Node, string) {
+// returned unchanged for evaluateRules to judge. budget is the work left for
+// the whole expansion (see gitlabMaxReferenceWork); each call and each rule
+// entry copied spends from it, and running out fails closed.
+func expandRuleReferences(rules *yaml.Node, scope ciTemplateScope, depth int, budget *int) (*yaml.Node, string) {
 	if depth > gitlabMaxReferenceDepth {
 		return nil, fmt.Sprintf("rules nest !reference tags more than %d levels deep", gitlabMaxReferenceDepth)
+	}
+	if *budget--; *budget < 0 {
+		return nil, budgetErr
 	}
 	resolved := resolveAlias(rules)
 	if resolved == nil {
@@ -175,7 +190,7 @@ func expandRuleReferences(rules *yaml.Node, scope ciTemplateScope, depth int) (*
 		if why != "" {
 			return nil, why
 		}
-		return expandRuleReferences(target, scope, depth+1)
+		return expandRuleReferences(target, scope, depth+1, budget)
 	}
 	if resolved.Kind != yaml.SequenceNode {
 		return resolved, ""
@@ -184,6 +199,9 @@ func expandRuleReferences(rules *yaml.Node, scope ciTemplateScope, depth int) (*
 	for _, item := range resolved.Content {
 		r := resolveAlias(item)
 		if r == nil || r.Tag != "!reference" {
+			if *budget--; *budget < 0 {
+				return nil, budgetErr
+			}
 			out.Content = append(out.Content, item)
 			continue
 		}
@@ -191,11 +209,14 @@ func expandRuleReferences(rules *yaml.Node, scope ciTemplateScope, depth int) (*
 		if why != "" {
 			return nil, why
 		}
-		expanded, why := expandRuleReferences(target, scope, depth+1)
+		expanded, why := expandRuleReferences(target, scope, depth+1, budget)
 		if why != "" {
 			return nil, why
 		}
 		if expanded.Kind == yaml.SequenceNode && !hasNonCoreTag(expanded) {
+			if *budget -= len(expanded.Content); *budget < 0 {
+				return nil, budgetErr
+			}
 			out.Content = append(out.Content, expanded.Content...)
 		} else {
 			out.Content = append(out.Content, expanded)

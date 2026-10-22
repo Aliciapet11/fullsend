@@ -285,6 +285,42 @@ func TestTriggerExtraWork_SharedExtendsTemplateReachedTooDeep(t *testing.T) {
 	assert.Contains(t, got, "nested more than 11 levels")
 }
 
+// A heavily shared !reference DAG stays within the nesting limit but expands
+// to an enormous number of rules; the scan gives up with a diagnostic instead
+// of expanding it.
+func TestTriggerExtraWork_SharedReferenceDAGFailsClosed(t *testing.T) {
+	ci := fanOutReferenceDAG(9, 10)
+	done := make(chan string, 1)
+	go func() {
+		done <- triggerExtraWorkProblemForSource([]byte(ci), "the committed .gitlab-ci.yml", "main", "trigger", nil, nil, nil, nil)
+	}()
+	select {
+	case got := <-done:
+		assert.Contains(t, got, "too much work")
+	case <-time.After(10 * time.Second):
+		t.Fatal("!reference expansion did not finish: the work is not bounded")
+	}
+}
+
+// fanOutReferenceDAG builds levels of rules templates where each level
+// references the previous level's rules width times, ending in a job whose
+// rules reference the last level.
+func fanOutReferenceDAG(levels, width int) string {
+	var b strings.Builder
+	b.WriteString(rejectTriggerTemplate)
+	prev := ".reject"
+	for i := 1; i <= levels; i++ {
+		name := fmt.Sprintf(".r%d", i)
+		fmt.Fprintf(&b, "%s:\n  rules:\n", name)
+		for range width {
+			fmt.Fprintf(&b, "    - !reference [%s, rules]\n", prev)
+		}
+		prev = name
+	}
+	fmt.Fprintf(&b, "job:\n  script: [x]\n  rules:\n    - !reference [%s, rules]\n", prev)
+	return b.String()
+}
+
 // fanOutExtendsDAG builds levels of templates where each level extends the
 // previous one width times, ending in a job that extends the last level.
 func fanOutExtendsDAG(levels, width int) string {
