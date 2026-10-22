@@ -42,8 +42,9 @@ full documentation site.
   [Go Code § Running the fullsend CLI](docs/contributing/go-code.md#running-the-fullsend-cli).
 - Follow [COMMITS.md](COMMITS.md) when writing or reviewing commit messages
   and PR titles. Commit prefixes feed release notes; breaking changes require
-  the `!` marker in both commit subjects and PR titles; forbidden combinations
-  (e.g. `fix(ci)`/`fix(e2e)`) are enforced as errors.
+  the `!` marker in both commit subjects and PR titles; a missing `!` is an
+  important-severity review finding; forbidden combinations (e.g.
+  `fix(ci)`/`fix(e2e)`) are enforced as errors.
 - Human and human-driven agent commits require DCO sign-off (`git commit -s`);
   autonomous bot commits are exempt and must never supply the DCO with `-s` or
   `Signed-off-by`. See
