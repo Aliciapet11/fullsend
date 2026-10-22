@@ -239,11 +239,16 @@ custom agent definitions exist.
 
 ### Triage agent
 
+The built-in triage and code agents still read `GITHUB_ISSUE_URL` from their
+GitHub overlays. Set both URL variables until the agents repository migrates
+to `FULLSEND_WORK_ITEM_URL`.
+
 Add to an env file:
 
 ```bash
 # fullsend-triage.env
 GH_TOKEN={github-pat}
+GITHUB_ISSUE_URL=https://github.com/{org}/{repo}/issues/{issue_num}
 FULLSEND_WORK_ITEM_URL=https://github.com/{org}/{repo}/issues/{issue_num}
 ```
 
@@ -296,6 +301,7 @@ Add to an env file:
 GH_TOKEN={github-pat}
 PUSH_TOKEN={github-pat}
 PUSH_TOKEN_SOURCE=pat
+GITHUB_ISSUE_URL=https://github.com/{org}/{repo}/issues/{issue_num}
 FULLSEND_WORK_ITEM_URL=https://github.com/{org}/{repo}/issues/{issue_num}
 REPO_FULL_NAME={org}/{repo}
 ISSUE_NUMBER={issue_num}
