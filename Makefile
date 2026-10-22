@@ -263,7 +263,8 @@ behaviour-test:
 # run both suites. RunPlaybackSuite fixes the @playback tag filter (GODOG_TAGS
 # is ignored), sets PLAYBACK_RUNTIME=dummy-playback, and otherwise reads the
 # same env as behaviour-test (ENVIRONMENT, BEHAVIOUR_*, E2E_*, GODOG_CONCURRENCY,
-# BEHAVIOUR_ARTIFACT_DIR) and reserves an org through the same pool lock.
+# BEHAVIOUR_ARTIFACT_DIR) and leases repo slots across the pool orgs through
+# the same shared install driver.
 # The timeout matches behaviour-test; a CI job running this target must use
 # the same timeout-minutes (see docs/guides/dev/behaviour-testing.md).
 playback-test:
