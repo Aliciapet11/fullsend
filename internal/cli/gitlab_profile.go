@@ -209,7 +209,8 @@ func addGitLabForgeEndpoint(data []byte, host string, port int) ([]byte, bool, e
 	}
 
 	portStr := strconv.Itoa(port)
-	endpoints := yamlMappingValue(root, "endpoints")
+	rawEndpoints := yamlMappingValue(root, "endpoints")
+	endpoints := resolveYAMLAlias(rawEndpoints)
 	if endpoints == nil {
 		// No endpoints to mirror: the profile never authorized any access,
 		// so do not synthesize one for it.
@@ -220,7 +221,8 @@ func addGitLabForgeEndpoint(data []byte, host string, port int) ([]byte, bool, e
 	}
 	var template *yaml.Node
 	for _, ep := range endpoints.Content {
-		if ep.Kind != yaml.MappingNode {
+		ep = resolveYAMLAlias(ep)
+		if ep == nil || ep.Kind != yaml.MappingNode {
 			continue
 		}
 		if template == nil {
@@ -238,6 +240,13 @@ func addGitLabForgeEndpoint(data []byte, host string, port int) ([]byte, bool, e
 	ep := cloneYAMLNode(template)
 	setYAMLMappingScalar(ep, "host", host, "!!str")
 	setYAMLMappingScalar(ep, "port", portStr, "!!int")
+	if rawEndpoints != endpoints {
+		// endpoints is an alias: appending to the anchored sequence would
+		// also change every other node that references it, so give this
+		// profile its own copy of the list.
+		endpoints = cloneYAMLNode(endpoints)
+		setYAMLMappingNode(root, "endpoints", endpoints)
+	}
 	endpoints.Content = append(endpoints.Content, ep)
 
 	var buf bytes.Buffer
@@ -317,11 +326,23 @@ func setYAMLMappingScalar(m *yaml.Node, key, value, tag string) {
 	m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, v)
 }
 
+// setYAMLMappingNode replaces the value node for an existing key in mapping m.
+func setYAMLMappingNode(m *yaml.Node, key string, value *yaml.Node) {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			m.Content[i+1] = value
+			return
+		}
+	}
+}
+
 // cloneYAMLNode deep-copies n without comments, so a comment describing
-// the template endpoint does not end up labelling the forge host.
+// the template endpoint does not end up labelling the forge host. Anchors
+// are dropped too, so the copy never redefines an anchor of the original.
 func cloneYAMLNode(n *yaml.Node) *yaml.Node {
 	c := *n
 	c.HeadComment, c.LineComment, c.FootComment = "", "", ""
+	c.Anchor = ""
 	c.Content = make([]*yaml.Node, len(n.Content))
 	for i, child := range n.Content {
 		c.Content[i] = cloneYAMLNode(child)

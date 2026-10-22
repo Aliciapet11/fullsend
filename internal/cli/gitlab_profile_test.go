@@ -358,6 +358,71 @@ endpoints:
 	assert.Equal(t, "gitlab.custom.example", p.Endpoints[1].Host)
 }
 
+func TestBindGitLabForgeHost_AliasedEndpointsList(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestProfile(t, dir, "p.yaml", `id: aliased
+x-endpoints: &eps
+  - &first
+    host: gitlab.com
+    port: 443
+    protocol: rest
+    access: read-only
+    enforcement: enforce
+credentials:
+  - name: api_token
+    env_vars: [GITLAB_TOKEN]
+endpoints: *eps
+`)
+	out, cleanup, err := bindGitLabForgeHost([]resolve.ResolvedProfile{{ID: "aliased", LocalPath: path}}, "gitlab.custom.example", "443")
+	require.NoError(t, err)
+	defer cleanup()
+	data, err := os.ReadFile(out[0].LocalPath)
+	require.NoError(t, err)
+	p := parseBoundTestProfile(t, data)
+	require.Len(t, p.Endpoints, 2)
+	assert.Equal(t, "gitlab.com", p.Endpoints[0].Host)
+	assert.Equal(t, "gitlab.custom.example", p.Endpoints[1].Host)
+	assert.Equal(t, "read-only", p.Endpoints[1].Access)
+
+	// The anchored list other nodes reference is not modified.
+	var raw map[string]any
+	require.NoError(t, yaml.Unmarshal(data, &raw))
+	assert.Len(t, raw["x-endpoints"], 1)
+}
+
+func TestBindGitLabForgeHost_AliasedEndpointEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestProfile(t, dir, "p.yaml", `id: aliased
+x-ep: &ep
+  host: gitlab.com
+  port: 443
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+credentials:
+  - name: api_token
+    env_vars: [GITLAB_TOKEN]
+endpoints:
+  - *ep
+`)
+	out, cleanup, err := bindGitLabForgeHost([]resolve.ResolvedProfile{{ID: "aliased", LocalPath: path}}, "gitlab.custom.example", "443")
+	require.NoError(t, err)
+	defer cleanup()
+	data, err := os.ReadFile(out[0].LocalPath)
+	require.NoError(t, err)
+	p := parseBoundTestProfile(t, data)
+	require.Len(t, p.Endpoints, 2)
+	assert.Equal(t, "gitlab.com", p.Endpoints[0].Host)
+	assert.Equal(t, "gitlab.custom.example", p.Endpoints[1].Host)
+	assert.Equal(t, "read-write", p.Endpoints[1].Access)
+
+	// An aliased entry that already names the forge host is detected.
+	out, cleanup2, err := bindGitLabForgeHost([]resolve.ResolvedProfile{{ID: "aliased", LocalPath: path}}, "gitlab.com", "443")
+	require.NoError(t, err)
+	defer cleanup2()
+	assert.Equal(t, path, out[0].LocalPath)
+}
+
 func TestBindGitLabForgeHost_RejectsNonConcreteDestination(t *testing.T) {
 	dir := t.TempDir()
 	good := writeTestProfile(t, dir, "rw.yaml", stockGitLabRWProfile)
