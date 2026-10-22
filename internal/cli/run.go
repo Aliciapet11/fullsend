@@ -1474,6 +1474,19 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 				LocalPath: profilePath,
 			}}, result.Profiles...)
 		}
+		// The profile above is imported but attached only when a provider
+		// names its type, and it carries no credential. The stock GitLab
+		// providers attach their own profiles, whose GITLAB_TOKEN
+		// placeholder OpenShell resolves only at those profiles' endpoints,
+		// so the configured forge host must be one of them (#8683).
+		forgeHost, forgePort := gl.ResolveForgeHostPort()
+		boundProfiles, cleanupBound, err := bindGitLabForgeHost(result.Profiles, forgeHost, forgePort)
+		if err != nil {
+			printer.StepFail("Failed to add the GitLab forge host to provider profiles")
+			return fmt.Errorf("binding GitLab forge host to provider profiles: %w", err)
+		}
+		defer cleanupBound()
+		result.Profiles = boundProfiles
 	}
 
 	if intErr := checkProviderProfileIntegrity(result.Providers, result.Profiles); intErr != nil {
