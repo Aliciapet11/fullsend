@@ -193,15 +193,14 @@ trigger: |
 }
 
 func TestDispatch_OwnersUpgradesActorRole(t *testing.T) {
-	// Use issue-opened (not label-added) so IsAuthorized requires
-	// write-level access. Without the OWNERS approver upgrade the
-	// actor's RoleNone would be denied — this proves the OWNERS path
-	// is actually exercised.
+	// issue-opened (not label-added) with a role: coder harness requires
+	// write. RoleNone is denied without the OWNERS approver upgrade, so
+	// this proves the approver -> write upgrade is applied.
 	ev := mustEvent(t, "issue-opened.json")
 
 	dir := t.TempDir()
 
-	configDir := writeHarnessConfigSubdir(t, dir, issueOpenedHarnessYAML(), func(cfg config.PerRepoConfigWriter) {
+	configDir := writeHarnessConfigSubdir(t, dir, issueOpenedCoderHarnessYAML(), func(cfg config.PerRepoConfigWriter) {
 		cfg.SetOwnersFileAuthEnabled(true)
 	})
 	ev.Actor.ID = "test-approver"
@@ -305,10 +304,10 @@ func TestDispatch_PerHarnessRoleThreshold(t *testing.T) {
 }
 
 func TestDispatch_OwnersDisabledNoUpgrade(t *testing.T) {
-	// Use issue-opened (not label-added) so IsAuthorized requires
-	// write-level access. The OWNERS file lists the actor as an
-	// approver, but with the config flag off, OWNERS should not be
-	// consulted — the actor stays at RoleNone and is denied.
+	// Use issue-opened (not label-added) so the role threshold applies.
+	// The OWNERS file lists the actor as an approver, but with the
+	// config flag off, OWNERS is not consulted — the actor stays at
+	// RoleNone and is denied.
 	ev := mustEvent(t, "issue-opened.json")
 
 	dir := t.TempDir()

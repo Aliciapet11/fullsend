@@ -15,7 +15,7 @@ consumed by this contract. Bot identity and role resolution are specified by
 > the target behavior. The building blocks exist: the `actor.bot_role` and
 > `actor.role_verified` fields in `internal/normevent`, the forge-neutral
 > `BotRoleResolver` contract in `internal/botidentity`, the mint's GitHub
-> `POST /v1/bot-role` lookup, and a non-label bot branch in `IsAuthorized()`.
+> `POST /v1/bot-role` lookup, and a non-label bot branch in `IsEventAuthorized()`.
 > That branch applies only to events that carry a lookup result
 > (`actor.role_verified` set). No production adapter performs the lookup yet,
 > so existing compatibility behavior remains authoritative for current events.
@@ -158,15 +158,20 @@ The bash dispatch implementation uses a parameterized
 `has_repo_permission(username, min)` helper that encodes this comparison
 (see [Enforcement point](#enforcement-point)).
 
-> **Implementation note:** the Go dispatch path (`harnessdispatch`, used by
-> GitHub CEL dispatch and GitLab/Jira polling) applies these thresholds per
-> matched harness, keyed on the harness `role:` field. The event-level gate
-> (`IsEventAuthorized()`) runs once before harness enumeration and applies the
-> label-added, bot, and `role_verified` rules. For the remaining actors, each
-> matched harness is then filtered by `IsHarnessAuthorized()`: `role: triage`
+> **Implementation note:** the Go CEL dispatch path (`harnessdispatch`) applies
+> these thresholds per harness, keyed on the harness `role:` field. It serves
+> GitHub CEL dispatch (`fullsend dispatch`) and Jira polling (`fullsend poll
+> --input-driver jira-poll`). The event-level gate (`IsEventAuthorized()`)
+> runs once before harness enumeration and applies the label-added, bot, and
+> `role_verified` rules. For the remaining actors, the candidate harnesses are
+> then filtered by `IsHarnessAuthorized()` before CEL evaluation: `role: triage`
 > and `role: review` require `triage`; every other role, including an empty,
-> unknown, or custom role, requires `write` (fail closed). The bash path
-> (GitHub webhook dispatch) applies the same thresholds per stage through
+> unknown, or custom role, requires `write` (fail closed). GitLab polling and
+> webhook routing do not use `harnessdispatch`: `dispatch.HarnessRouter`
+> gates slash commands per stage (triage and review at `triage`, other stages
+> at `write`) and label routes at `write`, and the agent job then requires
+> Developer access for every stage except retro and prioritize. The bash path (GitHub webhook
+> dispatch) applies the same thresholds per stage through
 > `has_repo_permission`.
 
 ## Fail-closed behavior
@@ -253,8 +258,8 @@ The `pull_request_target.closed` event that triggers the retro stage is
 intentionally ungated: any closer may trigger read-only lifecycle
 accounting. The retro agent performs only observation work and does not
 mutate repository state. This exception is currently implemented in
-the bash dispatch path; the Go `IsAuthorized()` path has no special
-handling for closed transitions and applies the standard `write+` gate.
+the bash dispatch path. The Go CEL path has no special handling for closed
+transitions: the retro harness role resolves to the `write` threshold.
 
 ### Schedule and manual dispatch
 
@@ -433,9 +438,9 @@ may **never weaken** the platform authorization gate. On the event-backed path,
 an event that fails authorization never reaches CEL evaluation.
 
 This separation is enforced architecturally: on the event-backed path,
-`IsEventAuthorized()` runs before `MatchHarnesses()` in the dispatch core, and
-each matched harness is filtered by its role threshold before an execution ref
-is projected. On the
+`IsEventAuthorized()` runs before harness enumeration in the dispatch core, and
+`FilterAuthorizedHarnesses()` removes each harness whose role threshold the
+actor does not meet before `MatchHarnesses()` evaluates CEL. On the
 Fullsend-originated eventless path, the trusted-origin gate runs before poll
 enumeration or bound-entity resolution and CEL evaluation. For each eligible
 harness, the platform removes unauthorized action-indicating elements using
@@ -453,7 +458,8 @@ cannot make it available to unauthorized users.
 
 A repository can add permission sources through the `authorization`
 field (today only `owners_file`). These sources extend the
-`has_repo_permission` helper and the Go `IsAuthorized` check; they do not
+`has_repo_permission` helper and the Go `IsEventAuthorized` gate and
+per-harness filter; they do not
 bypass the gate or change the thresholds.
 
 ## Versioning

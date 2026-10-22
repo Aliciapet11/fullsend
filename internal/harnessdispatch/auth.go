@@ -103,7 +103,7 @@ func satisfiesThreshold(role, minimum normevent.ActorRole) bool {
 // every harness: a nil event, a bot whose ADR 0107 lookup did not recognize a
 // registered role, a human whose role lookup failed, or an actor.role below
 // the lowest per-harness threshold (triage). A true result means at least one
-// harness may be authorized; callers must still filter matched harnesses with
+// harness may be authorized; callers must still filter harnesses with
 // IsHarnessAuthorized or FilterAuthorizedHarnesses.
 func IsEventAuthorized(event *normevent.Event) bool {
 	switch authorizeEvent(event) {
@@ -139,11 +139,12 @@ func IsAuthorized(event *normevent.Event) bool {
 	return IsHarnessAuthorized(event, "")
 }
 
-// FilterAuthorizedHarnesses returns the subset of matched harnesses that
-// event is authorized to dispatch, keyed on each harness role: field.
-func FilterAuthorizedHarnesses(matched []TriggeredHarness, event *normevent.Event) []TriggeredHarness {
+// FilterAuthorizedHarnesses returns the subset of harnesses that event is
+// authorized to dispatch, keyed on each harness role: field. Run it before
+// MatchHarnesses so CEL only evaluates authorized harnesses.
+func FilterAuthorizedHarnesses(harnesses []TriggeredHarness, event *normevent.Event) []TriggeredHarness {
 	var out []TriggeredHarness
-	for _, m := range matched {
+	for _, m := range harnesses {
 		role := ""
 		if m.Harness != nil {
 			role = m.Harness.Role

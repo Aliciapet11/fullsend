@@ -37,8 +37,9 @@ thresholds, dispatch-path differences), see
    commands and custom agents registered under `agents:`.
    **Exception:** `/fs-fix-stop` always checks the forge's collaborator
    API (or PR authorship) and does not read OWNERS. `reviewers` receive
-   `triage`-equivalent access — `/fs-triage` and `/fs-review` only
-   (custom agents still require `write`).
+   `triage`-equivalent access — `/fs-triage`, `/fs-review`, and custom
+   agents with `role: triage` or `role: review` (any other custom agent
+   still requires `write`).
 
 3. _(Optional)_ Define aliases in an `OWNERS_ALIASES` file at the repository
    root:

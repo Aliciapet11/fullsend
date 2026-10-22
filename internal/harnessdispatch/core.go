@@ -76,11 +76,12 @@ func Dispatch(ctx context.Context, opts Options) ([]ExecutionRef, error) {
 		return nil, err
 	}
 
+	candidates = FilterAuthorizedHarnesses(candidates, &authCheck)
+
 	matched, err := MatchHarnesses(candidates, opts.Event)
 	if err != nil {
 		return nil, err
 	}
-	matched = FilterAuthorizedHarnesses(matched, &authCheck)
 	matched = dropGitHubRoutedBuiltins(matched, opts.Event)
 
 	var refs []ExecutionRef
