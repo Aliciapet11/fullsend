@@ -18,7 +18,7 @@ import (
 func groupOrgs(groups []mintGroup) [][]string {
 	out := make([][]string, len(groups))
 	for i, g := range groups {
-		out[i] = g.Orgs
+		out[i] = g.orgs
 	}
 	return out
 }
@@ -29,10 +29,10 @@ func assertPacked(t *testing.T, layout PoolLayout, groups []mintGroup, maxBytes 
 	t.Helper()
 	var all []string
 	for i, g := range groups {
-		assert.Equal(t, i+1, g.Index)
-		assert.Equal(t, groupWorkflowHostRepos(g.Orgs, layout.SlotsPerOrg), g.WorkflowHostRepos)
-		assert.LessOrEqual(t, len(g.WorkflowHostRepos), maxBytes, "%s", g)
-		all = append(all, g.Orgs...)
+		assert.Equal(t, i+1, g.index)
+		assert.Equal(t, groupWorkflowHostRepos(g.orgs, layout.SlotsPerOrg), g.workflowHostRepos)
+		assert.LessOrEqual(t, len(g.workflowHostRepos), maxBytes, "%s", g)
+		all = append(all, g.orgs...)
 	}
 	assert.Equal(t, layout.Orgs(), all)
 }
@@ -43,10 +43,10 @@ func TestPlanMintGroups_DevPoolTwoMints(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, groups, 2)
 	assertPacked(t, layout, groups, maxWorkerVarBytes)
-	assert.Equal(t, layout.Orgs()[:6], groups[0].Orgs)
-	assert.Equal(t, layout.Orgs()[6:], groups[1].Orgs)
+	assert.Equal(t, layout.Orgs()[:6], groups[0].orgs)
+	assert.Equal(t, layout.Orgs()[6:], groups[1].orgs)
 	// The serialized sizes cited in #8681: six orgs fit, seven do not.
-	assert.Len(t, groups[0].WorkflowHostRepos, 4319)
+	assert.Len(t, groups[0].workflowHostRepos, 4319)
 	assert.Len(t, groupWorkflowHostRepos(layout.Orgs()[:7], DefaultPoolSize), 5039)
 }
 
@@ -68,7 +68,7 @@ func TestPlanMintGroups_NearByteLimit(t *testing.T) {
 func groupSizes(groups []mintGroup) []int {
 	sizes := make([]int, len(groups))
 	for i, g := range groups {
-		sizes[i] = len(g.Orgs)
+		sizes[i] = len(g.orgs)
 	}
 	return sizes
 }
@@ -137,16 +137,16 @@ func TestPickStatusOrg_FromPool(t *testing.T) {
 func TestSingleMintPlan(t *testing.T) {
 	plan := singleMintPlan(DevPoolLayout(2))
 	require.Len(t, plan.groups, 1)
-	assert.Equal(t, DevPoolLayout(2).Orgs(), plan.groups[0].Orgs)
-	assert.Empty(t, plan.groups[0].WorkflowHostRepos)
+	assert.Equal(t, DevPoolLayout(2).Orgs(), plan.groups[0].orgs)
+	assert.Empty(t, plan.groups[0].workflowHostRepos)
 	assert.Empty(t, plan.statusGroup)
 }
 
 func TestMintGroup_String(t *testing.T) {
-	assert.Equal(t, "mint group 2", mintGroup{Index: 2}.String())
-	assert.Equal(t, "mint group 1 (halfsend)", mintGroup{Index: 1, Orgs: []string{"halfsend"}}.String())
+	assert.Equal(t, "mint group 2", mintGroup{index: 2}.String())
+	assert.Equal(t, "mint group 1 (halfsend)", mintGroup{index: 1, orgs: []string{"halfsend"}}.String())
 	assert.Equal(t, "mint group 1 (halfsend-01…halfsend-06)",
-		mintGroup{Index: 1, Orgs: DevPoolLayout(1).Orgs()[:6]}.String())
+		mintGroup{index: 1, orgs: DevPoolLayout(1).Orgs()[:6]}.String())
 }
 
 // countingMint is a mintDriver that counts teardowns.
@@ -155,7 +155,7 @@ type countingMint struct {
 	teardowns atomic.Int32
 }
 
-func (m *countingMint) Install(context.Context, string) (string, error) { return m.url, nil }
+func (m *countingMint) Install(context.Context) (string, error) { return m.url, nil }
 func (m *countingMint) Teardown(context.Context) error {
 	m.teardowns.Add(1)
 	return nil
@@ -172,13 +172,13 @@ func TestSharedMint_DeployOnceTeardownByLastRef(t *testing.T) {
 	b := &sharedMintRef{shared: s}
 	ctx := context.Background()
 
-	url, err := a.Install(ctx, "")
+	url, err := a.Install(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "https://mint.g1", url)
-	url, err = a.Install(ctx, "")
+	url, err = a.Install(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "https://mint.g1", url, "a held reference returns the URL again")
-	url, err = b.Install(ctx, "")
+	url, err = b.Install(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "https://mint.g1", url)
 	assert.Equal(t, 1, deploys)
@@ -205,13 +205,13 @@ func TestSharedMint_FailedDeployRetried(t *testing.T) {
 		return md, md.url, nil
 	}}
 	ref := &sharedMintRef{shared: s}
-	_, err := ref.Install(context.Background(), "")
+	_, err := ref.Install(context.Background())
 	require.ErrorContains(t, err, "deploy boom")
 	require.NoError(t, ref.Teardown(context.Background()), "a failed install holds nothing")
 	assert.Zero(t, s.refs)
 
 	fail = false
-	url, err := (&sharedMintRef{shared: s}).Install(context.Background(), "")
+	url, err := (&sharedMintRef{shared: s}).Install(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "https://mint.g1", url)
 	assert.Equal(t, 2, deploys, "a later lease retries the deploy")
@@ -246,14 +246,14 @@ func newGroupPoolDriver(t *testing.T, layout PoolLayout) *groupPoolDriver {
 	newMint := func(group mintGroup, cred orgCredential) (mintDriver, func(), error) {
 		gp.mu.Lock()
 		defer gp.mu.Unlock()
-		gp.deploys[group.Index]++
-		gp.creds[group.Index] = append(gp.creds[group.Index], cred.token)
+		gp.deploys[group.index]++
+		gp.creds[group.index] = append(gp.creds[group.index], cred.token)
 		if err := gp.deployErr; err != nil {
 			gp.deployErr = nil
 			return &testCFMintMintDriver{installErr: err}, func() { gp.cleanups.Add(1) }, nil
 		}
-		md := &countingMint{url: fmt.Sprintf("https://mint-group-%d.test", group.Index)}
-		gp.mints[group.Index] = append(gp.mints[group.Index], md)
+		md := &countingMint{url: fmt.Sprintf("https://mint-group-%d.test", group.index)}
+		gp.mints[group.index] = append(gp.mints[group.index], md)
 		return md, func() { gp.cleanups.Add(1) }, nil
 	}
 	d, err := buildPoolDriver(testPoolConfig(t, layout), gp.plan, newMint, playbackSetupOpts(), traceStart{})
@@ -299,7 +299,7 @@ func TestGroupPoolDriver_ConcurrentFirstLeasesShareOneDeploy(t *testing.T) {
 	require.Len(t, gp.creds[1], 1)
 	assert.True(t, strings.HasPrefix(gp.creds[1][0], "tok-halfsend-0"), "deployed with a group org's credential")
 
-	wantHosts := strings.Split(gp.plan.groups[0].WorkflowHostRepos, ",")
+	wantHosts := strings.Split(gp.plan.groups[0].workflowHostRepos, ",")
 	for _, org := range orgs {
 		env := envs[org]
 		assert.Equal(t, "https://mint-group-1.test", env.mintURL, org)

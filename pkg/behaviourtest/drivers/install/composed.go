@@ -230,7 +230,7 @@ func buildPoolDriver(pool PoolConfig, plan *mintPlan, newMint groupMintFunc, set
 					return nil, "", err
 				}
 				logf("[driver] deploying the mint of %s", group)
-				mintURL, err := md.Install(ctx, "")
+				mintURL, err := md.Install(ctx)
 				if cleanup != nil {
 					cleanup()
 				}
@@ -249,8 +249,8 @@ func buildPoolDriver(pool PoolConfig, plan *mintPlan, newMint groupMintFunc, set
 	var hostsOf [][]string
 	for _, group := range plan.groups {
 		var hosts []string
-		if group.WorkflowHostRepos != "" {
-			hosts = strings.Split(group.WorkflowHostRepos, ",")
+		if group.workflowHostRepos != "" {
+			hosts = strings.Split(group.workflowHostRepos, ",")
 		}
 		hostsOf = append(hostsOf, hosts)
 	}
@@ -260,7 +260,7 @@ func buildPoolDriver(pool PoolConfig, plan *mintPlan, newMint groupMintFunc, set
 			return nil, fmt.Errorf("org %s is not in any mint group", org)
 		}
 		md := &sharedMintRef{shared: shared[gi], cred: cred}
-		mintURL, err := md.Install(ctx, org)
+		mintURL, err := md.Install(ctx)
 		if err != nil {
 			return nil, err
 		}

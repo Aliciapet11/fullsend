@@ -135,7 +135,7 @@ func TestBuildPoolDriver_OrgSetupUsesOrgCredentialAndMint(t *testing.T) {
 	client := forge.NewFakeClient()
 	env, err := cd.setup(context.Background(), "halfsend-03", orgCredential{token: "tok-halfsend-03", client: client})
 	require.NoError(t, err)
-	assert.Contains(t, gotGroup.Orgs, "halfsend-03", "the org's group mint is deployed")
+	assert.Contains(t, gotGroup.orgs, "halfsend-03", "the org's group mint is deployed")
 	assert.True(t, cleaned, "deploy-only material removed after Install")
 	assert.Equal(t, "https://mint.halfsend-03", env.mintURL)
 	ref, ok := env.mint.(*sharedMintRef)

@@ -106,7 +106,7 @@ func NewRepoPoolCFMintPreviews(pool PoolConfig) (Driver, error) {
 		cfg := cfmintConfig{
 			pemDir:            pemDir,
 			suiteName:         envSuiteName(),
-			workflowHostRepos: group.WorkflowHostRepos,
+			workflowHostRepos: group.workflowHostRepos,
 			appSet:            envAppSet(),
 			statusGitHubGroup: plan.statusGroup,
 			traceEndpoint:     traceEndpoint,
@@ -284,7 +284,7 @@ func CFMintTeardownArgs(previewAlias, workerName string) []string {
 	}
 }
 
-func (d *cfmintMintDriver) Install(_ context.Context, _ string) (string, error) {
+func (d *cfmintMintDriver) Install(_ context.Context) (string, error) {
 	alias, err := GenerateCFMintPreviewAlias()
 	if err != nil {
 		return "", err

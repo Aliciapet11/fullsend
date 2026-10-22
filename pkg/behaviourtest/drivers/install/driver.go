@@ -15,8 +15,8 @@ import (
 // This is an unexported interface used internally by concrete driver
 // implementations. The suite does not construct or reference it directly.
 type mintDriver interface {
-	// Install deploys the mint for the given org and returns the mint URL.
-	Install(ctx context.Context, org string) (mintURL string, err error)
+	// Install deploys the mint and returns the mint URL.
+	Install(ctx context.Context) (mintURL string, err error)
 
 	// Teardown tears down suite-scoped mint resources. The driver owns
 	// its own state (e.g. preview alias) — no external state is needed.

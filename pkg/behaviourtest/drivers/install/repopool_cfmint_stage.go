@@ -100,7 +100,7 @@ func NewRepoPoolCFMintStage(pool PoolConfig) (Driver, error) {
 		cfg := stageMintConfig{
 			pemDir:            pemDir,
 			perRepoWIFRepos:   buildRepoList(StageOrg, pool.Layout.SlotsPerOrg),
-			workflowHostRepos: group.WorkflowHostRepos,
+			workflowHostRepos: group.workflowHostRepos,
 			appSet:            envAppSet(),
 			statusGitHubGroup: plan.statusGroup,
 		}
@@ -207,7 +207,7 @@ func StageMintDeployArgs(cfg stageMintConfig) []string {
 	return args
 }
 
-func (d *stageMintMintDriver) Install(_ context.Context, _ string) (string, error) {
+func (d *stageMintMintDriver) Install(_ context.Context) (string, error) {
 	d.logf("[stage-cfmint] deploying durable mint at %s", StageMintURL)
 	args := StageMintDeployArgs(d.cfg)
 

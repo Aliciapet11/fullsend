@@ -14,26 +14,26 @@ import (
 // 5,000 bytes keeps a margin under it.
 const maxWorkerVarBytes = 5000
 
-// mintGroup is a set of pool orgs served by one mint. Index is 1-based
+// mintGroup is a set of pool orgs served by one mint. index is 1-based
 // and stable for a given layout.
 type mintGroup struct {
-	Index int
-	Orgs  []string
-	// WorkflowHostRepos is the mint's serialized WORKFLOW_HOST_REPOS
-	// (buildWorkflowHostRepoList over Orgs), or "" when the driver does
+	index int
+	orgs  []string
+	// workflowHostRepos is the mint's serialized WORKFLOW_HOST_REPOS
+	// (buildWorkflowHostRepoList over orgs), or "" when the driver does
 	// not configure the mint's workflow hosts (external mint).
-	WorkflowHostRepos string
+	workflowHostRepos string
 }
 
 // String names the group in logs and errors.
 func (g mintGroup) String() string {
-	if len(g.Orgs) == 0 {
-		return fmt.Sprintf("mint group %d", g.Index)
+	if len(g.orgs) == 0 {
+		return fmt.Sprintf("mint group %d", g.index)
 	}
-	if len(g.Orgs) == 1 {
-		return fmt.Sprintf("mint group %d (%s)", g.Index, g.Orgs[0])
+	if len(g.orgs) == 1 {
+		return fmt.Sprintf("mint group %d (%s)", g.index, g.orgs[0])
 	}
-	return fmt.Sprintf("mint group %d (%s…%s)", g.Index, g.Orgs[0], g.Orgs[len(g.Orgs)-1])
+	return fmt.Sprintf("mint group %d (%s…%s)", g.index, g.orgs[0], g.orgs[len(g.orgs)-1])
 }
 
 // mintPlan maps every pool org to the mint group serving it, plus the
@@ -48,7 +48,7 @@ type mintPlan struct {
 func newMintPlan(groups []mintGroup, statusGroup string) *mintPlan {
 	p := &mintPlan{groups: groups, groupOf: map[string]int{}, statusGroup: statusGroup}
 	for i, g := range groups {
-		for _, org := range g.Orgs {
+		for _, org := range g.orgs {
 			p.groupOf[org] = i
 		}
 	}
@@ -58,7 +58,7 @@ func newMintPlan(groups []mintGroup, statusGroup string) *mintPlan {
 // singleMintPlan serves every org of layout from one mint whose
 // workflow hosts and status group the driver does not configure.
 func singleMintPlan(layout PoolLayout) *mintPlan {
-	return newMintPlan([]mintGroup{{Index: 1, Orgs: layout.Orgs()}}, "")
+	return newMintPlan([]mintGroup{{index: 1, orgs: layout.Orgs()}}, "")
 }
 
 // planMintGroups packs layout's orgs, in order, into the fewest
@@ -80,17 +80,17 @@ func planMintGroups(layout PoolLayout, maxBytes int) ([]mintGroup, error) {
 		}
 		candidate := append(append([]string(nil), cur...), org)
 		if len(groupWorkflowHostRepos(candidate, layout.SlotsPerOrg)) > maxBytes {
-			groups = append(groups, mintGroup{Orgs: cur})
+			groups = append(groups, mintGroup{orgs: cur})
 			candidate = []string{org}
 		}
 		cur = candidate
 	}
 	if len(cur) > 0 {
-		groups = append(groups, mintGroup{Orgs: cur})
+		groups = append(groups, mintGroup{orgs: cur})
 	}
 	for i := range groups {
-		groups[i].Index = i + 1
-		groups[i].WorkflowHostRepos = groupWorkflowHostRepos(groups[i].Orgs, layout.SlotsPerOrg)
+		groups[i].index = i + 1
+		groups[i].workflowHostRepos = groupWorkflowHostRepos(groups[i].orgs, layout.SlotsPerOrg)
 	}
 	return groups, nil
 }
@@ -184,7 +184,7 @@ type sharedMintRef struct {
 
 var _ mintDriver = (*sharedMintRef)(nil)
 
-func (r *sharedMintRef) Install(ctx context.Context, _ string) (string, error) {
+func (r *sharedMintRef) Install(ctx context.Context) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.held {

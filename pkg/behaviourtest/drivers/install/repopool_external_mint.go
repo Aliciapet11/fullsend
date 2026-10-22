@@ -45,7 +45,7 @@ type externalMintDriver struct {
 // Compile-time check that externalMintDriver implements mintDriver.
 var _ mintDriver = (*externalMintDriver)(nil)
 
-func (d *externalMintDriver) Install(_ context.Context, _ string) (string, error) {
+func (d *externalMintDriver) Install(_ context.Context) (string, error) {
 	// The driver only provides the mint URL. Per-repo github setup and
 	// post-install validation are handled by the ensurer for each
 	// leased pool repo.

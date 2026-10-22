@@ -246,7 +246,7 @@ func TestCFMintInstall_Success(t *testing.T) {
 		return "✓ Worker deployed at " + wantMintURL, nil
 	})
 
-	mintURL, err := d.Install(context.Background(), "my-org")
+	mintURL, err := d.Install(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, wantMintURL, mintURL)
 
@@ -259,7 +259,7 @@ func TestCFMintInstall_DeployFailure(t *testing.T) {
 		return "", fmt.Errorf("deploy exploded")
 	})
 
-	mintURL, err := d.Install(context.Background(), "my-org")
+	mintURL, err := d.Install(context.Background())
 	require.Error(t, err)
 	assert.Empty(t, mintURL)
 	assert.Contains(t, err.Error(), "deploying CF preview mint for BT")
@@ -270,7 +270,7 @@ func TestCFMintInstall_NoMintURLInOutput(t *testing.T) {
 		return "Deploying...\nDone", nil
 	})
 
-	mintURL, err := d.Install(context.Background(), "my-org")
+	mintURL, err := d.Install(context.Background())
 	require.Error(t, err)
 	assert.Empty(t, mintURL)
 	assert.Contains(t, err.Error(), "could not parse mint URL")
@@ -312,7 +312,7 @@ type testCFMintMintDriver struct {
 	teardownErr    error
 }
 
-func (m *testCFMintMintDriver) Install(_ context.Context, _ string) (string, error) {
+func (m *testCFMintMintDriver) Install(_ context.Context) (string, error) {
 	return m.installMintURL, m.installErr
 }
 
