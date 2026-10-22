@@ -318,6 +318,12 @@ func IsWriteAuthorized(role ActorRole) bool {
 	}
 }
 
+// IsTriageAuthorized reports whether actor.role is at or above triage, the
+// default threshold for observation agents (triage, review).
+func IsTriageAuthorized(role ActorRole) bool {
+	return role == RoleTriage || IsWriteAuthorized(role)
+}
+
 // MapGitHubPermission maps a GitHub base role to ActorRole. The GitHub client
 // resolves custom repository roles to a base role before this mapping;
 // unrecognized values map to RoleNone.

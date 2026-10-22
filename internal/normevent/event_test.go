@@ -51,6 +51,17 @@ func TestIsWriteAuthorized(t *testing.T) {
 	assert.False(t, IsWriteAuthorized(RoleNone))
 }
 
+func TestIsTriageAuthorized(t *testing.T) {
+	assert.True(t, IsTriageAuthorized(RoleAdmin))
+	assert.True(t, IsTriageAuthorized(RoleMaintain))
+	assert.True(t, IsTriageAuthorized(RoleWrite))
+	assert.True(t, IsTriageAuthorized(RoleTriage))
+	assert.False(t, IsTriageAuthorized(RoleRead))
+	assert.False(t, IsTriageAuthorized(RoleNone))
+	assert.False(t, IsTriageAuthorized(RoleExternal))
+	assert.False(t, IsTriageAuthorized(""))
+}
+
 func TestMapGitHubPermission(t *testing.T) {
 	assert.Equal(t, RoleWrite, MapGitHubPermission("write"))
 	assert.Equal(t, RoleNone, MapGitHubPermission("unknown"))

@@ -48,9 +48,9 @@ func Dispatch(ctx context.Context, opts Options) ([]ExecutionRef, error) {
 	}
 
 	// Compute the effective role for the auth gate without mutating the
-	// caller's event. The OWNERS-upgraded role is used only for
-	// IsAuthorized; downstream CEL evaluation sees the original
-	// collaborator-API role.
+	// caller's event. The OWNERS-upgraded role is used only for the
+	// event-level and per-harness auth checks; downstream CEL evaluation
+	// sees the original collaborator-API role.
 	repoRoot := filepath.Dir(opts.ConfigDir)
 	effectiveRole := opts.Event.Actor.Role
 	if pr, ok := dirCfg.(config.PerRepoConfigReader); ok && pr.IsOwnersFileAuthEnabled() && opts.Event.Actor.ID != "" {
@@ -67,7 +67,7 @@ func Dispatch(ctx context.Context, opts Options) ([]ExecutionRef, error) {
 
 	authCheck := *opts.Event
 	authCheck.Actor.Role = effectiveRole
-	if !IsAuthorized(&authCheck) {
+	if !IsEventAuthorized(&authCheck) {
 		return nil, nil
 	}
 
@@ -80,6 +80,7 @@ func Dispatch(ctx context.Context, opts Options) ([]ExecutionRef, error) {
 	if err != nil {
 		return nil, err
 	}
+	matched = FilterAuthorizedHarnesses(matched, &authCheck)
 	matched = dropGitHubRoutedBuiltins(matched, opts.Event)
 
 	var refs []ExecutionRef

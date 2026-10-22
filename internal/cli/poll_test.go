@@ -16,6 +16,8 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/dispatch"
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/harness"
+	"github.com/fullsend-ai/fullsend/internal/harnessdispatch"
 	"github.com/fullsend-ai/fullsend/internal/normevent"
 )
 
@@ -621,4 +623,40 @@ func TestGitLabChildDispatchJobToken(t *testing.T) {
 		require.ErrorContains(t, err, "not a recognized dispatch route")
 		assert.NotContains(t, err.Error(), "job-token-value")
 	})
+}
+
+func TestCELMatcher_PerHarnessRoleThreshold(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "normative", "normalized-event", "v1", "examples", "issue-opened.json"))
+	require.NoError(t, err)
+
+	trigger := `event.entity.kind == "work_item" && event.transition.kind == "opened"`
+	m := &celMatcher{candidates: []harnessdispatch.TriggeredHarness{
+		{Name: "triage", Harness: &harness.Harness{Role: "triage", Trigger: trigger}},
+		{Name: "code", Harness: &harness.Harness{Role: "coder", Trigger: trigger}},
+	}}
+
+	tests := []struct {
+		name      string
+		actorRole normevent.ActorRole
+		want      []string
+	}{
+		{name: "triage actor gets observation only", actorRole: normevent.RoleTriage, want: []string{"triage"}},
+		{name: "write actor gets both", actorRole: normevent.RoleWrite, want: []string{"triage", "code"}},
+		{name: "read actor gets neither", actorRole: normevent.RoleRead},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := normevent.ParseJSON(data)
+			require.NoError(t, err)
+			ev.Actor.Role = tc.actorRole
+
+			records, err := m.Match(t.Context(), ev)
+			require.NoError(t, err)
+			var got []string
+			for _, r := range records {
+				got = append(got, r.Agent)
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

@@ -158,13 +158,16 @@ The bash dispatch implementation uses a parameterized
 `has_repo_permission(username, min)` helper that encodes this comparison
 (see [Enforcement point](#enforcement-point)).
 
-> **Implementation note:** the Go dispatch path (`IsAuthorized()` in
-> `harnessdispatch`) currently uses a coarse `write+` filter for all
-> non-exception transitions — it does not yet distinguish observation
-> from mutation thresholds. Poll-based dispatch (GitLab/Jira) uses the
-> Go path, so a `triage`-role user triggering observation through that
-> path is denied today. The bash path (GitHub webhook dispatch)
-> implements the full parameterized threshold.
+> **Implementation note:** the Go dispatch path (`harnessdispatch`, used by
+> GitHub CEL dispatch and GitLab/Jira polling) applies these thresholds per
+> matched harness, keyed on the harness `role:` field. The event-level gate
+> (`IsEventAuthorized()`) runs once before harness enumeration and applies the
+> label-added, bot, and `role_verified` rules. For the remaining actors, each
+> matched harness is then filtered by `IsHarnessAuthorized()`: `role: triage`
+> and `role: review` require `triage`; every other role, including an empty,
+> unknown, or custom role, requires `write` (fail closed). The bash path
+> (GitHub webhook dispatch) applies the same thresholds per stage through
+> `has_repo_permission`.
 
 ## Fail-closed behavior
 
@@ -430,7 +433,9 @@ may **never weaken** the platform authorization gate. On the event-backed path,
 an event that fails authorization never reaches CEL evaluation.
 
 This separation is enforced architecturally: on the event-backed path,
-`IsAuthorized()` runs before `MatchHarnesses()` in the dispatch core. On the
+`IsEventAuthorized()` runs before `MatchHarnesses()` in the dispatch core, and
+each matched harness is filtered by its role threshold before an execution ref
+is projected. On the
 Fullsend-originated eventless path, the trusted-origin gate runs before poll
 enumeration or bound-entity resolution and CEL evaluation. For each eligible
 harness, the platform removes unauthorized action-indicating elements using
