@@ -733,9 +733,9 @@ disables nothing because no agent has that harness name.
 
 By default, fullsend checks the forge's permission API to decide who can
 trigger agents. Users with `write` or above can trigger all agents; users
-with `triage` can trigger observation agents (`/fs-triage`, `/fs-review`)
-only. This triage-level access applies to **GitHub webhook dispatch** (slash
-commands, label-triggered dispatch, and event-triggered dispatch).
+with `triage` can trigger the built-in observation agents (`/fs-triage`,
+`/fs-review`). This applies to **GitHub webhook dispatch** (slash commands,
+label-triggered dispatch, and event-triggered dispatch).
 
 On the CEL dispatch path (GitHub `fullsend dispatch` and the Jira poll), the
 threshold follows the harness `role:`:
