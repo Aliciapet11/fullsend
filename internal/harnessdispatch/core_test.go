@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -166,6 +167,18 @@ trigger: |
 `
 }
 
+func issueOpenedCoderHarnessYAML() string {
+	return `agent: agents/code.md
+role: coder
+slug: fullsend-ai-issue-code
+model: opus
+image: ghcr.io/fullsend-ai/fullsend-sandbox:latest
+trigger: |
+  event.entity.kind == "work_item"
+  && event.transition.kind == "opened"
+`
+}
+
 func issuePingHarnessYAML() string {
 	return `agent: agents/triage.md
 role: triage
@@ -180,15 +193,14 @@ trigger: |
 }
 
 func TestDispatch_OwnersUpgradesActorRole(t *testing.T) {
-	// Use issue-opened (not label-added) so IsAuthorized requires
-	// write-level access. Without the OWNERS approver upgrade the
-	// actor's RoleNone would be denied — this proves the OWNERS path
-	// is actually exercised.
+	// issue-opened (not label-added) with a role: coder harness requires
+	// write. RoleNone is denied without the OWNERS approver upgrade, so
+	// this proves the approver -> write upgrade is applied.
 	ev := mustEvent(t, "issue-opened.json")
 
 	dir := t.TempDir()
 
-	configDir := writeHarnessConfigSubdir(t, dir, issueOpenedHarnessYAML(), func(cfg config.PerRepoConfigWriter) {
+	configDir := writeHarnessConfigSubdir(t, dir, issueOpenedCoderHarnessYAML(), func(cfg config.PerRepoConfigWriter) {
 		cfg.SetOwnersFileAuthEnabled(true)
 	})
 	ev.Actor.ID = "test-approver"
@@ -212,8 +224,8 @@ func TestDispatch_OwnersUpgradesActorRole(t *testing.T) {
 func TestDispatch_OwnersReviewerDeniedWriteLevel(t *testing.T) {
 	dir := t.TempDir()
 
-	// issue-opened matches this harness, so write-level auth is the only gate.
-	configDir := writeHarnessConfigSubdir(t, dir, issueOpenedHarnessYAML(), func(cfg config.PerRepoConfigWriter) {
+	// issue-opened matches this coder harness, so write-level auth is the only gate.
+	configDir := writeHarnessConfigSubdir(t, dir, issueOpenedCoderHarnessYAML(), func(cfg config.PerRepoConfigWriter) {
 		cfg.SetOwnersFileAuthEnabled(true)
 	})
 
@@ -232,11 +244,70 @@ func TestDispatch_OwnersReviewerDeniedWriteLevel(t *testing.T) {
 	assert.Empty(t, refs, "OWNERS reviewer should be denied: triage-equivalent does not satisfy write-level harness auth")
 }
 
+func TestDispatch_OwnersReviewerAllowedObservation(t *testing.T) {
+	dir := t.TempDir()
+
+	// The OWNERS reviewer upgrade yields triage, which satisfies the
+	// observation threshold of a role: triage harness.
+	configDir := writeHarnessConfigSubdir(t, dir, issueOpenedHarnessYAML(), func(cfg config.PerRepoConfigWriter) {
+		cfg.SetOwnersFileAuthEnabled(true)
+	})
+
+	ev := mustEvent(t, "issue-opened.json")
+	ev.Actor.ID = "test-reviewer"
+	ev.Actor.Role = normevent.RoleNone
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "OWNERS"),
+		[]byte("approvers: []\nreviewers:\n  - test-reviewer\n"),
+		0o644,
+	))
+
+	refs, err := Dispatch(context.Background(), Options{ConfigDir: configDir, Event: ev})
+	require.NoError(t, err)
+	require.Len(t, refs, 1, "OWNERS reviewer should satisfy the triage threshold of an observation harness")
+	assert.Equal(t, normevent.RoleNone, ev.Actor.Role)
+}
+
+func TestDispatch_PerHarnessRoleThreshold(t *testing.T) {
+	harnesses := map[string]string{
+		"issue-triage": issueOpenedHarnessYAML(),
+		"issue-code":   issueOpenedCoderHarnessYAML(),
+	}
+	tests := []struct {
+		name      string
+		actorRole normevent.ActorRole
+		want      []string
+	}{
+		{name: "triage actor dispatches observation only", actorRole: normevent.RoleTriage, want: []string{"issue-triage"}},
+		{name: "write actor dispatches both", actorRole: normevent.RoleWrite, want: []string{"issue-code", "issue-triage"}},
+		{name: "read actor dispatches neither", actorRole: normevent.RoleRead},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeHarnessesConfig(t, dir, harnesses)
+
+			ev := mustEvent(t, "issue-opened.json")
+			ev.Actor.Role = tc.actorRole
+
+			refs, err := Dispatch(context.Background(), Options{ConfigDir: dir, Event: ev})
+			require.NoError(t, err)
+			var got []string
+			for _, r := range refs {
+				got = append(got, r.Agent)
+			}
+			sort.Strings(got)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestDispatch_OwnersDisabledNoUpgrade(t *testing.T) {
-	// Use issue-opened (not label-added) so IsAuthorized requires
-	// write-level access. The OWNERS file lists the actor as an
-	// approver, but with the config flag off, OWNERS should not be
-	// consulted — the actor stays at RoleNone and is denied.
+	// Use issue-opened (not label-added) so the role threshold applies.
+	// The OWNERS file lists the actor as an approver, but with the
+	// config flag off, OWNERS is not consulted — the actor stays at
+	// RoleNone and is denied.
 	ev := mustEvent(t, "issue-opened.json")
 
 	dir := t.TempDir()
@@ -303,6 +374,24 @@ func writeNamedHarnessConfig(t *testing.T, dir, name, harnessYAML string, opts .
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	data, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), data, 0o644))
+}
+
+// writeHarnessesConfig registers one harness file per entry of harnesses
+// (agent name -> harness YAML) in dir.
+func writeHarnessesConfig(t *testing.T, dir string, harnesses map[string]string) {
+	t.Helper()
+	harnessDir := filepath.Join(dir, "harness")
+	require.NoError(t, os.MkdirAll(harnessDir, 0o755))
+	var agents []config.AgentEntry
+	for name, harnessYAML := range harnesses {
+		require.NoError(t, os.WriteFile(filepath.Join(harnessDir, name+".yaml"), []byte(harnessYAML), 0o644))
+		agents = append(agents, config.AgentEntry{Name: name, Source: "harness/" + name + ".yaml"})
+	}
+	cfg := config.NewPerRepoConfig(nil, "fullsend-ai/demo")
+	cfg.SetAgents(agents)
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), data, 0o644))
