@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"debug/elf"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -224,6 +225,29 @@ func useFakeOpenshellProviders(t *testing.T) {
 	require.NoError(t, err)
 	origPath := os.Getenv("PATH")
 	t.Setenv("PATH", stubDir+string(filepath.ListSeparator)+origPath)
+}
+
+// fakeSandboxBinary writes a minimal ELF header for the sandbox arch and
+// returns its path, to pass as runAgent's fullsendBinary in tests whose
+// run reaches bootstrapCommon. With no binary given, bootstrapCommon
+// copies, tars and gzips the running executable — the whole test binary,
+// tens of megabytes — which costs seconds per run.
+func fakeSandboxBinary(t *testing.T) string {
+	t.Helper()
+	machine := map[string]elf.Machine{"amd64": elf.EM_X86_64, "arm64": elf.EM_AARCH64}[sandboxArch()]
+	hdr := make([]byte, 64) // an ELF64 header with no program or section headers
+	copy(hdr, elf.ELFMAG)
+	hdr[elf.EI_CLASS] = byte(elf.ELFCLASS64)
+	hdr[elf.EI_DATA] = byte(elf.ELFDATA2LSB)
+	hdr[elf.EI_VERSION] = byte(elf.EV_CURRENT)
+	hdr[16] = byte(elf.ET_EXEC) // e_type
+	hdr[18], hdr[19] = byte(machine), byte(machine>>8)
+	hdr[20] = byte(elf.EV_CURRENT) // e_version
+	hdr[52] = 64                   // e_ehsize
+	path := filepath.Join(t.TempDir(), "fullsend")
+	require.NoError(t, os.WriteFile(path, hdr, 0o755))
+	require.NoError(t, binary.ValidateLinuxBinary(path, sandboxArch()), "the fake binary must pass bootstrapCommon's check")
+	return path
 }
 
 func TestRunAgent_HarnessLoadPipeline(t *testing.T) {
@@ -824,7 +848,7 @@ func TestRunAgent_BareBuiltinProviderResolvesEmbeddedDefinitionAndProfile(t *tes
 	var buf bytes.Buffer
 	printer := ui.New(&buf)
 	repoDir := t.TempDir()
-	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", repoDir, fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
 	// The stub cannot bootstrap an agent past sandbox creation, but the run
 	// must get past the provider/profile orchestration steps without error.
 	require.Error(t, err)
@@ -860,7 +884,7 @@ func runAgentWithProviderFiles(t *testing.T, harnessYAML string, files map[strin
 	}
 	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
 	var buf bytes.Buffer
-	err := runAgent(context.Background(), "code", dir, "", t.TempDir(), "", nil, false, "", "", "", rFlags, statusOpts{}, ui.New(&buf), false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", t.TempDir(), fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, ui.New(&buf), false, runOverrideFlags{})
 	// The stub fails the first in-sandbox exec, after provider setup.
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "importing")
@@ -969,7 +993,7 @@ func TestRunAgent_UnlistedProfileDirectoryFileIsNotImported(t *testing.T) {
 	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
 	printer := ui.New(io.Discard)
 	repoDir := t.TempDir()
-	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	err := runAgent(context.Background(), "code", dir, "", repoDir, fakeSandboxBinary(t), nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
 	// The stub cannot bootstrap an agent past sandbox creation, but the run
 	// must get past the profile-import step without error.
 	require.Error(t, err)
@@ -1769,6 +1793,8 @@ func TestTryAgentsRepoMeasurementManifest_NetworkFailure(t *testing.T) {
 	tlsCfg := srv.TLS.Clone()
 	tlsCfg.InsecureSkipVerify = true
 	policy := fetch.NewTestPolicy(tlsCfg, []string{hostname}, []string{port})
+	// The 502 is retried; keep the backoff between attempts negligible.
+	policy.RetryBackoff = time.Millisecond
 
 	orig := defaultAgentsRepoURLPrefix
 	defaultAgentsRepoURLPrefix = srv.URL + "/"
@@ -4547,7 +4573,9 @@ func TestRunAgent_PreflightCheck_Timeout(t *testing.T) {
 	// A preflight_check that exceeds the context deadline should abort
 	// with a "timed out" error, not hang indefinitely.
 	useFakeOpenshell(t)
-	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"sleep 5\"\n  max_iterations: 2\n")
+	// exec replaces the shell, so the context kill reaches sleep itself;
+	// a forked sleep would keep the output pipe open for the full 5s.
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"exec sleep 5\"\n  max_iterations: 2\n")
 
 	// Shrink the real timeout so the "sleep 5" command genuinely outlives
 	// it, exercising the actual DeadlineExceeded branch rather than
