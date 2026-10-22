@@ -1478,12 +1478,15 @@ func (l *mergeLookup) find(mapping *yaml.Node, depth int) (*yaml.Node, bool) {
 	if mapping == nil || mapping.Kind != yaml.MappingNode || depth > maxMergeDepth {
 		return nil, false
 	}
-	if idx := findMappingKeyIndex(mapping, l.key); idx >= 0 {
-		return mapping.Content[idx+1], true
-	}
+	// Consult the memo before scanning explicit keys: it only holds results
+	// computed after an explicit-key miss, so a hit means the scan would miss
+	// again, and a wide mapping repeated through many aliases is scanned once.
 	state := mergeLookupState{node: mapping, depth: depth}
 	if r, seen := l.memo[state]; seen {
 		return r.value, r.ok
+	}
+	if idx := findMappingKeyIndex(mapping, l.key); idx >= 0 {
+		return mapping.Content[idx+1], true
 	}
 	value, ok := l.findInMergeSources(mapping, depth)
 	if l.memo == nil {

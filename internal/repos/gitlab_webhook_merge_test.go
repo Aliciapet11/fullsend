@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -156,4 +157,34 @@ func TestEffectiveMappingValue_WorkBudget(t *testing.T) {
 	v, ok = effectiveMappingValue(wideMerge(mergeLookupBudget+1), "key")
 	require.True(t, ok, "early match does not spend the budget")
 	assert.Equal(t, "found", v.Value)
+}
+
+// A wide mapping lacking the key, merged through many repeated aliases, must
+// be scanned once rather than once per alias.
+func TestEffectiveMappingValue_RepeatedAliasesToWideMapping(t *testing.T) {
+	const width, sources = 200000, mergeLookupBudget
+	wide := &yaml.Node{Kind: yaml.MappingNode}
+	for i := 0; i < width; i++ {
+		wide.Content = append(wide.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("key-%06d", i)},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "v"})
+	}
+	list := &yaml.Node{Kind: yaml.SequenceNode}
+	for i := 0; i < sources; i++ {
+		list.Content = append(list.Content, &yaml.Node{Kind: yaml.AliasNode, Alias: wide})
+	}
+	top := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "<<"}, list,
+	}}
+
+	start := time.Now()
+	v, ok := effectiveMappingValue(top, "absent")
+	elapsed := time.Since(start)
+	assert.True(t, ok)
+	assert.Nil(t, v)
+	assert.Less(t, elapsed, time.Second, "mapping must not be rescanned per alias")
+
+	v, ok = effectiveMappingValue(top, "key-199999")
+	require.True(t, ok)
+	assert.Equal(t, "v", v.Value)
 }
