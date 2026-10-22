@@ -99,8 +99,8 @@ func Dispatch(ctx context.Context, opts Options) ([]ExecutionRef, error) {
 // event comes from GitHub. On GitHub the built-in stages are already routed
 // by the route job in reusable-dispatch.yml; dispatching an override of a
 // built-in agent here as well would run it twice. Other sources are left
-// untouched: the Jira/GitLab poll path has no stage routing and registers
-// built-in names with triggers on purpose.
+// untouched: Jira polling has no stage routing and registers built-in names
+// with triggers on purpose.
 func dropGitHubRoutedBuiltins(matched []TriggeredHarness, event *normevent.Event) []TriggeredHarness {
 	if event.Source.System != normevent.SystemGitHub {
 		return matched
