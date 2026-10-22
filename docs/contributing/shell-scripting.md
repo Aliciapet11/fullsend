@@ -135,9 +135,7 @@ The same rule applies to any function output that is not the intended return val
 
 **When reviewing PRs:** If a shell function is used inside `$(...)` or backtick command substitution, verify that all non-value output (log messages, warnings, `::error::`/`::warning::` annotations, retry diagnostics) is directed to stderr. Flag stdout contamination as medium-severity when the captured value is used in conditional logic or parsed by `jq`/`yq`, and as high-severity when it feeds into security-sensitive operations (token handling, authorization checks, cryptographic verification).
 
-## GitHub API collaborator permissions and concurrent label deletion
-
-### Bot and app collaborator permissions (`none` permission)
+## Bot and app collaborator permissions (`none` permission)
 
 The collaborator permission endpoint
 (`/repos/{owner}/{repo}/collaborators/{username}/permission`) returns HTTP 200
@@ -154,7 +152,11 @@ case "${perm}" in
 esac
 ```
 
-### Concurrent label deletion (HTTP 404 race)
+**When reviewing PRs:** Flag collaborator permission parsing that treats
+`permission: "none"` or an empty `role_name` as a hard API error as a
+low-to-medium-severity finding.
+
+## Concurrent label deletion (HTTP 404 race)
 
 When multiple workflows trigger concurrently on the same PR event (e.g.,
 separate behaviour and functional test runs) and both attempt
@@ -179,6 +181,4 @@ rm -f "${del_err}"
 ```
 
 **When reviewing PRs:** Flag label deletion steps in gate or cleanup scripts
-that do not tolerate HTTP 404 as race-prone. Flag permission parsing that
-treats `permission: "none"` or empty `role_name` as a hard error as a
-bot-incompatibility finding.
+that do not tolerate HTTP 404 as a medium-severity finding.
