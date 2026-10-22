@@ -70,7 +70,7 @@ type jobAdmission struct {
 // unresolvable merge key or alias, and only/except anywhere in the chain
 // (their admission semantics are not modelled).
 func effectiveJobAdmission(job *yaml.Node, scope ciTemplateScope) (adm jobAdmission, why string) {
-	adm, why = resolveExtendsAdmission(job, "configuration", scope, 0, map[*yaml.Node]bool{})
+	adm, _, why = resolveExtendsAdmission(job, "configuration", scope, 0, map[*yaml.Node]bool{}, map[*yaml.Node]resolvedExtends{})
 	if why != "" || adm.rules == nil {
 		return adm, why
 	}
@@ -78,13 +78,37 @@ func effectiveJobAdmission(job *yaml.Node, scope ciTemplateScope) (adm jobAdmiss
 	return adm, why
 }
 
-func resolveExtendsAdmission(node *yaml.Node, label string, scope ciTemplateScope, depth int, visiting map[*yaml.Node]bool) (adm jobAdmission, why string) {
+// resolvedExtends is a memoized successful resolution of one extends: node:
+// its effective admission and the height of its extends chain (0 for a node
+// that extends nothing), so a cached result can still be checked against the
+// depth limit at its new position.
+type resolvedExtends struct {
+	adm    jobAdmission
+	height int
+}
+
+// resolveExtendsAdmission resolves one node's admission, returning it with the
+// height of the node's extends chain. memo holds the nodes already resolved
+// successfully, so a template shared by many extends: entries is resolved once
+// and the total work stays linear in the number of templates and extends
+// entries rather than in the number of paths through them. Failures are not
+// cached: the first one aborts the whole resolution.
+func resolveExtendsAdmission(node *yaml.Node, label string, scope ciTemplateScope, depth int, visiting map[*yaml.Node]bool, memo map[*yaml.Node]resolvedExtends) (adm jobAdmission, height int, why string) {
+	const chainErr = "extends chain is cyclic or nested more than %d levels"
 	mapping := resolveAlias(node)
 	if mapping == nil || mapping.Kind != yaml.MappingNode || hasNonCoreTag(mapping) {
-		return adm, label + " is not a mapping"
+		return adm, 0, label + " is not a mapping"
 	}
 	if visiting[mapping] || depth > gitlabMaxExtendsDepth {
-		return adm, fmt.Sprintf("extends chain is cyclic or nested more than %d levels", gitlabMaxExtendsDepth)
+		return adm, 0, fmt.Sprintf(chainErr, gitlabMaxExtendsDepth)
+	}
+	// A cached node was resolved without meeting any node now being visited
+	// (it would have been a cycle), so only the depth limit can differ here.
+	if cached, ok := memo[mapping]; ok {
+		if depth+cached.height > gitlabMaxExtendsDepth {
+			return adm, 0, fmt.Sprintf(chainErr, gitlabMaxExtendsDepth)
+		}
+		return cached.adm, cached.height, ""
 	}
 	visiting[mapping] = true
 	defer delete(visiting, mapping)
@@ -93,27 +117,28 @@ func resolveExtendsAdmission(node *yaml.Node, label string, scope ciTemplateScop
 	for _, key := range []string{"rules", "when", "only", "except", "extends"} {
 		v, ok := effectiveMappingValue(mapping, key)
 		if !ok {
-			return adm, label + " has a merge key or alias that cannot be resolved"
+			return adm, 0, label + " has a merge key or alias that cannot be resolved"
 		}
 		values[key] = v
 	}
 	if values["only"] != nil || values["except"] != nil {
-		return adm, label + " uses only or except (directly or through extends), which the scan does not evaluate"
+		return adm, 0, label + " uses only or except (directly or through extends), which the scan does not evaluate"
 	}
 	if ext := values["extends"]; ext != nil {
 		names, ok := extendsNames(ext)
 		if !ok {
-			return adm, "extends value is not a literal template name or list of names"
+			return adm, 0, "extends value is not a literal template name or list of names"
 		}
 		for _, name := range names {
 			target, why := scope.lookup(name, "extends target")
 			if why != "" {
-				return adm, why
+				return adm, 0, why
 			}
-			parent, why := resolveExtendsAdmission(target, fmt.Sprintf("extends target %q", name), scope, depth+1, visiting)
+			parent, parentHeight, why := resolveExtendsAdmission(target, fmt.Sprintf("extends target %q", name), scope, depth+1, visiting, memo)
 			if why != "" {
-				return adm, why
+				return adm, 0, why
 			}
+			height = max(height, parentHeight+1)
 			if parent.rules != nil {
 				adm.rules = parent.rules
 			}
@@ -128,7 +153,8 @@ func resolveExtendsAdmission(node *yaml.Node, label string, scope ciTemplateScop
 	if values["when"] != nil {
 		adm.when = values["when"]
 	}
-	return adm, ""
+	memo[mapping] = resolvedExtends{adm: adm, height: height}
+	return adm, height, ""
 }
 
 // expandRuleReferences returns rules with GitLab !reference tags resolved

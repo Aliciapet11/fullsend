@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -238,6 +239,68 @@ func TestSharedTopLevelKeys(t *testing.T) {
 	assert.True(t, shared(".b"))
 	assert.False(t, shared(".c"))
 	assert.False(t, shared("spec"), "only the configuration document counts")
+}
+
+// A heavily shared extends DAG is short and acyclic but has a huge number of
+// paths; the scan resolves each template once, so it finishes at once instead
+// of walking every path.
+func TestTriggerExtraWork_SharedExtendsDAGResolvesOnce(t *testing.T) {
+	ci := fanOutExtendsDAG(10, 10)
+	done := make(chan string, 1)
+	go func() {
+		done <- triggerExtraWorkProblemForSource([]byte(ci), "the committed .gitlab-ci.yml", "main", "trigger", nil, nil, nil, nil)
+	}()
+	select {
+	case got := <-done:
+		assert.Empty(t, got, "the shared template rejects trigger pipelines")
+	case <-time.After(10 * time.Second):
+		t.Fatal("extends resolution did not finish: shared parents are being re-resolved per path")
+	}
+}
+
+// A memoized template is still checked against the depth limit where it is
+// reached again: one that fits near the top of the job's extends tree can
+// exceed the limit when reached through a longer path.
+func TestTriggerExtraWork_SharedExtendsTemplateReachedTooDeep(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(rejectTriggerTemplate)
+	prev := ".reject"
+	for i := range 5 {
+		name := fmt.Sprintf(".x%d", i)
+		fmt.Fprintf(&b, "%s:\n  extends: %s\n", name, prev)
+		prev = name
+	}
+	// .x4 has a chain height of 5; .c1 .. .c7 reach it at depth 8, past the limit.
+	for i := 1; i <= 7; i++ {
+		target := fmt.Sprintf(".c%d", i+1)
+		if i == 7 {
+			target = prev
+		}
+		fmt.Fprintf(&b, ".c%d:\n  extends: %s\n", i, target)
+	}
+	fmt.Fprintf(&b, "job:\n  script: [x]\n  extends: [%s, .c1]\n", prev)
+
+	got := triggerExtraWorkProblemForSource([]byte(b.String()), "the committed .gitlab-ci.yml", "main", "trigger", nil, nil, nil, nil)
+
+	assert.Contains(t, got, "nested more than 11 levels")
+}
+
+// fanOutExtendsDAG builds levels of templates where each level extends the
+// previous one width times, ending in a job that extends the last level.
+func fanOutExtendsDAG(levels, width int) string {
+	var b strings.Builder
+	b.WriteString(rejectTriggerTemplate)
+	list := func(name string) string {
+		return "[" + strings.TrimSuffix(strings.Repeat(name+", ", width), ", ") + "]"
+	}
+	prev := ".reject"
+	for i := 1; i < levels; i++ {
+		name := fmt.Sprintf(".l%d", i)
+		fmt.Fprintf(&b, "%s:\n  extends: %s\n", name, list(prev))
+		prev = name
+	}
+	fmt.Fprintf(&b, "job:\n  script: [x]\n  extends: %s\n", list(prev))
+	return b.String()
 }
 
 func deepExtendsChain(n int) string {
