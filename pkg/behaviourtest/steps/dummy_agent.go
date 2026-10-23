@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,7 +113,11 @@ func parseDummyAgentTable(w *world.World, table *godog.Table) error {
 			if err != nil {
 				return fmt.Errorf("reading fixture %s: %w", fixturePath, err)
 			}
-			op.Content = string(content)
+			expanded, err := expandFixturePlaceholders(w, string(content))
+			if err != nil {
+				return fmt.Errorf("write_fixture %s: %w", fixtureRel, err)
+			}
+			op.Content = expanded
 		}
 		ops = append(ops, op)
 	}
@@ -130,6 +135,31 @@ func parseDummyAgentTable(w *world.World, table *godog.Table) error {
 
 	w.DummyOps = ops
 	return nil
+}
+
+// repoPlaceholder is replaced with the leased repository as owner/name in
+// write_fixture content. Pool repos are leased per run, so an agent result
+// that must name the scenario's own repository cannot be a static fixture.
+const repoPlaceholder = "<repo>"
+
+// expandFixturePlaceholders substitutes the scenario issue number for
+// <issue> and the leased repository for <repo> in write_fixture content.
+// The expansion applies only to fixture content: fixture files are
+// authored for the suite, so it cannot rewrite paths or URLs in other ops.
+func expandFixturePlaceholders(w *world.World, content string) (string, error) {
+	if strings.Contains(content, issuePlaceholder) {
+		if w.IssueNumber == 0 {
+			return "", fmt.Errorf("uses %s but no issue exists yet — put the \"an issue\" step before the dummy agent step", issuePlaceholder)
+		}
+		content = strings.ReplaceAll(content, issuePlaceholder, strconv.Itoa(w.IssueNumber))
+	}
+	if strings.Contains(content, repoPlaceholder) {
+		if w.RepoOwner == "" || w.RepoName == "" {
+			return "", fmt.Errorf("uses %s but no repository is enrolled — put \"the enrolled test repository\" before the dummy agent step", repoPlaceholder)
+		}
+		content = strings.ReplaceAll(content, repoPlaceholder, w.RepoOwner+"/"+w.RepoName)
+	}
+	return content, nil
 }
 
 func assertAgentSucceeds(w *world.World, description string) error {
