@@ -109,8 +109,12 @@ the agent's `agents:` entry in `.fullsend/config.yaml` instead. Harness `env.run
 
 The `agents:` list is the per-agent place in `config.yaml`: an entry names an
 agent and can set its `runtime`, `model`, `effort`, `subagents` and `trigger`
-(on `review`, decides when review runs; see
-[Choosing when review runs](guides/user/customizing-agents.md#choosing-when-review-runs)).
+(on `review`, `retro`, `triage` and `prioritize`, decides routing for that
+agent; see
+[Choosing when review runs](guides/user/customizing-agents.md#choosing-when-review-runs),
+[Choosing when retro runs](guides/user/customizing-agents.md#choosing-when-retro-runs)
+and
+[Choosing when triage and prioritize run](guides/user/customizing-agents.md#choosing-when-triage-and-prioritize-run)).
 A built-in agent (`triage`, `code`, `review`, `fix`, `retro`, `prioritize`) is
 tuned with a name-only entry; a custom agent carries the settings on its
 `source:` entry.
