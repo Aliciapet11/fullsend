@@ -42,10 +42,27 @@ type routableAgent struct {
 	// accepts reports whether the event is one this agent's CEL route
 	// covers. Other events keep bash routing (routeBash).
 	accepts func(*normevent.Event) bool
+	// role is the role the agent's reusable-dispatch.yml job mints its
+	// token for, used by the authorization gate.
+	role string
 }
 
 var routableAgents = map[string]routableAgent{
-	"review": {accepts: reviewRouteAccepts},
+	"prioritize": {accepts: prioritizeRouteAccepts, role: "prioritize"},
+	"retro":      {accepts: retroRouteAccepts, role: "retro"},
+	"review":     {accepts: reviewRouteAccepts, role: "review"},
+	"triage":     {accepts: triageRouteAccepts, role: "triage"},
+}
+
+// retroRouteAccepts covers the events bash routes to retro: a pull request
+// closed (merged or not), and /fs-retro on an issue or a pull request.
+func retroRouteAccepts(e *normevent.Event) bool {
+	if e.Entity.Kind == normevent.EntityChangeProposal &&
+		(e.Transition.Kind == normevent.TransitionClosed || e.Transition.Kind == normevent.TransitionMerged) {
+		return true
+	}
+	return e.Transition.Kind == normevent.TransitionCommentAdded &&
+		e.Transition.Comment != nil && e.Transition.Comment.Command == "/fs-retro"
 }
 
 // reviewRouteAccepts covers pull request events and comments on a pull
@@ -56,6 +73,31 @@ func reviewRouteAccepts(e *normevent.Event) bool {
 		return true
 	}
 	return e.Transition.Kind == normevent.TransitionCommentAdded && e.Entity.LinkedChangeProposal != nil
+}
+
+// triageRouteAccepts covers issue events and comments on an issue or a pull
+// request: bash routes triage from issues opened, edited and labeled, and
+// /fs-triage on either. Pull request events (a label on a pull request
+// included) are not triage's.
+func triageRouteAccepts(e *normevent.Event) bool {
+	if e.Entity.Kind != normevent.EntityWorkItem {
+		return false
+	}
+	switch e.Transition.Kind {
+	case normevent.TransitionCommentAdded:
+		return true
+	case normevent.TransitionOpened, normevent.TransitionEdited, normevent.TransitionLabelChanged:
+		return e.Entity.LinkedChangeProposal == nil
+	default:
+		return false
+	}
+}
+
+// prioritizeRouteAccepts covers comments on an issue or a pull request: bash
+// routes /fs-prioritize on either. The scheduled scoring path calls
+// reusable-prioritize.yml directly and never reaches --route.
+func prioritizeRouteAccepts(e *normevent.Event) bool {
+	return e.Entity.Kind == normevent.EntityWorkItem && e.Transition.Kind == normevent.TransitionCommentAdded
 }
 
 // routableAgentNames lists the routable agents for error messages.
@@ -206,9 +248,17 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 
 	// Same gate as harness dispatch: the event-level rules, then the
 	// harness role threshold (IsHarnessAuthorized applies both), on the
-	// OWNERS-upgraded role.
+	// OWNERS-upgraded role. A closed pull request starts a retro whoever
+	// closed it (the lifecycle-close exception), keyed on the resolved
+	// harness role:, or on the agent's own role only when the harness could
+	// not be loaded (the agent's job mints that role either way).
+	exceptionRole := harnessRole
+	if harnessUnavailable {
+		exceptionRole = agent.role
+	}
 	authCheck := harnessdispatch.AuthCheckEvent(o.configDir, cfg, o.event)
-	if !harnessdispatch.IsHarnessAuthorized(&authCheck, harnessRole) {
+	if !harnessdispatch.IsLifecycleCloseAuthorized(o.event, exceptionRole) &&
+		!harnessdispatch.IsHarnessAuthorized(&authCheck, harnessRole) {
 		if harnessUnavailable {
 			return withDecision(d, routeSkip, "harness unavailable; actor below write"), nil
 		}
