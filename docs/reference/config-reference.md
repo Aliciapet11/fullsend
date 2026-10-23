@@ -204,7 +204,10 @@ effort, sub-agent models and the trigger.
   It does not change CEL dispatch: the harness `trigger:` keeps deciding when
   custom agents run and what the Jira poller dispatches. A trigger alone
   makes a valid override-only entry for a built-in agent. Validated when the
-  agent list is validated: it must compile and return a boolean.
+  agent list is validated: it must compile and return a boolean. Like an
+  invalid `model` or `effort`, an invalid `trigger` makes every agent run in
+  the repository fail with `invalid agent config`, not only review routing, so
+  check the expression before you merge the change.
 
 In the layered config system, agents use keyed merge by `DerivedName()` — see
 [Layered Config Reference](../guides/infrastructure/layered-config-reference.md).
