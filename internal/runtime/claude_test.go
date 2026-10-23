@@ -317,7 +317,9 @@ func TestBuildRunCommand_WithHooksSettings(t *testing.T) {
 
 func TestBuildRunCommand_WithoutHooksSettings(t *testing.T) {
 	cmd := testRunCommand("agent", "", "/sandbox/workspace/repo", nil, "")
-	assert.NotContains(t, cmd, "--settings")
+	assert.Contains(t, cmd, "--settings "+shellQuote(claudeNonessentialSettings),
+		"without the hooks document, --settings still pins nonessential traffic off")
+	assert.Contains(t, cmd, "export "+claudeNonessentialTrafficEnv+"=1")
 }
 
 func TestBuildRunCommand_HooksSettingsEscapesQuotes(t *testing.T) {
