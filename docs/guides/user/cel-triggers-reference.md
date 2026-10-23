@@ -41,11 +41,23 @@ no stage routing, so built-in names whose trigger matches are still dispatched.
 GitLab routes agents through its own built-in router and does not evaluate
 `trigger` expressions.
 
+The review agent is the exception on GitHub: a `trigger` you set on the
+`review` entry in `config.yaml` decides whether the built-in `Review` job
+starts, in place of the stage-based rules. A harness `trigger:` field never
+changes built-in routing; copy it into `config.yaml` to opt in. See
+[Choosing when review runs](customizing-agents.md#choosing-when-review-runs).
+
 You can also keep a hand-written workflow that invokes `fullsend run` with a fixed harness path. CEL-based dispatch and explicit harness invocation may run side by side in the same installation.
 
 ## Writing CEL triggers
 
-The harness `trigger` field is a [CEL](https://github.com/google/cel-spec) boolean expression evaluated against the incoming event. The expression has access to a single root variable, `event`, which is a [`NormalizedEvent`](../../normative/normalized-event/v1/) object.
+The harness `trigger` field is a [CEL](https://github.com/google/cel-spec)
+boolean expression evaluated against the incoming event. The expression has
+access to a single root variable, `event`, which is a
+[`NormalizedEvent`](../../normative/normalized-event/v1/) object. The same
+expression language is used by `agents[].trigger` in `config.yaml`, but that
+field decides routing for the built-in review agent only; CEL dispatch of custom
+agents and the Jira poller use the harness `trigger:`.
 
 A harness with no `trigger` field (or an empty trigger) is manual-only — it runs via `fullsend run` but is never selected by dispatch.
 

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/fullsend-ai/fullsend/internal/celtrigger"
 	"github.com/fullsend-ai/fullsend/internal/urlutil"
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,11 @@ var validConfigAgentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 // (ValidAgentNames) or matches a sourced entry in a parent layer; the
 // built-in keeps resolving through the agents-repo fallback.
 //
+// Trigger is a CEL boolean over the normalized event (ADR 0061). It decides
+// routing for the built-in review agent only (fullsend dispatch --route
+// review); CEL dispatch and the Jira poller keep using the harness trigger:.
+// An omitted or empty value inherits the parent layer's.
+//
 // Subagents maps persona names to model references, controlling which
 // model each sub-agent persona runs on. The "default" key sets the
 // fallback for personas without an explicit entry. A nil *string value
@@ -56,12 +62,13 @@ type AgentEntry struct {
 	Model     string             `yaml:"model,omitempty"`
 	Effort    string             `yaml:"effort,omitempty"`
 	Subagents map[string]*string `yaml:"subagents,omitempty"`
+	Trigger   string             `yaml:"trigger,omitempty"`
 }
 
-// HasSettings reports whether the entry tunes runtime, model, effort
-// or subagents.
+// HasSettings reports whether the entry tunes runtime, model, effort,
+// subagents or trigger.
 func (a AgentEntry) HasSettings() bool {
-	return a.Runtime != "" || a.Model != "" || a.Effort != "" || len(a.Subagents) > 0
+	return a.Runtime != "" || a.Model != "" || a.Effort != "" || len(a.Subagents) > 0 || strings.TrimSpace(a.Trigger) != ""
 }
 
 // IsOverrideOnly reports whether the entry only tunes an agent defined
@@ -469,6 +476,9 @@ func validateAgentSettings(i int, entry AgentEntry) error {
 	if entry.Effort != "" && !ValidEffort(entry.Effort) {
 		return fmt.Errorf("agents[%d] (%s): invalid effort %q: must be one of %s", i, label, entry.Effort, strings.Join(ValidEffortLevels(), ", "))
 	}
+	if err := celtrigger.Validate(entry.Trigger); err != nil {
+		return fmt.Errorf("agents[%d] (%s): invalid trigger: %w", i, label, err)
+	}
 	for key, val := range entry.Subagents {
 		if !ValidSubagentKey(key) {
 			return fmt.Errorf("agents[%d] (%s): invalid subagent key %q: must be lowercase alphanumeric segments joined by hyphens (max 64 chars), or \"default\"", i, label, key)
@@ -551,7 +561,7 @@ func validateAgentEntries(agents []AgentEntry, allowlist []string, enforceAllowl
 			// merge (the merged entry carries the parent's source), so by the
 			// time an entry reaches validation without one it must be built in.
 			if !entry.HasSettings() {
-				return fmt.Errorf("agents[%d]: enabled agent entry must have a source (or, to tune a built-in agent, a name plus runtime, model, effort or subagents)", i)
+				return fmt.Errorf("agents[%d]: enabled agent entry must have a source (or, to tune a built-in agent, a name plus runtime, model, effort, subagents or trigger)", i)
 			}
 			if entry.Name == "" {
 				return fmt.Errorf("agents[%d]: agent entry without a source must name the agent it tunes", i)

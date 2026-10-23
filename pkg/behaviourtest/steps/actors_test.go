@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"errors"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,6 +23,28 @@ type fakeActorSCM struct {
 	listErr      error
 	addedBodies  []string
 	createdIssue []string
+	branches     []string
+	commits      []string
+	openedPRs    []string
+	commitErr    error
+}
+
+func (f *fakeActorSCM) CreateBranch(_ context.Context, _, _, branch string) error {
+	f.branches = append(f.branches, branch)
+	return nil
+}
+
+func (f *fakeActorSCM) CommitFileToBranch(_ context.Context, _, _, branch, _, _ string, _ []byte) error {
+	if f.commitErr != nil {
+		return f.commitErr
+	}
+	f.commits = append(f.commits, branch)
+	return nil
+}
+
+func (f *fakeActorSCM) CreateChangeProposal(_ context.Context, _, _, _, _, head, _ string) (*forge.ChangeProposal, error) {
+	f.openedPRs = append(f.openedPRs, head)
+	return &forge.ChangeProposal{Number: 11}, nil
 }
 
 func (f *fakeActorSCM) AddComment(_ context.Context, _, _ string, _ int, body string) (*forge.IssueComment, error) {
@@ -127,6 +150,67 @@ func TestWhenActorPostsComment_Errors(t *testing.T) {
 
 	err := whenActorPostsComment(&world.World{IssueNumber: 7}, actorTriage, "hello")
 	require.ErrorContains(t, err, "TEST_ACTOR_TRIAGE_PAT not set")
+}
+
+func TestWhenActorOpensPullRequest(t *testing.T) {
+	t.Parallel()
+
+	w, drivers := actorWorld()
+	require.NoError(t, whenActorOpensPullRequest(w, actorWrite))
+	write := drivers[actorWrite]
+	require.Len(t, write.openedPRs, 1)
+	assert.Equal(t, write.branches, write.openedPRs, "the PR is opened from the branch the actor pushed")
+	assert.Equal(t, write.branches, write.commits)
+	assert.Empty(t, drivers["default"].openedPRs, "the PR must not be opened by the e2e installation identity")
+	assert.Equal(t, 11, w.PRNumber)
+	assert.Equal(t, []int{11}, w.CreatedPRNumbers, "the PR is closed at cleanup")
+	assert.Equal(t, write.branches, w.CreatedBranches, "the branch is deleted at cleanup")
+	assert.False(t, w.ScenarioStart.IsZero())
+}
+
+func TestActorOpensPullRequestPattern(t *testing.T) {
+	t.Parallel()
+
+	re := regexp.MustCompile(actorOpensPullRequestPattern)
+	for text, want := range map[string]string{
+		"the write actor opens a pull request":  actorWrite,
+		"the triage actor opens a pull request": actorTriage,
+		"the outsider opens a pull request":     actorOutsider,
+	} {
+		m := re.FindStringSubmatch(text)
+		require.Len(t, m, 2, text)
+		assert.Equal(t, want, m[1])
+	}
+	assert.False(t, re.MatchString("the bot opens a pull request"))
+}
+
+func TestWhenActorOpensPullRequest_Errors(t *testing.T) {
+	t.Parallel()
+
+	err := whenActorOpensPullRequest(&world.World{RepoOwner: "org", RepoName: "repo"}, actorWrite)
+	require.ErrorContains(t, err, "TEST_ACTOR_WRITE_PAT not set")
+
+	w, drivers := actorWorld()
+	drivers[actorWrite].commitErr = errors.New("push rejected")
+	require.ErrorContains(t, whenActorOpensPullRequest(w, actorWrite), "push rejected")
+	assert.Equal(t, drivers[actorWrite].branches, w.CreatedBranches, "a pushed branch is still cleaned up")
+	assert.Empty(t, w.CreatedPRNumbers)
+}
+
+func TestWhenActorPostsPRComment(t *testing.T) {
+	t.Parallel()
+
+	w, drivers := actorWorld()
+	require.ErrorContains(t, whenActorPostsPRComment(w, actorWrite, "/fs-review"), "no pull request opened")
+
+	w.PRNumber = 9
+	require.NoError(t, whenActorPostsPRComment(w, actorWrite, "/fs-review"))
+	assert.Equal(t, []string{"/fs-review"}, drivers[actorWrite].addedBodies)
+	assert.Empty(t, drivers["default"].addedBodies, "the comment must not use the e2e installation identity")
+	assert.False(t, w.ScenarioStart.IsZero())
+
+	err := whenActorPostsPRComment(&world.World{PRNumber: 9}, actorWrite, "/fs-review")
+	require.ErrorContains(t, err, "TEST_ACTOR_WRITE_PAT not set")
 }
 
 func TestThenIssueCommentAuthoredBy(t *testing.T) {

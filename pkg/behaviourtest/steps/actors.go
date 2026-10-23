@@ -23,9 +23,17 @@ const (
 // actor name, for use inside a step pattern's capture group.
 const actorAlternation = actorWrite + "|" + actorTriage + "|" + actorOutsider
 
+const actorOpensPullRequestPattern = `^the (` + actorAlternation + `) opens a pull request$`
+
 func registerActorSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the (`+actorAlternation+`) posts "([^"]+)" on the issue$`, func(ctx context.Context, actor, body string) (context.Context, error) {
 		return ctx, whenActorPostsComment(world.FromContext(ctx), actor, body)
+	})
+	sc.Step(actorOpensPullRequestPattern, func(ctx context.Context, actor string) (context.Context, error) {
+		return ctx, whenActorOpensPullRequest(world.FromContext(ctx), actor)
+	})
+	sc.Step(`^the (`+actorAlternation+`) posts "([^"]+)" on the pull request$`, func(ctx context.Context, actor, body string) (context.Context, error) {
+		return ctx, whenActorPostsPRComment(world.FromContext(ctx), actor, body)
 	})
 	sc.Step(`^the comment "([^"]+)" on the issue is authored by the (`+actorAlternation+`)$`, func(ctx context.Context, body, actor string) (context.Context, error) {
 		return ctx, thenIssueCommentAuthoredBy(world.FromContext(ctx), body, actor)
@@ -91,6 +99,44 @@ func whenActorPostsComment(w *world.World, actor, body string) error {
 	w.ScenarioStart = time.Now()
 	_, err = actorSCM.AddComment(context.Background(),
 		w.RepoOwner, w.RepoName, w.IssueNumber, body)
+	return err
+}
+
+// whenActorOpensPullRequest opens a pull request as the named test actor,
+// so the PR author and the opened event's sender are a human with that
+// actor's repository role rather than the e2e installation identity (a
+// bot). The PR and its branch are registered for scenario cleanup.
+func whenActorOpensPullRequest(w *world.World, actor string) error {
+	actorSCM, _, err := actorIdentity(w, actor)
+	if err != nil {
+		return err
+	}
+	branch, err := openPullRequest(w, actorSCM)
+	if branch != "" {
+		w.CreatedBranches = append(w.CreatedBranches, branch)
+	}
+	if err != nil {
+		return err
+	}
+	w.CreatedPRNumbers = append(w.CreatedPRNumbers, w.PRNumber)
+	return nil
+}
+
+// whenActorPostsPRComment posts body on the scenario's pull request as the
+// named test actor. Slash commands from the e2e installation identity are
+// bot comments, which the dispatch shim drops; a human-like actor is needed
+// to dispatch from a pull request comment.
+func whenActorPostsPRComment(w *world.World, actor, body string) error {
+	actorSCM, _, err := actorIdentity(w, actor)
+	if err != nil {
+		return err
+	}
+	if w.PRNumber == 0 {
+		return fmt.Errorf("no pull request opened")
+	}
+	w.ScenarioStart = time.Now()
+	_, err = actorSCM.AddComment(context.Background(),
+		w.RepoOwner, w.RepoName, w.PRNumber, body)
 	return err
 }
 
