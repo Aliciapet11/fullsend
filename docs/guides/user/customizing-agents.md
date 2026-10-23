@@ -729,6 +729,102 @@ role name. The built-in agent names are: `code`, `triage`, `review`,
 agent named `code` — writing `name: coder` passes validation but
 disables nothing because no agent has that harness name.
 
+## Choosing when review runs
+
+By default, the dispatch workflow decides when the review agent runs: when a
+pull request is opened, pushed to or marked ready, when the
+`ready-for-review` label is added, and on a `/fs-review` comment. To decide it
+yourself, give the `review` entry in `.fullsend/config.yaml` a `trigger`: a
+[CEL expression](cel-triggers-reference.md) over the event. The review still
+runs in the same `Review` job; the trigger only decides whether that job
+starts.
+
+### Example: review only on `/fs-review`
+
+To stop the automatic review on every pull request but keep `/fs-review`, add
+this entry to `.fullsend/config.yaml` on your default branch:
+
+```yaml
+agents:
+  - name: review
+    trigger: >-
+      event.transition.kind == "comment_added"
+      && has(event.entity.linked_change_proposal)
+      && has(event.transition.comment.command)
+      && event.transition.comment.command == "/fs-review"
+      && event.actor.kind == "human"
+```
+
+`has(event.entity.linked_change_proposal)` keeps the trigger to comments on
+pull requests. The `Route` job evaluates the review trigger for every pull
+request event (opened, pushed to, edited, labeled, reopened, and so on) and
+every comment on a pull request, so a broad trigger can start reviews the
+default rules would not. It never starts a review from a bot's comment.
+
+The trigger is read from your default branch, so a pull request cannot change
+its own routing. After the change merges, open a pull request: no review
+starts. Comment `/fs-review` on it: one review starts.
+
+### What opts a repository in
+
+Only a `trigger` on the `review` entry in `config.yaml` moves review routing
+to CEL:
+
+| Your configuration | Who decides |
+|---|---|
+| No `review` entry, or one with only `runtime`, `model`, `effort` or `subagents` | The dispatch workflow, as before |
+| `trigger` on the `review` entry | The trigger |
+| A `review` entry with `source:` whose harness sets or inherits `trigger:` | The dispatch workflow, as before |
+
+A harness `trigger:` field never changes when a built-in agent runs, whether
+your own harness writes it or inherits it through `base:`. To route review by
+a trigger you keep in a harness, copy the expression into the `review` entry's
+`trigger` in `config.yaml`. The kill switch and `enabled: false` on the review
+entry keep working as before. The `Route`
+job evaluates the trigger with the fullsend CLI built at the dispatch
+workflow's commit; if your workflow call pins `fullsend_version`, the `Review`
+job runs that version instead.
+
+### Known differences from the default rules
+
+A trigger is checked by the same permission gate as other CEL-dispatched
+agents: the review harness's `role: review` needs at least triage access, so
+triage-role users can start a review as before. Some cases still differ from
+the dispatch workflow's built-in rules:
+
+| Case | Default rules | Trigger |
+|---|---|---|
+| Pull request opened or pushed by a bot without a registered fullsend role | Reviewed | Not reviewed |
+| Pull request pushed by the fix agent | Reviewed | Not reviewed until [#8329](https://github.com/fullsend-ai/fullsend/issues/8329) ships, so the review → fix → re-review loop stops |
+| Who is checked when a pull request is opened, pushed to or marked ready | The pull request author | The user who sent the event |
+| A maintainer's push to an outside contributor's fork pull request | Not reviewed | Reviewed |
+
+> [!WARNING]
+> Opt in only after
+> [#8329](https://github.com/fullsend-ai/fullsend/issues/8329) ships, or
+> accept that pushes from the fix agent no longer start a re-review. Until
+> then the trigger path does not look up a bot's role.
+
+### Checking the decision
+
+When a trigger is set, the `Route` job's "Finalize stage" step logs the
+decision for each pull request and pull request comment:
+
+```text
+CEL route (review): bash=review cel=skip reason=trigger did not match harness=agents@3c3081741e3c
+```
+
+The job summary shows `review_route=cel` when the trigger decided, or
+`review_route=bash` when the dispatch workflow did: the kill switch is on, the
+review entry is disabled, or the event is not a pull request or a comment on
+one.
+
+| Log text | Meaning | Action |
+|---|---|---|
+| `cel=skip reason=trigger did not match` | The trigger left this event out | Expected for events your trigger excludes; otherwise fix the trigger |
+| `cel=skip reason=actor not authorized` | The actor failed the dispatch permission check | See [Known differences from the default rules](#known-differences-from-the-default-rules) for bots |
+| `CEL route failed; keeping the bash stage` | A CEL route step failed, so the dispatch workflow decided | Open the failed "… CEL route" step for the error, for example an invalid `trigger` or a harness that fails to load |
+
 ## Agent dispatch authorization
 
 By default, fullsend checks the forge's permission API to decide who can
