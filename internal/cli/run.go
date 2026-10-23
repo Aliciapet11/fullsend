@@ -1126,6 +1126,11 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		printer.StepFail("Environment validation failed")
 		return fmt.Errorf("validating env: %w", err)
 	}
+	// Collect lint diagnostics before the ${VAR} expansion below: Lint()
+	// scans env values for deprecated variable references (e.g.
+	// GITHUB_ISSUE_URL) that os.Expand would rewrite before they can be
+	// seen. Emission happens after ValidateFilesExist, further below.
+	lintDiags := h.Lint()
 	for k, v := range h.RunnerEnv {
 		h.RunnerEnv[k] = os.Expand(v, expander)
 	}
@@ -1171,12 +1176,13 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	}
 	printer.StepDone(fmt.Sprintf("Harness loaded (%.1fs)", time.Since(harnessStart).Seconds()))
 
-	// Run lint checks before merging env.runner into RunnerEnv so that
-	// Lint() sees the original YAML state and only warns when runner_env
-	// was actually declared (not when env.runner entries are merged in).
+	// Emit the lint diagnostics collected before ${VAR} expansion above.
+	// Collected there (not here) so value-based deprecation checks still
+	// see declared references; emitted here (before env.runner is merged
+	// into RunnerEnv) so runner_env diagnostics reflect the declared YAML.
 	// reservedSandboxEnvDiagnostics rides along: it names the env.sandbox
 	// keys this run will drop instead of exporting them (#3373).
-	for _, diag := range append(h.Lint(), reservedSandboxEnvDiagnostics(h)...) {
+	for _, diag := range append(lintDiags, reservedSandboxEnvDiagnostics(h)...) {
 		emitDiagnostic(printer, diag)
 	}
 
@@ -2236,10 +2242,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 
 	// 6. Start runtime fetch service (Phase 4, ADR-0038).
 	var fetchEnvVal fetchServiceEnv
-	startFetch, deprecationWarning := shouldStartFetchService(h)
-	if deprecationWarning != "" {
-		printer.StepWarn(deprecationWarning)
-	}
+	startFetch := shouldStartFetchService(h)
 	if startFetch {
 		env, fetchShutdown, fetchErr := setupFetchService(ctx, rFlags.treeFetcher, rFlags.gitToken, h, resolveToken, fetchsvc.ServiceConfig{
 			Harness:       h,
@@ -3161,21 +3164,16 @@ type fetchServiceEnv struct {
 	token string // bearer token
 }
 
-const deprecatedImplicitFetchWarning = "Harness declares allowed_remote_resources without allow_runtime_fetch: true; " +
-	"the runtime fetch service will start for backward compatibility, but this behavior is " +
-	"deprecated — add allow_runtime_fetch: true to the harness to silence this warning"
-
 // shouldStartFetchService decides whether the runtime fetch HTTP service
-// should be started, and returns a deprecation warning if the harness relies
-// on the legacy implicit opt-in via allowed_remote_resources.
-func shouldStartFetchService(h *harness.Harness) (start bool, deprecationWarning string) {
+// should be started. A bare allowed_remote_resources declaration still
+// starts it for backward compatibility, but that implicit opt-in is
+// deprecated — the warning lives in Harness.Lint() so lint/lock/run all
+// report it once, from one place.
+func shouldStartFetchService(h *harness.Harness) bool {
 	if h.HasURLDirResources() || h.AllowRuntimeFetch {
-		return true, ""
+		return true
 	}
-	if len(h.AllowedRemoteResources) > 0 {
-		return true, deprecatedImplicitFetchWarning
-	}
-	return false, ""
+	return len(h.AllowedRemoteResources) > 0
 }
 
 // setupFetchService resolves a git token for runtime fetching and starts
@@ -7296,6 +7294,8 @@ func fetchPinnedAgentsRepoFile(ctx context.Context, relPath string, forgeClient 
 		return "", none, false
 	}
 	if composeOpts.FetchPolicy.Offline {
+		// No offline cache path: the URL embeds the commit SHA of main,
+		// which needs a network request to resolve (#8743).
 		return "", none, false
 	}
 	if forgeClient == nil {

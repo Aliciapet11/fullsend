@@ -5150,9 +5150,7 @@ func TestShouldStartFetchService_AllowRuntimeFetch(t *testing.T) {
 		AllowRuntimeFetch:      true,
 		AllowedRemoteResources: []string{"https://github.com/org/"},
 	}
-	start, warning := shouldStartFetchService(h)
-	assert.True(t, start)
-	assert.Empty(t, warning)
+	assert.True(t, shouldStartFetchService(h))
 }
 
 func TestShouldStartFetchService_URLSkills(t *testing.T) {
@@ -5160,9 +5158,7 @@ func TestShouldStartFetchService_URLSkills(t *testing.T) {
 		Agent:  "agents/test.md",
 		Skills: []harness.SkillEntry{{Source: "https://github.com/org/skills/tree/abc/rust#sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},
 	}
-	start, warning := shouldStartFetchService(h)
-	assert.True(t, start)
-	assert.Empty(t, warning)
+	assert.True(t, shouldStartFetchService(h))
 }
 
 func TestShouldStartFetchService_AllowedRemoteResourcesOnly(t *testing.T) {
@@ -5170,16 +5166,14 @@ func TestShouldStartFetchService_AllowedRemoteResourcesOnly(t *testing.T) {
 		Agent:                  "agents/test.md",
 		AllowedRemoteResources: []string{"https://github.com/org/"},
 	}
-	start, warning := shouldStartFetchService(h)
-	assert.True(t, start)
-	assert.Contains(t, warning, "deprecated")
+	// Starts for backward compatibility; the deprecation warning is
+	// Harness.Lint()'s job now (TestLint_AllowedRemoteResourcesWithoutAllowRuntimeFetch).
+	assert.True(t, shouldStartFetchService(h))
 }
 
 func TestShouldStartFetchService_NoRemoteResources(t *testing.T) {
 	h := &harness.Harness{Agent: "agents/test.md"}
-	start, warning := shouldStartFetchService(h)
-	assert.False(t, start)
-	assert.Empty(t, warning)
+	assert.False(t, shouldStartFetchService(h))
 }
 
 func TestSetupFetchService_WithTreeFetcher(t *testing.T) {
