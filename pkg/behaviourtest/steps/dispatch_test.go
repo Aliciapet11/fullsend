@@ -38,7 +38,8 @@ func TestWhenPullRequestChangesRequested_SubmitsRequestChanges(t *testing.T) {
 	before := time.Now()
 	require.NoError(t, whenPullRequestChangesRequested(w))
 	assert.Equal(t, []string{"REQUEST_CHANGES"}, scm.reviewEvents)
-	assert.False(t, w.ScenarioStart.Before(before), "ScenarioStart must be reset to the review time")
+	assert.False(t, w.ScenarioStart.Before(before.Truncate(time.Second)), "ScenarioStart must be reset to the review time")
+	assert.Zero(t, w.ScenarioStart.Nanosecond(), "ScenarioStart must be truncated to the second")
 }
 
 func TestEnsureHarnessArtifacts_NoWorkflowRun(t *testing.T) {

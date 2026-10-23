@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/cucumber/godog"
@@ -141,4 +143,43 @@ func TestExpandFixturePlaceholders_RepoRequiresScenarioRepo(t *testing.T) {
 	_, err := expandFixturePlaceholders(&world.World{}, `{"target_repo": "<repo>"}`)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no repository is enrolled")
+}
+
+type fakeHeadSHASCM struct {
+	*fakeDispatchSCM
+	sha string
+	err error
+}
+
+func (f *fakeHeadSHASCM) GetPullRequestHeadSHA(context.Context, string, string, int) (string, error) {
+	return f.sha, f.err
+}
+
+func TestExpandPRHeadSHAPlaceholder(t *testing.T) {
+	const fixture = `{"head_sha": "<pr_head_sha>"}`
+	tests := []struct {
+		name    string
+		world   *world.World
+		content string
+		want    string
+		wantErr string
+	}{
+		{name: "no placeholder", world: &world.World{}, content: `{"a": 1}`, want: `{"a": 1}`},
+		{name: "no pull request", world: &world.World{SCM: &fakeHeadSHASCM{fakeDispatchSCM: &fakeDispatchSCM{}}}, content: fixture, wantErr: "no pull request exists yet"},
+		{name: "driver cannot read head", world: &world.World{SCM: &fakeDispatchSCM{}, PRNumber: 7}, content: fixture, wantErr: "cannot read a pull request head SHA"},
+		{name: "fetch error", world: &world.World{SCM: &fakeHeadSHASCM{fakeDispatchSCM: &fakeDispatchSCM{}, err: errors.New("boom")}, PRNumber: 7}, content: fixture, wantErr: "boom"},
+		{name: "empty sha", world: &world.World{SCM: &fakeHeadSHASCM{fakeDispatchSCM: &fakeDispatchSCM{}}, PRNumber: 7}, content: fixture, wantErr: "empty head SHA"},
+		{name: "expanded", world: &world.World{SCM: &fakeHeadSHASCM{fakeDispatchSCM: &fakeDispatchSCM{}, sha: "abc123"}, PRNumber: 7}, content: fixture, want: `{"head_sha": "abc123"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := expandPRHeadSHAPlaceholder(tc.world, tc.content)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

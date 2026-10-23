@@ -335,6 +335,20 @@ func TestListPullRequestReviews(t *testing.T) {
 	}
 }
 
+func TestGetPullRequestHeadSHA(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.PullRequestHeadSHA = "abc123"
+	d := New(fc)
+
+	sha, err := d.(*Driver).GetPullRequestHeadSHA(context.Background(), "owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sha != "abc123" {
+		t.Fatalf("expected abc123, got %q", sha)
+	}
+}
+
 func TestListPullRequestCommits(t *testing.T) {
 	fc := forge.NewFakeClient()
 	fc.PRCommits = map[string][]string{"owner/repo/1": {"first", "second"}}

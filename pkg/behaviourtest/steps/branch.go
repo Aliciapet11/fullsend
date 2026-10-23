@@ -267,10 +267,7 @@ var failureCommentPollInterval = 5 * time.Second
 // stable fragment of the failure-comment contract (the category label
 // headline or a fixed detail phrase), not incidental prose.
 //
-// No shipped scenario uses this step yet: the fix stage's only dispatch
-// route is a changes_requested review from the org review bot, which the
-// behaviour suite cannot produce. The step is exercised by unit tests
-// and ready for when a suite-reachable fail-closed path exists.
+// No shipped scenario uses this step yet; it is exercised by unit tests.
 func thenHarnessWorkflowFailsReporting(ctx context.Context, w *world.World, agent, report string) error {
 	agent = strings.TrimSpace(agent)
 	if w.ScenarioStart.IsZero() {

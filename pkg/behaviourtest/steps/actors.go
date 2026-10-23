@@ -146,7 +146,8 @@ func whenActorPostsPRComment(w *world.World, actor, body string) error {
 	if w.PRNumber == 0 {
 		return fmt.Errorf("no pull request opened")
 	}
-	w.ScenarioStart = time.Now()
+	// Run created_at has second precision (#7957).
+	w.ScenarioStart = time.Now().Truncate(time.Second)
 	_, err = actorSCM.AddComment(context.Background(),
 		w.RepoOwner, w.RepoName, w.PRNumber, body)
 	return err

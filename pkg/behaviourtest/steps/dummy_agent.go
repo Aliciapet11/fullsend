@@ -15,6 +15,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/runtime"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/artifacts"
+	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/drivers/scm"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/world"
 )
 
@@ -143,7 +144,8 @@ func parseDummyAgentTable(w *world.World, table *godog.Table) error {
 const repoPlaceholder = "<repo>"
 
 // expandFixturePlaceholders substitutes the scenario issue number for
-// <issue> and the leased repository for <repo> in write_fixture content.
+// <issue>, the leased repository for <repo> and the pull request head SHA
+// for <pr_head_sha> in write_fixture content.
 // The expansion applies only to fixture content: fixture files are
 // authored for the suite, so it cannot rewrite paths or URLs in other ops.
 func expandFixturePlaceholders(w *world.World, content string) (string, error) {
@@ -159,7 +161,32 @@ func expandFixturePlaceholders(w *world.World, content string) (string, error) {
 		}
 		content = strings.ReplaceAll(content, repoPlaceholder, w.RepoOwner+"/"+w.RepoName)
 	}
-	return content, nil
+	return expandPRHeadSHAPlaceholder(w, content)
+}
+
+// prHeadSHAPlaceholder is replaced in write_fixture content with the
+// scenario pull request's head SHA, read when the dummy-agent step runs.
+const prHeadSHAPlaceholder = "<pr_head_sha>"
+
+func expandPRHeadSHAPlaceholder(w *world.World, content string) (string, error) {
+	if !strings.Contains(content, prHeadSHAPlaceholder) {
+		return content, nil
+	}
+	if w.PRNumber == 0 {
+		return "", fmt.Errorf("uses %s but no pull request exists yet — order a pull request step first", prHeadSHAPlaceholder)
+	}
+	reader, ok := w.SCM.(scm.PullRequestHeadSHAReader)
+	if !ok {
+		return "", fmt.Errorf("uses %s but the SCM driver cannot read a pull request head SHA", prHeadSHAPlaceholder)
+	}
+	sha, err := reader.GetPullRequestHeadSHA(context.Background(), w.RepoOwner, w.RepoName, w.PRNumber)
+	if err != nil {
+		return "", fmt.Errorf("reading head SHA of pull request #%d: %w", w.PRNumber, err)
+	}
+	if sha == "" {
+		return "", fmt.Errorf("pull request #%d has an empty head SHA", w.PRNumber)
+	}
+	return strings.ReplaceAll(content, prHeadSHAPlaceholder, sha), nil
 }
 
 func assertAgentSucceeds(w *world.World, description string) error {

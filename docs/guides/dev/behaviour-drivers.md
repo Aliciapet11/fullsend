@@ -72,6 +72,9 @@ When the [job-scoped trace collector](behaviour-testing.md#job-scoped-trace-coll
 ## Adding an SCM driver
 
 1. Implement `scm.Driver` in `pkg/behaviourtest/drivers/scm/<vendor>/`.
+   Also implement the optional `scm.PullRequestHeadSHAReader` interface
+   (`GetPullRequestHeadSHA`). Dummy-agent fixtures that use the
+   `<pr_head_sha>` placeholder need it.
 2. Register the driver in `behaviourtest.RunSuite` when `BEHAVIOUR_SCM=<vendor>`.
 3. Document the env var value here.
 4. Add `@skip:<vendor>` tags on scenarios that cannot run until the driver is complete.

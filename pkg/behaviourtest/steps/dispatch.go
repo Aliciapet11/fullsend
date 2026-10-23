@@ -522,7 +522,8 @@ func openPullRequest(w *world.World, driver scm.Driver, path, body string) (stri
 	if w.RepoOwner == "" || w.RepoName == "" {
 		return "", fmt.Errorf("no repo configured; call 'Given the enrolled test repository' before PR operations")
 	}
-	w.ScenarioStart = time.Now()
+	// Run created_at has second precision (#7957).
+	w.ScenarioStart = time.Now().Truncate(time.Second)
 	branch := fmt.Sprintf("behaviour-pr-%d", time.Now().UnixNano())
 	ctx := context.Background()
 	if err := driver.CreateBranch(ctx, w.RepoOwner, w.RepoName, branch); err != nil {
@@ -544,7 +545,7 @@ func whenPullRequestLabeled(w *world.World, label string) error {
 	if w.PRNumber == 0 {
 		return fmt.Errorf("no pull request opened")
 	}
-	w.ScenarioStart = time.Now()
+	w.ScenarioStart = time.Now().Truncate(time.Second)
 	return w.SCM.AddIssueLabels(context.Background(), w.RepoOwner, w.RepoName, w.PRNumber, label)
 }
 
@@ -571,11 +572,12 @@ func whenPullRequestReviewComment(w *world.World) error {
 // whenPullRequestChangesRequested submits a changes-requested review on the
 // scenario's pull request as the e2e installation identity: a bot, but not
 // the registered review bot. GitHub refuses REQUEST_CHANGES on a reviewer's
-// own pull request, so a test actor must have opened it.
+// own pull request, so a test actor must have opened it. ScenarioStart is
+// truncated to the second because run created_at has second precision.
 func whenPullRequestChangesRequested(w *world.World) error {
 	if w.PRNumber == 0 {
 		return fmt.Errorf("no pull request opened")
 	}
-	w.ScenarioStart = time.Now()
+	w.ScenarioStart = time.Now().Truncate(time.Second)
 	return w.SCM.SubmitPullRequestReview(context.Background(), w.RepoOwner, w.RepoName, w.PRNumber, "REQUEST_CHANGES")
 }

@@ -186,6 +186,13 @@ func (d *Driver) ListPullRequestCommits(ctx context.Context, owner, repo string,
 	return d.Client.ListPullRequestCommits(ctx, owner, repo, number)
 }
 
+var _ scm.PullRequestHeadSHAReader = (*Driver)(nil)
+
+// GetPullRequestHeadSHA returns the change proposal's current head commit SHA.
+func (d *Driver) GetPullRequestHeadSHA(ctx context.Context, owner, repo string, number int) (string, error) {
+	return d.Client.GetPullRequestHeadSHA(ctx, owner, repo, number)
+}
+
 // ParseRepo splits "owner/repo" into owner and repo name.
 func ParseRepo(fullName string) (owner, repo string, err error) {
 	return scm.ParseRepo(fullName)
