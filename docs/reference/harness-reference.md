@@ -56,7 +56,7 @@ privilege_levels:
 # ── Validation ────────────────────────────────────────────────
 validation_loop:
   script: scripts/validate-output-schema.sh
-  preflight_check: 'python3 -c "import jsonschema"'  # Literal sh -c command (NOT a script path); runs before sandbox creation
+  preflight_check: 'python3 -c "import jsonschema"'  # Literal sh -c command (NOT a script path); runs before sandbox creation in the allowlisted preflight environment
   max_iterations: 2
   feedback_mode: append              # "none" (default) or "append" — append the
                                      # previous iteration's validation failure to
@@ -153,7 +153,7 @@ Most fields are self-explanatory from the inline comments above. This section ex
 
 **`validation_loop.max_iterations`** — The maximum number of agent runs in one invocation (default 1). A second run happens only when the agent finished and its output failed validation; an iteration the runner killed at `timeout_minutes` is not retried. See [`fullsend run` § Budget and deadline](../cli/run.md#budget-and-deadline) and [ADR 0105](../ADRs/0105-timed-out-iteration-ends-the-run.md).
 
-**`validation_loop.preflight_check`** — A host-dependency probe run before sandbox creation as a literal `sh -c` command ([ADR 0128](../ADRs/0128-preflight-check-literal-command.md)). It uses the host process's working directory and is not resolved through the resource-fetch pipeline. Prefer a self-contained probe such as `python3 -c "import jsonschema"`; a relative script command works only if its file is present in that host working directory.
+**`validation_loop.preflight_check`** — A host-dependency probe run before sandbox creation as a literal `sh -c` command ([ADR 0128](../ADRs/0128-preflight-check-literal-command.md)). It uses the host process's working directory and is not resolved through the resource-fetch pipeline. Prefer a self-contained probe such as `python3 -c "import jsonschema"`; a relative script command works only if its file is present in that host working directory. The probe runs in a minimal allowlisted environment: the host `PATH`, `HOME`, and `TMPDIR` (when set), the runner-forced `FULLSEND_DIR` and `PYTHONDONTWRITEBYTECODE`, and non-credential variables declared under `env.runner`/`runner_env` — nothing else is inherited from the process environment. Credential names (`GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `PUSH_TOKEN`, `FULLSEND_FORGE_TOKEN`, `FULLSEND_FETCH_TOKEN`, `FULLSEND_GITLAB_*` role tokens, `OPENAI_API_KEY`, `GH_WORKFLOW_TOKEN`, and the OIDC/trigger/runner-secret names) are excluded even when declared under `env.runner`. `${VAR}` references are validated and expanded before the command runs: a reference to a name outside the allowlisted environment fails the run before any shell executes, naming the variable (never its value) and pointing to the allowlist and the `env.runner` declaration channel. On failure or timeout, diagnostics carry only redacted command text and output. Bare `$VAR` references are left to the shell, where every non-allowlisted name is unset.
 
 **`env.runner`** — Variables passed to host-side scripts (`pre_script`, `post_script`,
 `validation_loop.script` and `validation_loop.preflight_check`), layered over the `fullsend run`
@@ -345,7 +345,7 @@ agent: https://raw.githubusercontent.com/org/repo/<sha>/agents/lint.md#sha256=ab
 
 **Scripts are local-only** — `pre_script`, `post_script`, and `validation_loop.script` must be local paths (they run on the trusted runner). Exception: scripts declared in a `base` harness fetched via URL are allowed.
 
-**`validation_loop.preflight_check` is a command, not a script resource** — The runner expands `${VAR}` references from its permitted host environment, then passes the result to `sh -c` on the host; it does not fetch or stage a file named by the command. Do not interpolate untrusted values or credentials, even within shell quotes: on failure or timeout the expanded command currently appears in diagnostics.
+**`validation_loop.preflight_check` is a command, not a script resource** — The runner validates `${VAR}` references against the preflight allowlist environment (host `PATH`/`HOME`/`TMPDIR`, runner-forced `FULLSEND_DIR`/`PYTHONDONTWRITEBYTECODE`, and `env.runner` declarations), expands them, and passes the result to `sh -c` on the host; it does not fetch or stage a file named by the command. A reference outside that environment — including any credential name, whether inherited from the process environment or declared under `env.runner` — fails the run before the command executes. Do not interpolate untrusted values, even within shell quotes: on failure or timeout the diagnostics embed the command and output with declared secret values redacted.
 
 ## See also
 

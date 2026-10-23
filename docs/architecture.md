@@ -232,7 +232,14 @@ repo baseline and overrides)
   via `sh -c` without setting a working directory and is not resource-resolved;
   `Harness.Lint()` will flag path-like values (planned, not yet implemented;
   non-fatal when it lands)
-  ([ADR 0128](ADRs/0128-preflight-check-literal-command.md)).
+  ([ADR 0128](ADRs/0128-preflight-check-literal-command.md)). The nested
+  `validation_loop.preflight_check` runs in a minimal allowlisted environment —
+  host `PATH`, `HOME`, and `TMPDIR`, runner-forced `FULLSEND_DIR` and
+  `PYTHONDONTWRITEBYTECODE`, and non-credential `env.runner` declarations —
+  with `${VAR}` references validated and expanded before execution; credential
+  names are excluded however they arrive (process environment or harness
+  declaration), and failure/timeout diagnostics carry only redacted command
+  text and output.
 - Preflight coverage for all scripts: a top-level `preflight_check` field is a
   single host-dependency gate for `pre_script`, `post_script`, and
   `validation_loop`, running before `pre_script` and before sandbox creation.

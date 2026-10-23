@@ -84,7 +84,7 @@ references are scalar values, not shell commands.
 
 | Semantic type | Meaning | Fields |
 |---|---|---|
-| inline command | Executed via `sh -c` on the host, not resource-resolved | `validation_loop.preflight_check`; top-level `preflight_check` (planned) |
+| inline command | Executed via `sh -c` on the host against the allowlisted preflight environment (credential-safe), not resource-resolved | `validation_loop.preflight_check`; top-level `preflight_check` (planned) |
 | runtime local path | Path to a file or directory in the local configuration, not a command | `pre_script`, `post_script`, `validation_loop.script`, `validation_loop.schema`, `agent_input` (directory), `host_files[].src` (host path, optional `${VAR}` expansion), `api_servers[].script` (path resolved, server startup planned) |
 | resource reference | Local path or pinned URL resolved/fetched as applicable | `agent`, `base`, `policy`, `skills[].source`, `plugins[].path`, `openshell.profiles[]`; `providers[]` has additional identifier semantics below |
 | skill override | Key is a path within the skill; value is a local file, pinned URL, or `null` to remove the file | `skills[].overrides[<path>]` |
