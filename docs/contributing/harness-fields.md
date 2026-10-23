@@ -69,7 +69,7 @@ per-overlay:
 | `trigger`          | CEL trigger expression is evaluated against normalized events, not forge-specific (ADR-0061) |
 | `privilege_levels` | Mint privilege per run-stage is forge-agnostic (ADR-0073). **Top level only** — not a `ForgeConfig` field |
 | `schema_version`   | Schema contract version, forge-agnostic (ADR-0127); absent = version `1`. **Planned, not yet implemented** |
-| `preflight_check`  | Single host-dependency gate run once before sandbox creation for `pre_script`/`post_script`/`validation_loop`; a literal `sh -c` command, not a script path (ADR-0128, ADR-0129). **Planned, not yet implemented** |
+| `preflight_check`  | Single host-dependency gate run once before sandbox creation for `pre_script`/`post_script`/`validation_loop`; a literal `sh -c` command, not a script path (ADR-0128, ADR-0129). **Planned, not yet implemented** ([#8722](https://github.com/fullsend-ai/fullsend/issues/8722)) |
 
 ## Semantic types (ADR 0127)
 

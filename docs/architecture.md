@@ -237,9 +237,9 @@ repo baseline and overrides)
   host `PATH`, `HOME`, and `TMPDIR`, runner-forced `FULLSEND_DIR` and
   `PYTHONDONTWRITEBYTECODE`, and non-credential `env.runner` declarations —
   with `${VAR}` references validated and expanded before execution; credential
-  names are excluded however they arrive (process environment or harness
-  declaration), and failure/timeout diagnostics carry only redacted command
-  text and output.
+  names are excluded under their own names, whether they arrive from the
+  process environment or a harness declaration, and failure/timeout
+  diagnostics carry only redacted command text and output.
 - Preflight coverage for all scripts: a top-level `preflight_check` field is a
   single host-dependency gate for `pre_script`, `post_script`, and
   `validation_loop`, running before `pre_script` and before sandbox creation.

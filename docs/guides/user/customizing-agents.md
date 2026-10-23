@@ -114,7 +114,7 @@ validation_loop:
   schema: schemas/my-custom-schema.json
 ```
 
-Setting `validation_loop.preflight_check` swaps the dependency probe. It runs in a minimal allowlisted environment — host `PATH`, `HOME`, and `TMPDIR`, runner-forced `FULLSEND_DIR` and `PYTHONDONTWRITEBYTECODE`, and non-credential variables declared under `env.runner` — so credential names are excluded even when declared, and a `${VAR}` reference outside that environment fails the run before the probe executes. See the [harness reference](../../reference/harness-reference.md) for the full contract.
+Setting `validation_loop.preflight_check` swaps the dependency probe. It runs in a minimal, credential-safe environment, and an out-of-scope `${VAR}` reference fails the run before the probe executes. See the [harness reference](../../reference/harness-reference.md) for the full contract.
 
 ### What you can override
 
