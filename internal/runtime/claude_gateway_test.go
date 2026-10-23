@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -361,8 +362,9 @@ func TestInstallClaudeHooks_PinsRunnerSettings(t *testing.T) {
 			}
 			assert.Equal(t, "https://gw.example.com", env["ANTHROPIC_BASE_URL"], "the route env is kept")
 			assert.Equal(t, "", env["CLAUDE_CODE_USE_VERTEX"])
-			// The route env already sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
-			assert.Len(t, env, len(extra["env"].(map[string]any))+len(wantHookEnv)-1)
+			keys := maps.Clone(extra["env"].(map[string]any))
+			maps.Copy(keys, wantHookEnv)
+			assert.Len(t, env, len(keys))
 			assert.Equal(t, extra["apiKeyHelper"], doc["apiKeyHelper"])
 
 			cmd := buildRunCommand(RunParams{SandboxName: sb, AgentBaseName: "agent", RepoDir: "/r", Model: "gateway/m", HooksSettingsPath: security.SandboxHooksSettings})
@@ -462,7 +464,7 @@ func TestBuildRunCommand_NoGatewayUnchanged(t *testing.T) {
 	cmd := buildRunCommand(RunParams{SandboxName: "fs-claude-gw-not-registered", AgentBaseName: "agent", RepoDir: "/r", Model: "opus", FallbackModels: []string{"gateway/x"}})
 	assert.NotContains(t, cmd, "ANTHROPIC_BASE_URL")
 	assert.NotContains(t, cmd, "INFERENCE_GATEWAY_API_KEY")
-	assert.NotContains(t, cmd, "--settings")
+	assert.Contains(t, cmd, "--settings "+shellQuote(claudeNonessentialSettings))
 	assert.Contains(t, cmd, "--fallback-model 'gateway/x'", "without the route nothing is stripped")
 }
 
