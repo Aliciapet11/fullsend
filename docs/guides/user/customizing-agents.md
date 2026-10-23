@@ -815,7 +815,9 @@ the dispatch workflow's built-in rules:
 ### Checking the decision
 
 When a trigger is set, the `Route` job's "Finalize stage" step logs the
-decision for each pull request and pull request comment:
+decision for each pull request and pull request comment. To catch an invalid
+trigger before it merges, see
+[Checking a trigger before you merge](#checking-a-trigger-before-you-merge).
 
 ```text
 CEL route (review): bash=review cel=skip reason=trigger did not match harness=agents@3c3081741e3c
@@ -1008,14 +1010,45 @@ pass its path:
 fullsend lint --fullsend-dir <path>
 ```
 
-`fullsend lint` loads `.fullsend/config.yaml` with the same validation agent
+`fullsend lint` loads `.fullsend/config.yaml`, layered over
+`.fullsend/config.base.yaml` if you have one, with the same validation agent
 runs use. It exits 1 when it finds an error.
+
+`fullsend lint` caches the agents it fetches in `.fullsend/.fullsend-cache/`.
+Add `.fullsend/.fullsend-cache/` to your `.gitignore`, or delete the directory
+before you commit.
 
 #### A valid trigger
 
-With only the `review` entry from
-[Example: review only on `/fs-review`](#example-review-only-on-fs-review) in
-`.fullsend/config.yaml`, `fullsend lint` prints no `error:` line and exits 0.
+This `.fullsend/config.yaml` holds only the `review` entry from
+[Example: review only on `/fs-review`](#example-review-only-on-fs-review):
+
+```yaml
+version: "1"
+agents:
+  - name: review
+    trigger: >-
+      event.transition.kind == "comment_added"
+      && has(event.entity.linked_change_proposal)
+      && has(event.transition.comment.command)
+      && event.transition.comment.command == "/fs-review"
+      && event.actor.kind == "human"
+```
+
+```text
+$ fullsend lint
+  • Fetching agent review from fullsend-ai/agents@5144c1d561a0
+  ✓ agent review resolved from fullsend-ai/agents@main
+  ! review: warning: env.sandbox: env.sandbox coexists with host_files entry /home/user/repo/.fullsend/.fullsend-cache/resources/sha256/e2874d7d47a7a710f89ea6dcb99ae3b8c720ac06fccb7499dfddbe14f12b5ecb/content.env (dest: /sandbox/workspace/.env.d/gcp-vertex.env); env.sandbox values take precedence on key collision
+  ! review: warning: forge: forge is deprecated; use overlays with CEL when expressions instead (see ADR 0088)
+$ echo $?
+0
+```
+
+There is no `error:` line, so the trigger is valid. The entry has no `source:`,
+so `fullsend lint` fetches the `review` agent from the agents repository and
+lints it too. The two `warning:` lines come from that agent, not from your
+`config.yaml` (see [Reading the output](#reading-the-output)).
 
 #### A syntax error
 
@@ -1043,9 +1076,9 @@ $ echo $?
 1
 ```
 
-`agents[0] (review)` names the entry. The `>-` block joins the trigger into
-one line, and the caret marks the position in that line (`1:212`) where
-parsing failed. Here, that is the end of the expression.
+`agents[0] (review)` names the entry. `<input>:1:212` is line 1, column 212
+of the trigger as YAML reads it: the `>-` block joins the trigger into one
+line. The caret marks where parsing failed, here the end of the expression.
 
 #### A trigger that does not return a boolean
 
@@ -1070,8 +1103,9 @@ $ echo $?
 
 | Output | Meaning | Action |
 |---|---|---|
-| `invalid trigger: ERROR: <input>:1:N: Syntax error: …` | The trigger does not compile; the caret marks column `N` of the trigger joined into one line | Fix the expression at the caret in `.fullsend/config.yaml` |
+| `invalid trigger: ERROR: <input>:L:N: Syntax error: …` | The trigger does not compile; the caret marks line `L`, column `N` of the trigger as YAML reads it | Fix the expression at the caret in `.fullsend/config.yaml` |
 | `invalid trigger: trigger expression must evaluate to bool, got string` | The trigger compiles but returns a string, not `true` or `false` | Write a condition, for example `event.transition.kind == "opened"` |
+| `! Git token not available; private repo fetches may fail` | No `GH_TOKEN`, `GITHUB_TOKEN` or `gh` login was found | Nothing to fix for the public agents repository; set `GH_TOKEN` to remove the line |
 | A `warning:` line prefixed with an agent name, for example `review: warning: forge: forge is deprecated` | The warning comes from the upstream harness that an entry without `source:` resolves from the agents repository | Nothing to fix in this repository; warnings do not fail the run unless you pass `--strict` |
 
 `fullsend lint` does not evaluate triggers against events. A trigger that
@@ -1083,7 +1117,8 @@ error at run time, which counts as no match (`cel=skip`); see the
 #### Running the check in CI
 
 This GitHub Actions workflow runs `fullsend lint` on every pull request that
-changes `.fullsend/config.yaml`. It installs the CLI with the same step as
+changes `.fullsend/config.yaml` or `.fullsend/config.base.yaml`. It installs
+the CLI with the same action and `agent: __install_only__` input as
 [Building custom agents](building-custom-agents.md):
 
 ```yaml
@@ -1091,7 +1126,7 @@ name: Lint fullsend config
 
 on:
   pull_request:
-    paths: ['.fullsend/config.yaml']
+    paths: ['.fullsend/config.yaml', '.fullsend/config.base.yaml']
 
 permissions:
   contents: read
@@ -1100,7 +1135,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install fullsend CLI
         uses: fullsend-ai/fullsend@vX.Y.Z
@@ -1114,14 +1149,15 @@ jobs:
         run: fullsend lint --fullsend-dir .fullsend
 ```
 
-`fullsend lint` first ships in the release after v0.50.0. Replace `vX.Y.Z`
-with that release or a later one. The `version` input picks the CLI release
+`fullsend lint` first ships in the release after v0.50.0. Replace both
+`vX.Y.Z` values with that release or a later one. The `version` input picks the CLI release
 the step installs, and it defaults to `latest`. If the repository vendors the
 CLI at `.fullsend/bin/fullsend`, the step uses that binary instead, so it
 must also be that release or later.
 
 An entry without `source:` makes `fullsend lint` fetch the agent from the
-agents repository, so the job needs network access, and `--offline` cannot
+agents repository, so the job needs network access; `GH_TOKEN` authenticates
+that request, and `--offline` cannot
 resolve that entry
 ([#8743](https://github.com/fullsend-ai/fullsend/issues/8743)).
 
