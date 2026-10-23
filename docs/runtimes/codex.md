@@ -140,9 +140,12 @@ refuse some levels with an upstream 400. Check the levels your model accepts bef
 | Extra knobs | `FULLSEND_CODEX_MODEL` (the runner-side model default for codex runs; see [Models](#models)) |
 | Not supported | Sub-agents, `plugins:`, fallback chains, non-OpenAI providers (other than through a Responses-capable inference gateway), Chat Completions or Messages on a gateway |
 
-Cost is **not** in `metrics.json` on codex: the `codex exec --json` stream carries no cost field, so
-the value stays `0`. Token counts are recorded normally on the direct route; through a gateway they
-can read 0 (see [Models through an inference gateway](#models-through-an-inference-gateway-experimental)).
+Cost is recorded as **zero** in `metrics.json` on codex: the
+`codex exec --json` stream carries no cost field, so the value stays `0`.
+Token counts are recorded normally on the direct route; through a gateway
+they can read 0 (see [Models through an inference gateway](#models-through-an-inference-gateway-experimental)).
+See [Computing dollar cost from token telemetry](../guides/infrastructure/distributed-tracing.md#computing-dollar-cost-from-token-telemetry)
+for a list-price estimate from `run-telemetry.jsonl`, including Codex reasoning tokens.
 
 ## Running it locally
 
@@ -286,7 +289,8 @@ What a local codex run needs, beyond the guide:
   project is untrusted; that is not documented upstream and may change, so keep repository skills
   in `.agents/skills`. Codex's bundled skills (`skill-installer`, `imagegen` and friends) are
   switched off, so an agent sees only yours.
-- **No cost in metrics** — see [At a glance](#at-a-glance).
+- **Reported dollar cost is zero.** Token usage is recorded separately; see
+  [At a glance](#at-a-glance).
 
 ## Not yet exercised
 
