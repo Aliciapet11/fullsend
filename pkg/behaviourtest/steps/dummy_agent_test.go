@@ -57,3 +57,85 @@ func TestFindModuleSubdir(t *testing.T) {
 	require.NoError(t, err)
 	assert.DirExists(t, dir)
 }
+
+// fixtureTable builds a dummy-agent table whose rows are op/args pairs.
+func fixtureTable(rows ...[2]string) *godog.Table {
+	table := &godog.Table{
+		Rows: []*messages.PickleTableRow{
+			{Cells: []*messages.PickleTableCell{{Value: "description"}, {Value: "op"}, {Value: "args"}}},
+		},
+	}
+	for _, r := range rows {
+		table.Rows = append(table.Rows, &messages.PickleTableRow{
+			Cells: []*messages.PickleTableCell{{Value: r[0]}, {Value: r[0]}, {Value: r[1]}},
+		})
+	}
+	return table
+}
+
+func fixtureWorld(issue int) (*world.World, *fakeURLSCM) {
+	scm := &fakeURLSCM{files: map[string][]byte{}}
+	return &world.World{
+		SCM:          scm,
+		Org:          "test-org",
+		RepoOwner:    "test-org",
+		RepoName:     "test-repo-03",
+		IssueNumber:  issue,
+		FixturesRoot: "pkg/behaviourtest/steps/testdata",
+	}, scm
+}
+
+func TestParseDummyAgentTable_WriteFixtureExpandsPlaceholders(t *testing.T) {
+	w, scm := fixtureWorld(42)
+	err := parseDummyAgentTable(w, fixtureTable(
+		[2]string{"write_fixture", "output/agent-result.json, fixtures/placeholders.json"},
+	))
+	require.NoError(t, err)
+	require.Len(t, w.DummyOps, 1)
+	assert.Equal(t, "{\n"+
+		"  \"target_repo\": \"test-org/test-repo-03\",\n"+
+		"  \"title\": \"Proposal for #42\",\n"+
+		"  \"body\": \"Filed from test-org/test-repo-03#42\"\n"+
+		"}\n", w.DummyOps[0].Content)
+	assert.Contains(t, string(scm.files["test-org/test-repo-03/"+w.BehaviourScriptPath()]), "test-org/test-repo-03#42")
+}
+
+func TestParseDummyAgentTable_WriteFixtureIssueBeforeIssueExists(t *testing.T) {
+	w, scm := fixtureWorld(0)
+	err := parseDummyAgentTable(w, fixtureTable(
+		[2]string{"write_fixture", "output/agent-result.json, fixtures/placeholders.json"},
+	))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fixtures/placeholders.json")
+	assert.Contains(t, err.Error(), "no issue exists yet")
+	assert.Empty(t, scm.files, "no script is committed when the Given step fails")
+}
+
+func TestParseDummyAgentTable_WriteFixtureWithoutPlaceholdersUnchanged(t *testing.T) {
+	// No issue exists yet: content without placeholders needs none.
+	w, _ := fixtureWorld(0)
+	err := parseDummyAgentTable(w, fixtureTable(
+		[2]string{"write_fixture", "output/agent-result.json, fixtures/plain.json"},
+	))
+	require.NoError(t, err)
+	require.Len(t, w.DummyOps, 1)
+	assert.Equal(t, "{\n  \"target_repo\": \"fullsend-ai/agents\"\n}\n", w.DummyOps[0].Content)
+}
+
+func TestParseDummyAgentTable_PlaceholdersNotExpandedInOtherOps(t *testing.T) {
+	w, _ := fixtureWorld(42)
+	err := parseDummyAgentTable(w, fixtureTable(
+		[2]string{"read_file", "docs/<repo>/<issue>.md"},
+	))
+	require.NoError(t, err)
+	require.Len(t, w.DummyOps, 1)
+	assert.Equal(t, "docs/<repo>/<issue>.md", w.DummyOps[0].Args)
+	assert.Empty(t, w.DummyOps[0].Content)
+}
+
+func TestExpandFixturePlaceholders_RepoRequiresScenarioRepo(t *testing.T) {
+	t.Parallel()
+	_, err := expandFixturePlaceholders(&world.World{}, `{"target_repo": "<repo>"}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no repo configured")
+}
