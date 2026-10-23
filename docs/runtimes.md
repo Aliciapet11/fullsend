@@ -107,10 +107,13 @@ the agent's `agents:` entry in `.fullsend/config.yaml` instead. Harness `env.run
 
 ### Per-agent runtime, model and effort
 
-The `agents:` list is the per-agent place in `config.yaml`: an entry names an agent and can set
-its `runtime`, `model`, `effort` and `subagents`. A built-in agent (`triage`, `code`, `review`,
-`fix`, `retro`, `prioritize`) is tuned with a name-only entry; a custom agent carries the settings
-on its `source:` entry.
+The `agents:` list is the per-agent place in `config.yaml`: an entry names an
+agent and can set its `runtime`, `model`, `effort`, `subagents` and `trigger`
+(on `review`, decides when review runs; see
+[Choosing when review runs](guides/user/customizing-agents.md#choosing-when-review-runs)).
+A built-in agent (`triage`, `code`, `review`, `fix`, `retro`, `prioritize`) is
+tuned with a name-only entry; a custom agent carries the settings on its
+`source:` entry.
 
 ```yaml
 runtime: pi                    # repo default for agents that set none

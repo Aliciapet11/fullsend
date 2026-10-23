@@ -106,7 +106,8 @@ type routeOpts struct {
 // role.
 //
 // An invalid trigger or agent list is an error for every actor, so the
-// route job keeps the bash stage.
+// route job keeps the bash stage. A valid trigger that fails to evaluate on
+// the event returns routeSkip.
 func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) {
 	d := routeDecision{Agent: o.agent}
 	if o.event == nil {
@@ -215,11 +216,14 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 	}
 	eventMap, err := o.event.ToMap()
 	if err != nil {
-		return d, err
+		return d, fmt.Errorf("converting event for %q route: %w", o.agent, err)
 	}
+	// The trigger compiled above, so an error here comes from evaluating it
+	// on this event (e.g. a missing key without has()). Like
+	// harnessdispatch.MatchHarnesses, that is no match.
 	matched, err := harness.EvaluateTrigger(configTrigger, eventMap)
 	if err != nil {
-		return d, fmt.Errorf("evaluating %s trigger: %w", o.agent, err)
+		return withDecision(d, routeSkip, fmt.Sprintf("trigger evaluation failed: %v", err)), nil
 	}
 	if !matched {
 		return withDecision(d, routeSkip, "trigger did not match"), nil

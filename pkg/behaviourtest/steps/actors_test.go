@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"errors"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -165,6 +166,22 @@ func TestWhenActorOpensPullRequest(t *testing.T) {
 	assert.Equal(t, []int{11}, w.CreatedPRNumbers, "the PR is closed at cleanup")
 	assert.Equal(t, write.branches, w.CreatedBranches, "the branch is deleted at cleanup")
 	assert.False(t, w.ScenarioStart.IsZero())
+}
+
+func TestActorOpensPullRequestPattern(t *testing.T) {
+	t.Parallel()
+
+	re := regexp.MustCompile(actorOpensPullRequestPattern)
+	for text, want := range map[string]string{
+		"the write actor opens a pull request":  actorWrite,
+		"the triage actor opens a pull request": actorTriage,
+		"the outsider opens a pull request":     actorOutsider,
+	} {
+		m := re.FindStringSubmatch(text)
+		require.Len(t, m, 2, text)
+		assert.Equal(t, want, m[1])
+	}
+	assert.False(t, re.MatchString("the bot opens a pull request"))
 }
 
 func TestWhenActorOpensPullRequest_Errors(t *testing.T) {

@@ -413,6 +413,20 @@ func TestRouteBuiltinAgent_WhitespaceTriggerIsNoTrigger(t *testing.T) {
 	assert.Equal(t, routeBash, got.Decision)
 }
 
+func TestRouteBuiltinAgent_TriggerEvaluationErrorSkips(t *testing.T) {
+	neutralizeAgentsRepoFallback(t)
+	dir := writeRouteFixture(t, routeFixture{agents: []config.AgentEntry{
+		{Name: "review", Trigger: `event.transition.comment.command == "/fs-review"`},
+	}})
+	got, err := routeBuiltinAgent(context.Background(), routeOpts{
+		agent: "review", configDir: dir, event: routeEvent(t, routePROpened),
+		forgeClient: forge.NewFakeClient(), printer: ui.New(io.Discard),
+	})
+	require.NoError(t, err, "an evaluation error is a CEL decision, not a step failure")
+	assert.Equal(t, routeSkip, got.Decision)
+	assert.True(t, strings.HasPrefix(got.Reason, "trigger evaluation failed: "), "reason: %s", got.Reason)
+}
+
 func TestReviewRouteAccepts(t *testing.T) {
 	cases := map[string]struct {
 		event string

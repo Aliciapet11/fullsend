@@ -23,12 +23,14 @@ const (
 // actor name, for use inside a step pattern's capture group.
 const actorAlternation = actorWrite + "|" + actorTriage + "|" + actorOutsider
 
+const actorOpensPullRequestPattern = `^the (` + actorAlternation + `) opens a pull request$`
+
 func registerActorSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the (`+actorAlternation+`) posts "([^"]+)" on the issue$`, func(ctx context.Context, actor, body string) (context.Context, error) {
 		return ctx, whenActorPostsComment(world.FromContext(ctx), actor, body)
 	})
-	sc.Step(`^the write actor opens a pull request$`, func(ctx context.Context) (context.Context, error) {
-		return ctx, whenActorOpensPullRequest(world.FromContext(ctx), actorWrite)
+	sc.Step(actorOpensPullRequestPattern, func(ctx context.Context, actor string) (context.Context, error) {
+		return ctx, whenActorOpensPullRequest(world.FromContext(ctx), actor)
 	})
 	sc.Step(`^the (`+actorAlternation+`) posts "([^"]+)" on the pull request$`, func(ctx context.Context, actor, body string) (context.Context, error) {
 		return ctx, whenActorPostsPRComment(world.FromContext(ctx), actor, body)

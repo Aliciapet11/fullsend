@@ -51,7 +51,13 @@ You can also keep a hand-written workflow that invokes `fullsend run` with a fix
 
 ## Writing CEL triggers
 
-The harness `trigger` field is a [CEL](https://github.com/google/cel-spec) boolean expression evaluated against the incoming event. The expression has access to a single root variable, `event`, which is a [`NormalizedEvent`](../../normative/normalized-event/v1/) object. The same expression language is used by `agents[].trigger` in `config.yaml`, but that field decides routing for the built-in review agent only; CEL dispatch of custom agents and the Jira poller use the harness `trigger:`.
+The harness `trigger` field is a [CEL](https://github.com/google/cel-spec)
+boolean expression evaluated against the incoming event. The expression has
+access to a single root variable, `event`, which is a
+[`NormalizedEvent`](../../normative/normalized-event/v1/) object. The same
+expression language is used by `agents[].trigger` in `config.yaml`, but that
+field decides routing for the built-in review agent only; CEL dispatch of custom
+agents and the Jira poller use the harness `trigger:`.
 
 A harness with no `trigger` field (or an empty trigger) is manual-only — it runs via `fullsend run` but is never selected by dispatch.
 

@@ -242,6 +242,9 @@ func TestFinalizeStage_CELRoute(t *testing.T) {
 	}
 	badAgent := finalizeEnv("", "success", "success", "run")
 	badAgent["ROUTE_AGENT"] = "review; rm -rf /"
+	hostile := finalizeEnv("review", "success", "success", "skip")
+	hostile["CEL_ROUTE_REASON"] = "bad\r\n::error::pwned 100%"
+	hostile["CEL_ROUTE_HARNESS"] = "x\x1b::warning::y"
 	cases := []struct {
 		name        string
 		env         map[string]string
@@ -286,6 +289,12 @@ func TestFinalizeStage_CELRoute(t *testing.T) {
 		{
 			name: "a failed opt-in check keeps the bash stage and reports an error",
 			env:  withOptIn("failure"), wantStage: "review", wantLog: "::error::CEL route opt-in check failed",
+		},
+		{
+			name: "dynamic values cannot inject workflow commands",
+			env:  hostile, wantStage: "",
+			wantLog:   "reason=bad: :error: :pwned 100%25 harness=x: :warning: :y\n",
+			wantNoLog: "\n::error::",
 		},
 		{
 			name: "an unexpected agent name keeps the bash stage",
@@ -374,6 +383,7 @@ func TestEvaluateCELRouteStep(t *testing.T) {
 		cliExit    int
 		wantErr    bool
 		wantOutput string
+		wantLog    string
 	}{
 		{
 			name:       "decision is written to the step outputs",
@@ -386,6 +396,11 @@ func TestEvaluateCELRouteStep(t *testing.T) {
 			wantOutput: "decision=bash\nreason=resolved harness has no trigger\nharness=\n",
 		},
 		{name: "unknown decision fails the step", cliOutput: `{"decision":"maybe"}`, wantErr: true},
+		{
+			name:      "an unknown decision is escaped in the error",
+			cliOutput: `{"decision":"x\n::error::pwned %0A"}`, wantErr: true,
+			wantLog: "::error::Unexpected CEL route decision: x: :error: :pwned %250A\n",
+		},
 		{name: "CLI failure fails the step", cliExit: 1, wantErr: true},
 	}
 	for _, tc := range cases {
@@ -409,6 +424,8 @@ func TestEvaluateCELRouteStep(t *testing.T) {
 			out, err := cmd.CombinedOutput()
 			if tc.wantErr {
 				require.Error(t, err, "step should fail:\n%s", out)
+				assert.Contains(t, string(out), tc.wantLog)
+				assert.NotContains(t, string(out), "\n::error::pwned")
 				return
 			}
 			require.NoError(t, err, "step failed:\n%s", out)
@@ -435,6 +452,7 @@ func TestValidateAgentsConfigStep_AcceptsOverrideOnlySettings(t *testing.T) {
 		{"subagents only", "agents:\n  - name: review\n    subagents:\n      default: sonnet\n", false},
 		{"model only", "agents:\n  - name: triage\n    model: opus\n", false},
 		{"name only", "agents:\n  - name: review\n", true},
+		{"unquoted boolean trigger", "agents:\n  - name: review\n    trigger: false\n", false},
 		{"blank trigger", "agents:\n  - name: review\n    trigger: \"  \"\n", true},
 		{"empty trigger", "agents:\n  - name: review\n    trigger: \"\"\n", true},
 	}
@@ -455,4 +473,20 @@ func TestValidateAgentsConfigStep_AcceptsOverrideOnlySettings(t *testing.T) {
 			require.NoError(t, err, "%s", out)
 		})
 	}
+}
+
+// TestCELRouteSanitizerCopiesMatch keeps the gha_text copies in the CEL
+// route steps identical.
+func TestCELRouteSanitizerCopiesMatch(t *testing.T) {
+	var defs []string
+	for _, step := range []string{"Detect CEL route opt-in", "Evaluate CEL route", "Finalize stage"} {
+		script := extractReusableDispatchStepScript(t, "route", step)
+		start := strings.Index(script, "gha_text() {")
+		require.GreaterOrEqual(t, start, 0, "step %q must define gha_text", step)
+		end := strings.Index(script[start:], "\n}\n")
+		require.Greater(t, end, 0)
+		defs = append(defs, script[start:start+end])
+	}
+	assert.Equal(t, defs[0], defs[1])
+	assert.Equal(t, defs[0], defs[2])
 }
