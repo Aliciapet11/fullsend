@@ -588,6 +588,11 @@ Install runs in two phases:
 > repository, the install command creates a fork and submits the scaffold
 > PR from the fork. To avoid fork-based delivery, ensure you have write
 > (or admin) access to the target repositories before running install.
+> GitHub App installation tokens never fork: they push a branch and open the
+> scaffold PR in the target repository. Install the App on each target
+> repository with Contents, Pull requests and Workflows read and write
+> permissions. See
+> [Scaffold PR delivery](../../cli/repos.md#scaffold-pr-delivery).
 
 Preview what would change without making modifications:
 
