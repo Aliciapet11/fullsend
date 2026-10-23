@@ -337,6 +337,37 @@ func TestDeleteRef(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, forge.IsNotFound(err))
 	})
+
+	t.Run("reference does not exist (422)", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"message":"Reference does not exist"}`))
+		}))
+		defer srv.Close()
+
+		client := newTestClient(t, srv)
+		err := client.DeleteRef(context.Background(), "owner", "repo", "heads/gone")
+		require.Error(t, err)
+		assert.True(t, forge.IsNotFound(err))
+		var apiErr *APIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, http.StatusUnprocessableEntity, apiErr.StatusCode)
+	})
+
+	t.Run("422 unrelated message", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"message":"Validation Failed"}`))
+		}))
+		defer srv.Close()
+
+		client := newTestClient(t, srv)
+		err := client.DeleteRef(context.Background(), "owner", "repo", "heads/protected")
+		require.Error(t, err)
+		assert.False(t, forge.IsNotFound(err))
+	})
 }
 
 func TestDeleteBranch(t *testing.T) {

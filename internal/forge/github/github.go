@@ -2445,9 +2445,17 @@ func (c *LiveClient) DeleteBranch(ctx context.Context, owner, repo, branchName s
 }
 
 // DeleteRef deletes a git ref (e.g., "heads/my-branch", "tags/v1.0").
-// Returns forge.ErrNotFound (wrapped) if the ref does not exist.
+// Returns forge.ErrNotFound (wrapped) if the ref does not exist. GitHub
+// reports a missing ref on delete as 422 "Reference does not exist" rather
+// than 404, so that response is mapped to forge.ErrNotFound here; the
+// generic APIError.Unwrap 422 handling is deliberately left unchanged.
 func (c *LiveClient) DeleteRef(ctx context.Context, owner, repo, refPath string) error {
 	if err := c.delete_(ctx, fmt.Sprintf("/repos/%s/%s/git/refs/%s", owner, repo, refPath)); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnprocessableEntity &&
+			strings.Contains(lowerAPIErrorText(apiErr), "reference does not exist") {
+			return fmt.Errorf("delete ref %s in %s/%s: %w: %w", refPath, owner, repo, forge.ErrNotFound, err)
+		}
 		return fmt.Errorf("delete ref %s in %s/%s: %w", refPath, owner, repo, err)
 	}
 	return nil
