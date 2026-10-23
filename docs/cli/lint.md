@@ -44,6 +44,9 @@ Each enabled `agents:` entry is resolved and composed through the same machinery
   execute. Without a platform (`--forge` omitted, none in config, no CI env), the forge
   section is left unconsumed and its fields are linted in place.
 
+Diagnostics for an override-only entry come from the upstream harness, not from your
+`config.yaml`, so you cannot fix them in this repository.
+
 Disabled agents (`enabled: false`) are skipped. Overlay `when` expressions evaluate
 against an empty event with `runtime.forge` and `config` available, like other CLI
 flows without event context.
@@ -52,8 +55,14 @@ flows without event context.
 
 After composition, lint applies run's path resolution and file checks: relative paths
 must stay inside the configuration directory, referenced local files must exist, and a
-`policy:` is required. `${VAR}` paths (expanded at run time) and URL references are
-skipped — lint validates what is on disk.
+`policy:` is required. A `${VAR}` reference to a variable run always refuses (OIDC
+credential and provider-only keys) fails lint; other variables are assumed to be set at
+run time. As in run, a harness's `allowed_remote_resources` must be covered
+by the `allowed_remote_resources` in `config.yaml`, and every URL reference must match
+one of the two lists. Local OpenShell profiles and provider definitions are parsed as
+run parses them, so a missing or malformed one fails lint. `${VAR}` paths (expanded at
+run time) are skipped, and URL references are checked against the allowlists but not
+fetched — lint validates what is on disk.
 
 ## Diagnostics
 
@@ -71,7 +80,7 @@ position (`forge[<name>].…`).
 | `forge` | warning | `forge` is deprecated; use overlays with CEL `when` expressions instead ([ADR 0088](../ADRs/0088-cel-guarded-overlays.md)) |
 | `validation_loop.preflight_check` | warning | The value looks like a bare script path; `preflight_check` runs verbatim as a `sh -c` command on the host and is never fetched or resolved like `pre_script`/`post_script` — use `pre_script` for a fetched script, or inline the command |
 | `runner_env`, `env.runner`, `env.sandbox`, `host_files[<n>].src`, `forge[<name>].…` | warning | An env entry named `GITHUB_ISSUE_URL`, or a value or `host_files` source referencing it (`$GITHUB_ISSUE_URL` / `${GITHUB_ISSUE_URL}`), which is deprecated; use `FULLSEND_WORK_ITEM_URL` instead |
-| `config.yaml` | error | Semantic validation of the merged configuration fails — for example an unsupported `version` or an unknown `runtime`; invalid agent entries also surface as per-agent resolution failures |
+| `config.yaml` | error | Semantic validation of `config.yaml` fails — for example an unsupported `version`, an unknown `runtime`, or an `agents[]` entry whose `trigger` does not compile or does not return a boolean. Merged `agents[]` entries and model aliases are validated, including those inherited from `config.base.yaml`; other inherited settings (such as `version` or `runtime`) are not. Errors are labelled `config.yaml` even when the entry comes from the base file. When an `agents[]` entry is invalid, no agent harness is resolved, because every agent would fail with the same error |
 
 ## Exit codes
 

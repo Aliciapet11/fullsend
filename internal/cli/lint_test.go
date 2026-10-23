@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,7 +22,20 @@ func TestRootCommand_HasLintSubcommand(t *testing.T) {
 	assert.True(t, found, "expected lint subcommand")
 }
 
+// stubLintGitHubToken pins token resolution so output assertions do not
+// depend on whether the host has GH_TOKEN, GITHUB_TOKEN or a gh login.
+// An empty token makes resolution fail, as on a CI runner without one.
+func stubLintGitHubToken(t *testing.T, token string) {
+	t.Helper()
+	t.Setenv("GH_TOKEN", token)
+	t.Setenv("GITHUB_TOKEN", "")
+	old := ghAuthTokenFn
+	t.Cleanup(func() { ghAuthTokenFn = old })
+	ghAuthTokenFn = func() ([]byte, error) { return nil, errGitHubTokenMissing }
+}
+
 func TestLintCommand_ExecuteWithFullsendDir(t *testing.T) {
+	stubLintGitHubToken(t, "test-token")
 	dir := t.TempDir()
 	content := "version: \"1\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o644))
@@ -33,6 +47,7 @@ func TestLintCommand_ExecuteWithFullsendDir(t *testing.T) {
 }
 
 func TestLintCommand_ExecuteWithDefaultFullsendDir(t *testing.T) {
+	stubLintGitHubToken(t, "test-token")
 	dir := t.TempDir()
 	fullsendPath := filepath.Join(dir, defaultFullsendDir)
 	require.NoError(t, os.Mkdir(fullsendPath, 0o755))
@@ -44,6 +59,17 @@ func TestLintCommand_ExecuteWithDefaultFullsendDir(t *testing.T) {
 	out, err := executeCmd(cmd, nil)
 	require.NoError(t, err)
 	assert.Empty(t, out)
+}
+
+func TestLintCommand_WarnsWithoutGitToken(t *testing.T) {
+	stubLintGitHubToken(t, "")
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("version: \"1\"\n"), 0o644))
+
+	cmd := newLintCmd()
+	out, err := executeCmd(cmd, []string{"--fullsend-dir", dir})
+	require.NoError(t, err, "a missing token is a warning, not a lint failure")
+	assert.Contains(t, out, "Git token not available")
 }
 
 func TestLintCommand_MissingConfigYAML(t *testing.T) {
@@ -561,6 +587,8 @@ validation_loop:
 func TestLintCommand_URLPolicyNotFetched(t *testing.T) {
 	dir := t.TempDir()
 	cfg := `version: "1"
+allowed_remote_resources:
+  - "https://example.com/"
 agents:
   - name: my-agent
     source: harness/my-agent.yaml
@@ -575,6 +603,8 @@ agents:
 	harnessYAML := `role: triage
 agent: agents/my-agent.md
 policy: https://example.com/policy.yaml#sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+allowed_remote_resources:
+  - "https://example.com/"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
 
@@ -583,7 +613,32 @@ policy: https://example.com/policy.yaml#sha256=0123456789abcdef0123456789abcdef0
 	require.NoError(t, err)
 }
 
+func TestLintCommand_URLReferenceNotAllowlistedFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `version: "1"
+agents:
+  - name: my-agent
+    source: harness/my-agent.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
+	writeLintAgentFixture(t, dir, "my-agent")
+	// run rejects a URL that neither allowlist covers before fetching it;
+	// lint must too.
+	harnessYAML := `role: triage
+agent: agents/my-agent.md
+policy: https://example.com/policy.yaml#sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
+
+	cmd := newLintCmd()
+	_, err := executeCmd(cmd, []string{"--fullsend-dir", dir, "--offline"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `policy: URL "https://example.com/policy.yaml" is not in allowed_remote_resources`)
+}
+
 func TestLintCommand_SkipsDisabledAgents(t *testing.T) {
+	stubLintGitHubToken(t, "test-token")
 	dir := t.TempDir()
 	cfg := `version: "1"
 agents:
@@ -614,4 +669,154 @@ agents:
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "resolving harness for agent \"code\"")
 	assert.Contains(t, err.Error(), "agents-repo fallback unavailable")
+}
+
+func TestLintCommand_InvalidConfigTriggerReportedOnce(t *testing.T) {
+	stubLintGitHubToken(t, "test-token")
+	dir := t.TempDir()
+	cfg := `version: "1"
+agents:
+  - name: review
+    trigger: '"yes"'
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644))
+
+	cmd := newLintCmd()
+	out, err := executeCmd(cmd, []string{"--fullsend-dir", dir, "--offline"})
+	require.Error(t, err)
+	assert.Contains(t, out, "config: error: config.yaml")
+	// Reported once, by config validation: per-agent resolution would
+	// repeat the same whole-list validation error.
+	assert.Equal(t, 1, strings.Count(out+err.Error(), "must evaluate to bool"))
+	assert.NotContains(t, err.Error(), "resolving harness")
+}
+
+func TestLintCommand_RemoteResourceNotInOrgAllowlistFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `version: "1"
+allowed_remote_resources:
+  - "https://raw.githubusercontent.com/fullsend-ai/agents/"
+agents:
+  - name: my-agent
+    source: harness/my-agent.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
+	writeLintAgentFixture(t, dir, "my-agent")
+	harnessYAML := `role: triage
+agent: agents/my-agent.md
+policy: https://example.com/policy.yaml#sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+allowed_remote_resources:
+  - "https://example.com/"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
+
+	cmd := newLintCmd()
+	_, err := executeCmd(cmd, []string{"--fullsend-dir", dir, "--offline"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `validating allowed remote resources for agent "my-agent"`)
+}
+
+func TestLintCommand_MissingLocalProviderFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `version: "1"
+agents:
+  - name: my-agent
+    source: harness/my-agent.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
+	writeLintAgentFixture(t, dir, "my-agent")
+	harnessYAML := `role: triage
+agent: agents/my-agent.md
+policy: policies/base.yaml
+providers:
+  - providers/missing.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
+
+	cmd := newLintCmd()
+	_, err := executeCmd(cmd, []string{"--fullsend-dir", dir})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `resolving local profiles/providers for agent "my-agent"`)
+}
+
+func TestLintCommand_MissingLocalProviderWithURLReferenceFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `version: "1"
+allowed_remote_resources:
+  - "https://example.com/"
+agents:
+  - name: my-agent
+    source: harness/my-agent.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
+	writeLintAgentFixture(t, dir, "my-agent")
+	// A URL reference must not stop the local provider check, and the
+	// check must not fetch it (--offline with nothing cached).
+	harnessYAML := `role: triage
+agent: agents/my-agent.md
+policy: https://example.com/policy.yaml#sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+allowed_remote_resources:
+  - "https://example.com/"
+providers:
+  - providers/missing.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
+
+	cmd := newLintCmd()
+	_, err := executeCmd(cmd, []string{"--fullsend-dir", dir, "--offline"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `resolving local profiles/providers for agent "my-agent"`)
+}
+
+func TestLintCommand_InvalidConfigDoesNotHideInvalidAgentEntry(t *testing.T) {
+	stubLintGitHubToken(t, "test-token")
+	dir := t.TempDir()
+	cfg := `version: "2"
+agents:
+  - name: review
+    trigger: '"yes"'
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644))
+
+	cmd := newLintCmd()
+	out, err := executeCmd(cmd, []string{"--fullsend-dir", dir, "--offline"})
+	require.Error(t, err)
+	assert.Contains(t, out, `unsupported version "2"`)
+	assert.Contains(t, err.Error(), "must evaluate to bool")
+}
+
+func TestLintCommand_DeniedEnvReferenceFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `version: "1"
+agents:
+  - name: my-agent
+    source: harness/my-agent.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
+	writeLintAgentFixture(t, dir, "my-agent")
+	// run refuses OIDC credential variables whatever the host holds.
+	harnessYAML := `role: triage
+agent: agents/my-agent.md
+policy: policies/base.yaml
+env:
+  runner:
+    T: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "set-on-host")
+
+	cmd := newLintCmd()
+	_, err := executeCmd(cmd, []string{"--fullsend-dir", dir})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `validating env for agent "my-agent"`)
+}
+
+func TestLintCommand_RejectsPositionalArgs(t *testing.T) {
+	cmd := newLintCmd()
+	_, err := executeCmd(cmd, []string{"garbage"})
+	require.Error(t, err)
 }
