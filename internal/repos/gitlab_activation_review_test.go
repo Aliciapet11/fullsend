@@ -55,9 +55,11 @@ func TestConvergeRefusesTypedDeliveryBeforeRestriction(t *testing.T) {
 	wrapper, err := scaffold.GitLabPerRepoFile(fullsendPipelineInclude)
 	require.NoError(t, err)
 	fc.FileContents["acme/widgets/"+fullsendPipelineInclude] = wrapper
+	forgeCfg := GitLabForgeConfig()
+	forgeCfg.Client = fc
 	d := convergeDiscovery{
 		repo:       ResolvedRepo{Owner: "acme", Repo: "widgets"},
-		resolved:   ResolvedConfig{Owner: "acme", Repo: "widgets", Forge: ForgeGitLab, ForgeConfig: ForgeConfig{Client: fc}},
+		resolved:   ResolvedConfig{Owner: "acme", Repo: "widgets", Forge: ForgeGitLab, ForgeConfig: forgeCfg},
 		components: []ComponentStatus{{Name: "workflow", Present: true}},
 	}
 	sc := &fakeScaffoldCommit{}
@@ -148,7 +150,7 @@ func TestExpectedGitLabScaffoldForRecordedReleaseDefault(t *testing.T) {
 			for _, f := range installed {
 				fc.FileContents["acme/widgets/"+f.Path] = f.Content
 			}
-			checkScaffoldContentDrift(context.Background(), fc, resolved, dcfg, nil, status)
+			checkScaffoldContentDrift(context.Background(), fc, resolved, dcfg, nil, false, status)
 			assert.Empty(t, status.Error)
 			assert.Empty(t, status.Drifts, "installation-rendered content with a SHA ref and a distinct release tag must not report drift: %+v", status.Drifts)
 		})
