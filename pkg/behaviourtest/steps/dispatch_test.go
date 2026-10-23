@@ -29,6 +29,16 @@ func TestDispatchSteps_RequirePullRequest(t *testing.T) {
 	w := &world.World{ScenarioStart: time.Now()}
 	require.Error(t, whenPullRequestLabeled(w, "label"))
 	require.Error(t, whenPullRequestReviewComment(w))
+	require.Error(t, whenPullRequestChangesRequested(w))
+}
+
+func TestWhenPullRequestChangesRequested_SubmitsRequestChanges(t *testing.T) {
+	scm := &fakeDispatchSCM{}
+	w := &world.World{SCM: scm, RepoOwner: "org", RepoName: "repo", PRNumber: 7}
+	before := time.Now()
+	require.NoError(t, whenPullRequestChangesRequested(w))
+	assert.Equal(t, []string{"REQUEST_CHANGES"}, scm.reviewEvents)
+	assert.False(t, w.ScenarioStart.Before(before), "ScenarioStart must be reset to the review time")
 }
 
 func TestEnsureHarnessArtifacts_NoWorkflowRun(t *testing.T) {
@@ -335,6 +345,7 @@ type fakeDispatchSCM struct {
 	commitCalled     bool
 	committedContent []byte
 	commitErr        error
+	reviewEvents     []string
 }
 
 func (f *fakeDispatchSCM) GetFileContent(_ context.Context, _, _, _ string) ([]byte, error) {
@@ -371,7 +382,8 @@ func (f *fakeDispatchSCM) CommitFileToBranch(context.Context, string, string, st
 func (f *fakeDispatchSCM) CreateChangeProposal(context.Context, string, string, string, string, string, string) (*forge.ChangeProposal, error) {
 	return nil, nil
 }
-func (f *fakeDispatchSCM) SubmitPullRequestReview(context.Context, string, string, int, string) error {
+func (f *fakeDispatchSCM) SubmitPullRequestReview(_ context.Context, _, _ string, _ int, event string) error {
+	f.reviewEvents = append(f.reviewEvents, event)
 	return nil
 }
 func (f *fakeDispatchSCM) CloseIssue(context.Context, string, string, int) error { return nil }

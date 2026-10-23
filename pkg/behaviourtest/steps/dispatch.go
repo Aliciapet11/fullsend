@@ -48,6 +48,9 @@ func registerDispatchSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^a review comment is submitted on the pull request$`, func(ctx context.Context) (context.Context, error) {
 		return ctx, whenPullRequestReviewComment(world.FromContext(ctx))
 	})
+	sc.Step(`^a changes-requested review is submitted on the pull request$`, func(ctx context.Context) (context.Context, error) {
+		return ctx, whenPullRequestChangesRequested(world.FromContext(ctx))
+	})
 	sc.Step(`^the pull request is closed$`, func(ctx context.Context) (context.Context, error) {
 		return ctx, whenPullRequestClosed(world.FromContext(ctx))
 	})
@@ -563,4 +566,16 @@ func whenPullRequestReviewComment(w *world.World) error {
 	w.ScenarioStart = time.Now()
 	// COMMENT works when the e2e bot authored the PR; APPROVE returns 422 self-review.
 	return w.SCM.SubmitPullRequestReview(context.Background(), w.RepoOwner, w.RepoName, w.PRNumber, "COMMENT")
+}
+
+// whenPullRequestChangesRequested submits a changes-requested review on the
+// scenario's pull request as the e2e installation identity: a bot, but not
+// the registered review bot. GitHub refuses REQUEST_CHANGES on a reviewer's
+// own pull request, so a test actor must have opened it.
+func whenPullRequestChangesRequested(w *world.World) error {
+	if w.PRNumber == 0 {
+		return fmt.Errorf("no pull request opened")
+	}
+	w.ScenarioStart = time.Now()
+	return w.SCM.SubmitPullRequestReview(context.Background(), w.RepoOwner, w.RepoName, w.PRNumber, "REQUEST_CHANGES")
 }
