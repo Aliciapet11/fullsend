@@ -115,6 +115,13 @@ head matches the pattern. The pattern is a Go regular expression,
 anchored on both ends by the step — a literal `.` in a branch name must
 be escaped, and a pattern that could also match a fixture branch (e.g. a
 decoy inside the `agent/` namespace) makes the step fail as ambiguous.
+The matched PR becomes the scenario's pull request, so the
+[forge-state steps](#forge-state-assertion-steps) that follow read the
+agent's PR rather than a fixture PR opened earlier.
+
+`branch "<name>" has advanced` is the counterpart of `is unchanged`: it
+passes only when the tip moved since it was recorded, for example because
+an agent pushed to the branch.
 
 For fail-closed paths there is a failure counterpart, asserted against
 the run conclusion plus the post-script's failure comment on the
@@ -129,6 +136,50 @@ label headline or a fixed detail phrase). No shipped scenario uses this
 step yet — the fix stage's only dispatch route is a `changes_requested`
 review from a review bot, which the suite cannot produce — but the
 step is unit-tested and ready for a suite-reachable fail-closed path.
+
+### Forge-state assertion steps
+
+`pkg/behaviourtest/steps/forge_state.go` asserts what agent post-scripts
+leave on the forge. Agent behaviour scenarios in `fullsend-ai/agents` use
+these steps through `go.mod`. Each step is a single forge read. Transient
+errors are retried with the suite's retry helper (`cleanupRetry`), but no
+step polls. Assert after `the harness "<agent>" workflow completes
+successfully`, because by then the post-script has written to the forge.
+"The issue" is the scenario's issue. "The pull request" is the
+scenario's pull request: the one a Given step opened, or the agent's PR
+once `the pull request head branch matches` has found it.
+
+| Step | Passes when |
+|------|-------------|
+| `the issue has label "<label>"` | The issue carries the label |
+| `the issue does not have label "<label>"` | The issue does not carry the label |
+| `the pull request has label "<label>"` | The pull request carries the label |
+| `the pull request does not have label "<label>"` | The pull request does not carry the label |
+| `the issue has been closed as "<reason>"` | The issue is closed with state reason `completed`, `not_planned` or `duplicate` |
+| `the pull request has been closed` | The pull request is closed, merged or not |
+| `a comment on the issue contains "<text>"` | Some issue comment contains the text, such as a sticky marker like `<!-- fullsend:agent-status:` |
+| `a comment on the pull request contains "<text>"` | Some pull request comment contains the text |
+| `the pull request body contains "<text>"` | The PR body contains the text. `<issue>` expands, so `"Closes #<issue>"` checks the closing reference |
+| `an issue with label "<label>" and title containing "<text>" exists` | An open issue other than the scenario's own carries the label and has a matching title, such as an issue an agent filed |
+
+The Then wording `the pull request has been closed` is kept apart from
+the When step `the pull request is closed`, which closes it, so godog
+matching stays unambiguous.
+
+Pull requests are read through the issue endpoints, which serve pull
+requests as issues on GitHub. The existing pull request label and close
+steps write through the same endpoints. Only GitHub reports a close
+reason, so `has been closed as` fails on other forges.
+
+Two Given steps set up pull requests for these scenarios:
+
+- `the write actor opens a pull request linked to the issue` (any test
+  actor works) opens the actor's PR with `Closes #<issue>` in its body.
+  Order `an issue` before it.
+- `a pull request that changes "<path>"` opens a PR, as the e2e
+  installation identity, whose one commit writes `<path>` (for example
+  `scripts/x.sh`) instead of the default `behaviour/pr.txt`. Its branch
+  and PR are cleaned up with the scenario.
 
 ### Compatibility tags
 

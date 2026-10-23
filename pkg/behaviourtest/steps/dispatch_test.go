@@ -360,6 +360,9 @@ func (f *fakeDispatchSCM) AddComment(context.Context, string, string, int, strin
 func (f *fakeDispatchSCM) GetIssue(context.Context, string, string, int) (*forge.Issue, error) {
 	return nil, nil
 }
+func (f *fakeDispatchSCM) ListOpenIssues(context.Context, string, string, ...string) ([]forge.Issue, error) {
+	return nil, nil
+}
 func (f *fakeDispatchSCM) CreateBranch(context.Context, string, string, string) error { return nil }
 func (f *fakeDispatchSCM) DeleteBranch(context.Context, string, string, string) error { return nil }
 func (f *fakeDispatchSCM) CommitFileToBranch(context.Context, string, string, string, string, string, []byte) error {

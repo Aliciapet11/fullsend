@@ -564,6 +564,13 @@ type Issue struct {
 	Body   string
 	URL    string
 	Labels []string
+	// State is "open" or "closed". It is only populated by GetIssue;
+	// other issue reads leave it empty.
+	State string
+	// StateReason is GitHub's close reason ("completed", "not_planned",
+	// "duplicate", or "reopened"); empty when the issue has none or the
+	// forge does not report one (GitLab). Only populated by GetIssue.
+	StateReason string
 }
 
 // IssueComment represents a comment on an issue.

@@ -376,3 +376,20 @@ func TestParseRepo_Invalid(t *testing.T) {
 		t.Fatal("expected error for invalid repo name")
 	}
 }
+
+func TestListOpenIssues(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.OpenIssues = map[string][]forge.Issue{"owner/repo": {
+		{Number: 1, Title: "a", Labels: []string{"bug"}},
+		{Number: 2, Title: "b", Labels: []string{"docs"}},
+	}}
+	d := New(fc)
+
+	issues, err := d.ListOpenIssues(context.Background(), "owner", "repo", "bug")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(issues) != 1 || issues[0].Number != 1 {
+		t.Fatalf("expected only issue #1, got %+v", issues)
+	}
+}

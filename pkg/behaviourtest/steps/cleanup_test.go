@@ -600,6 +600,10 @@ func (f *fakeCleanupSCM) GetIssue(context.Context, string, string, int) (*forge.
 	return nil, nil
 }
 
+func (f *fakeCleanupSCM) ListOpenIssues(context.Context, string, string, ...string) ([]forge.Issue, error) {
+	return nil, nil
+}
+
 func (f *fakeCleanupSCM) GetFileContent(_ context.Context, _, _, path string) ([]byte, error) {
 	if f.baseFileConfigured && strings.Contains(path, "config.base.yaml") {
 		return f.baseFileContent, f.baseFileErr
@@ -1291,6 +1295,10 @@ func (f *fakeRetryCleanupSCM) AddComment(context.Context, string, string, int, s
 }
 
 func (f *fakeRetryCleanupSCM) GetIssue(context.Context, string, string, int) (*forge.Issue, error) {
+	return nil, nil
+}
+
+func (f *fakeRetryCleanupSCM) ListOpenIssues(context.Context, string, string, ...string) ([]forge.Issue, error) {
 	return nil, nil
 }
 

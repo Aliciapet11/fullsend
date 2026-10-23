@@ -701,3 +701,17 @@ func TestEnsureRepoPublic_ContextCancelledWhileWaiting(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 1, c.calls)
 }
+
+func TestListOpenIssues(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.OpenIssues = map[string][]forge.Issue{"owner/repo": {
+		{Number: 1, Title: "a", Labels: []string{"bug"}},
+		{Number: 2, Title: "b", Labels: []string{"docs"}},
+	}}
+	d := New(fc)
+
+	issues, err := d.ListOpenIssues(context.Background(), "owner", "repo", "bug")
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, 1, issues[0].Number)
+}

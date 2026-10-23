@@ -1128,6 +1128,9 @@ func (f *fakeURLSCM) AddComment(context.Context, string, string, int, string) (*
 func (f *fakeURLSCM) GetIssue(context.Context, string, string, int) (*forge.Issue, error) {
 	return nil, nil
 }
+func (f *fakeURLSCM) ListOpenIssues(context.Context, string, string, ...string) ([]forge.Issue, error) {
+	return nil, nil
+}
 func (f *fakeURLSCM) CreateBranch(context.Context, string, string, string) error { return nil }
 func (f *fakeURLSCM) DeleteBranch(context.Context, string, string, string) error { return nil }
 func (f *fakeURLSCM) CommitFileToBranch(context.Context, string, string, string, string, string, []byte) error {

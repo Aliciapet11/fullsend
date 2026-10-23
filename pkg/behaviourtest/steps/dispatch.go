@@ -39,6 +39,9 @@ func registerDispatchSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^a pull request is opened$`, func(ctx context.Context) (context.Context, error) {
 		return ctx, whenPullRequestOpened(world.FromContext(ctx))
 	})
+	sc.Step(`^a pull request that changes "([^"]+)"$`, func(ctx context.Context, path string) (context.Context, error) {
+		return ctx, givenPullRequestChangingPath(world.FromContext(ctx), path)
+	})
 	sc.Step(`^the pull request is labeled "([^"]+)"$`, func(ctx context.Context, label string) (context.Context, error) {
 		return ctx, whenPullRequestLabeled(world.FromContext(ctx), label)
 	})
@@ -477,15 +480,42 @@ func ensureHarnessArtifacts(w *world.World, agent string) error {
 	return nil
 }
 
+// defaultPRPath and defaultPRBody are the file a scenario pull request
+// changes and its body, unless a step asks for others.
+const (
+	defaultPRPath = "behaviour/pr.txt"
+	defaultPRBody = "behaviour"
+)
+
 func whenPullRequestOpened(w *world.World) error {
-	_, err := openPullRequest(w, w.SCM)
+	_, err := openPullRequest(w, w.SCM, defaultPRPath, defaultPRBody)
 	return err
 }
 
-// openPullRequest pushes a new branch with one commit and opens a pull
-// request from it through driver, so the PR author (and the sender of its
-// opened event) is driver's identity. It returns the head branch.
-func openPullRequest(w *world.World, driver scm.Driver) (string, error) {
+// givenPullRequestChangingPath opens a pull request, as the e2e
+// installation identity, whose one commit changes path (e.g. a script
+// a path-filtered harness or post-script reacts to). The PR and its
+// branch are registered for scenario cleanup.
+func givenPullRequestChangingPath(w *world.World, path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("pull request path must not be empty")
+	}
+	branch, err := openPullRequest(w, w.SCM, path, defaultPRBody)
+	if branch != "" {
+		w.CreatedBranches = append(w.CreatedBranches, branch)
+	}
+	if err != nil {
+		return err
+	}
+	w.CreatedPRNumbers = append(w.CreatedPRNumbers, w.PRNumber)
+	return nil
+}
+
+// openPullRequest pushes a new branch with one commit changing path and
+// opens a pull request with body from it through driver, so the PR
+// author (and the sender of its opened event) is driver's identity. It
+// returns the head branch.
+func openPullRequest(w *world.World, driver scm.Driver, path, body string) (string, error) {
 	if w.RepoOwner == "" || w.RepoName == "" {
 		return "", fmt.Errorf("no repo configured; call 'Given the enrolled test repository' before PR operations")
 	}
@@ -496,10 +526,10 @@ func openPullRequest(w *world.World, driver scm.Driver) (string, error) {
 		return "", err
 	}
 	msg := fmt.Sprintf("behaviour pr %s", branch)
-	if err := driver.CommitFileToBranch(ctx, w.RepoOwner, w.RepoName, branch, "behaviour/pr.txt", msg, []byte("behaviour test\n")); err != nil {
+	if err := driver.CommitFileToBranch(ctx, w.RepoOwner, w.RepoName, branch, path, msg, []byte("behaviour test\n")); err != nil {
 		return branch, err
 	}
-	pr, err := driver.CreateChangeProposal(ctx, w.RepoOwner, w.RepoName, "Behaviour test PR", "behaviour", branch, "main")
+	pr, err := driver.CreateChangeProposal(ctx, w.RepoOwner, w.RepoName, "Behaviour test PR", body, branch, "main")
 	if err != nil {
 		return branch, err
 	}
