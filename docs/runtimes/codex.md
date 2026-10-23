@@ -145,7 +145,7 @@ Cost is recorded as **zero** in `metrics.json` on codex: the
 Token counts are recorded normally on the direct route; through a gateway
 they can read 0 (see [Models through an inference gateway](#models-through-an-inference-gateway-experimental)).
 See [Computing dollar cost from token telemetry](../guides/infrastructure/distributed-tracing.md#computing-dollar-cost-from-token-telemetry)
-for a contracted-rate estimate from `run-telemetry.jsonl`, including Codex reasoning tokens.
+for a list-price estimate from `run-telemetry.jsonl`, including Codex reasoning tokens.
 
 ## Running it locally
 

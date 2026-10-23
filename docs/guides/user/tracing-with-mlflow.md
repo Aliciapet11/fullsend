@@ -79,7 +79,7 @@ excludes cache-creation and cache-read tokens, which dominate agent-run cost.
 
 The authoritative cost figure is the runtime-reported `fullsend.cost_usd`
 attribute on `agent` spans (also in `run-telemetry.jsonl`). When that value
-is zero, or when you need a contracted-rate figure rather than the
+is zero, or when you need a list-price figure rather than the
 runtime's reported estimate, compute it from the persisted token fields
 — see [Computing dollar cost from token telemetry](../infrastructure/distributed-tracing.md#computing-dollar-cost-from-token-telemetry).
 

@@ -404,8 +404,7 @@ Fullsend does not calculate inference cost from token counts or maintain a
 model-price table. Each runtime reports a USD cost value and fullsend
 records it as-is. This section defines the source, aggregation, rounding,
 and display behavior of that value across every output surface. To compute
-a dollar figure from persisted token counts using your own contracted
-rates, see [Computing dollar cost from token telemetry](#computing-dollar-cost-from-token-telemetry).
+a list-price dollar estimate from persisted token counts, see [Computing dollar cost from token telemetry](#computing-dollar-cost-from-token-telemetry).
 
 ### Runtime cost extraction
 
@@ -466,7 +465,7 @@ If a runtime does not report cost (returns zero or the field is absent),
 fullsend records zero. There is no fallback cost calculation from token
 counts. A missing runtime cost propagates as `$0.00` on all surfaces. See
 [Computing dollar cost from token telemetry](#computing-dollar-cost-from-token-telemetry)
-for how to apply your own contracted rates to the persisted token fields.
+for how to apply list-price rates to the persisted token fields.
 
 ### Distinction from backend-derived cost estimates
 
@@ -498,9 +497,11 @@ original [cancelled-run follow-up](https://github.com/fullsend-ai/fullsend/pull/
 was closed in favor of pricing the persisted token counts at users' own
 rates. This procedure covers both cases.
 
-Use `run-telemetry.jsonl` as the primary source for a contracted-rate
-estimate. Its `agent` spans carry per-iteration token counts, runtime, and
-model identity. `metrics.json` provides the run-level aggregate when span
+Use `run-telemetry.jsonl` as the primary source for a list-price estimate.
+This is an estimate at the provider's published list price, not your
+contracted rate: fullsend does not yet support configuring or calculating
+a contracted rate. Its `agent` spans carry per-iteration token counts,
+runtime, and model identity. `metrics.json` provides the run-level aggregate when span
 telemetry is unavailable. Token counts survive interruption where the
 runtime has reported them; tokens consumed after its last usage update
 cannot be reconstructed from these artifacts. If telemetry is disabled or
@@ -584,7 +585,7 @@ not the raw OTLP envelope):
 }
 ```
 
-Using hypothetical contracted rates of $2.00 / $10.00 / $2.50 / $0.20 /
+Using hypothetical list-price rates of $2.00 / $10.00 / $2.50 / $0.20 /
 $10.00 per million tokens (uncached input / output / cache creation / cache
 read / reasoning):
 
@@ -601,12 +602,14 @@ cost = 1000/1e6 * 2.00
 The fifth term applies because this is Codex with non-zero reasoning.
 For Claude or the pinned pi version, output already includes reasoning:
 use the first four terms when reasoning has the same rate as other output.
-If your contract prices that subset differently, split output into
+If the provider prices that subset differently, split output into
 `output - reasoning` and `reasoning` and price each once.
 
 Pricing only uncached input and output would give $0.007 and miss the
 cache tokens that dominate this example. Substitute the rates and cache
-retention tiers from your contract; these numbers are illustrative.
+retention tiers from your provider's published list prices; these numbers
+are illustrative. The result is a list-price estimate and will differ from
+your actual charge if you have a contracted rate.
 
 Price each iteration at its model's rates, then sum the estimates. Do not
 also charge the root `run` span or add `metrics.json` totals: that counts
