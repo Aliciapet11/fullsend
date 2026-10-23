@@ -114,6 +114,122 @@ func TestCommitScaffoldViaPR_WriteAccessPushesDirect(t *testing.T) {
 	assert.Equal(t, "acme/widget/fullsend/scaffold-install", client.CreatedBranches[0])
 }
 
+func TestCommitScaffoldViaPR_InstallationTokenPushesUpstream(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "fullsend-ai-sync[bot]"
+	client.InstallationToken = true
+	printer, buf := newTestPrinter()
+
+	_, err := CommitScaffoldFiles(context.Background(), client, printer,
+		"acme", "widget", "main", testMeta("msg", "title", "body"), testFiles, false, nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, buf.String(), "installation token detected")
+	assert.NotContains(t, buf.String(), "creating fork by default")
+	assert.Empty(t, client.CreatedForks, "installation tokens must not fork")
+	require.Equal(t, []string{"acme/widget/fullsend/scaffold-install"}, client.CreatedBranches)
+	require.Len(t, client.CreatedProposals, 1)
+	assert.Equal(t, "fullsend/scaffold-install", client.CreatedProposals[0].Head)
+	assert.Equal(t, "main", client.CreatedProposals[0].Base)
+}
+
+func TestCommitScaffoldViaPR_InstallationTokenBranchForbidden(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "fullsend-ai-sync[bot]"
+	client.InstallationToken = true
+	client.CreateBranchErrors = map[string]error{
+		"acme/widget": fmt.Errorf("API error: %w", forge.ErrForbidden),
+	}
+	printer, _ := newTestPrinter()
+
+	_, err := CommitScaffoldFiles(context.Background(), client, printer,
+		"acme", "widget", "main", testMeta("msg", "title", "body"), testFiles, false, nil)
+	require.Error(t, err)
+	assert.True(t, forge.IsForbidden(err))
+	assert.Contains(t, err.Error(), "GitHub App installation cannot deliver the scaffold PR to acme/widget")
+	assert.Contains(t, err.Error(), `"Contents: Read and write"`)
+	assert.Contains(t, err.Error(), `"Pull requests: Read and write"`)
+	assert.NotContains(t, err.Error(), "fork option")
+	assert.Empty(t, client.CreatedForks)
+}
+
+func TestCommitScaffoldViaPR_InstallationTokenCommitForbiddenNamesWorkflows(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "fullsend-ai-sync[bot]"
+	client.InstallationToken = true
+	client.Errors["CommitFilesToBranch"] = fmt.Errorf("commit: %w", forge.ErrForbidden)
+	printer, _ := newTestPrinter()
+
+	_, err := CommitScaffoldFiles(context.Background(), client, printer,
+		"acme", "widget", "main", testMeta("msg", "title", "body"), testFiles, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"Workflows: Read and write"`)
+	assert.Contains(t, err.Error(), "one possible cause")
+	assert.Contains(t, err.Error(), "SAML enforcement")
+	assert.NotContains(t, err.Error(), "fork option")
+}
+
+func TestCommitScaffoldViaPR_InstallationTokenCommitForbiddenOmitsWorkflowsWithoutWorkflowFiles(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "fullsend-ai-sync[bot]"
+	client.InstallationToken = true
+	client.Errors["CommitFilesToBranch"] = fmt.Errorf("commit: %w", forge.ErrForbidden)
+	printer, _ := newTestPrinter()
+	files := []forge.TreeFile{{Path: "config.yaml", Content: []byte("x"), Mode: "100644"}}
+
+	_, err := CommitScaffoldFiles(context.Background(), client, printer,
+		"acme", "widget", "main", testMeta("msg", "title", "body"), files, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"Contents: Read and write"`)
+	assert.NotContains(t, err.Error(), "Workflows")
+}
+
+func TestCommitScaffoldViaPR_InstallationTokenPRForbidden(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "fullsend-ai-sync[bot]"
+	client.InstallationToken = true
+	client.Errors["CreateChangeProposal"] = fmt.Errorf("create pull request: %w", forge.ErrForbidden)
+	printer, _ := newTestPrinter()
+
+	_, err := CommitScaffoldFiles(context.Background(), client, printer,
+		"acme", "widget", "main", testMeta("msg", "title", "body"), testFiles, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"Pull requests: Read and write"`)
+	assert.Empty(t, client.CreatedForks)
+}
+
+func TestCommitScaffoldViaPR_InstallationTokenOtherErrorUnchanged(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "fullsend-ai-sync[bot]"
+	client.InstallationToken = true
+	client.Errors["CreateChangeProposal"] = fmt.Errorf("server error")
+	printer, _ := newTestPrinter()
+
+	_, err := CommitScaffoldFiles(context.Background(), client, printer,
+		"acme", "widget", "main", testMeta("msg", "title", "body"), testFiles, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creating scaffold PR")
+	assert.NotContains(t, err.Error(), "GitHub App installation")
+}
+
+func TestCommitScaffoldViaPR_InstallationTokenProbeErrorKeepsForkPath(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "contributor"
+	client.TokenScopes = []string{"repo", "workflow"}
+	client.Errors["IsInstallationToken"] = fmt.Errorf("network down")
+	client.BranchRefs["acme/widget/main"] = "upstream-sha"
+	printer, buf := newTestPrinter()
+
+	_, err := CommitScaffoldFiles(context.Background(), client, printer,
+		"acme", "widget", "main", testMeta("msg", "title", "body"), testFiles, false, nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, buf.String(), "Could not detect installation token: network down")
+	assert.NotContains(t, buf.String(), "installation token detected")
+	assert.Equal(t, []string{"acme/widget"}, client.CreatedForks, "probe failure keeps the existing fork default")
+	require.Equal(t, []string{"contributor/widget/fullsend/scaffold-install"}, client.CreatedBranches)
+}
+
 func TestCommitScaffoldViaPR_AdminAccessPushesDirect(t *testing.T) {
 	client := forge.NewFakeClient()
 	client.AuthenticatedUser = "contributor"

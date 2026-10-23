@@ -119,6 +119,25 @@ On GitHub, a `fullsend_ref` pinned to an older release needs the CLI from that r
 
 No equivalent configuration flags were added to `github setup` or elsewhere. Declare `config.inference.region` in `repos.yaml` to make the region managed. Until you do, install keeps the existing `FULLSEND_GCP_REGION` (for example one set with the removed `--vertex-region`) and writes `global` only where the variable is missing; see [Effective infrastructure values](#effective-infrastructure-values). See [Migrating to manifest-driven `repos install`](../guides/getting-started/migrating-from-github-setup.md) for step-by-step migration.
 
+### Scaffold PR delivery
+
+Without `--direct`, install delivers scaffold changes as a pull request. On
+GitHub, a token that owns the repository or has write access pushes a
+`fullsend/scaffold-install` branch to the repository and opens the PR there.
+Any other user token delivers from a fork: install reuses an existing fork, or
+creates one (interactive runs offer a choice; non-interactive runs fork by
+default; fine-grained PATs push to the repository instead).
+
+GitHub App installation tokens never fork. They push the branch and open the
+PR in the target repository, so the App needs the **Contents**, **Pull
+requests** and **Workflows** repository permissions set to read and write (the
+scaffold includes files under `.github/workflows/`), and must be installed on
+that repository. When GitHub refuses to create the branch, commit the files or
+create the PR with a 403, install fails with an error that names the
+permissions to grant as one possible cause. A policy restriction, such as SAML
+enforcement or the repository setting that blocks Actions from creating pull
+requests, can produce the same denial.
+
 ### DCO sign-off
 
 Repositories that enforce the [Developer Certificate of Origin](https://developercertificate.org/) reject commits without a `Signed-off-by` trailer. `repos install` can add one to every scaffold commit it creates or updates — fresh installs, re-runs of an open initialization PR/MR, drift repair, and upgrades — on GitHub and GitLab, for both direct (`--direct`) and PR/MR delivery. The trailer names the user who owns the installing token, resolved from the forge's authenticated-user API (`Signed-off-by: Name <email>`). When the profile has no name, the login is used. When it has no public email, the forge's noreply address is used.

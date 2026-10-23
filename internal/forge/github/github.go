@@ -1708,7 +1708,7 @@ func (c *LiveClient) commitFilesTo(ctx context.Context, owner, repo, branch, mes
 			if !p.modeOnly {
 				createdSHA, err := c.createBlobForFile(ctx, owner, repo, f)
 				if err != nil {
-					return false, fmt.Errorf("create blob for %s: %w", f.Path, err)
+					return false, fmt.Errorf("create blob for %s: %w", f.Path, wrapForbidden(err))
 				}
 				blobSHAValue = createdSHA
 			}
@@ -1732,7 +1732,7 @@ func (c *LiveClient) commitFilesTo(ctx context.Context, owner, repo, branch, mes
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnprocessableEntity && isStaleTreeSHAError(apiErr) {
 			return false, fmt.Errorf("create tree: %w: %w", forge.ErrNonFastForward, err)
 		}
-		return false, fmt.Errorf("create tree: %w", err)
+		return false, fmt.Errorf("create tree: %w", wrapForbidden(err))
 	}
 	var newTree struct {
 		SHA string `json:"sha"`
@@ -1754,7 +1754,7 @@ func (c *LiveClient) commitFilesTo(ctx context.Context, owner, repo, branch, mes
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnprocessableEntity && isStaleTreeSHAError(apiErr) {
 			return false, fmt.Errorf("create commit: %w: %w", forge.ErrNonFastForward, err)
 		}
-		return false, fmt.Errorf("create commit: %w", err)
+		return false, fmt.Errorf("create commit: %w", wrapForbidden(err))
 	}
 	var newCommit struct {
 		SHA string `json:"sha"`
@@ -1784,7 +1784,7 @@ func (c *LiveClient) commitFilesTo(ctx context.Context, owner, repo, branch, mes
 				return false, fmt.Errorf("update ref: %w: %w", forge.ErrNonFastForward, err)
 			}
 		}
-		return false, fmt.Errorf("update ref: %w", err)
+		return false, fmt.Errorf("update ref: %w", wrapForbidden(err))
 	}
 	refUpdateResp.Body.Close()
 
@@ -2372,12 +2372,26 @@ func (c *LiveClient) CompareCommits(ctx context.Context, owner, repo, base, head
 	return cmp.Status, nil
 }
 
+// wrapForbidden marks a 403 APIError that is not a rate-limit response as
+// forge.ErrForbidden while keeping the underlying APIError in the chain. Other
+// errors are returned unchanged. CreateBranch, CreateBranchFromSHA,
+// CreateChangeProposal and the Git Data steps of commitFilesTo (blob, tree,
+// commit and ref update) use it so a throttled 403 is not reported as a
+// missing permission.
+func wrapForbidden(err error) error {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden && !IsRateLimitError(err) {
+		return fmt.Errorf("%w: %w", forge.ErrForbidden, err)
+	}
+	return err
+}
+
 // CreateBranch creates a new branch from the repository's default branch.
 func (c *LiveClient) CreateBranch(ctx context.Context, owner, repo, branchName string) error {
 	// Step 1: Get the default branch name.
 	repoResp, err := c.get(ctx, fmt.Sprintf("/repos/%s/%s", owner, repo))
 	if err != nil {
-		return fmt.Errorf("get repo for default branch: %w", err)
+		return fmt.Errorf("get repo for default branch: %w", wrapForbidden(err))
 	}
 	var repoInfo struct {
 		DefaultBranch string `json:"default_branch"`
@@ -2389,7 +2403,7 @@ func (c *LiveClient) CreateBranch(ctx context.Context, owner, repo, branchName s
 	// Step 2: Get the SHA of the default branch.
 	refResp, err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", owner, repo, repoInfo.DefaultBranch))
 	if err != nil {
-		return fmt.Errorf("get ref for default branch: %w", err)
+		return fmt.Errorf("get ref for default branch: %w", wrapForbidden(err))
 	}
 	var ref struct {
 		Object struct {
@@ -2407,11 +2421,7 @@ func (c *LiveClient) CreateBranch(ctx context.Context, owner, repo, branchName s
 	}
 	resp, err := c.post(ctx, fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo), payload)
 	if err != nil {
-		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
-			return fmt.Errorf("%w: %w", forge.ErrForbidden, err)
-		}
-		return fmt.Errorf("create branch %s: %w", branchName, err)
+		return fmt.Errorf("create branch %s: %w", branchName, wrapForbidden(err))
 	}
 	resp.Body.Close()
 	return nil
@@ -2428,11 +2438,7 @@ func (c *LiveClient) CreateBranchFromSHA(ctx context.Context, owner, repo, branc
 	}
 	resp, err := c.post(ctx, fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo), payload)
 	if err != nil {
-		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
-			return fmt.Errorf("%w: %w", forge.ErrForbidden, err)
-		}
-		return fmt.Errorf("create branch %s from SHA: %w", branchName, err)
+		return fmt.Errorf("create branch %s from SHA: %w", branchName, wrapForbidden(err))
 	}
 	resp.Body.Close()
 	return nil
@@ -2462,6 +2468,7 @@ func (c *LiveClient) DeleteRef(ctx context.Context, owner, repo, refPath string)
 }
 
 // CreateChangeProposal creates a pull request.
+// Returns forge.ErrForbidden (wrapped) on insufficient permissions.
 func (c *LiveClient) CreateChangeProposal(ctx context.Context, owner, repo, title, body, head, base string) (*forge.ChangeProposal, error) {
 	payload := map[string]string{
 		"title": title,
@@ -2472,7 +2479,7 @@ func (c *LiveClient) CreateChangeProposal(ctx context.Context, owner, repo, titl
 
 	resp, err := c.post(ctx, fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), payload)
 	if err != nil {
-		return nil, fmt.Errorf("create pull request: %w", err)
+		return nil, fmt.Errorf("create pull request: %w", wrapForbidden(err))
 	}
 
 	var pr struct {
