@@ -567,9 +567,9 @@ type Issue struct {
 	// State is "open" or "closed". It is only populated by GetIssue;
 	// other issue reads leave it empty.
 	State string
-	// StateReason is GitHub's close reason ("completed", "not_planned",
-	// "duplicate", or "reopened"); empty when the issue has none or the
-	// forge does not report one (GitLab). Only populated by GetIssue.
+	// StateReason is GitHub's state_reason: "completed", "not_planned"
+	// or "duplicate" for a closed issue, "reopened" or empty otherwise.
+	// GitLab does not report one. Only populated by GetIssue.
 	StateReason string
 }
 

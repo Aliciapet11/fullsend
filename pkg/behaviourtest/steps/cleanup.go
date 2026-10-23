@@ -139,6 +139,14 @@ func CleanupScenario(w *world.World) {
 			worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
 		}
 	}
+	for _, number := range w.CreatedIssueNumbers {
+		desc := fmt.Sprintf("close agent-filed issue #%d", number)
+		if err := guardedCleanupRetry(w, desc, func() error {
+			return w.SCM.CloseIssue(ctx, w.RepoOwner, w.RepoName, number)
+		}); err != nil {
+			worldLogf(w, "behaviour cleanup: %s: %v", desc, err)
+		}
+	}
 	if w.ForkPRNumber > 0 {
 		// Fork PRs are opened against the base repo, so close on base repo.
 		desc := fmt.Sprintf("close fork PR #%d", w.ForkPRNumber)

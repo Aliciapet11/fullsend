@@ -83,8 +83,9 @@ type World struct {
 	// Branch-handling scenario state — set by branch step definitions.
 	// RecordedBranchSHAs maps branch name → tip SHA captured before a
 	// run so "branch X is unchanged" can re-check it afterwards.
-	// CreatedBranches and CreatedPRNumbers track resources the branch
-	// steps created (or discovered) so CleanupScenario can remove them.
+	// CreatedBranches, CreatedPRNumbers and CreatedIssueNumbers track
+	// resources the steps created (or discovered) so CleanupScenario can
+	// remove them.
 	// Isolation across Clone()d Worlds relies on the suite invariant
 	// that resetScenarioWorld nils these after every clone and the
 	// template World never populates them — do not set them on a
@@ -92,6 +93,9 @@ type World struct {
 	RecordedBranchSHAs map[string]string
 	CreatedBranches    []string
 	CreatedPRNumbers   []int
+	// CreatedIssueNumbers holds issues an agent filed that a step
+	// matched, closed at cleanup.
+	CreatedIssueNumbers []int
 
 	// LeasedRepoName is the logical test-repo name acquired via
 	// Driver.AllocateRepo (or install.LeaseDriver.AllocateLease) for this

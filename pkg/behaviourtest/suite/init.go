@@ -172,6 +172,7 @@ func resetScenarioWorld(w *world.World) {
 	w.RecordedBranchSHAs = nil
 	w.CreatedBranches = nil
 	w.CreatedPRNumbers = nil
+	w.CreatedIssueNumbers = nil
 	w.LeasedRepoName = ""
 	w.LeasedRepoOrg = ""
 	w.LeaseOwned = nil

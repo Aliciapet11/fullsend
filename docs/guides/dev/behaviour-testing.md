@@ -160,7 +160,7 @@ once `the pull request head branch matches` has found it.
 | `a comment on the issue contains "<text>"` | Some issue comment contains the text, such as a sticky marker like `<!-- fullsend:agent-status:` |
 | `a comment on the pull request contains "<text>"` | Some pull request comment contains the text |
 | `the pull request body contains "<text>"` | The PR body contains the text. `<issue>` expands, so `"Closes #<issue>"` checks the closing reference |
-| `an issue with label "<label>" and title containing "<text>" exists` | An open issue other than the scenario's own carries the label and has a matching title, such as an issue an agent filed |
+| `an issue with label "<label>" and title containing "<text>" exists` | An open issue other than the scenario's own carries the label and has a matching title, such as an issue an agent filed. `<issue>` expands; use it in the title so a leftover from an earlier run cannot match. The matched issue is closed at cleanup |
 
 The Then wording `the pull request has been closed` is kept apart from
 the When step `the pull request is closed`, which closes it, so godog
@@ -168,14 +168,17 @@ matching stays unambiguous.
 
 Pull requests are read through the issue endpoints, which serve pull
 requests as issues on GitHub. The existing pull request label and close
-steps write through the same endpoints. Only GitHub reports a close
-reason, so `has been closed as` fails on other forges.
+steps write through the same endpoints. GitLab numbers merge requests
+apart from issues, so tag scenarios that use the pull request steps
+`@skip:gitlab`. Only GitHub reports a close reason, so `has been closed
+as` fails on other forges.
 
 Two Given steps set up pull requests for these scenarios:
 
-- `the write actor opens a pull request linked to the issue` (any test
-  actor works) opens the actor's PR with `Closes #<issue>` in its body.
-  Order `an issue` before it.
+- `the write actor opens a pull request linked to the issue` opens the
+  write actor's PR with `Closes #<issue>` in its body. Only the write
+  actor can push a branch to the test repository. Order `an issue`
+  before it.
 - `a pull request that changes "<path>"` opens a PR, as the e2e
   installation identity, whose one commit writes `<path>` (for example
   `scripts/x.sh`) instead of the default `behaviour/pr.txt`. Its branch
@@ -961,6 +964,8 @@ suiteRunner := godog.TestSuite{
 **`scm.Driver.ListPullRequestCommits` addition (breaking change):** The `scm.Driver` interface now includes `ListPullRequestCommits(ctx, owner, repo, number) ([]string, error)`, returning the commit SHAs on a pull request, oldest first. The dummy-playback suite uses the first entry as the code stage's published commit: review and fix only append commits to the branch, so unlike the head branch's live tip, that commit cannot be displaced by a later stage that races ahead. The GitHub and GitLab reference implementations pass through to the new `forge.Client.ListPullRequestCommits` method (GitHub caps results at 250 commits). This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
 
 **`scm.Driver.CreateUserFork` addition (breaking change):** The `scm.Driver` interface now includes `CreateUserFork(ctx, owner, repo string) (forkOwner, forkRepo string, err error)`, which forks a repository into the authenticated user's own account, the way an outside contributor does. The forge picks the fork's name. The `owned by the <actor>` fork step uses it. The GitHub and GitLab reference implementations pass through to the existing `forge.Client.CreateFork` method. This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
+
+**`scm.Driver.ListOpenIssues` addition (breaking change):** The `scm.Driver` interface now includes `ListOpenIssues(ctx, owner, repo string, labels ...string) ([]forge.Issue, error)`, returning the repository's open issues (pull requests excluded) that carry every given label. The `an issue with label ... and title containing ... exists` step uses it. The GitHub and GitLab reference implementations pass through to the existing `forge.Client` method of the same name. This widens the required method set, so external `scm.Driver` implementations must add this method when upgrading past this release or they will no longer satisfy the interface.
 
 **`ci.RunLister` optional interface:** `ListRecentRuns(ctx, owner, repo string, limit int) ([]forge.WorkflowRun, error)` lists a repository's most recent workflow runs across all workflows. Failure log collection uses it to find runs that no step resolved. It is a separate interface, not a `ci.Driver` method, so external `ci.Driver` implementations keep compiling. Without it, failed scenarios still get a failure summary but only the run a step resolved has its logs collected. The GitHub Actions and GitLab CI reference drivers implement it.
 

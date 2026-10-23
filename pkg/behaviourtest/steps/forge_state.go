@@ -195,13 +195,19 @@ func thenPullRequestBodyContains(w *world.World, text string) error {
 
 // thenIssueWithLabelAndTitleExists asserts that an open issue other than
 // the scenario's own carries the label and has a title containing title,
-// such as an issue an agent's post-script filed.
+// such as an issue an agent's post-script filed. The <issue> placeholder
+// expands, so a title naming the scenario's issue cannot match a leftover
+// from an earlier run. The matched issue is closed at cleanup.
 func thenIssueWithLabelAndTitleExists(w *world.World, label, title string) error {
 	if err := ensureScenarioRepo(w); err != nil {
 		return err
 	}
+	title, err := expandIssuePlaceholder(w, title)
+	if err != nil {
+		return err
+	}
 	var issues []forge.Issue
-	err := cleanupRetry(w.Logf, fmt.Sprintf("list open issues labeled %q", label), func() error {
+	err = cleanupRetry(w.Logf, fmt.Sprintf("list open issues labeled %q", label), func() error {
 		var listErr error
 		issues, listErr = w.SCM.ListOpenIssues(context.Background(), w.RepoOwner, w.RepoName, label)
 		return listErr
@@ -215,9 +221,13 @@ func thenIssueWithLabelAndTitleExists(w *world.World, label, title string) error
 			continue
 		}
 		if strings.Contains(issue.Title, title) {
+			w.CreatedIssueNumbers = append(w.CreatedIssueNumbers, issue.Number)
 			return nil
 		}
 		titles = append(titles, fmt.Sprintf("#%d %q", issue.Number, issue.Title))
+	}
+	if len(titles) == 0 {
+		titles = []string{"none"}
 	}
 	return fmt.Errorf("no open issue labeled %q has a title containing %q (labeled: %s)", label, title, strings.Join(titles, ", "))
 }

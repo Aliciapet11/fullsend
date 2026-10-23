@@ -213,14 +213,19 @@ func TestThenIssueWithLabelAndTitleExists(t *testing.T) {
 
 	require.NoError(t, thenIssueWithLabelAndTitleExists(w, "retro", "flaky login"))
 	assert.Equal(t, [][]string{{"retro"}}, f.labelsSeen, "the label filter is passed to the forge")
+	assert.Equal(t, []int{13}, w.CreatedIssueNumbers, "the matched issue is closed at cleanup")
 
 	err := thenIssueWithLabelAndTitleExists(w, "retro", "missing")
 	require.ErrorContains(t, err, `no open issue labeled "retro" has a title containing "missing"`)
 	assert.Contains(t, err.Error(), `#12 "Unrelated follow-up"`)
 
+	f.openIssues = append(f.openIssues, forge.Issue{Number: 14, Title: "Retro for #7"})
+	require.NoError(t, thenIssueWithLabelAndTitleExists(w, "retro", "for #<issue>"))
+	assert.Equal(t, []int{13, 14}, w.CreatedIssueNumbers, "<issue> expands to the scenario's issue")
+
 	f.openIssues = f.openIssues[:1]
-	require.Error(t, thenIssueWithLabelAndTitleExists(w, "retro", "flaky login"),
-		"the scenario's own issue does not count")
+	err = thenIssueWithLabelAndTitleExists(w, "retro", "flaky login")
+	require.ErrorContains(t, err, "(labeled: none)", "the scenario's own issue does not count")
 }
 
 func TestThenIssueWithLabelAndTitleExists_Errors(t *testing.T) {

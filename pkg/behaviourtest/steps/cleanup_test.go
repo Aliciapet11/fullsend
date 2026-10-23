@@ -54,6 +54,24 @@ func TestCleanupScenario_ClosesForkPR(t *testing.T) {
 	assert.Equal(t, 42, scmDriver.closedIssues[0].number)
 }
 
+func TestCleanupScenario_ClosesAgentFiledIssues(t *testing.T) {
+	t.Parallel()
+
+	scmDriver := &fakeCleanupSCM{}
+	w := &world.World{
+		RepoOwner:           "org",
+		RepoName:            "repo",
+		CreatedIssueNumbers: []int{13, 14},
+		SCM:                 scmDriver,
+	}
+	CleanupScenario(w)
+	var closed []int
+	for _, rec := range scmDriver.closedIssues {
+		closed = append(closed, rec.number)
+	}
+	assert.Equal(t, []int{13, 14}, closed)
+}
+
 func TestCleanupScenario_RestoresGatewayConfig(t *testing.T) {
 	t.Parallel()
 
