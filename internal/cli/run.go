@@ -2689,6 +2689,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			Effort:            h.Effort,
 			FallbackModels:    overrides.fallbackModels,
 			RepoDir:           remoteRepositoryDir,
+			HostRepoDir:       hostRepositoryDir,
 			FullsendDir:       absFullsendDir,
 			PluginDirs:        pluginDirs,
 			Plugins:           boot.Plugins(),
