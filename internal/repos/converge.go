@@ -3676,13 +3676,18 @@ func resolveTargetRef(ctx context.Context, fullsendRef, upstreamRef, upstreamTag
 // example changed GitLab runner tags — can be detected and repaired
 // without repointing a scaffold pinned to another ref.
 //
-// An empty GitHub ref is not unstamped: vendored callers use local
-// workflow paths that carry no ref at all.
+// The check is forge-specific. An empty GitHub ref is not unstamped:
+// vendored callers use local workflow paths that carry no ref at all. A
+// GitLab wrapper marked config.DefaultUpstreamRef is not unstamped either:
+// it was rendered with an explicit "main" ref, which writes the
+// fullsend-ref marker and a main source build, whereas an empty ref writes
+// no marker and a latest-release download. Re-rendering it with empty refs
+// would silently change its runtime target.
 func isUnstampedInstallRef(forgeName, installedRef string) bool {
-	if installedRef == config.DefaultUpstreamRef {
-		return true
+	if forgeName == ForgeGitLab {
+		return installedRef == ""
 	}
-	return forgeName == ForgeGitLab && installedRef == ""
+	return installedRef == config.DefaultUpstreamRef
 }
 
 // unstampedWorkflow reports whether the probed workflow component is

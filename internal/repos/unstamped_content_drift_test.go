@@ -108,6 +108,35 @@ func TestConverge_GitLab_PinnedInstallWithoutRefWarns(t *testing.T) {
 	assert.Contains(t, strings.Join(messages, "\n"), "scaffold content drift not checked: gitlab.fullsend_ref is not set")
 }
 
+// TestConverge_GitLab_MainMarkedInstallKeepsRuntimeTarget verifies that a
+// GitLab scaffold marked fullsend-ref: main (rendered with an explicit main
+// ref and FULLSEND_VERSION=main) is not treated as unstamped: with neither
+// manifest nor build refs, convergence must not re-render it with empty refs,
+// which would drop the marker and switch the bootstrap script from a main
+// source build to a latest-release download.
+func TestConverge_GitLab_MainMarkedInstallKeepsRuntimeTarget(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	populateGitLabInstalled(fc, "acme", "api")
+	populateGitLabScaffoldContent(t, fc, "acme", "api", config.DefaultUpstreamRef)
+	populateGitLabTypedRoot(t, fc, "acme", "api", fc.FileContents["acme/api/"+fullsendPipelineInclude])
+	require.Contains(t, string(fc.FileContents["acme/api/"+fullsendPipelineInclude]), "fullsend-ref: "+config.DefaultUpstreamRef)
+	cfg := unstampedTaggedConvergeCfg()
+
+	sc := &spyScaffoldCommit{}
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+	require.NoError(t, err)
+	require.Empty(t, result.Failed())
+
+	committed := committedScaffold(sc)
+	for path, content := range committed {
+		assert.NotContains(t, string(content), `FULLSEND_VERSION="latest"`, "%s must not switch to a latest-release download", path)
+	}
+	if wrapper, ok := committed[fullsendPipelineInclude]; ok {
+		assert.Contains(t, string(wrapper), "fullsend-ref: "+config.DefaultUpstreamRef, "the main marker must be preserved")
+	}
+	assert.NotContains(t, committed, ".gitlab/ci/fullsend-agent.yml", "no baseline can be rendered without repointing the ref")
+}
+
 // TestStatus_GitLab_UnstampedInstallReportsRunnerTagDrift verifies that
 // repos status reports the same runner-tag drift convergence repairs for
 // an unstamped installation, and none once the templates match.
@@ -179,8 +208,8 @@ func TestIsUnstampedInstallRef(t *testing.T) {
 		{ForgeGitHub, config.DefaultUpstreamRef, true},
 		{ForgeGitHub, "", false}, // vendored callers carry no ref
 		{ForgeGitHub, "v1.0.0", false},
-		{ForgeGitLab, config.DefaultUpstreamRef, true},
-		{ForgeGitLab, "", true}, // wrapper without a version marker
+		{ForgeGitLab, config.DefaultUpstreamRef, false}, // explicit main marker, not an unstamped wrapper
+		{ForgeGitLab, "", true},                         // wrapper without a version marker
 		{ForgeGitLab, "v2.5.0", false},
 	}
 	for _, tc := range cases {
