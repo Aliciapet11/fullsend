@@ -42,12 +42,10 @@ var validConfigAgentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 // (ValidAgentNames) or matches a sourced entry in a parent layer; the
 // built-in keeps resolving through the agents-repo fallback.
 //
-// Trigger is a CEL boolean over the normalized event (ADR 0061) that decides
-// when this agent runs, taking precedence over the harness's own trigger:
-// field. For the review agent it opts the repository into CEL routing
-// (fullsend dispatch --route review); for a source-registered agent it
-// replaces the harness trigger in CEL dispatch. An omitted or empty value
-// inherits the parent layer's.
+// Trigger is a CEL boolean over the normalized event (ADR 0061). It decides
+// routing for the built-in review agent only (fullsend dispatch --route
+// review); CEL dispatch and the Jira poller keep using the harness trigger:.
+// An omitted or empty value inherits the parent layer's.
 //
 // Subagents maps persona names to model references, controlling which
 // model each sub-agent persona runs on. The "default" key sets the
