@@ -1150,9 +1150,6 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	if h.ValidationLoop != nil && strings.Contains(h.ValidationLoop.Schema, "${") {
 		h.ValidationLoop.Schema = os.Expand(h.ValidationLoop.Schema, expander)
 	}
-	if h.ValidationLoop != nil && strings.Contains(h.ValidationLoop.PreflightCheck, "${") {
-		h.ValidationLoop.PreflightCheck = os.Expand(h.ValidationLoop.PreflightCheck, expander)
-	}
 
 	if err := h.ValidateFilesExist(); err != nil {
 		printer.StepFail("File validation failed")
@@ -1414,27 +1411,13 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// When a validation_loop declares a preflight_check command, run it now
 	// to catch missing host dependencies (e.g. python3-jsonschema) before
 	// sandbox creation — not after the agent has already finished. See #5074.
+	// The command runs against the preflight allowlist environment; its
+	// ${VAR} references are validated and expanded in runPreflightCheck,
+	// which rejects credential references before any shell sees them.
 	if h.ValidationLoop != nil && h.ValidationLoop.PreflightCheck != "" {
-		printer.StepStart("Preflight: checking validation_loop dependencies")
-		preflightCtx, preflightCancel := context.WithTimeout(ctx, preflightCheckTimeout)
-		defer preflightCancel()
-		preflightCmd := exec.CommandContext(preflightCtx, "sh", "-c", h.ValidationLoop.PreflightCheck)
-		// Use childScriptEnv to strip OIDC credential vars (#5832).
-		preflightCmd.Env = childScriptEnv(h.RunnerEnv, "")
-		preflightOut, preflightErr := preflightCmd.CombinedOutput()
-		if preflightErr != nil {
-			printer.StepFail("Preflight dependency check failed")
-			if preflightCtx.Err() == context.DeadlineExceeded {
-				return fmt.Errorf("validation_loop.preflight_check timed out after %s: %s", preflightCheckTimeout, h.ValidationLoop.PreflightCheck)
-			}
-			// Redact before the message reaches the CLI error, the trace and
-			// the completion comment: the command runs with env.runner.
-			// Redact the raw capture first, because validationFailMessage
-			// trims it and a padded secret would then miss the literal match.
-			redactedOut := []byte(redactFeedback(string(preflightOut), h.RunnerEnv))
-			return fmt.Errorf("validation_loop.preflight_check failed: %s\n%s\nInstall the missing dependency before running this agent", h.ValidationLoop.PreflightCheck, redactFeedback(validationFailMessage(redactedOut, preflightErr), h.RunnerEnv))
+		if err := runPreflightCheck(ctx, printer, "validation_loop.preflight_check", h.ValidationLoop.PreflightCheck, h.RunnerEnv, absFullsendDir); err != nil {
+			return err
 		}
-		printer.StepDone("Preflight dependency check passed")
 	}
 
 	// 2. Check openshell availability.

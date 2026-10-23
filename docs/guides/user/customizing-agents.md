@@ -114,6 +114,8 @@ validation_loop:
   schema: schemas/my-custom-schema.json
 ```
 
+Setting `validation_loop.preflight_check` swaps the dependency probe. It runs in a minimal, credential-safe environment, and an out-of-scope `${VAR}` reference fails the run before the probe executes. See the [harness reference](../../reference/harness-reference.md) for the full contract.
+
 ### What you can override
 
 Any harness field can be overridden. See the [field merge rules](../../reference/harness-reference.md#field-merge-rules-for-base-and-overlays) for how each field type combines with the base:

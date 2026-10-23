@@ -4592,6 +4592,129 @@ func TestRunAgent_PreflightCheck_Timeout(t *testing.T) {
 	assert.Contains(t, err.Error(), "timed out")
 }
 
+func TestRunAgent_PreflightCheck_HostSetTokenReferenceRejected(t *testing.T) {
+	// A preflight_check referencing a host-set credential must be rejected
+	// before the command runs: the error names the variable, never its
+	// value, and the run never reaches the openshell availability check.
+	useFakeOpenshell(t)
+	t.Setenv("GH_TOKEN", "gh-host-secret-value-1")
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"echo ${GH_TOKEN}\"\n  max_iterations: 2\n")
+
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(io.Discard)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "${GH_TOKEN}")
+	assert.Contains(t, err.Error(), "env.runner")
+	assert.NotContains(t, err.Error(), "gh-host-secret-value-1")
+	// Rejection fires before the openshell check.
+	assert.NotContains(t, err.Error(), "openshell")
+}
+
+func TestRunAgent_PreflightCheck_DeclaredTokenReferenceRejected(t *testing.T) {
+	// A credential declared via env.runner (host-unset) is excluded from
+	// the preflight environment, so referencing it is likewise rejected
+	// before expansion — the value never reaches the child or the error.
+	useFakeOpenshell(t)
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nenv:\n  runner:\n    GH_TOKEN: \"declared-secret-value-1\"\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"echo ${GH_TOKEN}\"\n  max_iterations: 2\n")
+
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(io.Discard)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "${GH_TOKEN}")
+	assert.NotContains(t, err.Error(), "declared-secret-value-1")
+	assert.NotContains(t, err.Error(), "openshell")
+}
+
+func TestRunAgent_PreflightCheck_DeclaredReferenceReachesChild(t *testing.T) {
+	// An env.runner-declared, host-unset non-credential variable is part
+	// of the preflight environment: a passing probe that references it
+	// proceeds past the guard to the openshell check.
+	useFakeOpenshell(t)
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nenv:\n  runner:\n    SENTINEL: \"reaches-child\"\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: 'test \"${SENTINEL}\" = reaches-child'\n  max_iterations: 2\n")
+
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(io.Discard)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "openshell")
+}
+
+func TestRunAgent_PreflightCheck_OutOfAllowlistUnsetRejected(t *testing.T) {
+	// A reference to a host-unset name outside the allowlist surfaces the
+	// new rejection error naming the allowlist and the env.runner channel,
+	// not the legacy ValidateRunnerEnvWith "is not set" error.
+	useFakeOpenshell(t)
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"echo ${MYSTERY_VAR}\"\n  max_iterations: 2\n")
+
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(io.Discard)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "${MYSTERY_VAR}")
+	assert.Contains(t, err.Error(), "env.runner")
+	assert.Contains(t, err.Error(), "allowlisted host variables")
+	assert.NotContains(t, err.Error(), "is not set")
+	assert.NotContains(t, err.Error(), "unresolved host variable")
+	assert.NotContains(t, err.Error(), "openshell")
+}
+
+func TestRunAgent_PreflightCheck_BareRefsLeftToShell(t *testing.T) {
+	// Bare $VAR references are deliberately not scanned: the child shell
+	// expands them, and credentials are absent there, so probes like
+	// test -z "$GH_TOKEN" keep working on allowlisted host variables.
+	useFakeOpenshell(t)
+	t.Setenv("GH_TOKEN", "gh-host-secret-value-1")
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: 'test -z \"$GH_TOKEN\" && test -n \"$PATH\"'\n  max_iterations: 2\n")
+
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(io.Discard)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "openshell")
+}
+
+func TestRunAgent_PreflightCheck_FailureRedactsDeclaredSecret(t *testing.T) {
+	// When a failing probe embeds a declared sensitive value in the
+	// command or its output, both are redacted in the error.
+	useFakeOpenshell(t)
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nenv:\n  runner:\n    SENTINEL_SECRET: \"sentinel-secret-value-77\"\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"echo ${SENTINEL_SECRET}; exit 1\"\n  max_iterations: 2\n")
+
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(io.Discard)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preflight_check failed")
+	assert.Contains(t, err.Error(), "[REDACTED:SENTINEL_SECRET]")
+	assert.NotContains(t, err.Error(), "sentinel-secret-value-77")
+}
+
+func TestRunAgent_PreflightCheck_TimeoutRedactsDeclaredSecret(t *testing.T) {
+	// The timeout error carries the redacted command text only.
+	useFakeOpenshell(t)
+	dir := preflightTestSetup(t, "agent: agents/code.md\nrole: test\nenv:\n  runner:\n    SENTINEL_SECRET: \"sentinel-secret-value-77\"\nvalidation_loop:\n  script: scripts/validate.sh\n  preflight_check: \"echo ${SENTINEL_SECRET}; exec sleep 5\"\n  max_iterations: 2\n")
+
+	original := preflightCheckTimeout
+	preflightCheckTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { preflightCheckTimeout = original })
+
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(io.Discard)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
+	assert.Contains(t, err.Error(), "[REDACTED:SENTINEL_SECRET]")
+	assert.NotContains(t, err.Error(), "sentinel-secret-value-77")
+}
+
 func TestBuildSandboxEnvLines_FromEnvSandbox(t *testing.T) {
 	h := &harness.Harness{
 		Agent: "agents/test.md",
