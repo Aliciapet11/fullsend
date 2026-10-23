@@ -288,6 +288,9 @@ document the runner passes pins these keys:
 - `env`: the five hook variables, empty for any the harness did not set, and
   every variable in the "Every run" rows of the table above, and `BASH_ENV`
   and `ENV`, set empty.
+- `env`: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, on every route. Without
+  it, a harness that sets its own `ANTHROPIC_BASE_URL` would send Claude Code's
+  usage telemetry and other nonessential traffic to Anthropic.
 - `"disableAllHooks": false`.
 
 On gateway runs the `env` entries are added to the route's `env` block in the

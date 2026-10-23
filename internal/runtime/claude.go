@@ -1012,6 +1012,10 @@ func installClaudeHooks(sandboxName string, hooks security.SandboxHookConfig, ex
 //     them after .env, and a settings file's
 //     env block would otherwise set them again inside Claude Code, for the
 //     hook commands it starts.
+//   - env sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC to "1" on every
+//     route, not only the gateway one: Claude Code treats a harness's own
+//     ANTHROPIC_BASE_URL as the direct Claude API, which sends telemetry
+//     carrying repository details unless this is set.
 //   - disableAllHooks is false, so no other file can switch off the hooks
 //     this document wires.
 //
@@ -1040,6 +1044,7 @@ func claudeRunnerSettings(securityEnv []hookEnvPair, extra map[string]any) map[s
 	for _, key := range claudeShellStartupEnv {
 		env[key] = ""
 	}
+	env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 	out["env"] = env
 	out["disableAllHooks"] = false
 	return out
