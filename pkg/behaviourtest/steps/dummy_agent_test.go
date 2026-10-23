@@ -108,6 +108,7 @@ func TestParseDummyAgentTable_WriteFixtureIssueBeforeIssueExists(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fixtures/placeholders.json")
 	assert.Contains(t, err.Error(), "no issue exists yet")
+	assert.NotContains(t, err.Error(), "target_repo", "the error names the token, not the fixture content")
 	assert.Empty(t, scm.files, "no script is committed when the Given step fails")
 }
 
@@ -126,16 +127,18 @@ func TestParseDummyAgentTable_PlaceholdersNotExpandedInOtherOps(t *testing.T) {
 	w, _ := fixtureWorld(42)
 	err := parseDummyAgentTable(w, fixtureTable(
 		[2]string{"read_file", "docs/<repo>/<issue>.md"},
+		[2]string{"write_fixture", "output/<repo>.json, fixtures/plain.json"},
 	))
 	require.NoError(t, err)
-	require.Len(t, w.DummyOps, 1)
+	require.Len(t, w.DummyOps, 2)
 	assert.Equal(t, "docs/<repo>/<issue>.md", w.DummyOps[0].Args)
 	assert.Empty(t, w.DummyOps[0].Content)
+	assert.Equal(t, "output/<repo>.json, fixtures/plain.json", w.DummyOps[1].Args, "the write_fixture destination is not expanded")
 }
 
 func TestExpandFixturePlaceholders_RepoRequiresScenarioRepo(t *testing.T) {
 	t.Parallel()
 	_, err := expandFixturePlaceholders(&world.World{}, `{"target_repo": "<repo>"}`)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no repo configured")
+	assert.Contains(t, err.Error(), "no repository is enrolled")
 }

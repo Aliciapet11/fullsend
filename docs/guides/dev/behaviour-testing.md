@@ -73,7 +73,7 @@ Given a dummy agent that would:
 
 The `<issue>` placeholder expands to the scenario's issue number in `checkout_branch` args (only that op) and in the branch step definitions' branch names and head-branch patterns; order the `an issue` step before any step using it.
 
-`write_fixture` content also expands two placeholders when the dummy-agent Given step reads the fixture: `<issue>` becomes the scenario's issue number and `<repo>` becomes the leased repository as `owner/name`. Use them for agent results that must name the scenario's own issue or repository, such as a retro `target_repo`, since both change on every run. A fixture that uses `<issue>` before the `an issue` step fails at Given time. The expansion applies only to fixture content, not to the `write_fixture` paths or to any other op's args.
+`write_fixture` content also expands two placeholders when the dummy-agent Given step reads the fixture: `<issue>` becomes the scenario's issue number and `<repo>` becomes the leased repository as `owner/name`. Use them for agent results that must name the scenario's own issue or repository, such as a retro `target_repo`, since both change on every run. When a fixture uses `<issue>`, put the dummy-agent step after `an issue`; otherwise the Given step fails. The expansion applies only to `write_fixture` content: not to its paths, other ops' args, or `{{fixture:...}}` inlined into an agent file.
 
 ### Assertion steps
 

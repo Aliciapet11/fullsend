@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,17 +147,19 @@ const repoPlaceholder = "<repo>"
 // The expansion applies only to fixture content: fixture files are
 // authored for the suite, so it cannot rewrite paths or URLs in other ops.
 func expandFixturePlaceholders(w *world.World, content string) (string, error) {
-	content, err := expandIssuePlaceholder(w, content)
-	if err != nil {
-		return "", err
+	if strings.Contains(content, issuePlaceholder) {
+		if w.IssueNumber == 0 {
+			return "", fmt.Errorf("uses %s but no issue exists yet — put the \"an issue\" step before the dummy agent step", issuePlaceholder)
+		}
+		content = strings.ReplaceAll(content, issuePlaceholder, strconv.Itoa(w.IssueNumber))
 	}
-	if !strings.Contains(content, repoPlaceholder) {
-		return content, nil
+	if strings.Contains(content, repoPlaceholder) {
+		if w.RepoOwner == "" || w.RepoName == "" {
+			return "", fmt.Errorf("uses %s but no repository is enrolled — put \"the enrolled test repository\" before the dummy agent step", repoPlaceholder)
+		}
+		content = strings.ReplaceAll(content, repoPlaceholder, w.RepoOwner+"/"+w.RepoName)
 	}
-	if err := ensureScenarioRepo(w); err != nil {
-		return "", err
-	}
-	return strings.ReplaceAll(content, repoPlaceholder, w.RepoOwner+"/"+w.RepoName), nil
+	return content, nil
 }
 
 func assertAgentSucceeds(w *world.World, description string) error {
