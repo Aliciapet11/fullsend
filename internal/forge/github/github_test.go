@@ -4450,11 +4450,13 @@ func TestGetIssue(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/repos/org/repo/issues/7", r.URL.Path)
 		json.NewEncoder(w).Encode(map[string]any{
-			"number":   7,
-			"title":    "Bug",
-			"body":     "details",
-			"html_url": "https://github.com/org/repo/issues/7",
-			"labels":   []map[string]string{{"name": "ready-to-code"}},
+			"number":       7,
+			"title":        "Bug",
+			"body":         "details",
+			"html_url":     "https://github.com/org/repo/issues/7",
+			"labels":       []map[string]string{{"name": "ready-to-code"}},
+			"state":        "closed",
+			"state_reason": "not_planned",
 		})
 	}))
 	defer srv.Close()
@@ -4464,6 +4466,8 @@ func TestGetIssue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 7, issue.Number)
 	assert.Equal(t, []string{"ready-to-code"}, issue.Labels)
+	assert.Equal(t, "closed", issue.State)
+	assert.Equal(t, "not_planned", issue.StateReason)
 }
 
 func TestListRecentWorkflowRuns(t *testing.T) {

@@ -318,6 +318,7 @@ func TestGetIssue_StringLabels(t *testing.T) {
 			"description": "Issue body",
 			"web_url":     "https://gitlab.com/myorg/myrepo/-/issues/5",
 			"labels":      []string{"feature", "docs"},
+			"state":       "opened",
 		})
 	})
 
@@ -327,6 +328,8 @@ func TestGetIssue_StringLabels(t *testing.T) {
 	assert.Equal(t, "Test issue", issue.Title)
 	assert.Equal(t, "Issue body", issue.Body)
 	assert.Equal(t, []string{"feature", "docs"}, issue.Labels)
+	assert.Equal(t, "open", issue.State, "GitLab's \"opened\" is normalized to \"open\"")
+	assert.Empty(t, issue.StateReason)
 }
 
 func TestGetIssue_ObjectLabels(t *testing.T) {
@@ -343,12 +346,14 @@ func TestGetIssue_ObjectLabels(t *testing.T) {
 				{"title": "alpha"},
 				{"title": "beta"},
 			},
+			"state": "closed",
 		})
 	})
 
 	issue, err := client.GetIssue(ctx, "myorg", "myrepo", 7)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"alpha", "beta"}, issue.Labels)
+	assert.Equal(t, "closed", issue.State)
 }
 
 func TestGetIssue_NotFound(t *testing.T) {

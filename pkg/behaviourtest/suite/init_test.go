@@ -40,6 +40,9 @@ func (p *panickingSCM) AddComment(context.Context, string, string, int, string) 
 func (p *panickingSCM) GetIssue(context.Context, string, string, int) (*forge.Issue, error) {
 	return nil, nil
 }
+func (p *panickingSCM) ListOpenIssues(context.Context, string, string, ...string) ([]forge.Issue, error) {
+	return nil, nil
+}
 func (p *panickingSCM) GetFileContent(context.Context, string, string, string) ([]byte, error) {
 	return nil, nil
 }

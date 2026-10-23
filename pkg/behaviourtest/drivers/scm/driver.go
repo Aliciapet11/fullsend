@@ -23,6 +23,9 @@ type Driver interface {
 	AddIssueLabels(ctx context.Context, owner, repo string, number int, labels ...string) error
 	AddComment(ctx context.Context, owner, repo string, number int, body string) (*forge.IssueComment, error)
 	GetIssue(ctx context.Context, owner, repo string, number int) (*forge.Issue, error)
+	// ListOpenIssues returns the repository's open issues (pull requests
+	// excluded), filtered to those carrying every given label.
+	ListOpenIssues(ctx context.Context, owner, repo string, labels ...string) ([]forge.Issue, error)
 	GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error)
 	// GetFileContentAtRef retrieves the content of a file at a specific
 	// ref (commit SHA, branch, or tag), rather than GetFileContent's

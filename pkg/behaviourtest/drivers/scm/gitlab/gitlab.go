@@ -46,6 +46,10 @@ func (d *Driver) GetIssue(ctx context.Context, owner, repo string, number int) (
 	return d.Client.GetIssue(ctx, owner, repo, number)
 }
 
+func (d *Driver) ListOpenIssues(ctx context.Context, owner, repo string, labels ...string) ([]forge.Issue, error) {
+	return d.Client.ListOpenIssues(ctx, owner, repo, labels...)
+}
+
 func (d *Driver) GetFileContent(ctx context.Context, owner, repo, path string) ([]byte, error) {
 	return d.Client.GetFileContent(ctx, owner, repo, path)
 }

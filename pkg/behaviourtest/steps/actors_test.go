@@ -26,6 +26,8 @@ type fakeActorSCM struct {
 	branches     []string
 	commits      []string
 	openedPRs    []string
+	prBodies     []string
+	paths        []string
 	commitErr    error
 }
 
@@ -34,16 +36,18 @@ func (f *fakeActorSCM) CreateBranch(_ context.Context, _, _, branch string) erro
 	return nil
 }
 
-func (f *fakeActorSCM) CommitFileToBranch(_ context.Context, _, _, branch, _, _ string, _ []byte) error {
+func (f *fakeActorSCM) CommitFileToBranch(_ context.Context, _, _, branch, path, _ string, _ []byte) error {
 	if f.commitErr != nil {
 		return f.commitErr
 	}
 	f.commits = append(f.commits, branch)
+	f.paths = append(f.paths, path)
 	return nil
 }
 
-func (f *fakeActorSCM) CreateChangeProposal(_ context.Context, _, _, _, _, head, _ string) (*forge.ChangeProposal, error) {
+func (f *fakeActorSCM) CreateChangeProposal(_ context.Context, _, _, _, body, head, _ string) (*forge.ChangeProposal, error) {
 	f.openedPRs = append(f.openedPRs, head)
+	f.prBodies = append(f.prBodies, body)
 	return &forge.ChangeProposal{Number: 11}, nil
 }
 
@@ -156,7 +160,7 @@ func TestWhenActorOpensPullRequest(t *testing.T) {
 	t.Parallel()
 
 	w, drivers := actorWorld()
-	require.NoError(t, whenActorOpensPullRequest(w, actorWrite))
+	require.NoError(t, whenActorOpensPullRequest(w, actorWrite, false))
 	write := drivers[actorWrite]
 	require.Len(t, write.openedPRs, 1)
 	assert.Equal(t, write.branches, write.openedPRs, "the PR is opened from the branch the actor pushed")
@@ -165,7 +169,25 @@ func TestWhenActorOpensPullRequest(t *testing.T) {
 	assert.Equal(t, 11, w.PRNumber)
 	assert.Equal(t, []int{11}, w.CreatedPRNumbers, "the PR is closed at cleanup")
 	assert.Equal(t, write.branches, w.CreatedBranches, "the branch is deleted at cleanup")
+	assert.Equal(t, []string{"behaviour/pr.txt"}, write.paths)
+	assert.Equal(t, []string{"behaviour"}, write.prBodies, "an unlinked PR does not reference the issue")
 	assert.False(t, w.ScenarioStart.IsZero())
+}
+
+func TestWhenActorOpensPullRequest_LinkedToIssue(t *testing.T) {
+	t.Parallel()
+
+	w, drivers := actorWorld()
+	require.ErrorContains(t, whenActorOpensPullRequest(w, actorWrite, true), "no issue created")
+	assert.Empty(t, drivers[actorWrite].openedPRs, "no PR is opened without an issue to link")
+
+	w.IssueNumber = 42
+	require.NoError(t, whenActorOpensPullRequest(w, actorWrite, true))
+	write := drivers[actorWrite]
+	require.Len(t, write.prBodies, 1)
+	assert.Contains(t, write.prBodies[0], "Closes #42")
+	assert.Equal(t, 11, w.PRNumber)
+	assert.Equal(t, []int{11}, w.CreatedPRNumbers)
 }
 
 func TestActorOpensPullRequestPattern(t *testing.T) {
@@ -178,21 +200,26 @@ func TestActorOpensPullRequestPattern(t *testing.T) {
 		"the outsider opens a pull request":     actorOutsider,
 	} {
 		m := re.FindStringSubmatch(text)
-		require.Len(t, m, 2, text)
+		require.Len(t, m, 3, text)
 		assert.Equal(t, want, m[1])
+		assert.Empty(t, m[2], text)
 	}
+	m := re.FindStringSubmatch("the write actor opens a pull request linked to the issue")
+	require.Len(t, m, 3)
+	assert.Equal(t, actorWrite, m[1])
+	assert.NotEmpty(t, m[2])
 	assert.False(t, re.MatchString("the bot opens a pull request"))
 }
 
 func TestWhenActorOpensPullRequest_Errors(t *testing.T) {
 	t.Parallel()
 
-	err := whenActorOpensPullRequest(&world.World{RepoOwner: "org", RepoName: "repo"}, actorWrite)
+	err := whenActorOpensPullRequest(&world.World{RepoOwner: "org", RepoName: "repo"}, actorWrite, false)
 	require.ErrorContains(t, err, "TEST_ACTOR_WRITE_PAT not set")
 
 	w, drivers := actorWorld()
 	drivers[actorWrite].commitErr = errors.New("push rejected")
-	require.ErrorContains(t, whenActorOpensPullRequest(w, actorWrite), "push rejected")
+	require.ErrorContains(t, whenActorOpensPullRequest(w, actorWrite, false), "push rejected")
 	assert.Equal(t, drivers[actorWrite].branches, w.CreatedBranches, "a pushed branch is still cleaned up")
 	assert.Empty(t, w.CreatedPRNumbers)
 }

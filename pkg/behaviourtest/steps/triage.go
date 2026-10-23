@@ -206,14 +206,5 @@ func thenTriageWorkflowCompletes(w *world.World) error {
 }
 
 func thenIssueHasLabel(w *world.World, label string) error {
-	issue, err := w.SCM.GetIssue(context.Background(), w.RepoOwner, w.RepoName, w.IssueNumber)
-	if err != nil {
-		return err
-	}
-	for _, name := range issue.Labels {
-		if name == label {
-			return nil
-		}
-	}
-	return fmt.Errorf("issue #%d labels %v do not include %q", w.IssueNumber, issue.Labels, label)
+	return thenTargetLabel(w, targetIssue, label, true)
 }

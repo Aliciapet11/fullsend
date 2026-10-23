@@ -23,14 +23,17 @@ const (
 // actor name, for use inside a step pattern's capture group.
 const actorAlternation = actorWrite + "|" + actorTriage + "|" + actorOutsider
 
-const actorOpensPullRequestPattern = `^the (` + actorAlternation + `) opens a pull request$`
+// actorOpensPullRequestPattern optionally links the pull request to the
+// scenario's issue: "... opens a pull request linked to the issue" puts
+// a "Closes #<issue>" reference in its body.
+const actorOpensPullRequestPattern = `^the (` + actorAlternation + `) opens a pull request( linked to the issue)?$`
 
 func registerActorSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the (`+actorAlternation+`) posts "([^"]+)" on the issue$`, func(ctx context.Context, actor, body string) (context.Context, error) {
 		return ctx, whenActorPostsComment(world.FromContext(ctx), actor, body)
 	})
-	sc.Step(actorOpensPullRequestPattern, func(ctx context.Context, actor string) (context.Context, error) {
-		return ctx, whenActorOpensPullRequest(world.FromContext(ctx), actor)
+	sc.Step(actorOpensPullRequestPattern, func(ctx context.Context, actor, linked string) (context.Context, error) {
+		return ctx, whenActorOpensPullRequest(world.FromContext(ctx), actor, linked != "")
 	})
 	sc.Step(`^the (`+actorAlternation+`) posts "([^"]+)" on the pull request$`, func(ctx context.Context, actor, body string) (context.Context, error) {
 		return ctx, whenActorPostsPRComment(world.FromContext(ctx), actor, body)
@@ -105,13 +108,22 @@ func whenActorPostsComment(w *world.World, actor, body string) error {
 // whenActorOpensPullRequest opens a pull request as the named test actor,
 // so the PR author and the opened event's sender are a human with that
 // actor's repository role rather than the e2e installation identity (a
-// bot). The PR and its branch are registered for scenario cleanup.
-func whenActorOpensPullRequest(w *world.World, actor string) error {
+// bot). When linkedToIssue is set, the PR body closes the scenario's
+// issue ("Closes #<issue>"). The PR and its branch are registered for
+// scenario cleanup.
+func whenActorOpensPullRequest(w *world.World, actor string, linkedToIssue bool) error {
 	actorSCM, _, err := actorIdentity(w, actor)
 	if err != nil {
 		return err
 	}
-	branch, err := openPullRequest(w, actorSCM)
+	body := defaultPRBody
+	if linkedToIssue {
+		if w.IssueNumber == 0 {
+			return fmt.Errorf("no issue created; order the \"an issue\" step before linking a pull request to it")
+		}
+		body = fmt.Sprintf("%s\n\nCloses #%d", defaultPRBody, w.IssueNumber)
+	}
+	branch, err := openPullRequest(w, actorSCM, defaultPRPath, body)
 	if branch != "" {
 		w.CreatedBranches = append(w.CreatedBranches, branch)
 	}
@@ -153,13 +165,9 @@ func thenIssueCommentAuthoredBy(w *world.World, body, actor string) error {
 	if login == "" {
 		return fmt.Errorf("%s login not resolved", actor)
 	}
-	if w.IssueNumber == 0 {
-		return fmt.Errorf("no issue created")
-	}
-	comments, err := w.SCM.ListComments(context.Background(),
-		w.RepoOwner, w.RepoName, w.IssueNumber)
+	comments, _, err := listTargetComments(w, targetIssue)
 	if err != nil {
-		return fmt.Errorf("listing comments on issue #%d: %w", w.IssueNumber, err)
+		return err
 	}
 	found := false
 	for _, c := range comments {
