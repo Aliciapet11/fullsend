@@ -341,14 +341,20 @@ releases, so a newly published release needs no VM update.
 5. Requires the image's own `openshell --version` (run hardened like the job
    container) to equal that pin. A match is required even when the host
    already has the version.
-6. If the host version differs, tears down the old gateway, installs the
+6. Requires the pin to be OpenShell 0.1.0 or newer. A pre-0.1 pin is refused
+   before the host is touched (see below).
+7. If the host version differs, tears down the old gateway, installs the
    pinned version from `install.sh` at `OPENSHELL_SHA` (never a release tag
    the job could influence), confirms the host now reports that version,
    and pulls the matching supervisor image. This works for both upgrades
    and downgrades. If it matches, the supervisor image is re-pinned to it.
 
-Images built before the OpenShell 0.0.x to 0.1 breaking change cannot be
-served after a host has moved to 0.1: the executor migrates forward only.
+The minimum supported OpenShell version is 0.1.0. Images that pin OpenShell
+0.0.x (built before the 0.1 breaking change) are not supported: the executor
+writes only the schema-v2 `gateway.toml` introduced in 0.1, and a 0.0.x
+gateway rejects that file and does not start. The executor migrates forward
+only, so it refuses such an image before any teardown or install, and the host
+keeps its current OpenShell version and gateway config.
 
 **When version resolution fails.** The job log shows one of these errors:
 
@@ -375,6 +381,9 @@ served after a host has moved to 0.1: the executor migrates forward only.
   `~/.local/state/fullsend/verified-revisions` to avoid repeat API calls.
 - `reports OpenShell X, but the Fullsend commit it was built from pins Y`:
   the image's CLI does not match its source commit. Rebuild the image.
+- `pins OpenShell X, but this runner supports OpenShell 0.1.0 or newer`: the
+  image pins an unsupported OpenShell 0.0.x release. Use a newer Fullsend
+  runner image that pins OpenShell 0.1.0 or newer.
 - `host OpenShell is ... after installing`: the installer exited
   successfully but the host did not switch versions. Inspect the install
   output in the job log.
