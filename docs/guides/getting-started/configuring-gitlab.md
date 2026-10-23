@@ -1479,9 +1479,13 @@ fullsend repos set gitlab.control_runner_tags '[fullsend-api]'
 > gitlab.runner_tags`. That key rewrite is unrelated to the poll job's
 > tag default described above.
 
-If the repo is already installed, setting the tag with `repos
-set` and re-running `fullsend repos install -f repos.yaml`
-takes the converge path instead of a fresh install: it retries any
+If the repo is already installed, set the tags with `repos set` and
+re-run `fullsend repos install -f repos.yaml`. The re-run takes the
+converge path instead of a fresh install and rewrites the `tags:` lines
+in `.gitlab/ci/fullsend-agent.yml` (agent tags) and in
+`.gitlab/ci/fullsend-poll.yml` and `.gitlab/ci/fullsend-dispatcher.yml`
+(control tags). Until then, `fullsend repos status` reports those files
+as content drift. The converge path also retries any
 not-yet-created pipeline schedules, and on any instance where schedule
 creation previously failed that retry fails
 hard with a `convergence errors` error — even though the runner-tag

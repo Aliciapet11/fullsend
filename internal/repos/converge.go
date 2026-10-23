@@ -3373,20 +3373,33 @@ func convergeScaffoldFiles(ctx context.Context,
 // template path and installed path are checked against coveredPaths
 // because extension differences (.yml vs .yaml) can cause them to
 // diverge.
+//
+// unstampedInstall reports whether the installed workflow shows that a
+// build without a release ref wrote the scaffold (see
+// isUnstampedInstallRef). When neither fullsend_ref nor a release ref is
+// available, the expected content is then still rendered, at
+// config.DefaultUpstreamRef, exactly as that install rendered it.
 func convergeContentDriftFiles(ctx context.Context,
 	resolved ResolvedConfig,
 	cfg ConvergeConfig,
 	refResolver *RefResolver,
 	coveredPaths map[string]bool,
 	dcfg DriftConfig,
+	unstampedInstall bool,
 	progress ProgressFunc) ([]forge.TreeFile, []ComponentAction) {
 
 	repoFullName := resolved.Owner + "/" + resolved.Repo
 	var actions []ComponentAction
 
 	targetRef := resolved.FullsendRef
-	if targetRef == "" && cfg.UpstreamRef == "" {
-		// No ref configured — cannot render expected content.
+	if targetRef == "" && cfg.UpstreamRef == "" && !unstampedInstall {
+		// No ref configured and the installed scaffold is pinned to
+		// some other ref: rendering at the default ref would repoint
+		// it, so the expected content is unknown. Say so rather than
+		// silently reporting the scaffold as current (#8689).
+		progress(repoFullName, "content-drift",
+			fmt.Sprintf("scaffold content drift not checked: %s.fullsend_ref is not set and this build has no release ref; "+
+				"set %s.fullsend_ref to converge template changes such as runner tags", resolved.Forge, resolved.Forge))
 		return nil, actions
 	}
 
@@ -3654,6 +3667,41 @@ func resolveTargetRef(ctx context.Context, fullsendRef, upstreamRef, upstreamTag
 	return resolvedRef{ref: ref, tag: tag, manifestRef: manifestRef}
 }
 
+// isUnstampedInstallRef reports whether installedRef is what a build
+// without a release ref commits when no fullsend_ref is set: scaffold
+// rendering falls back to config.DefaultUpstreamRef, which pins GitHub
+// callers to that ref and leaves the GitLab wrapper without a version
+// marker (an empty ref). Rendering the expected scaffold at the default
+// ref then reproduces what that install wrote, so content drift — for
+// example changed GitLab runner tags — can be detected and repaired
+// without repointing a scaffold pinned to another ref.
+//
+// The check is forge-specific. An empty GitHub ref is not unstamped:
+// vendored callers use local workflow paths that carry no ref at all. A
+// GitLab wrapper marked config.DefaultUpstreamRef is not unstamped either:
+// it was rendered with an explicit "main" ref, which writes the
+// fullsend-ref marker and a main source build, whereas an empty ref writes
+// no marker and a latest-release download. Re-rendering it with empty refs
+// would silently change its runtime target.
+func isUnstampedInstallRef(forgeName, installedRef string) bool {
+	if forgeName == ForgeGitLab {
+		return installedRef == ""
+	}
+	return installedRef == config.DefaultUpstreamRef
+}
+
+// unstampedWorkflow reports whether the probed workflow component is
+// present and carries an unstamped install ref. A missing workflow has no
+// known ref, so it is not treated as unstamped.
+func unstampedWorkflow(forgeName string, components []ComponentStatus) bool {
+	for _, c := range components {
+		if c.Name == "workflow" {
+			return c.Present && isUnstampedInstallRef(forgeName, c.Actual)
+		}
+	}
+	return false
+}
+
 // convergeRepoCredentials applies variable, credential, and schedule changes.
 func convergeRepoCredentials(ctx context.Context, d convergeDiscovery, wifProvider string, cfg ConvergeConfig, progress ProgressFunc) ([]ComponentAction, error) {
 	var actions []ComponentAction
@@ -3781,6 +3829,7 @@ func collectConvergeScaffoldFiles(ctx context.Context, d convergeDiscovery, cfg 
 			AgentRunnerTags:   gitlabAgentRunnerTags(cfg.Manifest),
 			ControlRunnerTags: gitlabControlRunnerTags(cfg.Manifest),
 		},
+		unstampedWorkflow(resolved.Forge, d.components),
 		progress,
 	)
 	actions = append(actions, contentDriftActions...)

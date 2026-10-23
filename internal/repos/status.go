@@ -455,7 +455,7 @@ func checkRepoStatus(ctx context.Context, cfg ResolvedConfig, dcfg DriftConfig, 
 	// presence checks above. Refs are normalized before comparison so that
 	// ref-format differences do not produce false content-drift reports —
 	// ref drift is already detected separately.
-	checkScaffoldContentDrift(ctx, client, cfg, dcfg, resolver, &status)
+	checkScaffoldContentDrift(ctx, client, cfg, dcfg, resolver, workflowPresent && isUnstampedInstallRef(cfg.Forge, status.CurrentRef), &status)
 	if status.Error != "" {
 		return status
 	}
@@ -589,6 +589,23 @@ func appendGitLabRoleStatus(ctx context.Context, client forge.Client, owner, rep
 	}
 }
 
+// unpinnedScaffoldContent renders the expected scaffold for a repository
+// whose manifest sets no fullsend_ref, using the same target ref as
+// convergeContentDriftFiles: the running release's ref when the build has
+// one, otherwise config.DefaultUpstreamRef (the renderer's fallback) when
+// unstampedInstall reports that a build without a release ref wrote the
+// scaffold. Returns (nil, nil) when neither applies, because no baseline
+// can be rendered without repointing the installed ref.
+func unpinnedScaffoldContent(resolved ResolvedConfig, dcfg DriftConfig, unstampedInstall bool) ([]forge.TreeFile, error) {
+	if dcfg.UpstreamRef == "" && !unstampedInstall {
+		return nil, nil
+	}
+	installCfg := driftInstallConfig(resolved, dcfg)
+	installCfg.UpstreamRef = dcfg.UpstreamRef
+	installCfg.UpstreamTag = dcfg.UpstreamTag
+	return BuildScaffoldFiles(installCfg)
+}
+
 func readWorkflowRef(ctx context.Context, client forge.Client, owner, repo string, fc ForgeConfig) (string, error) {
 	content, _, err := readWorkflowContent(ctx, client, owner, repo, fc)
 	if err != nil {
@@ -700,8 +717,18 @@ func filterRepos(repos []ResolvedRepo, filter []string) ([]ResolvedRepo, []strin
 // The refResolver is used to fetch remote scaffold templates when
 // fullsend_ref pins a version that differs from the running binary,
 // ensuring the baseline matches the pinned version's templates.
-func checkScaffoldContentDrift(ctx context.Context, client forge.Client, cfg ResolvedConfig, dcfg DriftConfig, refResolver *RefResolver, status *RepoStatus) {
-	expectedFiles, err := ExpectedScaffoldContent(ctx, cfg, dcfg, refResolver)
+//
+// Without fullsend_ref the baseline matches convergeContentDriftFiles:
+// the running release's ref, or — for a build without one — the default
+// ref when unstampedInstall reports that such a build wrote the scaffold.
+func checkScaffoldContentDrift(ctx context.Context, client forge.Client, cfg ResolvedConfig, dcfg DriftConfig, refResolver *RefResolver, unstampedInstall bool, status *RepoStatus) {
+	var expectedFiles []forge.TreeFile
+	var err error
+	if cfg.FullsendRef == "" {
+		expectedFiles, err = unpinnedScaffoldContent(cfg, dcfg, unstampedInstall)
+	} else {
+		expectedFiles, err = ExpectedScaffoldContent(ctx, cfg, dcfg, refResolver)
+	}
 	if err != nil {
 		status.Error = fmt.Sprintf("rendering expected scaffold for %s/%s: %v", cfg.Owner, cfg.Repo, err)
 		return
