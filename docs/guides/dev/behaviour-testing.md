@@ -73,7 +73,7 @@ Given a dummy agent that would:
 
 The `<issue>` placeholder expands to the scenario's issue number in `checkout_branch` args (only that op) and in the branch step definitions' branch names and head-branch patterns; order the `an issue` step before any step using it.
 
-`write_fixture` content also expands two placeholders when the dummy-agent Given step reads the fixture: `<issue>` becomes the scenario's issue number and `<repo>` becomes the leased repository as `owner/name`. Use them for agent results that must name the scenario's own issue or repository, such as a retro `target_repo`, since both change on every run. When a fixture uses `<issue>`, put the dummy-agent step after `an issue`; otherwise the Given step fails. The expansion applies only to `write_fixture` content: not to its paths, other ops' args, or `{{fixture:...}}` inlined into an agent file.
+`write_fixture` content also expands three placeholders when the dummy-agent Given step reads the fixture: `<issue>` becomes the scenario's issue number, `<repo>` becomes the leased repository as `owner/name`, and `<pr_head_sha>` becomes the scenario pull request's head SHA. Use them for agent results that must name the scenario's own issue, repository or commit, such as a retro `target_repo` or a review result's `head_sha`, since all three change on every run. A review fixture needs `<pr_head_sha>` to request changes, because the review post-script turns a result for any other SHA into a stale-head notice. Put the dummy-agent step after `an issue` when a fixture uses `<issue>`, and after a pull request step when it uses `<pr_head_sha>`; otherwise the Given step fails. The head SHA is read once, so a later push to the pull request makes the fixture stale. The expansion applies only to `write_fixture` content: not to its paths, other ops' args, or `{{fixture:...}}` inlined into an agent file.
 
 ### Assertion steps
 
@@ -135,9 +135,7 @@ Then the harness "fix" workflow fails reporting "Refusing to push"
 
 Pick a stable fragment of the failure-comment contract (the category
 label headline or a fixed detail phrase). No shipped scenario uses this
-step yet — the fix stage's only dispatch route is a `changes_requested`
-review from a review bot, which the suite cannot produce — but the
-step is unit-tested and ready for a suite-reachable fail-closed path.
+step yet; it is unit-tested.
 
 ### Forge-state assertion steps
 
@@ -650,7 +648,9 @@ The `fork-dispatch.feature` file defines the canonical fork-PR behaviour contrac
 
 **`a disabled custom harness "<name>" with:`** — Registers the harness YAML under `.fullsend/harness/<name>.yaml` and adds an agent entry with `enabled: false` to the repo's `config.yaml`. Use this step for negative dispatch assertions where a single agent should be excluded while other agents in the same scenario continue to run. This is *not* the kill switch; for the global emergency stop that blocks all harnesses, use `the kill switch is active`.
 
-**`the harness dispatch completes with an empty matrix`** — Waits for the harness workflow run(s) created since the last trigger step, then requires every run that was not cancelled to have completed with its `Harness dispatch` job succeeded and no `Harness run (<agent>)` job scheduled. It fails if the dispatch job failed or an agent was scheduled, and keeps waiting while no run exists yet or a run is still in progress, so a denial is never inferred from a missing or failed run. Pair it with `agent did not run` and `dispatched exactly 0 times` for denial scenarios. It needs a CI driver that implements the optional `ci.EmptyMatrixWaiter`; the GitHub Actions driver does.
+**`the harness dispatch completes with an empty matrix`** — Waits for the harness workflow run(s) created since the last trigger step, then requires every run that was not cancelled or skipped (a skipped run, such as the shim run for a bot comment, ran no job) to have completed with its `Harness dispatch` job succeeded and no `Harness run (<agent>)` job scheduled. It fails if the dispatch job failed or an agent was scheduled, and keeps waiting while no run exists yet or a run is still in progress, so a denial is never inferred from a missing or failed run. Pair it with `agent did not run` and `dispatched exactly 0 times` for denial scenarios. It needs a CI driver that implements the optional `ci.EmptyMatrixWaiter`; the GitHub Actions driver does.
+
+**`a changes-requested review is submitted on the pull request`** — Submits a `REQUEST_CHANGES` review on the scenario's pull request as the e2e identity, a bot that is not the registered review bot, and restarts the trigger time. GitHub only. GitHub refuses a changes-requested review on the reviewer's own pull request, so a test actor must open it (`the write actor opens a pull request`).
 
 **`the kill switch is active`** — Sets `kill_switch: true` in the repo's `config.yaml` (the overlay), causing `Dispatch` to return an empty matrix for *all* agents. Use this step in a dedicated scenario where no harness should run. Because the kill switch blocks everything, it cannot share a scenario with a positive-path harness.
 

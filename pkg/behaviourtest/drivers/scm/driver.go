@@ -102,3 +102,10 @@ type Driver interface {
 	// it makes no promise about the commits the proposal was opened with.
 	ListPullRequestCommits(ctx context.Context, owner, repo string, number int) ([]string, error)
 }
+
+// PullRequestHeadSHAReader is an optional extension of Driver that reads a
+// change proposal's current head commit SHA. It is separate so external
+// Driver implementations keep compiling.
+type PullRequestHeadSHAReader interface {
+	GetPullRequestHeadSHA(ctx context.Context, owner, repo string, number int) (string, error)
+}
