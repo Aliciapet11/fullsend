@@ -20,11 +20,13 @@ func TestPreflightCredentialRefused(t *testing.T) {
 	refused := []string{
 		"GH_TOKEN",
 		"GITHUB_TOKEN",
+		"REVIEW_TOKEN",
 		"GITLAB_TOKEN",
 		"PUSH_TOKEN",
 		"FULLSEND_FORGE_TOKEN",
 		"FULLSEND_FETCH_TOKEN",
 		"FULLSEND_GITLAB_POLLER_TOKEN",
+		"FULLSEND_INFERENCE_GATEWAY_API_KEY",
 		"OPENAI_API_KEY",
 		"GH_WORKFLOW_TOKEN",
 		"FULLSEND_TRIGGER_TOKEN",
@@ -94,10 +96,11 @@ func TestPreflightEnv_CollisionPrecedence(t *testing.T) {
 func TestPreflightEnv_DeclaredCredentialsRefused(t *testing.T) {
 	env := preflightEnv(map[string]string{
 		"GH_TOKEN":       "declared-secret",
+		"REVIEW_TOKEN":   "declared-review-secret",
 		"OPENAI_API_KEY": "sk-declared",
 		"SENTINEL":       "declared",
 	}, "/fs/dir")
-	for _, key := range []string{"GH_TOKEN", "OPENAI_API_KEY"} {
+	for _, key := range []string{"GH_TOKEN", "REVIEW_TOKEN", "OPENAI_API_KEY"} {
 		_, ok := env[key]
 		assert.False(t, ok, "%s must be refused even when declared under its own name", key)
 	}
@@ -162,13 +165,42 @@ func TestExpandPreflightCommand_RejectsDeclaredCredential(t *testing.T) {
 	assert.NotContains(t, err.Error(), "declared-secret-9")
 }
 
-func TestExpandPreflightCommand_RejectionPreservesRawCommand(t *testing.T) {
+func TestExpandPreflightCommand_RejectionOmitsRawCommand(t *testing.T) {
 	env := preflightEnv(map[string]string{"SENTINEL": "/tmp/sentinel-42"}, "/fs/dir")
 	raw := "touch ${SENTINEL} && echo ${GH_TOKEN}"
 	_, err := expandPreflightCommand(raw, env)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), raw, "the raw command must be reported unsubstituted")
+	assert.Contains(t, err.Error(), "${GH_TOKEN}")
+	assert.NotContains(t, err.Error(), raw, "the rejection must not echo the raw command, which can carry literal secrets")
 	assert.NotContains(t, err.Error(), "/tmp/sentinel-42")
+}
+
+func TestExpandPreflightCommand_RejectionOmitsLiteralSecret(t *testing.T) {
+	env := preflightEnv(map[string]string{"SENTINEL_SECRET": "literal-secret-beside-ref"}, "/fs/dir")
+	_, err := expandPreflightCommand("echo literal-secret-beside-ref && echo ${GH_TOKEN}", env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "${GH_TOKEN}")
+	assert.NotContains(t, err.Error(), "literal-secret-beside-ref", "a literal secret beside a rejected reference must not reach the rejection diagnostic")
+}
+
+func TestExpandPreflightCommand_RejectsDeclaredRoleToken(t *testing.T) {
+	env := preflightEnv(map[string]string{"REVIEW_TOKEN": "declared-review-secret"}, "/fs/dir")
+	_, err := expandPreflightCommand("echo ${REVIEW_TOKEN}", env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "${REVIEW_TOKEN}")
+	assert.NotContains(t, err.Error(), "declared-review-secret")
+}
+
+func TestExpandPreflightCommand_NonPlainBraceFormSilentlyEmpties(t *testing.T) {
+	env := preflightEnv(map[string]string{"SENTINEL": "/tmp/sentinel-42"}, "/fs/dir")
+	// ${SENTINEL:-fallback} is not a plain ${NAME} reference: the rejection
+	// scan does not match it, and os.Expand treats the whole brace content as
+	// an unset name, so it expands to empty rather than falling back.
+	got, err := expandPreflightCommand("echo ${SENTINEL:-fallback} ${SENTINEL}", env)
+	require.NoError(t, err)
+	assert.NotContains(t, got, "fallback", "a non-plain brace form expands empty, not to its default")
+	assert.NotContains(t, got, "${")
+	assert.Contains(t, got, "/tmp/sentinel-42")
 }
 
 func TestExpandPreflightCommand_RejectsAllowlistedButUnset(t *testing.T) {
@@ -212,6 +244,12 @@ func TestRunPreflightCheck_DeclaredValueReachesChild(t *testing.T) {
 	require.NoError(t, err, "an env.runner-declared, host-unset variable must reach the preflight child")
 }
 
+func TestRunPreflightCheck_DeclaredRoleTokenExcludedFromChild(t *testing.T) {
+	printer := ui.New(io.Discard)
+	err := runPreflightCheck(context.Background(), printer, "validation_loop.preflight_check", "test -z \"$REVIEW_TOKEN\"", map[string]string{"REVIEW_TOKEN": "review-secret-9"}, "/fs/dir")
+	require.NoError(t, err, "a declared role token must not reach the preflight child environment")
+}
+
 func TestRunPreflightCheck_RejectsBeforeExecutionNoSideEffect(t *testing.T) {
 	sentinelPath := filepath.Join(t.TempDir(), "side-effect")
 	printer := ui.New(io.Discard)
@@ -221,7 +259,7 @@ func TestRunPreflightCheck_RejectsBeforeExecutionNoSideEffect(t *testing.T) {
 	assert.Contains(t, err.Error(), "validation_loop.preflight_check")
 	assert.Contains(t, err.Error(), "${GH_TOKEN}")
 	assert.Contains(t, err.Error(), "env.runner")
-	assert.Contains(t, err.Error(), raw, "the raw command must be reported unsubstituted")
+	assert.NotContains(t, err.Error(), raw, "the rejection must not echo the raw command")
 	assert.NotContains(t, err.Error(), sentinelPath)
 	_, statErr := os.Stat(sentinelPath)
 	assert.True(t, os.IsNotExist(statErr), "no part of a rejected command may execute")
