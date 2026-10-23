@@ -34,11 +34,13 @@ Connect fullsend to a Jira project so that Jira issue activity — comments, lab
    > [!WARNING]
    > After the agents release that follows v0.49.0, the default triage and
    > prioritize harnesses ship triggers that also match Jira issues; the
-   > review and retro triggers need a pull request, so they never match one.
+   > review trigger needs a pull request and the retro trigger is limited to
+   > GitHub and GitLab, so neither matches a Jira issue.
    > A harness you registered with `source:` that points at the default
    > triage harness, or composes it with `base:`, and sets no trigger of its
    > own inherits that trigger when you re-pin its ref. From then on every
-   > Jira issue a person opens or edits dispatches triage, not only
+   > Jira issue that a person with triage access or above opens or edits
+   > dispatches triage, not only
    > `/fs-triage`, and on GitHub an entry registered under another name, such
    > as `my-triage`, is dispatched on every issue a person opens or edits.
    > Set your own trigger to keep a narrower one.

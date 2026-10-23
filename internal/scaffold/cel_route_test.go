@@ -281,6 +281,25 @@ func TestCELRouteOptIn_PerAgentEntry(t *testing.T) {
 	got = runRouteStep(t, "Detect CEL route opt-in", env, files)
 	assert.Equal(t, "triage", got.outputs["agent"])
 	assert.Equal(t, "true", got.outputs["opt_in"])
+
+	// A review-only trigger (#8733 users) keeps bash retro and triage.
+	reviewOnly := map[string]string{".fullsend/config.yaml": "agents:\n  - name: review\n    trigger: \"true\"\n"}
+	for _, tc := range []struct {
+		name, event, isPR, stage, action, comment, wantAgent string
+	}{
+		{"PR closed", "pull_request_target", "false", "retro", "closed", "", "retro"},
+		{"/fs-retro on a PR", "issue_comment", "true", "retro", "created", "/fs-retro", "retro"},
+		{"issue opened", "issues", "false", "triage", "opened", "", "triage"},
+	} {
+		t.Run("review only/"+tc.name, func(t *testing.T) {
+			env := optInEnv(tc.event, tc.isPR, tc.stage)
+			env["EVENT_ACTION"] = tc.action
+			env["COMMENT_BODY"] = tc.comment
+			got := runRouteStep(t, "Detect CEL route opt-in", env, reviewOnly)
+			assert.Equal(t, tc.wantAgent, got.outputs["agent"])
+			assert.Equal(t, "false", got.outputs["opt_in"])
+		})
+	}
 }
 
 func TestFinalizeStage_KeepsTriggerSource(t *testing.T) {

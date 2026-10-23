@@ -67,7 +67,8 @@ func retroRouteAccepts(e *normevent.Event) bool {
 
 // reviewRouteAccepts covers pull request events and comments on a pull
 // request: bash routes /fs-review only on pull requests, and a review needs
-// one.
+// one. It accepts a closed pull request, but the route job's opt-in step
+// sends that event to retro, never to review.
 func reviewRouteAccepts(e *normevent.Event) bool {
 	if e.Entity.Kind == normevent.EntityChangeProposal {
 		return true
@@ -249,15 +250,17 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 	// Same gate as harness dispatch: the event-level rules, then the
 	// harness role threshold (IsHarnessAuthorized applies both), on the
 	// OWNERS-upgraded role. A closed pull request starts a retro whoever
-	// closed it (the lifecycle-close exception), keyed on the resolved
-	// harness role:, or on the agent's own role only when the harness could
-	// not be loaded (the agent's job mints that role either way).
+	// closed it (the lifecycle-close exception), only on the retro route and
+	// keyed on the resolved harness role:, or on the agent's own role only
+	// when the harness could not be loaded (the Retro job mints the retro
+	// role either way).
 	exceptionRole := harnessRole
 	if harnessUnavailable {
 		exceptionRole = agent.role
 	}
 	authCheck := harnessdispatch.AuthCheckEvent(o.configDir, cfg, o.event)
-	if !harnessdispatch.IsLifecycleCloseAuthorized(o.event, exceptionRole) &&
+	lifecycleClose := o.agent == "retro" && harnessdispatch.IsLifecycleCloseAuthorized(o.event, exceptionRole)
+	if !lifecycleClose &&
 		!harnessdispatch.IsHarnessAuthorized(&authCheck, harnessRole) {
 		if harnessUnavailable {
 			return withDecision(d, routeSkip, "harness unavailable; actor below write"), nil

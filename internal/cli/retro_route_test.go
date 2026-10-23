@@ -17,15 +17,6 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
-// retroDefaultTrigger selects the events bash routes to retro: a pull request
-// closed (merged or not), or /fs-retro from a human on an issue or a PR.
-const retroDefaultTrigger = `(event.entity.kind == "change_proposal"
-  && event.transition.kind in ["closed", "merged"])
-|| (event.transition.kind == "comment_added"
-  && has(event.transition.comment.command)
-  && event.transition.comment.command == "/fs-retro"
-  && event.actor.kind == "human")`
-
 // retroCommandOnlyTrigger turns off the automatic retro on close and keeps
 // /fs-retro.
 const retroCommandOnlyTrigger = `event.transition.kind == "comment_added"
@@ -125,31 +116,31 @@ func TestRouteBuiltinAgent_Retro(t *testing.T) {
 		},
 		{
 			name:         "PR merged by a write user starts a retro",
-			agents:       []config.AgentEntry{{Name: "retro", Trigger: retroDefaultTrigger}},
+			agents:       []config.AgentEntry{{Name: "retro", Trigger: routeTrigger(t, "retro")}},
 			event:        routeRetroEvent(routeRetroPR, routeRetroMerged, routeRetroWriter, "pull_request_target", "closed"),
 			wantDecision: routeRun,
 		},
 		{
 			name:         "PR closed by its read-only author starts a retro (lifecycle-close exception)",
-			agents:       []config.AgentEntry{{Name: "retro", Trigger: retroDefaultTrigger}},
+			agents:       []config.AgentEntry{{Name: "retro", Trigger: routeTrigger(t, "retro")}},
 			event:        routeRetroEvent(routeRetroPR, routeRetroClosed, routeRetroReadAuthor, "pull_request_target", "closed"),
 			wantDecision: routeRun,
 		},
 		{
 			name:         "PR closed by an app bot without a role starts a retro (lifecycle-close exception)",
-			agents:       []config.AgentEntry{{Name: "retro", Trigger: retroDefaultTrigger}},
+			agents:       []config.AgentEntry{{Name: "retro", Trigger: routeTrigger(t, "retro")}},
 			event:        routeRetroEvent(routeRetroPR, routeRetroClosed, routeRetroAppBot, "pull_request_target", "closed"),
 			wantDecision: routeRun,
 		},
 		{
 			name:         "PR closed by a triage user starts a retro (lifecycle-close exception)",
-			agents:       []config.AgentEntry{{Name: "retro", Trigger: retroDefaultTrigger}},
+			agents:       []config.AgentEntry{{Name: "retro", Trigger: routeTrigger(t, "retro")}},
 			event:        routeRetroEvent(routeRetroPR, routeRetroClosed, routeRetroTriager, "pull_request_target", "closed"),
 			wantDecision: routeRun,
 		},
 		{
 			name:         "/fs-retro from a triage user is not authorized",
-			agents:       []config.AgentEntry{{Name: "retro", Trigger: retroDefaultTrigger}},
+			agents:       []config.AgentEntry{{Name: "retro", Trigger: routeTrigger(t, "retro")}},
 			event:        routeRetroEvent(routeRetroPR, routeRetroCommand, routeRetroTriager, "issue_comment", "created"),
 			wantDecision: routeSkip, wantReason: "actor not authorized",
 		},
@@ -198,16 +189,45 @@ func TestRouteBuiltinAgent_LifecycleCloseExceptionIsRetroOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, routeSkip, got.Decision)
 	assert.Equal(t, "actor not authorized", got.Reason)
+
+	// A review entry whose harness declares role: retro still goes through
+	// the review route, which never grants the exception.
+	dir = writeRouteFixture(t, sourcedRouteFixture([]config.AgentEntry{{Name: "review", Trigger: "true"}}, "review", routeTestRetroHarness))
+	got, err = routeBuiltinAgent(context.Background(), routeOpts{
+		agent: "review", configDir: dir,
+		event:       routeEvent(t, routeRetroEvent(routeRetroPR, routeRetroClosed, routeRetroReadAuthor, "pull_request_target", "closed")),
+		forgeClient: forge.NewFakeClient(), printer: ui.New(io.Discard),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, routeSkip, got.Decision)
+	assert.Equal(t, "actor not authorized", got.Reason)
+}
+
+// When the retro harness cannot be resolved, the lifecycle-close exception
+// falls back to the agent's own role (the Retro job mints the retro role),
+// so a read-only closer still starts a retro, as in bash.
+func TestRouteBuiltinAgent_LifecycleCloseHarnessUnavailable(t *testing.T) {
+	neutralizeAgentsRepoFallback(t)
+	dir := writeRouteFixture(t, routeFixture{agents: []config.AgentEntry{{Name: "retro", Trigger: routeTrigger(t, "retro")}}})
+	got, err := routeBuiltinAgent(context.Background(), routeOpts{
+		agent: "retro", configDir: dir,
+		event:       routeEvent(t, routeRetroEvent(routeRetroPR, routeRetroClosed, routeRetroReadAuthor, "pull_request_target", "closed")),
+		forgeClient: forge.NewFakeClient(), printer: ui.New(io.Discard),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, got.Harness)
+	assert.Equal(t, routeRun, got.Decision, "reason: %s", got.Reason)
 }
 
 // TestRetroRouteParity runs raw GitHub webhook payloads through the gha-event
 // input and routeBuiltinAgent (`fullsend dispatch --route retro`), with the
-// default retro trigger set in config, and compares the decision with the one
-// the bash router in reusable-dispatch.yml makes for the same event. A row
-// whose CEL result differs from bash must name the known difference in diff.
+// default retro trigger set in config and a local harness with role: retro,
+// and compares the decision with the one the bash router in
+// reusable-dispatch.yml makes for the same event. A row whose CEL result
+// differs from bash must name the known difference in diff.
 func TestRetroRouteParity(t *testing.T) {
 	neutralizeAgentsRepoFallback(t)
-	dir := writeRouteFixture(t, routeFixture{agents: []config.AgentEntry{{Name: "retro", Trigger: retroDefaultTrigger}}})
+	dir := writeRouteFixture(t, sourcedRouteFixture([]config.AgentEntry{{Name: "retro", Trigger: routeTrigger(t, "retro")}}, "retro", routeTestRetroHarness))
 
 	const repo = "acme/widgets"
 	permissions := map[string]string{
