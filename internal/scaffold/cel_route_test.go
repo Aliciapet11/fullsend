@@ -435,6 +435,8 @@ func TestValidateAgentsConfigStep_AcceptsOverrideOnlySettings(t *testing.T) {
 		{"subagents only", "agents:\n  - name: review\n    subagents:\n      default: sonnet\n", false},
 		{"model only", "agents:\n  - name: triage\n    model: opus\n", false},
 		{"name only", "agents:\n  - name: review\n", true},
+		{"blank trigger", "agents:\n  - name: review\n    trigger: \"  \"\n", true},
+		{"empty trigger", "agents:\n  - name: review\n    trigger: \"\"\n", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

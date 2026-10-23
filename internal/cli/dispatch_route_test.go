@@ -440,23 +440,40 @@ func TestRouteBuiltinAgent_IssueCommentIsLeftToBash(t *testing.T) {
 }
 
 func TestRouteBuiltinAgent_Errors(t *testing.T) {
-	t.Run("invalid config trigger", func(t *testing.T) {
-		dir := writeRouteFixture(t, routeFixture{agents: []config.AgentEntry{{Name: "review", Trigger: "event.x =="}}})
-		_, err := routeBuiltinAgent(context.Background(), routeOpts{
-			agent: "review", configDir: dir, event: routeEvent(t, routePROpened), printer: ui.New(io.Discard),
+	// An invalid config is an error for every actor role, so the route job
+	// keeps the bash stage either way.
+	actors := map[string]string{"write actor": routePROpened, "triage actor": routeTriageReviewComment}
+	for actor, event := range actors {
+		t.Run("invalid config trigger/"+actor, func(t *testing.T) {
+			dir := writeRouteFixture(t, routeFixture{agents: []config.AgentEntry{{Name: "review", Trigger: "event.x =="}}})
+			_, err := routeBuiltinAgent(context.Background(), routeOpts{
+				agent: "review", configDir: dir, event: routeEvent(t, event), printer: ui.New(io.Discard),
+			})
+			require.ErrorContains(t, err, "invalid review agents[].trigger")
 		})
-		require.ErrorContains(t, err, "evaluating review trigger")
-	})
-	t.Run("an invalid unrelated entry does not affect routing", func(t *testing.T) {
+		t.Run("invalid unrelated entry/"+actor, func(t *testing.T) {
+			dir := writeRouteFixture(t, routeFixture{agents: []config.AgentEntry{
+				{Name: "review", Trigger: "true"},
+				{Name: "lint", Source: "https://example.com/lint.yaml"},
+			}})
+			_, err := routeBuiltinAgent(context.Background(), routeOpts{
+				agent: "review", configDir: dir, event: routeEvent(t, event), printer: ui.New(io.Discard),
+			})
+			require.ErrorContains(t, err, "invalid agent config")
+		})
+	}
+	t.Run("a valid unrelated entry does not affect routing", func(t *testing.T) {
+		neutralizeAgentsRepoFallback(t)
 		dir := writeRouteFixture(t, routeFixture{agents: []config.AgentEntry{
 			{Name: "review", Trigger: "true"},
-			{Name: "lint", Source: "https://example.com/lint.yaml"},
+			{Name: "triage", Model: "opus"},
 		}})
 		got, err := routeBuiltinAgent(context.Background(), routeOpts{
-			agent: "review", configDir: dir, event: routeEvent(t, routePROpened), printer: ui.New(io.Discard),
+			agent: "review", configDir: dir, event: routeEvent(t, routePROpened),
+			forgeClient: forge.NewFakeClient(), printer: ui.New(io.Discard),
 		})
 		require.NoError(t, err)
-		assert.Equal(t, routeRun, got.Decision)
+		assert.Equal(t, routeRun, got.Decision, "reason: %s", got.Reason)
 	})
 	t.Run("unsupported agent", func(t *testing.T) {
 		_, err := routeBuiltinAgent(context.Background(), routeOpts{agent: "code", configDir: t.TempDir(), event: routeEvent(t, routePROpened)})
@@ -564,7 +581,7 @@ func TestRouteBuiltinAgent_HarnessRoleThreshold(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, routeSkip, got.Decision)
-		assert.Equal(t, "actor not authorized", got.Reason)
+		assert.Equal(t, "harness unavailable; actor below write", got.Reason)
 	})
 
 	t.Run("harness that fails to load requires write", func(t *testing.T) {
@@ -576,7 +593,7 @@ func TestRouteBuiltinAgent_HarnessRoleThreshold(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, routeSkip, got.Decision)
-		assert.Equal(t, "actor not authorized", got.Reason)
+		assert.Equal(t, "harness unavailable; actor below write", got.Reason)
 		assert.Equal(t, "config:harness/review.yaml", got.Harness)
 
 		write, err := routeBuiltinAgent(context.Background(), routeOpts{

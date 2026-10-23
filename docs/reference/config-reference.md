@@ -50,7 +50,7 @@ agents:                              # Registered agent sources and per-agent tu
     subagents:                       # Per-agent sub-agent model map
       default: sonnet                # Fallback model for personas without an explicit entry
       code-reviewer: opus            # Model for a specific persona
-    # trigger: <CEL expression>      # When the agent runs; takes precedence over the harness trigger:
+    # trigger: <CEL expression>      # When the built-in review agent runs (review entry only)
 
 # ── Remote resources ─────────────────────────────────────────
 allowed_remote_resources:            # URL prefixes allowed for remote resources (agents, policies, skills, plugins, profiles, providers, and base composition)
@@ -196,16 +196,15 @@ effort, sub-agent models and the trigger.
   value tombstones an inherited entry. Keys must be lowercase alphanumeric
   segments joined by hyphens (max 64 chars).
 - **`trigger`** — A [CEL trigger](../guides/user/cel-triggers-reference.md)
-  (a boolean over the normalized `event`) that decides when the agent runs.
-  It takes precedence over the `trigger:` field of the agent's harness. On a
-  `review` entry it opts the repository into CEL review routing: the trigger,
-  not the dispatch workflow's built-in rules, decides when the `Review` job
-  starts (see
+  (a boolean over the normalized `event`). It decides routing for the
+  built-in review agent only: on a `review` entry it opts the repository into
+  CEL review routing, so the trigger, not the dispatch workflow's built-in
+  rules, decides when the `Review` job starts (see
   [Choosing when review runs](../guides/user/customizing-agents.md#choosing-when-review-runs)).
-  On a source-registered custom agent it replaces the harness trigger in CEL
-  dispatch. A trigger alone makes a valid override-only entry for a built-in
-  agent. Validated when the agent list is validated: it must compile and
-  return a boolean.
+  It does not change CEL dispatch: the harness `trigger:` keeps deciding when
+  custom agents run and what the Jira poller dispatches. A trigger alone
+  makes a valid override-only entry for a built-in agent. Validated when the
+  agent list is validated: it must compile and return a boolean.
 
 In the layered config system, agents use keyed merge by `DerivedName()` — see
 [Layered Config Reference](../guides/infrastructure/layered-config-reference.md).

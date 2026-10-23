@@ -756,10 +756,13 @@ agents:
 ```
 
 `has(event.entity.linked_change_proposal)` keeps the trigger to comments on
-pull requests. The `Route` job evaluates the review trigger for every pull
-request event (opened, pushed to, edited, labeled, reopened, and so on) and
-every comment on a pull request, so a broad trigger can start reviews the
-default rules would not. It never starts a review from a bot's comment.
+pull requests. The `Route` job evaluates the review trigger for the events
+the fullsend workflow receives: a pull request opened, pushed to
+(`synchronize`), marked ready for review, labeled or unlabeled, and a `/fs-*`
+comment on a pull request from a user who is not a bot. It does so only when
+the default rules chose review or no stage (a closed pull request goes to
+retro), so a broad trigger can start reviews the default rules would not. It
+never starts a review from a bot's comment.
 
 The trigger is read from your default branch, so a pull request cannot change
 its own routing. After the change merges, open a pull request: no review
@@ -815,15 +818,15 @@ CEL route (review): bash=review cel=skip reason=trigger did not match harness=ag
 ```
 
 The job summary shows `review_route=cel` when the trigger decided, or
-`review_route=bash` when the dispatch workflow did: the kill switch is on, the
-review entry is disabled, or the event is not a pull request or a comment on
-one.
+`review_route=bash` when the dispatch workflow did: the kill switch is on or
+the review entry is disabled.
 
 | Log text | Meaning | Action |
 |---|---|---|
 | `cel=skip reason=trigger did not match` | The trigger left this event out | Expected for events your trigger excludes; otherwise fix the trigger |
 | `cel=skip reason=actor not authorized` | The actor failed the dispatch permission check | See [Known differences from the default rules](#known-differences-from-the-default-rules) for bots |
-| `CEL route failed; keeping the bash stage` | A CEL route step failed, so the dispatch workflow decided | Open the failed "… CEL route" step for the error, for example an invalid `trigger` or a harness that fails to load |
+| `cel=skip reason=harness unavailable; actor below write` | The review harness could not be fetched or loaded, so only write access passes | Check the route step's warning for the harness error |
+| `CEL route failed; keeping the bash stage` | A CEL route step failed, so the dispatch workflow decided | Open the failed "… CEL route" step for the error, for example an invalid `trigger` or another invalid `agents:` entry |
 
 ## Agent dispatch authorization
 

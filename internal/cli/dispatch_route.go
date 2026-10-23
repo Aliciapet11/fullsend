@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/fullsend-ai/fullsend/internal/celtrigger"
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/fetch"
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -103,6 +104,9 @@ type routeOpts struct {
 // `fullsend run` does (a config entry with source:, else the agents-repo
 // fallback at the lockstep ref) to name it in the decision and read its
 // role.
+//
+// An invalid trigger or agent list is an error for every actor, so the
+// route job keeps the bash stage.
 func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) {
 	d := routeDecision{Agent: o.agent}
 	if o.event == nil {
@@ -125,8 +129,6 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 	if config.IsAgentExplicitlyDisabled(cfg.AgentEntries(), o.agent) {
 		return withDecision(d, routeBash, "agent disabled in config"), nil
 	}
-	// Only the agent's own trigger is checked here (it is compiled when it
-	// is evaluated), so an unrelated invalid entry does not affect routing.
 	entry := findConfigAgentEntry(cfg.AgentEntries(), o.agent)
 	configTrigger := ""
 	if entry != nil {
@@ -135,6 +137,9 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 	if configTrigger == "" {
 		return withDecision(d, routeBash, "no agents[].trigger"), nil
 	}
+	if err := celtrigger.Validate(configTrigger); err != nil {
+		return d, fmt.Errorf("invalid %s agents[].trigger: %w", o.agent, err)
+	}
 	if !agent.accepts(o.event) {
 		return withDecision(d, routeBash, "event is not routable for "+o.agent), nil
 	}
@@ -142,6 +147,12 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 	// any trigger, including one that leaves out an actor.kind guard.
 	if o.event.Transition.Kind == normevent.TransitionCommentAdded && o.event.Actor.Kind == normevent.ActorBot {
 		return withDecision(d, routeSkip, "bot comments do not start "+o.agent), nil
+	}
+
+	// Same check as resolveAgentSource, so an invalid entry is an error
+	// rather than a failed harness resolution.
+	if err := config.ValidateAgentEntries(cfg.AgentEntries(), cfg.AllowedResources()); err != nil {
+		return d, fmt.Errorf("invalid agent config: %w", err)
 	}
 
 	absConfigDir, err := filepath.Abs(o.configDir)
@@ -172,9 +183,10 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 	}
 	// The harness is resolved to name it in the decision and to read its
 	// role:, which sets the per-harness authorization threshold. When it
-	// cannot be resolved or loaded, the threshold fails closed to write; the
-	// agent's job reports the resolution failure when it runs.
+	// cannot be fetched or loaded, the threshold fails closed to write; the
+	// agent's job reports the failure when it runs.
 	harnessRole := ""
+	harnessUnavailable := false
 	if path, deps, err := resolveAgentSource(ctx, absConfigDir, o.agent, forgeClient, cfg, composeOpts, printer); err == nil {
 		d.Harness = routeHarnessLabel(cfg, o.agent, deps)
 		if len(deps) > 0 && deps[0].URL != "" {
@@ -183,9 +195,11 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 		if h, _, err := harness.LoadWithBase(ctx, path, composeOpts); err == nil {
 			harnessRole = h.Role
 		} else {
+			harnessUnavailable = true
 			printer.StepWarn(fmt.Sprintf("Could not load the %s harness to read its role, requiring write access: %v", o.agent, err))
 		}
 	} else {
+		harnessUnavailable = true
 		printer.StepWarn(fmt.Sprintf("Could not resolve the %s harness, requiring write access: %v", o.agent, err))
 	}
 
@@ -194,6 +208,9 @@ func routeBuiltinAgent(ctx context.Context, o routeOpts) (routeDecision, error) 
 	// OWNERS-upgraded role.
 	authCheck := harnessdispatch.AuthCheckEvent(o.configDir, cfg, o.event)
 	if !harnessdispatch.IsHarnessAuthorized(&authCheck, harnessRole) {
+		if harnessUnavailable {
+			return withDecision(d, routeSkip, "harness unavailable; actor below write"), nil
+		}
 		return withDecision(d, routeSkip, "actor not authorized"), nil
 	}
 	eventMap, err := o.event.ToMap()

@@ -792,9 +792,9 @@ jobs:
           fi
           # An enabled entry may omit source when it only tunes a built-in
           # agent by name (runtime/model/effort/subagents, ADR 0091; trigger,
-          # #8726), the settings config.AgentEntry.HasSettings counts. The Go
-          # side also treats a blank trigger as unset.
-          BAD_SOURCE=$(yq '.agents[] | select(type == "!!map" and .enabled != false and (.source == null or .source == "") and (.runtime == null and .model == null and .effort == null and .subagents == null and .trigger == null)) | line' .fullsend/config.yaml 2>/dev/null || echo "")
+          # #8726), the settings config.AgentEntry.HasSettings counts. A blank
+          # trigger counts as unset, as on the Go side.
+          BAD_SOURCE=$(yq '.agents[] | select(type == "!!map" and .enabled != false and (.source == null or .source == "") and (.runtime == null and .model == null and .effort == null and .subagents == null and (.trigger // "" | tostring | test("^\\s*$")))) | line' .fullsend/config.yaml 2>/dev/null || echo "")
           if [[ -n "$BAD_SOURCE" ]]; then
             echo "::error::config.yaml: enabled agent entry without a source field (an entry with only a name must set runtime, model, effort, subagents or trigger to tune a built-in agent)"
             exit 1
