@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -298,7 +299,10 @@ func stubPostProvisionSleep(t *testing.T) *[]time.Duration {
 	t.Helper()
 	var slept []time.Duration
 	orig := PostProvisionSleep
-	PostProvisionSleep = func(d time.Duration) { slept = append(slept, d) }
+	PostProvisionSleep = func(_ context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		return nil
+	}
 	t.Cleanup(func() { PostProvisionSleep = orig })
 	return &slept
 }
@@ -473,4 +477,22 @@ func TestInferenceStatusWIFProvider(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestWaitInferenceHealthy_ContextCancelledDuringBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	statusCalls := 0
+	runner := func(_, _ string, args ...string) (string, error) {
+		statusCalls++
+		cancel()
+		return `{"status":"not_provisioned"}`, nil
+	}
+
+	start := time.Now()
+	_, err := WaitInferenceHealthy(ctx, "/bin/fullsend", "tok", "org/repo", "proj", runner, t.Logf)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Contains(t, err.Error(), `status="not_provisioned"`, "error keeps the last status")
+	assert.Equal(t, 1, statusCalls, "no status read after cancellation")
+	assert.Less(t, time.Since(start), postProvisionStatusDelays[0], "the real backoff is cut short")
 }

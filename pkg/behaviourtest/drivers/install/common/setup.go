@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -180,26 +181,61 @@ var postProvisionStatusDelays = []time.Duration{
 	30 * time.Second,
 }
 
-// PostProvisionSleep waits between post-provision "inference status"
-// reads. Tests replace it to skip the real backoff.
-var PostProvisionSleep = time.Sleep
+// PostProvisionSleep waits d between post-provision "inference status"
+// reads, returning early with ctx's error when ctx is done. Tests replace
+// it to skip the real backoff.
+var PostProvisionSleep = func(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
-// ProvisionInference runs inference provision, then polls inference status
-// with a bounded backoff (postProvisionStatusDelays) until the provider is
-// healthy, and returns the WIF provider resource name. It fails with the
-// last status error once the budget is spent. A failed provision is
-// returned without reading status.
+// ProvisionInference runs inference provision, then waits for the provider
+// to become healthy (WaitInferenceHealthy) and returns the WIF provider
+// resource name. A failed provision is returned without reading status.
 func ProvisionInference(
 	binary, token, target, project string,
 	runCLI CLIRunnerFunc,
 	logf func(string, ...any),
 ) (string, error) {
+	if err := RunInferenceProvision(binary, token, target, project, runCLI, logf); err != nil {
+		return "", err
+	}
+	return WaitInferenceHealthy(context.Background(), binary, token, target, project, runCLI, logf)
+}
+
+// RunInferenceProvision runs "inference provision" for target. Callers
+// that serialise provisions (the ensurer's provisionGate) hold their gate
+// only around this call, not around WaitInferenceHealthy.
+func RunInferenceProvision(
+	binary, token, target, project string,
+	runCLI CLIRunnerFunc,
+	logf func(string, ...any),
+) error {
 	provisionArgs := []string{"inference", "provision", target, "--project", project}
 	logf("[install] running fullsend %s", strings.Join(provisionArgs, " "))
 	if _, err := runCLI(binary, token, provisionArgs...); err != nil {
-		return "", fmt.Errorf("inference provision %s: %w", target, err)
+		return fmt.Errorf("inference provision %s: %w", target, err)
 	}
+	return nil
+}
 
+// WaitInferenceHealthy polls "inference status" after a successful
+// provision with a bounded backoff (postProvisionStatusDelays) until the
+// provider is healthy, and returns the WIF provider resource name. It fails
+// with the last status error once the budget is spent, or with ctx's error
+// when ctx is done during a wait.
+func WaitInferenceHealthy(
+	ctx context.Context,
+	binary, token, target, project string,
+	runCLI CLIRunnerFunc,
+	logf func(string, ...any),
+) (string, error) {
 	attempts := len(postProvisionStatusDelays) + 1
 	var budget time.Duration
 	for _, d := range postProvisionStatusDelays {
@@ -218,9 +254,11 @@ func ProvisionInference(
 		}
 		delay := postProvisionStatusDelays[attempt-1]
 		logf("[install] inference for %s not healthy yet, retrying in %s: %v", target, delay, err)
-		PostProvisionSleep(delay)
+		if err := PostProvisionSleep(ctx, delay); err != nil {
+			return "", fmt.Errorf("waiting for inference for %s to become healthy: %w (last status: %v)", target, err, lastErr)
+		}
 	}
-	return "", fmt.Errorf("inference for %s not healthy after provision (%d status reads over %s): %w",
+	return "", fmt.Errorf("inference for %s not healthy after provision (%d status reads, %s of backoff): %w",
 		target, attempts, budget, lastErr)
 }
 

@@ -1295,7 +1295,7 @@ func TestDoEnsure_PostInstallStillFailsAfterInstall(t *testing.T) {
 func skipPostProvisionBackoff(t *testing.T) {
 	t.Helper()
 	orig := common.PostProvisionSleep
-	common.PostProvisionSleep = func(time.Duration) {}
+	common.PostProvisionSleep = func(context.Context, time.Duration) error { return nil }
 	t.Cleanup(func() { common.PostProvisionSleep = orig })
 }
 
@@ -2327,4 +2327,57 @@ func TestAwaitCreation_ContextCancellation(t *testing.T) {
 	err := e.awaitCreation(ctx, "org", "repo", "org/repo")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "context cancelled")
+}
+
+func TestProvisionWIFProvider_ReleasesGateBeforePolling(t *testing.T) {
+	skipPostProvisionBackoff(t)
+	var provisioned bool
+	var gateHeldDuringPoll []bool
+	e := &repoEnsurer{
+		binary: "/usr/bin/fullsend",
+		token:  "tok",
+		runCLI: func(_, _ string, args ...string) (string, error) {
+			switch {
+			case len(args) >= 2 && args[0] == "inference" && args[1] == "provision":
+				require.Len(t, provisionGate, 1, "provision runs under the gate")
+				provisioned = true
+				return "", nil
+			case len(args) >= 2 && args[0] == "inference" && args[1] == "status":
+				gateHeldDuringPoll = append(gateHeldDuringPoll, len(provisionGate) == 1)
+				if len(gateHeldDuringPoll) < 3 {
+					return `{"status":"not_provisioned"}`, nil
+				}
+				return healthyStatusJSON, nil
+			}
+			return "", nil
+		},
+		logf: t.Logf,
+	}
+
+	got, err := e.provisionWIFProvider(context.Background(), "org/test-repo-gate", "proj")
+	require.NoError(t, err)
+	assert.Equal(t, testWIFProvider, got)
+	assert.True(t, provisioned)
+	assert.Equal(t, []bool{false, false, false}, gateHeldDuringPoll, "status polling runs after the gate is released")
+	assert.Empty(t, provisionGate, "gate released")
+	assert.Equal(t, testWIFProvider, e.wifProviders["org/test-repo-gate"], "result cached")
+}
+
+func TestProvisionWIFProvider_ProvisionErrorReleasesGate(t *testing.T) {
+	e := &repoEnsurer{
+		binary: "/usr/bin/fullsend",
+		token:  "tok",
+		runCLI: func(_, _ string, args ...string) (string, error) {
+			if len(args) >= 2 && args[0] == "inference" && args[1] == "status" {
+				t.Fatal("no status read after a failed provision")
+			}
+			return "", fmt.Errorf("provision boom")
+		},
+		logf: t.Logf,
+	}
+
+	_, err := e.provisionWIFProvider(context.Background(), "org/test-repo-gate-err", "proj")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "provision boom")
+	assert.Empty(t, provisionGate, "gate released")
 }
