@@ -880,6 +880,36 @@ it, and an administrator must remove or reassign it first. States
 other than `not-installed`, `deferred`, and `ready` add `gitlab-trigger-account`
 drift.
 
+`repos status` also adds a `gitlab_webhook` object for the webhook fast path
+([ADR 0125](../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md)). It has a
+`state`, the booleans `webhook_present`, `webhook_configured`,
+`trigger_token_ready` and `webhook_secret_ready`, and exact `reasons`. Like the
+rest of status output, it names variables and IDs only and never shows the
+trigger token, the webhook secret or the webhook URL. The states are:
+
+- `ready`: one managed webhook carries the active trigger credential with the
+  desired configuration.
+- `missing`: every gate holds but no managed webhook exists yet.
+- `drifted`: something is misconfigured or an unmet contract blocks the fast
+  path. Misconfiguration includes the webhook's trigger ref, events or SSL
+  verification, a disabled or duplicate webhook, a missing or unsafe
+  `FULLSEND_TRIGGER_TOKEN` or `FULLSEND_WEBHOOK_SECRET`, superseded trigger
+  tokens, or leftover Poller-owned trigger credentials on the trigger-account
+  route. Unmet contracts include the trigger-token safety invariants (such as
+  `ci_pipeline_variables_minimum_override_role` not being `no_one_allowed`)
+  and readiness gates (such as a wrapper or root `.gitlab-ci.yml` without the
+  typed pipeline-input contract). Unlike the trigger account, the webhook
+  status does evaluate these project-wide safety invariants.
+- `deferred`: nothing is provisioned and the pipeline wrapper on the default
+  branch does not include the dispatcher yet. This covers a fresh install
+  whose initialization MR has not merged and a scaffold version that predates
+  the fast path.
+- `unreadable`: the fast path could not be verified.
+
+States other than `ready` and `deferred` add `gitlab-webhook` drift. The table
+output lists the reasons for every state except `ready`. `repos install`
+creates a missing webhook and repairs a misconfigured one.
+
 `repos uninstall` removes the published token, trigger token, push entry,
 deploy key, the managed polling schedules the account owns (deleted without an
 installer-owned copy), and the account under the project lease, after the webhook fast path
