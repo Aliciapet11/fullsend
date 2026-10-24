@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // CLIRunnerFunc is the signature for running a fullsend CLI command.
@@ -166,8 +167,28 @@ func InferenceStatusWIFProvider(
 	return wifProvider, nil
 }
 
-// ProvisionInference runs inference provision, then inference status, and
-// returns the WIF provider resource name. The provider must be healthy.
+// postProvisionStatusDelays is the backoff between "inference status"
+// reads after "inference provision" succeeds. A just-provisioned repo can
+// briefly still report not_provisioned (read-after-write lag), so the
+// status is re-read until healthy. The delays sum to 60s; the status is
+// read len(postProvisionStatusDelays)+1 times before giving up.
+var postProvisionStatusDelays = []time.Duration{
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+	16 * time.Second,
+	30 * time.Second,
+}
+
+// PostProvisionSleep waits between post-provision "inference status"
+// reads. Tests replace it to skip the real backoff.
+var PostProvisionSleep = time.Sleep
+
+// ProvisionInference runs inference provision, then polls inference status
+// with a bounded backoff (postProvisionStatusDelays) until the provider is
+// healthy, and returns the WIF provider resource name. It fails with the
+// last status error once the budget is spent. A failed provision is
+// returned without reading status.
 func ProvisionInference(
 	binary, token, target, project string,
 	runCLI CLIRunnerFunc,
@@ -178,7 +199,29 @@ func ProvisionInference(
 	if _, err := runCLI(binary, token, provisionArgs...); err != nil {
 		return "", fmt.Errorf("inference provision %s: %w", target, err)
 	}
-	return InferenceStatusWIFProvider(binary, token, target, project, runCLI, logf)
+
+	attempts := len(postProvisionStatusDelays) + 1
+	var budget time.Duration
+	for _, d := range postProvisionStatusDelays {
+		budget += d
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		logf("[install] post-provision inference status for %s (attempt %d/%d)", target, attempt, attempts)
+		wifProvider, err := InferenceStatusWIFProvider(binary, token, target, project, runCLI, logf)
+		if err == nil {
+			return wifProvider, nil
+		}
+		lastErr = err
+		if attempt == attempts {
+			break
+		}
+		delay := postProvisionStatusDelays[attempt-1]
+		logf("[install] inference for %s not healthy yet, retrying in %s: %v", target, delay, err)
+		PostProvisionSleep(delay)
+	}
+	return "", fmt.Errorf("inference for %s not healthy after provision (%d status reads over %s): %w",
+		target, attempts, budget, lastErr)
 }
 
 // ParseInferenceStatusWIFProvider extracts the WIF provider from fullsend

@@ -1290,8 +1290,18 @@ func TestDoEnsure_PostInstallStillFailsAfterInstall(t *testing.T) {
 	assert.Contains(t, err.Error(), "post-install validation")
 }
 
+// skipPostProvisionBackoff makes common.ProvisionInference's
+// post-provision status polling return immediately.
+func skipPostProvisionBackoff(t *testing.T) {
+	t.Helper()
+	orig := common.PostProvisionSleep
+	common.PostProvisionSleep = func(time.Duration) {}
+	t.Cleanup(func() { common.PostProvisionSleep = orig })
+}
+
 func TestProvisionInference_StatusCLIError(t *testing.T) {
 	speedUpValidateRetries(t)
+	skipPostProvisionBackoff(t)
 	sc := &stubClient{installed: false}
 	e := &repoEnsurer{
 		e2eCfg: e2etest.EnvConfig{
@@ -1320,6 +1330,7 @@ func TestProvisionInference_StatusCLIError(t *testing.T) {
 
 func TestProvisionInference_ParseWIFProviderError(t *testing.T) {
 	speedUpValidateRetries(t)
+	skipPostProvisionBackoff(t)
 	sc := &stubClient{installed: false}
 	e := &repoEnsurer{
 		e2eCfg: e2etest.EnvConfig{
