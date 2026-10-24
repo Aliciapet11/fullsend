@@ -30,8 +30,8 @@ const managedConfigMarker = "# This file is managed by 'fullsend repos': repos-c
 // after managedConfigMarker, that names the repos.yaml manifest the file was
 // rendered from (#8627). The marker itself is unchanged, so
 // hasManagedConfigMarker's prefix match still recognizes the file, and a
-// file written before this line existed converges as ordinary drift rather
-// than requiring adoption.
+// file without this line never requires adoption. The line is informational:
+// drift and convergence ignore it (managedConfigEquivalent, #8785).
 const managedConfigSourcePrefix = "# Source manifest: "
 
 // sanitizeManifestSource returns the location of an HTTPS manifest in a form
@@ -127,6 +127,36 @@ func hasManagedConfigMarker(content []byte) bool {
 	return bytes.HasPrefix(content, []byte(managedConfigMarker))
 }
 
+// stripManagedConfigSource returns content without the optional
+// source-manifest line that directly follows the ownership marker. Content
+// without the marker, or with no source line after it, is returned
+// unchanged; otherwise a new slice is returned and content is not modified.
+func stripManagedConfigSource(content []byte) []byte {
+	if !hasManagedConfigMarker(content) {
+		return content
+	}
+	rest := content[len(managedConfigMarker):]
+	if !bytes.HasPrefix(rest, []byte(managedConfigSourcePrefix)) {
+		return content
+	}
+	out := make([]byte, 0, len(content))
+	out = append(out, managedConfigMarker...)
+	_, body, _ := bytes.Cut(rest, []byte("\n"))
+	return append(out, body...)
+}
+
+// managedConfigEquivalent reports whether an installed managed
+// .fullsend/config.yaml matches the desired rendered bytes, ignoring the
+// informational source-manifest line (#8785). That line records only where
+// the manifest was loaded from, so the same manifest addressed by a local
+// path (no line) or by an HTTPS URL (a line) must not count as drift or
+// make convergence rewrite the file back and forth. Everything else,
+// including the ownership marker and the configuration body, is compared
+// byte for byte.
+func managedConfigEquivalent(existing, desired []byte) bool {
+	return bytes.Equal(stripManagedConfigSource(existing), stripManagedConfigSource(desired))
+}
+
 // readExistingFile reads path on the default branch and reports whether
 // the file exists. A zero-byte file exists: it returns found with empty,
 // non-nil content so callers do not mistake it for an absent file. Read
@@ -205,8 +235,9 @@ func (m *Manifest) RenderManagedConfig(forgeName string, entry RepoEntry) (data 
 // a line naming that manifest (managedConfigHeader). ok is false when the
 // repository is not config-managed. This is the install path's renderer: install, converge,
 // and status all compare the installed .fullsend/config.yaml against these
-// exact bytes, so the marker is part of both the write and the whole-file
-// compare.
+// bytes, so the marker is part of both the write and the whole-file
+// compare; only the source-manifest line is ignored by that compare
+// (managedConfigEquivalent).
 func desiredManagedConfig(resolved ResolvedConfig) (data []byte, ok bool, err error) {
 	if !resolved.ConfigManaged {
 		return nil, false, nil
