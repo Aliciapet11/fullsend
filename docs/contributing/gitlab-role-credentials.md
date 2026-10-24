@@ -1467,11 +1467,16 @@ Agent input bridges explicitly disable expansion, and poll-job links are
 logged only after creator/HMAC authentication.
 The webhook fast-path's `TRIGGER_PAYLOAD` classification
 and the `CI_JOB_TOKEN` running-job identity pin are implemented. Live GitLab
-validation covers GitLab.com Free, self-managed EE, and self-managed CE; only
-stock agents on custom-port CE remain unverified: see
+validation of issue-to-agent dispatch passed on GitLab.com Free and
+self-managed EE; that run covered issue-open and polling dispatch, not
+issue-update dispatch. Self-managed CE is non-gating: earlier CE runs used a
+patched agents helper, and the latest CE rerun was stopped by the sandbox SSRF
+guard before the agents read issue data, so stock agents on custom-port CE
+remain unverified: see
 [GitLab webhook validation status](../normative/normalized-event/v1/README.md#gitlab-webhook-validation-status)
 and ADR 0125 (Caveats). Flip the env var to `enforced` fleet-wide only after
-the remaining live-validation gates close. Poll jobs
+the [#8245](https://github.com/fullsend-ai/fullsend/issues/8245)
+live-validation gate closes. Poll jobs
 resolve `FULLSEND_GITLAB_POLLER_TOKEN` once, after the schedule-only pin.
 The Go CLI then overrides `GITLAB_TOKEN` / `PUSH_TOKEN` from the
 registered role credential; nothing restores `FULLSEND_FORGE_TOKEN`.
