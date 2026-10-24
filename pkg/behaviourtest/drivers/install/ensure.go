@@ -701,8 +701,9 @@ func isGitHubSetupRepoInfo404(err error) bool {
 // resolveWIFProvider returns the inference WIF provider for target. A
 // cached value is returned without any CLI call. On a miss it reads
 // "inference status"; only when that is not healthy does it run
-// "inference provision" (then status again), holding provisionGate so at
-// most one provision runs in the process at a time.
+// "inference provision", holding provisionGate only for the provision so
+// at most one provision runs in the process at a time, then re-polls
+// status after releasing the gate.
 func (e *repoEnsurer) resolveWIFProvider(ctx context.Context, target, project string) (string, error) {
 	e.mu.Lock()
 	cached, ok := e.wifProviders[target]

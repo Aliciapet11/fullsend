@@ -739,8 +739,9 @@ func TestEnsurer_WIFProvider_CacheRecheckedUnderGate(t *testing.T) {
 }
 
 // TestEnsurer_WIFProvider_SameNameWaiterReusesProvision resolves one name
-// from two goroutines without singleflight: the second caller waits on the
-// gate behind the first provision and must reuse its cached result.
+// from two goroutines without EnsureRepo's singleflight: the second caller
+// waits for the first caller's in-flight provision and poll and must reuse
+// its cached result.
 func TestEnsurer_WIFProvider_SameNameWaiterReusesProvision(t *testing.T) {
 	var provisions atomic.Int32
 	statusStarted := make(chan struct{}, 2)
