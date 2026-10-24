@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/drivers/ci"
+	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/drivers/ci/githubactions"
+	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/drivers/ci/gitlabci"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/world"
 )
 
@@ -166,4 +170,57 @@ func TestThenHarnessRunSkippedByPreScript_NoWorkflowRun(t *testing.T) {
 	err := thenHarnessRunSkippedByPreScript(&world.World{CI: fake}, "pre")
 	require.ErrorContains(t, err, "no workflow run recorded")
 	assert.Empty(t, fake.gotName, "must not download without a tracked run")
+}
+
+// zipArtifact builds an artifact archive from relative path → content.
+func zipArtifact(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range files {
+		f, err := zw.Create(name)
+		require.NoError(t, err)
+		_, err = f.Write([]byte(content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
+// The real CI drivers extract into dest/<driver artifact name>/, and the
+// two forges keep different prefixes: upload-artifact strips output/,
+// GitLab artifacts:paths keeps it. A skipped run must pass on both.
+func TestThenHarnessRunSkippedByPreScript_RealDriverLayouts(t *testing.T) {
+	telemetry := filepath.ToSlash(filepath.Join(skipTestRunDir, "run-telemetry.jsonl"))
+	tests := []struct {
+		name     string
+		driver   func(forge.Client) ci.Driver
+		artifact string
+		prefix   string
+	}{
+		{name: "github", driver: func(c forge.Client) ci.Driver { return githubactions.New(c, "") }, artifact: "fullsend-pre"},
+		{name: "gitlab", driver: func(c forge.Client) ci.Driver { return gitlabci.New(c, "") }, artifact: "fullsend pre agent", prefix: "output/"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEHAVIOUR_ARTIFACT_DIR", t.TempDir())
+			client := forge.NewFakeClient()
+			client.WorkflowRunArtifacts = map[int][]forge.WorkflowArtifact{42: {{ID: 7, Name: tc.artifact}}}
+			client.WorkflowArtifactContents = map[int][]byte{7: zipArtifact(t, map[string]string{
+				tc.prefix + telemetry: runTelemetry("run", skippedAttrTrue),
+			})}
+			w := &world.World{Org: "org", RepoName: "repo", WorkflowRun: &forge.WorkflowRun{ID: 42}, CI: tc.driver(client)}
+			require.NoError(t, thenHarnessRunSkippedByPreScript(w, "pre"))
+
+			// The same layout with the agent's output present still fails.
+			client.WorkflowArtifactContents[7] = zipArtifact(t, map[string]string{
+				tc.prefix + telemetry: runTelemetry("run", skippedAttrFalse),
+				tc.prefix + skipTestRunDir + "/iteration-1/output/agent-result.json": `{}`,
+			})
+			err := thenHarnessRunSkippedByPreScript(w, "pre")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "=false")
+			assert.Contains(t, err.Error(), "agent-result.json present")
+		})
+	}
 }

@@ -51,13 +51,41 @@ func thenHarnessRunSkippedByPreScript(w *world.World, agent string) error {
 	if err := w.CI.DownloadNamedArtifactFromRun(context.Background(), w.Org, w.RepoName, runID, artifactName, dest); err != nil {
 		return fmt.Errorf("harness %q run %d: downloading artifact %s: %w", agent, runID, artifactName, err)
 	}
-	// The CI drivers extract a named artifact into dest/<artifact name>/,
-	// so the run directories sit one level below dest.
-	if err := checkPreScriptSkipped(filepath.Join(dest, filepath.Base(artifactName))); err != nil {
+	root, err := extractedArtifactRoot(dest)
+	if err != nil {
+		return fmt.Errorf("harness %q run %d: artifact %s: %w", agent, runID, artifactName, err)
+	}
+	if err := checkPreScriptSkipped(root); err != nil {
 		return fmt.Errorf("harness %q run %d was not skipped by its pre-script: %w", agent, runID, err)
 	}
 	return nil
 }
+
+// extractedArtifactRoot returns the directory a CI driver extracted one
+// named artifact into. dest is fresh, and the drivers extract into
+// dest/<driver artifact name>/: fullsend-<agent> on GitHub, the job name
+// ("fullsend <agent> agent") on GitLab.
+func extractedArtifactRoot(dest string) (string, error) {
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		return "", err
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	if len(dirs) != 1 {
+		return "", fmt.Errorf("expected one extracted artifact directory, found %d", len(dirs))
+	}
+	return filepath.Join(dest, dirs[0]), nil
+}
+
+// hostRunDirBases are where the run directories sit inside an extracted
+// harness artifact: at its root on GitHub (upload-artifact strips the
+// output/ prefix), under output/ on GitLab (artifacts:paths keeps it).
+var hostRunDirBases = []string{".", "output"}
 
 // checkPreScriptSkipped inspects a downloaded harness artifact. It reads
 // the host-written run-telemetry.jsonl (never an agent-writable nested
@@ -89,9 +117,16 @@ func checkPreScriptSkipped(artifactDir string) error {
 // preScriptSkippedFromTelemetry returns the root run span's
 // fullsend.prescript.skipped value from the artifact's platform telemetry.
 func preScriptSkippedFromTelemetry(artifactDir string) (bool, error) {
-	paths, err := evalmeasure.FindPlatformTelemetry(artifactDir, "")
-	if err != nil {
-		return false, fmt.Errorf("locating %s: %w", evalmeasure.PlatformTelemetryFile, err)
+	var paths []string
+	for _, base := range hostRunDirBases {
+		found, err := evalmeasure.FindPlatformTelemetry(filepath.Join(artifactDir, base), "")
+		if err != nil {
+			return false, fmt.Errorf("locating %s: %w", evalmeasure.PlatformTelemetryFile, err)
+		}
+		if len(found) > 0 {
+			paths = found
+			break
+		}
 	}
 	if len(paths) == 0 {
 		return false, fmt.Errorf("no host %s in artifact", evalmeasure.PlatformTelemetryFile)
