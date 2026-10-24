@@ -733,6 +733,17 @@ drift. The managed `FULLSEND_TRIGGER_TOKEN` and `FULLSEND_WEBHOOK_SECRET`
 variables are not reported as orphans; any other unrecognised `FULLSEND_`
 variable still is.
 
+For GitLab repos, status also reports the webhook fast path as a
+`gitlab_webhook` object with a `state`, the booleans `webhook_present`,
+`webhook_configured`, `trigger_token_ready` and `webhook_secret_ready`, and the
+reasons, never a token, secret or webhook URL. The states are `ready`,
+`missing` (no managed webhook yet), `drifted` (misconfigured, or an unmet safety
+or readiness contract), `deferred` (nothing provisioned and the pipeline
+wrapper does not include the dispatcher yet), and `unreadable`. Every state
+except `ready` and `deferred` is `gitlab-webhook` drift, so it makes the command
+exit non-zero. See [`repos status` output](../../cli/repos.md#output) for what
+each state means.
+
 Use `--json` for machine-readable output:
 
 ```bash
