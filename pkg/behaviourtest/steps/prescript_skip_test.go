@@ -17,7 +17,8 @@ import (
 )
 
 // fakeSkipArtifactCI answers DownloadNamedArtifactFromRun by writing files
-// (relative path → content) into the destination, or returning err.
+// (relative path → content) into dest/<artifact name>/, where the real CI
+// drivers extract a named artifact, or returning err.
 type fakeSkipArtifactCI struct {
 	ci.Driver
 	files map[string]string
@@ -34,7 +35,7 @@ func (f *fakeSkipArtifactCI) DownloadNamedArtifactFromRun(_ context.Context, _, 
 		return f.err
 	}
 	for rel, content := range f.files {
-		p := filepath.Join(dest, rel)
+		p := filepath.Join(dest, name, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
 		}
@@ -102,6 +103,16 @@ func TestThenHarnessRunSkippedByPreScript(t *testing.T) {
 				behaviourResults: `{}`,
 			}},
 			wantErr: []string{"behaviour-results.json present"},
+		},
+		{
+			// The agent can write under iteration-N/output but not the
+			// host's run-telemetry.jsonl; a nested copy must not count.
+			name: "agent-written telemetry copy is ignored",
+			fake: &fakeSkipArtifactCI{files: map[string]string{
+				telemetry: runTelemetry("run", skippedAttrFalse),
+				filepath.Join(skipTestRunDir, "iteration-1", "output", "run-telemetry.jsonl"): runTelemetry("run", skippedAttrTrue),
+			}},
+			wantErr: []string{"=false"},
 		},
 		{
 			name: "harness without pre-script",

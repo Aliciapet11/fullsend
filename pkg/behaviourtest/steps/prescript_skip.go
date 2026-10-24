@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/cucumber/godog"
@@ -45,12 +46,14 @@ func thenHarnessRunSkippedByPreScript(w *world.World, agent string) error {
 	if err != nil {
 		return err
 	}
+	defer os.RemoveAll(dest)
 	artifactName := "fullsend-" + agent
 	if err := w.CI.DownloadNamedArtifactFromRun(context.Background(), w.Org, w.RepoName, runID, artifactName, dest); err != nil {
-		_ = os.RemoveAll(dest)
 		return fmt.Errorf("harness %q run %d: downloading artifact %s: %w", agent, runID, artifactName, err)
 	}
-	if err := checkPreScriptSkipped(dest); err != nil {
+	// The CI drivers extract a named artifact into dest/<artifact name>/,
+	// so the run directories sit one level below dest.
+	if err := checkPreScriptSkipped(filepath.Join(dest, filepath.Base(artifactName))); err != nil {
 		return fmt.Errorf("harness %q run %d was not skipped by its pre-script: %w", agent, runID, err)
 	}
 	return nil
