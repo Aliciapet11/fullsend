@@ -379,9 +379,13 @@ Rotation-state writes use schema version 2
 ([#8242](https://github.com/fullsend-ai/fullsend/issues/8242)). Version 2
 state adds managed service-account IDs and supplied-account
 ownership/exclusions to the `FULLSEND_GITLAB_ROLE_ROTATION` document and still
-never stores token values. Unversioned and version 1 state remain readable;
-unsupported versions fail closed and are not rewritten. Version 1 is never
-written: CLIs built with the tolerant reader
+never stores token values. Version 2 is the only version read: unversioned
+and version 1 state, unsupported future versions, and documents with unknown
+fields fail closed and are not rewritten
+([#8246](https://github.com/fullsend-ai/fullsend/issues/8246)). Because older
+readers reject unknown fields, every schema change, additive ones included,
+must bump the state version. Version 1 is
+never written: CLIs built with the tolerant reader
 ([#8233](https://github.com/fullsend-ai/fullsend/issues/8233)) accept it but
 ignore the ownership fields during outgoing-token selection and grace cleanup.
 They reject version 2 before touching any credential, and CLIs older still
@@ -391,9 +395,9 @@ publishes missing supplied or minted secrets before recording distribution
 state, and older uninstall cleanup never reads rotation state: it deletes
 identity variables and revokes active role-named project tokens, supplied ones
 included, so those paths are not protected by the version gate.
-`gitlab_roles_rotate_version_gate_test.go` runs the older reader against a
-written document with a supplied PAT. It proves the older reader's rotation
-never selects, schedules or revokes that PAT, and never rewrites the
+`gitlab_roles_rotate_version_gate_test.go` runs rotation against unversioned
+and version 1 documents with a supplied PAT. It proves rotation refuses them
+before it selects, schedules or revokes that PAT, and never rewrites the
 document. Operators must still upgrade every CLI that runs install, converge
 or uninstall.
 
