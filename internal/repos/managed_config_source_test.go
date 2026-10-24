@@ -254,7 +254,10 @@ func TestManagedConfigSourceLine_DriftMatrix(t *testing.T) {
 }
 
 func TestStripManagedConfigSource(t *testing.T) {
-	const src = managedConfigSourcePrefix + "https://raw.githubusercontent.com/acme/infra/main/repos.yaml\n"
+	const (
+		srcURL = managedConfigSourcePrefix + "https://raw.githubusercontent.com/acme/infra/main/repos.yaml"
+		src    = srcURL + "\n"
+	)
 	tests := []struct {
 		name string
 		in   string
@@ -263,7 +266,13 @@ func TestStripManagedConfigSource(t *testing.T) {
 		{"marker only", managedConfigMarker + "kill_switch: true\n", managedConfigMarker + "kill_switch: true\n"},
 		{"marker and source", managedConfigMarker + src + "kill_switch: true\n", managedConfigMarker + "kill_switch: true\n"},
 		{"marker and source without body", managedConfigMarker + src, managedConfigMarker},
-		{"unterminated source line", managedConfigMarker + "# Source manifest: https://x", managedConfigMarker},
+		{"unterminated source line", managedConfigMarker + "# Source manifest: https://x", managedConfigMarker + "# Source manifest: https://x"},
+		{"source line that is not a sanitized URL", managedConfigMarker + "# Source manifest: https://x\nkill_switch: true\n", managedConfigMarker + "# Source manifest: https://x\nkill_switch: true\n"},
+		{"empty source line", managedConfigMarker + managedConfigSourcePrefix + "\nkill_switch: true\n", managedConfigMarker + managedConfigSourcePrefix + "\nkill_switch: true\n"},
+		{"bare CR in source line", managedConfigMarker + srcURL + "\rkill_switch: false\n" + "kill_switch: true\n", managedConfigMarker + srcURL + "\rkill_switch: false\n" + "kill_switch: true\n"},
+		{"NEL in source line", managedConfigMarker + srcURL + "\u0085kill_switch: false\nkill_switch: true\n", managedConfigMarker + srcURL + "\u0085kill_switch: false\nkill_switch: true\n"},
+		{"LS in source line", managedConfigMarker + srcURL + "\u2028kill_switch: false\nkill_switch: true\n", managedConfigMarker + srcURL + "\u2028kill_switch: false\nkill_switch: true\n"},
+		{"PS in source line", managedConfigMarker + srcURL + "\u2029kill_switch: false\nkill_switch: true\n", managedConfigMarker + srcURL + "\u2029kill_switch: false\nkill_switch: true\n"},
 		{"source line not after marker", managedConfigMarker + "kill_switch: true\n" + src, managedConfigMarker + "kill_switch: true\n" + src},
 		{"no marker", src + "kill_switch: true\n", src + "kill_switch: true\n"},
 		{"empty", "", ""},
@@ -286,6 +295,47 @@ func TestManagedConfigEquivalent(t *testing.T) {
 	assert.False(t, managedConfigEquivalent(local, []byte(managedConfigMarker+"kill_switch: false\n")))
 	assert.False(t, managedConfigEquivalent(nil, local))
 	assert.False(t, managedConfigEquivalent([]byte("kill_switch: true\n"), local))
+}
+
+// TestManagedConfigSourceLine_LineBreakSmuggling: a YAML line break other
+// than LF inside the installed source line (bare CR, NEL, LS, PS) must not
+// let the stripper discard configuration that the YAML loader still reads.
+// Such a file is drift, and converge rewrites it to the desired bytes.
+func TestManagedConfigSourceLine_LineBreakSmuggling(t *testing.T) {
+	const srcURL = "https://raw.githubusercontent.com/acme/infra/main/repos.yaml"
+	const body = "mint_url: https://other-mint.example.com\n"
+	m := newConvergeManifest("acme/api")
+	m.Defaults.Config = mustManagedConfig(t, body)
+	desired := mustDesiredManaged(t, m, "acme", "api")
+	require.Equal(t, managedConfigMarker+body, string(desired))
+
+	for name, sep := range map[string]string{
+		"bare CR": "\r",
+		"NEL":     "\u0085",
+		"LS":      "\u2028",
+		"PS":      "\u2029",
+	} {
+		t.Run(name, func(t *testing.T) {
+			installed := []byte(managedConfigMarker + managedConfigSourcePrefix + srcURL +
+				sep + "kill_switch: false\n" + body)
+			assert.False(t, managedConfigEquivalent(installed, desired))
+
+			fc := forge.NewFakeClient()
+			fc.FileContents["acme/api/"+preset.OverlayPath] = installed
+			resolved := managedResolved(t, fc, m, "acme", "api")
+
+			status := RepoStatus{Installed: true}
+			checkManagedConfigDrift(context.Background(), resolved, &status)
+			assert.Empty(t, status.Error)
+			require.Len(t, status.Drifts, 1)
+
+			files, actions := convergeManagedConfigFiles(context.Background(), resolved, desired, false, noopProgress)
+			require.Len(t, files, 1)
+			assert.Equal(t, desired, files[0].Content)
+			require.Len(t, actions, 1)
+			assert.Equal(t, "update", actions[0].Action)
+		})
+	}
 }
 
 // TestLoadManifest_LocalPathRecordsNoSource: a manifest loaded from disk

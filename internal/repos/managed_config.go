@@ -128,9 +128,13 @@ func hasManagedConfigMarker(content []byte) bool {
 }
 
 // stripManagedConfigSource returns content without the optional
-// source-manifest line that directly follows the ownership marker. Content
-// without the marker, or with no source line after it, is returned
-// unchanged; otherwise a new slice is returned and content is not modified.
+// source-manifest line that directly follows the ownership marker. The line
+// is stripped only when it is exactly what managedConfigHeader writes: the
+// prefix, a URL that sanitizeManifestSource leaves unchanged (so it holds no
+// CR, NEL, LS, PS or other character the YAML parser would treat as a line
+// break), and a terminating LF. Anything else, including content without the
+// marker or with no source line, is returned unchanged so it is compared in
+// full; otherwise a new slice is returned and content is not modified.
 func stripManagedConfigSource(content []byte) []byte {
 	if !hasManagedConfigMarker(content) {
 		return content
@@ -139,9 +143,15 @@ func stripManagedConfigSource(content []byte) []byte {
 	if !bytes.HasPrefix(rest, []byte(managedConfigSourcePrefix)) {
 		return content
 	}
+	line, body, found := bytes.Cut(rest[len(managedConfigSourcePrefix):], []byte("\n"))
+	if !found {
+		return content
+	}
+	if src := string(line); src == "" || sanitizeManifestSource(src) != src {
+		return content
+	}
 	out := make([]byte, 0, len(content))
 	out = append(out, managedConfigMarker...)
-	_, body, _ := bytes.Cut(rest, []byte("\n"))
 	return append(out, body...)
 }
 
