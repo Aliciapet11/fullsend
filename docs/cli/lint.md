@@ -98,5 +98,6 @@ still linted, and every error is reported together at the end.
 ## Related
 
 - [CEL Triggers Reference](../guides/user/cel-triggers-reference.md) for writing `trigger` expressions
+- [Checking a trigger before you merge](../guides/user/customizing-agents.md#checking-a-trigger-before-you-merge) for passing and failing `trigger` examples and a CI job
 - [Bring Your Own Agent](../guides/user/bring-your-own-agent.md) for harness and `config.yaml` layout
 - [CLI internals](../guides/dev/cli-internals.md) for the full command tree
