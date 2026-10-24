@@ -122,10 +122,18 @@ func (r DummyRuntime) hostGitFn() hostGitFunc {
 	return runHostGit
 }
 
+// gitNoAutoMaintenance are git config overrides that stop a fetch or commit
+// from starting automatic gc or maintenance. Either can detach into a
+// background process that outlives the git command and keeps writing into
+// .git/objects after it returns.
+var gitNoAutoMaintenance = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+
 // runHostGit runs git on the runner. GIT_TERMINAL_PROMPT=0 makes a missing
-// credential fail instead of waiting for input.
+// credential fail instead of waiting for input; gitNoAutoMaintenance keeps
+// git from leaving background work behind in the runner's checkout.
 func runHostGit(ctx context.Context, dir string, args ...string) (string, string, int, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	gitArgs := append(append(append([]string{}, gitNoAutoMaintenance...), "-C", dir), args...)
+	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -590,23 +598,27 @@ func uploadCheckoutBranchBundle(ctx context.Context, rt DummyRuntime, sandboxNam
 // target branch, so "branch ... is unchanged" assertions can actually
 // detect it. The commit subject uses a conventional-commit prefix because
 // post-code derives the applier's PR title from it.
+//
+// The fetch and the commit carry gitNoAutoMaintenance so neither leaves a
+// background gc or maintenance process running in the sandbox repository.
 func checkoutBranchCommand(repoDir, name, bundleRef string) string {
 	quoted := shellQuote(name)
+	noAuto := strings.Join(gitNoAutoMaintenance, " ")
 	checkout := fmt.Sprintf("git checkout -B %s", quoted)
 	if bundleRef != "" {
 		bundle := shellQuote(checkoutBranchBundlePath)
 		checkout = fmt.Sprintf(
-			"{ git fetch --no-tags %s %s && git checkout -B %s FETCH_HEAD; rc=$?; rm -f %s; test \"$rc\" -eq 0; }",
-			bundle, shellQuote(bundleRef), quoted, bundle)
+			"{ git %s fetch --no-tags %s %s && git checkout -B %s FETCH_HEAD; rc=$?; rm -f %s; test \"$rc\" -eq 0; }",
+			noAuto, bundle, shellQuote(bundleRef), quoted, bundle)
 	}
 	return fmt.Sprintf(
 		"cd %s"+
 			" && %s"+
 			" && mkdir -p behaviour && echo %s > behaviour/marker.txt"+
 			" && git add behaviour/marker.txt"+
-			" && git -c user.name=fullsend-behaviour -c user.email=behaviour@fullsend.invalid commit -m %s",
+			" && git %s -c user.name=fullsend-behaviour -c user.email=behaviour@fullsend.invalid commit -m %s",
 		shellQuote(repoDir), checkout,
-		shellQuote("scripted marker for "+name),
+		shellQuote("scripted marker for "+name), noAuto,
 		shellQuote("test: add scripted marker commit"))
 }
 
