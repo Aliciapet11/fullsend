@@ -663,6 +663,7 @@ func TestExecuteBehaviourOp_CheckoutBranchMissingRemoteCommand(t *testing.T) {
 	assert.NotContains(t, gotCmd, "/dev/null", "git stderr must not be discarded")
 	assert.Contains(t, gotCmd, "behaviour/marker.txt")
 	assert.Contains(t, gotCmd, "commit -m")
+	assert.Contains(t, gotCmd, "git -c gc.auto=0 -c maintenance.auto=false -c user.name=", "the commit must not start background maintenance")
 }
 
 func TestExecuteBehaviourOp_CheckoutBranchExistingRemoteCommand(t *testing.T) {
@@ -694,7 +695,8 @@ func TestExecuteBehaviourOp_CheckoutBranchExistingRemoteCommand(t *testing.T) {
 	assert.Equal(t, "refs/fullsend-behaviour/heads/agent/42-fix-widget", git.calls[2][len(git.calls[2])-1])
 	assert.Equal(t, []string{"update-ref", "-d", "refs/fullsend-behaviour/heads/agent/42-fix-widget"}, git.calls[3])
 	assert.Equal(t, checkoutBranchBundlePath, uploadedTo)
-	assert.Contains(t, gotCmd, "git fetch --no-tags '"+checkoutBranchBundlePath+"' 'refs/fullsend-behaviour/heads/agent/42-fix-widget'")
+	assert.Contains(t, gotCmd, "git -c gc.auto=0 -c maintenance.auto=false fetch --no-tags '"+checkoutBranchBundlePath+"' 'refs/fullsend-behaviour/heads/agent/42-fix-widget'")
+	assert.Contains(t, gotCmd, "git -c gc.auto=0 -c maintenance.auto=false -c user.name=")
 	assert.Contains(t, gotCmd, "git checkout -B 'agent/42-fix-widget' FETCH_HEAD")
 	assert.Contains(t, gotCmd, "rm -f '"+checkoutBranchBundlePath+"'")
 	assert.NotContains(t, gotCmd, "origin", "the sandbox must not contact the remote")
@@ -825,6 +827,17 @@ func TestRunHostGit(t *testing.T) {
 	assert.NotEqual(t, 0, code)
 	assert.Contains(t, stderr, "fatal:")
 
+	// Automatic gc and maintenance are disabled, so no detached git
+	// process outlives the command.
+	stdout, _, code, err = runHostGit(context.Background(), dir, "config", "--get", "gc.auto")
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+	assert.Equal(t, "0", strings.TrimSpace(stdout))
+	stdout, _, code, err = runHostGit(context.Background(), dir, "config", "--get", "maintenance.auto")
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+	assert.Equal(t, "false", strings.TrimSpace(stdout))
+
 	// A cancelled context is an error, not an exit code.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -878,14 +891,31 @@ func runCheckoutBranchForReal(t *testing.T, hostRepo, sandboxRepo, branch string
 	return bundlePath, err
 }
 
-// gitTestEnv isolates git from the caller's global and system config.
+// gitTestEnv isolates git from the caller's global and system config and
+// disables automatic gc and maintenance, which can detach into a
+// background process that keeps writing into .git/objects after the
+// command returns and races t.TempDir cleanup.
 func gitTestEnv() []string {
 	return append(os.Environ(),
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t.invalid",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t.invalid",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=gc.auto", "GIT_CONFIG_VALUE_0=0",
+		"GIT_CONFIG_KEY_1=maintenance.auto", "GIT_CONFIG_VALUE_1=false",
 		"GIT_EDITOR=true")
+}
+
+func TestGitTestEnvDisablesAutoMaintenance(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := t.TempDir()
+	assert.Equal(t, "0", gitOut(t, dir, "config", "--get", "gc.auto"))
+	assert.Equal(t, "false", gitOut(t, dir, "config", "--get", "maintenance.auto"))
 }
 
 // runGit runs git in dir without inheriting host signing or editor config.
@@ -910,6 +940,9 @@ func initCheckoutBranchRepos(t *testing.T) (clone, origin string) {
 	seed := filepath.Join(base, "seed")
 
 	runGit(t, base, "init", "--bare", "-b", "main", origin)
+	// Pushes run receive-pack in origin without the GIT_CONFIG_* variables
+	// from gitTestEnv, so stop it starting gc through origin's own config.
+	runGit(t, origin, "config", "receive.autogc", "false")
 	runGit(t, base, "init", "-b", "main", seed)
 	require.NoError(t, os.WriteFile(filepath.Join(seed, "README.md"), []byte("seed\n"), 0o644))
 	runGit(t, seed, "add", "README.md")
@@ -941,6 +974,7 @@ func gitOut(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	cmd.Env = gitTestEnv()
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v: %s", args, out)
 	return strings.TrimSpace(string(out))
