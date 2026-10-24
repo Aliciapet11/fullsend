@@ -903,9 +903,8 @@ install. Never delete a live installer's lease.
 > converge against a project before running this version against it.
 > Dispatch is unaffected: the polling path never reads rotation state.
 
-The current CLI reads the prior unversioned format and versions 1 and 2, and
-always writes version 2. Version 1 is never written. CLIs built with the
-tolerant reader ([#8233](https://github.com/fullsend-ai/fullsend/issues/8233))
+The current CLI reads and writes only version 2. Version 1 is never written.
+CLIs built with the tolerant reader ([#8233](https://github.com/fullsend-ai/fullsend/issues/8233))
 accept version 1 but ignore the ownership fields (`created_token_ids`,
 `supplied_token_id`, `supplied`, `excluded_user_ids`) when they select outgoing
 tokens or run grace cleanup, so a version 1 document could let them revoke an
@@ -920,6 +919,16 @@ and revokes active role-named project tokens, supplied ones included. Never run
 an older CLI for install or uninstall against a project this version manages.
 No CLI refuses state silently and then rewrites it: an unsupported version is
 never rewritten.
+
+> **BREAKING CHANGE ([#8246](https://github.com/fullsend-ai/fullsend/issues/8246)):**
+> the current CLI no longer reads the legacy unversioned format or version 1,
+> and rejects documents with unknown fields. It refuses such state before
+> touching any credential and does not rewrite it. A project whose state was
+> never converged by a CLI that writes version 2 must first be converged once
+> by a CLI that includes
+> [#8313](https://github.com/fullsend-ai/fullsend/pull/8313) but predates the
+> #8246 change, which rewrites the state as version 2. Do not edit the
+> `version` field by hand.
 
 The upgrade is one-way. After the first install, converge or uninstall with a
 CLI that includes this change ([#8313](https://github.com/fullsend-ai/fullsend/pull/8313)),
