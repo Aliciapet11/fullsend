@@ -210,6 +210,39 @@ func TestDiagnoseGitLabWebhook_DeferredUntilWrapperIncludesDispatcher(t *testing
 	}
 }
 
+// A published trigger-account credential is live even with no managed
+// webhook and no dispatcher include, so project safety is still checked.
+func TestDiagnoseGitLabWebhook_AccountCredentialIsLiveWhileDeferred(t *testing.T) {
+	key := webhookTestOwner + "/" + webhookTestRepo
+	prefix := key + "/"
+	setup := func(t *testing.T) webhookFake {
+		c := newWebhookFake()
+		seedWebhookAccountRoute(t, c, webhookAccountTrigger, webhookAccountToken, false)
+		c.FileContents[prefix+fullsendPipelineInclude] = []byte("include: []\n")
+		c.PipelineVarOverrideRoles[key] = "developer"
+		return c
+	}
+	t.Run("published credential", func(t *testing.T) {
+		c := setup(t)
+		diag := diagnoseWebhook(t, c)
+		assert.Equal(t, GitLabWebhookStateDrifted, diag.State)
+		assert.Contains(t, strings.Join(diag.Reasons, "\n"), "revokes the managed webhook and trigger credential")
+		assertWebhookStatusHidesCredentials(t, c, diag)
+	})
+	t.Run("unreadable ledger fails closed", func(t *testing.T) {
+		c := setup(t)
+		c.VariableValues[prefix+forge.VarGitLabTriggerAccount] = "not json"
+		diag := diagnoseWebhook(t, c)
+		assert.NotEqual(t, GitLabWebhookStateDeferred, diag.State)
+	})
+	t.Run("unpublished ledger stays deferred", func(t *testing.T) {
+		c := setup(t)
+		delete(c.VariableValues, prefix+forge.VarGitLabTriggerAccount)
+		diag := diagnoseWebhook(t, c)
+		assert.Equal(t, GitLabWebhookStateDeferred, diag.State)
+	})
+}
+
 func TestDiagnoseGitLabWebhook_SafetyAndReadinessContractsAreDrift(t *testing.T) {
 	key := webhookTestOwner + "/" + webhookTestRepo
 	prefix := key + "/"

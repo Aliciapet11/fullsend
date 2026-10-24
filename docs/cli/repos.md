@@ -900,8 +900,12 @@ trigger token, the webhook secret or the webhook URL. The states are:
   and readiness gates (such as a wrapper or root `.gitlab-ci.yml` without the
   typed pipeline-input contract). Unlike the trigger account, the webhook
   status does evaluate these project-wide safety invariants.
-- `deferred`: nothing is provisioned and the pipeline wrapper on the default
-  branch does not include the dispatcher yet. This covers a fresh install
+- `deferred`: nothing is provisioned (no managed webhook, trigger token or
+  published trigger-account credential) and the pipeline wrapper on the default
+  branch does not include the dispatcher yet. A published trigger-account
+  credential, including one from an interrupted rotation or an unreadable
+  ledger, counts as provisioned, so the safety invariants are still evaluated.
+  This covers a fresh install
   whose initialization MR has not merged and a scaffold version that predates
   the fast path.
 - `unreadable`: the fast path could not be verified.

@@ -87,6 +87,13 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 	}
 	live := len(st.hooks) > 0 || len(st.triggers) > 0 || st.triggerStored
 	if !live {
+		// A published trigger-account bearer, including a retired generation
+		// from an interrupted rotation, is project-wide and stays usable
+		// after the webhook is gone. An unreadable ledger fails closed: its
+		// bearer cannot be ruled out, so the safety checks still run.
+		live, _ = gitlabTriggerAccountContainmentRequired(ctx, client, owner, repo)
+	}
+	if !live {
 		wrapper, wErr := client.GetFileContent(ctx, owner, repo, fullsendPipelineInclude)
 		if wErr != nil && !forge.IsNotFound(wErr) {
 			return unreadable("the pipeline wrapper", safeAPIError("reading "+fullsendPipelineInclude, wErr))
