@@ -180,11 +180,11 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 			if genErr != nil {
 				return unreadable("the GitLab Poller generation state", genErr)
 			}
+			managedID, idErr := ManagedGitLabRoleAccountID(ctx, client, owner, repo, gitlabroles.RolePoller)
+			if idErr != nil {
+				return unreadable("the managed GitLab Poller identity", idErr)
+			}
 			if p := gen.Pending; p != nil && p.Phase == PollerPhaseVerified && gen.RetiringUserID == 0 {
-				managedID, idErr := ManagedGitLabRoleAccountID(ctx, client, owner, repo, gitlabroles.RolePoller)
-				if idErr != nil {
-					return unreadable("the managed GitLab Poller identity", idErr)
-				}
 				next, cutErr := beginPollerCutover(gen, p.UserID)
 				if p.UserID > 0 && int64(managedID) == p.UserID && cutErr == nil {
 					// The pending account already is the managed Poller, so
@@ -200,7 +200,15 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 					gen.Pending = nil
 				}
 			}
-			if blocked := pollerHandoffBlocked(gen); blocked != "" {
+			// Install defers on the same checks, in the same order: a blocked
+			// generation document first, then a current Poller that is not the
+			// managed one. Without a managed Poller install has nothing to
+			// compare, so only the document's own blocker applies.
+			blocked := pollerHandoffBlocked(gen)
+			if blocked == "" && managedID > 0 {
+				blocked = pollerCurrentMismatch(gen, int64(managedID))
+			}
+			if blocked != "" {
 				status.Reasons = append(status.Reasons, "reconciliation pending: "+blocked)
 			}
 		}

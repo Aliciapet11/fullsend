@@ -764,7 +764,7 @@ func TestDiagnoseGitLabWebhook_VerifiedGenerationNotReportedWhenInstallRecovers(
 	}{
 		"unwired, never distributed":                         {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, false)}},
 		"unwired, distributed":                               {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}},
-		"managed Poller is another account":                  {state: PollerGenerationState{CurrentUserID: cutoverNewUID + 1, Pending: verified(cutoverNewUID, true)}, managedUser: webhookPollerUserID},
+		"managed Poller is another account":                  {state: PollerGenerationState{CurrentUserID: cutoverNewUID + 1, Pending: verified(cutoverNewUID, true)}, managedUser: webhookPollerUserID, wantPending: true},
 		"pending is the managed Poller, no previous current": {state: PollerGenerationState{Pending: verified(cutoverNewUID, true)}, managedUser: int(cutoverNewUID)},
 		"pending is the managed Poller":                      {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}, managedUser: int(cutoverNewUID), wantPending: true},
 		"verified while retiring":                            {state: PollerGenerationState{CurrentUserID: cutoverNewUID, RetiringUserID: webhookPollerUserID, Pending: verified(cutoverNewUID+1, false)}, wantPending: true},
