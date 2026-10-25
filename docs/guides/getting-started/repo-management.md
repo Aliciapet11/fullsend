@@ -742,7 +742,9 @@ or readiness contract), `deferred` (nothing provisioned and the pipeline
 wrapper does not include the dispatcher yet), and `unreadable`. Every state
 except `ready` and `deferred` is `gitlab-webhook` drift, so it makes the command
 exit non-zero. See [`repos status` output](../../cli/repos.md#output) for what
-each state means.
+each state means. The poller stays the dispatch backstop in every state, so a
+fast path that is not `ready` delays dispatch by up to one poll interval
+instead of stopping it.
 
 Use `--json` for machine-readable output:
 

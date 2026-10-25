@@ -298,6 +298,39 @@ to the default branch instead. Preview with `--dry-run`.
 For the full list of install flags, see the
 [CLI reference](../../cli/repos.md#repos-install).
 
+### Least-privilege dispatch contract
+
+The webhook fast path and the polling backstop start agents without raising
+any runtime credential above Developer and without accepting caller-supplied
+pipeline variables:
+
+* **Developer-level API pipeline creation with typed inputs.** The poller and
+  the webhook dispatcher start agent pipelines with a Developer-level
+  credential: through the API with the Poller credential, or with the
+  trigger-only account's `CI_JOB_TOKEN` once its dispatch activation is
+  recorded. Dispatch fields travel as declared typed pipeline inputs
+  ([ADR 0131](../../ADRs/0131-gitlab-dispatch-pipeline-inputs-no-owner-role.md)),
+  never as pipeline variables.
+* **User-defined pipeline variables are rejected.**
+  `ci_pipeline_variables_minimum_override_role=no_one_allowed` makes GitLab
+  reject pipeline variables from every caller, including a trigger token, so
+  no caller can override values such as `CI_JOB_TOKEN`, `CI_API_V4_URL`, or
+  `FULLSEND_DISPATCH_SECRET`. Install verifies the setting before it delivers
+  runnable typed jobs or provisions the webhook.
+* **Native `TRIGGER_PAYLOAD` inside the job.** The fast path needs no
+  pipeline variables. GitLab's native webhook trigger exposes the webhook
+  body to the dispatcher job as the file-type `TRIGGER_PAYLOAD` variable,
+  which keeps working under `no_one_allowed`. The dispatcher treats its
+  contents as untrusted hints and re-fetches every referenced resource from
+  the GitLab API before it dispatches.
+* **Authenticated opaque dispatch data for larger payloads.** The event
+  payload is too large for one input, so it travels as base64 chunks
+  (`event_payload_chunk_00` through `event_payload_chunk_08`; see
+  [Typed-input dispatch migration](#typed-input-dispatch-migration)). The
+  agent job reassembles them as data, never as shell, and verifies its
+  creator and the dispatch HMAC, computed over the whole payload, before it
+  selects credentials or acts on the payload.
+
 ### Inherited CI/CD variable trust
 
 > **Security assumption:** the webhook fast path and the trigger-account

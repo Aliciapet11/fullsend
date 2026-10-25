@@ -55,15 +55,22 @@ continue through normal routing. An empty summary can still accompany
 substantive inline review comments, so custom triggers receive the complete
 review event.
 
-On GitLab, automatic review fires when the cron poller sees an MR whose `created_at` is newer than the watermark
-(up to one poll interval of delay). Native `merge_request_event` dispatch was removed. `fullsend repos install`
-provisions a project webhook with merge-request events enabled ([ADR 0125](../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md))
-as a fast path that cuts this latency. Provisioning is deferred until the dispatcher and its scripts are on the
-default branch, the default branch is protected, and `no_one_allowed` is verified, so a repository whose scaffold
-merge request is still open dispatches via the ADR 0067 poller until then. The poller stays in place as the
-reconciliation backstop for missed events.
-Push-to-open-MR (GitHub `synchronize`) is not auto-detected;
-comment `/fs-review` to re-review after new commits.
+On GitLab, opening an MR triggers automatic review through the
+[ADR 0125](../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md) webhook fast
+path. `fullsend repos install` provisions a project webhook with merge-request
+events enabled. Each event starts a dispatcher pipeline on the protected default
+branch, which dispatches review without waiting for a poll. Provisioning is
+deferred until the dispatcher and its scripts are on the default branch, the
+default branch is protected, and `no_one_allowed` is verified. A repository
+whose scaffold merge request is still open therefore relies on the poller alone
+until then. The [ADR 0067](../ADRs/0067-gitlab-cron-polling-event-dispatch.md)
+cron poller stays in place as the reconciliation backstop. When a webhook
+delivery is missed or the fast path is not provisioned, review fires once the
+poller sees an MR whose `created_at` is newer than the watermark (up to one poll
+interval of delay). Native `merge_request_event` pipeline dispatch was removed.
+Push-to-open-MR (GitHub `synchronize`) is not auto-detected: the poller does not
+detect it, and the webhook dispatcher rejects merge request updates. Comment
+`/fs-review` to re-review after new commits.
 
 ## Control labels
 
