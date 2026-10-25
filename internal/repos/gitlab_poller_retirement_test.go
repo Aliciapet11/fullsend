@@ -759,19 +759,33 @@ func TestDiagnoseGitLabWebhook_VerifiedGenerationNotReportedWhenInstallRecovers(
 	}
 	for name, tc := range map[string]struct {
 		state       PollerGenerationState
+		managedUser int
 		wantPending bool
 	}{
-		"unwired, never distributed":    {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, false)}},
-		"unwired, distributed":          {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}},
-		"pending is the managed Poller": {state: PollerGenerationState{CurrentUserID: cutoverNewUID + 1, Pending: verified(webhookPollerUserID, true)}},
-		"verified while retiring":       {state: PollerGenerationState{CurrentUserID: cutoverNewUID, RetiringUserID: webhookPollerUserID, Pending: verified(cutoverNewUID+1, false)}, wantPending: true},
-		"quarantined":                   {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseQuarantined, Reason: "test"}}, wantPending: true},
+		"unwired, never distributed":                         {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, false)}},
+		"unwired, distributed":                               {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}},
+		"managed Poller is another account":                  {state: PollerGenerationState{CurrentUserID: cutoverNewUID + 1, Pending: verified(cutoverNewUID, true)}, managedUser: webhookPollerUserID},
+		"pending is the managed Poller, no previous current": {state: PollerGenerationState{Pending: verified(cutoverNewUID, true)}, managedUser: int(cutoverNewUID)},
+		"pending is the managed Poller":                      {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}, managedUser: int(cutoverNewUID), wantPending: true},
+		"verified while retiring":                            {state: PollerGenerationState{CurrentUserID: cutoverNewUID, RetiringUserID: webhookPollerUserID, Pending: verified(cutoverNewUID+1, false)}, wantPending: true},
+		"quarantined":                                        {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseQuarantined, Reason: "test"}}, wantPending: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newWebhookFake()
 			ensureWebhook(t, c, false, false)
 			c.ProjectHooks[key][0].URL = "https://elsewhere.example/hooks/fullsend"
 			require.NoError(t, writePollerGenerations(context.Background(), c, webhookTestOwner, webhookTestRepo, tc.state))
+			if tc.managedUser != 0 {
+				rotation, _, err := loadRotationState(context.Background(), c, webhookTestOwner, webhookTestRepo)
+				require.NoError(t, err)
+				if rotation.Roles == nil {
+					rotation.Roles = map[string]rotationRoleState{}
+				}
+				rs := rotation.Roles[string(gitlabroles.RolePoller)]
+				rs.ManagedUserID = tc.managedUser
+				rotation.Roles[string(gitlabroles.RolePoller)] = rs
+				require.NoError(t, writeRotationState(context.Background(), c, webhookTestOwner, webhookTestRepo, rotation))
+			}
 
 			diag := diagnoseWebhook(t, c)
 			assert.Equal(t, GitLabWebhookStateDrifted, diag.State)
@@ -783,4 +797,39 @@ func TestDiagnoseGitLabWebhook_VerifiedGenerationNotReportedWhenInstallRecovers(
 			}
 		})
 	}
+}
+
+// An interrupted cutover whose pending account is already the managed Poller
+// is not discarded by status: install records the cutover, which makes the
+// previous Poller retiring, and a drifted named webhook then defers until
+// retirement completes. Status names that same blocker (#8802).
+func TestDiagnoseGitLabWebhook_InterruptedCutoverMatchesInstallOutcome(t *testing.T) {
+	key := webhookTestOwner + "/" + webhookTestRepo
+	c := newWebhookFake()
+	ownedBy(c, webhookMaintainerUserID, forge.GitLabAccessLevelMaintainer)
+	seedDefaultBranchGrants(t, c)
+	ro := newRetiringTriggerOwner(c)
+	_, err := ensureWebhookAsPollerOn(c, ro)
+	require.NoError(t, err)
+	require.Equal(t, int64(webhookPollerUserID), generationState(t, c).RetiringUserID)
+
+	// Rewind to the interrupted state: the runtime credential of the verified
+	// generation is published (rotation state names it as the managed Poller),
+	// but the generation document never recorded the cutover.
+	require.NoError(t, writePollerGenerations(context.Background(), c, webhookTestOwner, webhookTestRepo, PollerGenerationState{
+		CurrentUserID: webhookPollerUserID,
+		Pending:       &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseVerified, TriggerAttempted: true, TriggerID: 9001, TriggerDistributed: true},
+	}))
+	c.ProjectHooks[key][0].URL = "https://elsewhere.example/hooks/fullsend"
+
+	diag := diagnoseWebhook(t, c)
+	assert.Equal(t, GitLabWebhookStateDrifted, diag.State)
+	assert.Contains(t, strings.Join(diag.Reasons, "\n"), "reconciliation pending: webhook fast-path blocked: the superseded GitLab Poller identity (user ID 4004) has not finished retiring")
+
+	res, err := ensureWebhookAsPollerOn(c, ro)
+	require.NoError(t, err)
+	assert.Equal(t, "deferred", res.Action)
+	assert.Contains(t, strings.Join(res.Details, "\n"), "has not finished retiring")
+	assert.Equal(t, int64(webhookPollerUserID), generationState(t, c).RetiringUserID)
+	assert.Contains(t, strings.Join(diagnoseWebhook(t, c).Reasons, "\n"), "has not finished retiring")
 }

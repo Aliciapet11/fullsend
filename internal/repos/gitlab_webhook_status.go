@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/gitlabroles"
 )
 
 // GitLab webhook fast-path states reported by repos status (ADR 0125).
@@ -180,11 +181,24 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 				return unreadable("the GitLab Poller generation state", genErr)
 			}
 			if p := gen.Pending; p != nil && p.Phase == PollerPhaseVerified && gen.RetiringUserID == 0 {
-				// Install recovers this generation on its own: it resumes or
-				// abandons an unwired one, or records the interrupted cutover
-				// when the account is already the managed Poller
-				// (prepareHandoffPollerOwnedTrigger). It is not a blocker.
-				gen.Pending = nil
+				managedID, idErr := ManagedGitLabRoleAccountID(ctx, client, owner, repo, gitlabroles.RolePoller)
+				if idErr != nil {
+					return unreadable("the managed GitLab Poller identity", idErr)
+				}
+				next, cutErr := beginPollerCutover(gen, p.UserID)
+				if p.UserID > 0 && int64(managedID) == p.UserID && cutErr == nil {
+					// The pending account already is the managed Poller, so
+					// install records the interrupted cutover
+					// (prepareHandoffPollerOwnedTrigger), which makes the
+					// previous current Poller retiring. Diagnose that
+					// retirement obligation, not the unrecorded generation.
+					gen = next
+				} else {
+					// Install recovers any other verified generation on its
+					// own: it resumes or abandons an unwired one. It is not a
+					// blocker.
+					gen.Pending = nil
+				}
 			}
 			if blocked := pollerHandoffBlocked(gen); blocked != "" {
 				status.Reasons = append(status.Reasons, "reconciliation pending: "+blocked)
