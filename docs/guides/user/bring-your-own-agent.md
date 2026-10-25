@@ -488,12 +488,16 @@ overlays:
   post_script: scripts/post-triage.sh
   env:
     runner:
-      FULLSEND_WORK_ITEM_URL: ${FULLSEND_WORK_ITEM_URL}
+      ISSUE_URL: ${GITHUB_ISSUE_URL}
       GH_TOKEN: ${GH_TOKEN}
+      FULLSEND_FORGE: github
     sandbox:
-      FULLSEND_WORK_ITEM_URL: "${FULLSEND_WORK_ITEM_URL}"
-      GH_TOKEN: "${GH_TOKEN}"
+      ISSUE_URL: "${GITHUB_ISSUE_URL}"
+      FULLSEND_FORGE: github
 ```
+
+New agents should map `ISSUE_URL` from `FULLSEND_WORK_ITEM_URL`; the example
+above shows the current built-in GitHub overlay before that migration.
 
 Key patterns to note:
 
