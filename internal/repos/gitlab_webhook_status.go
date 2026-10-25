@@ -179,6 +179,13 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 			if genErr != nil {
 				return unreadable("the GitLab Poller generation state", genErr)
 			}
+			if p := gen.Pending; p != nil && p.Phase == PollerPhaseVerified && gen.RetiringUserID == 0 {
+				// Install recovers this generation on its own: it resumes or
+				// abandons an unwired one, or records the interrupted cutover
+				// when the account is already the managed Poller
+				// (prepareHandoffPollerOwnedTrigger). It is not a blocker.
+				gen.Pending = nil
+			}
 			if blocked := pollerHandoffBlocked(gen); blocked != "" {
 				status.Reasons = append(status.Reasons, "reconciliation pending: "+blocked)
 			}

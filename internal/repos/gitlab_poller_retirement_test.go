@@ -747,3 +747,40 @@ func TestDiagnoseGitLabWebhook_RetiringGenerationOnlyNamedWhenReplacementNeeded(
 	assert.Equal(t, GitLabWebhookStateUnreadable, diag.State)
 	assert.Contains(t, strings.Join(diag.Reasons, "\n"), "could not verify the GitLab Poller generation state")
 }
+
+// A verified pending generation with no retiring Poller is recovered by
+// install itself (resumed, abandoned, or its cutover recorded), so status does
+// not name it as a manual-cleanup blocker. A retiring Poller alongside it
+// still blocks, and so does any other blocking phase (#8802).
+func TestDiagnoseGitLabWebhook_VerifiedGenerationNotReportedWhenInstallRecovers(t *testing.T) {
+	key := webhookTestOwner + "/" + webhookTestRepo
+	verified := func(userID int64, distributed bool) *PendingPollerGeneration {
+		return &PendingPollerGeneration{UserID: userID, Phase: PollerPhaseVerified, TriggerAttempted: true, TriggerID: 9001, TriggerDistributed: distributed}
+	}
+	for name, tc := range map[string]struct {
+		state       PollerGenerationState
+		wantPending bool
+	}{
+		"unwired, never distributed":    {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, false)}},
+		"unwired, distributed":          {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}},
+		"pending is the managed Poller": {state: PollerGenerationState{CurrentUserID: cutoverNewUID + 1, Pending: verified(webhookPollerUserID, true)}},
+		"verified while retiring":       {state: PollerGenerationState{CurrentUserID: cutoverNewUID, RetiringUserID: webhookPollerUserID, Pending: verified(cutoverNewUID+1, false)}, wantPending: true},
+		"quarantined":                   {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseQuarantined, Reason: "test"}}, wantPending: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newWebhookFake()
+			ensureWebhook(t, c, false, false)
+			c.ProjectHooks[key][0].URL = "https://elsewhere.example/hooks/fullsend"
+			require.NoError(t, writePollerGenerations(context.Background(), c, webhookTestOwner, webhookTestRepo, tc.state))
+
+			diag := diagnoseWebhook(t, c)
+			assert.Equal(t, GitLabWebhookStateDrifted, diag.State)
+			joined := strings.Join(diag.Reasons, "\n")
+			if tc.wantPending {
+				assert.Contains(t, joined, "reconciliation pending")
+			} else {
+				assert.NotContains(t, joined, "reconciliation pending")
+			}
+		})
+	}
+}
