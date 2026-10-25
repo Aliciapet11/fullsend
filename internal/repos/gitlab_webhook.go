@@ -2209,6 +2209,14 @@ func ensureGitLabWebhookFastPath(ctx context.Context, client forge.Client, trigg
 						return res, teardownErr
 					}
 					deferErr := deferGitLabTriggerReplacement(ctx, client, &res, st, baseURL, owner, repo, activeID, nil)
+					if deferErr == nil && !st.activeCompliant(baseURL) && (len(st.hooks) > 0 || len(st.triggers) > 0) {
+						// The drifted fast path was torn down. It is not left in
+						// place: retiring a superseded Poller generation waits
+						// until no managed webhook carries an unidentifiable
+						// trigger, so keeping the drifted hook would block the
+						// retirement this replacement waits for (#8802).
+						res.Details = append(res.Details, "Reconciliation is pending: the drifted webhook fast path was removed because its pipeline trigger token cannot be replaced while the blocker above holds; repos install recreates it once the blocker clears")
+					}
 					return res, deferErr
 				}
 				minted = pm.minted

@@ -95,6 +95,13 @@ func TestDiagnoseGitLabWebhook_DriftedHookIsRepaired(t *testing.T) {
 			},
 			want: "no Fullsend-managed project webhook carries the active trigger token",
 		},
+		"url": {
+			// Only the URL changes; the named hook keeps its identity (#8802).
+			mutate: func(c webhookFake) {
+				c.ProjectHooks[key][0].URL = "https://elsewhere.example/hooks/fullsend"
+			},
+			want: "no Fullsend-managed project webhook carries the active trigger token",
+		},
 		"ssl verification": {
 			mutate: func(c webhookFake) { c.ProjectHooks[key][0].EnableSSLVerification = false },
 			want:   "differs from the desired trigger ref, events or SSL verification",
@@ -376,8 +383,17 @@ func TestDiagnoseGitLabWebhook_AccountRoute(t *testing.T) {
 	assert.True(t, diag.WebhookConfigured)
 	assertWebhookStatusHidesCredentials(t, c, diag)
 
-	// A webhook that no longer records the account's trigger is drift.
+	// A webhook whose URL changed no longer carries the account's token.
 	key := webhookTestOwner + "/" + webhookTestRepo
+	desiredURL := c.ProjectHooks[key][0].URL
+	c.ProjectHooks[key][0].URL = "https://elsewhere.example/hooks/fullsend"
+	diag = diagnoseWebhook(t, c)
+	assert.Equal(t, GitLabWebhookStateDrifted, diag.State)
+	assert.Contains(t, strings.Join(diag.Reasons, "\n"), "no Fullsend-managed project webhook carries the active trigger token")
+	assertWebhookStatusHidesCredentials(t, c, diag)
+	c.ProjectHooks[key][0].URL = desiredURL
+
+	// A webhook that no longer records the account's trigger is drift.
 	c.ProjectHooks[key][0].Description = gitlabWebhookDescription
 	diag = diagnoseWebhook(t, c)
 	assert.Equal(t, GitLabWebhookStateDrifted, diag.State)

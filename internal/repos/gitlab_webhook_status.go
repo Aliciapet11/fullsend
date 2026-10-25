@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/gitlabroles"
 )
 
 // GitLab webhook fast-path states reported by repos status (ADR 0125).
@@ -171,6 +172,60 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 		}
 		status.Reasons = append(status.Reasons, gitlabWebhookHookReasons(st, baseURL, st.triggerToken, activeID, st.activeHookIndex(baseURL), false)...)
 		status.WebhookConfigured = st.provisioned(baseURL)
+		if activeID == 0 {
+			// Repairing the fast path needs a replacement trigger token, which
+			// repos install mints through a fresh Poller generation. Name what
+			// blocks that generation so the drift reads as pending (#8802).
+			gen, genErr := loadPollerGenerations(ctx, client, owner, repo)
+			if genErr != nil {
+				return unreadable("the GitLab Poller generation state", genErr)
+			}
+			managedID, idErr := ManagedGitLabRoleAccountID(ctx, client, owner, repo, gitlabroles.RolePoller)
+			if idErr != nil {
+				return unreadable("the managed GitLab Poller identity", idErr)
+			}
+			if p := gen.Pending; p != nil && p.UserID > 0 && (p.Phase == PollerPhaseElevated || p.Phase == PollerPhaseTriggerRequested) && pollerTriggerRequestUnknown(*p) {
+				// Install first recovers an interrupted generation, and one
+				// whose single trigger request may have been sent is
+				// quarantined, which then blocks the replacement.
+				quarantined := *p
+				quarantined.Phase = PollerPhaseQuarantined
+				quarantined.Reason = pollerTriggerUnknownReason(p.UserID)
+				gen.Pending = &quarantined
+			}
+			if p := gen.Pending; p != nil && p.Phase == PollerPhaseVerified && gen.RetiringUserID == 0 {
+				next, cutErr := beginPollerCutover(gen, p.UserID)
+				if p.UserID > 0 && int64(managedID) == p.UserID && cutErr == nil {
+					// The pending account already is the managed Poller, so
+					// install records the interrupted cutover
+					// (prepareHandoffPollerOwnedTrigger), which makes the
+					// previous current Poller retiring. Diagnose that
+					// retirement obligation, not the unrecorded generation.
+					gen = next
+				} else {
+					// Install recovers any other verified generation on its
+					// own: it resumes or abandons an unwired one. It is not a
+					// blocker. A generation whose trigger may have been
+					// distributed is abandoned, which counts against the
+					// abandoned-account cap that can refuse the replacement.
+					if p.TriggerDistributed {
+						gen.AbandonedUserIDs = append(slices.Clone(gen.AbandonedUserIDs), p.UserID)
+					}
+					gen.Pending = nil
+				}
+			}
+			// Install defers on the same checks, in the same order: a blocked
+			// generation document first, then a current Poller that is not the
+			// managed one. Without a managed Poller install has nothing to
+			// compare, so only the document's own blocker applies.
+			blocked := pollerHandoffBlocked(gen)
+			if blocked == "" && managedID > 0 {
+				blocked = pollerCurrentMismatch(gen, int64(managedID))
+			}
+			if blocked != "" {
+				status.Reasons = append(status.Reasons, "reconciliation pending: "+blocked)
+			}
+		}
 	}
 
 	switch {
