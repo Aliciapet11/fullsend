@@ -184,6 +184,15 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 			if idErr != nil {
 				return unreadable("the managed GitLab Poller identity", idErr)
 			}
+			if p := gen.Pending; p != nil && p.UserID > 0 && (p.Phase == PollerPhaseElevated || p.Phase == PollerPhaseTriggerRequested) && pollerTriggerRequestUnknown(*p) {
+				// Install first recovers an interrupted generation, and one
+				// whose single trigger request may have been sent is
+				// quarantined, which then blocks the replacement.
+				quarantined := *p
+				quarantined.Phase = PollerPhaseQuarantined
+				quarantined.Reason = pollerTriggerUnknownReason(p.UserID)
+				gen.Pending = &quarantined
+			}
 			if p := gen.Pending; p != nil && p.Phase == PollerPhaseVerified && gen.RetiringUserID == 0 {
 				next, cutErr := beginPollerCutover(gen, p.UserID)
 				if p.UserID > 0 && int64(managedID) == p.UserID && cutErr == nil {

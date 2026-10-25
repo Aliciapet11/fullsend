@@ -771,6 +771,9 @@ func TestDiagnoseGitLabWebhook_VerifiedGenerationNotReportedWhenInstallRecovers(
 		"pending is the managed Poller":                      {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}, managedUser: int(cutoverNewUID), wantPending: true},
 		"verified while retiring":                            {state: PollerGenerationState{CurrentUserID: cutoverNewUID, RetiringUserID: webhookPollerUserID, Pending: verified(cutoverNewUID+1, false)}, wantPending: true},
 		"quarantined":                                        {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseQuarantined, Reason: "test"}}, wantPending: true},
+		"trigger requested, current is the managed Poller":   {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseTriggerRequested, TriggerAttempted: true}}, managedUser: webhookPollerUserID, wantPending: true},
+		"elevated after a trigger attempt":                   {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseElevated, TriggerAttempted: true}}, managedUser: webhookPollerUserID, wantPending: true},
+		"elevated before any trigger attempt":                {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseElevated}}, managedUser: webhookPollerUserID},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newWebhookFake()
@@ -863,4 +866,40 @@ func TestDiagnoseGitLabWebhook_DistributedVerifiedGenerationAtAbandonedCapMatche
 	require.NoError(t, err)
 	assert.Equal(t, "deferred", res.Action)
 	assert.Contains(t, strings.Join(res.Details, "\n"), "accounts were abandoned")
+}
+
+// Install first recovers an interrupted generation, and one whose single
+// trigger request may have been sent is quarantined, so the replacement
+// defers. Status names the same quarantine instead of reporting no blocker
+// (#8802).
+func TestDiagnoseGitLabWebhook_InterruptedTriggerRequestMatchesInstallOutcome(t *testing.T) {
+	key := webhookTestOwner + "/" + webhookTestRepo
+	for name, pending := range map[string]*PendingPollerGeneration{
+		"trigger requested":                {UserID: cutoverNewUID, Phase: PollerPhaseTriggerRequested, TriggerAttempted: true},
+		"elevated after a trigger attempt": {UserID: cutoverNewUID, Phase: PollerPhaseElevated, TriggerAttempted: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newWebhookFake()
+			ensureWebhook(t, c, false, false)
+			ownedBy(c, webhookMaintainerUserID, forge.GitLabAccessLevelMaintainer)
+			seedDefaultBranchGrants(t, c)
+			ro := newRetiringTriggerOwner(c)
+
+			require.NoError(t, writePollerGenerations(context.Background(), c, webhookTestOwner, webhookTestRepo, PollerGenerationState{
+				CurrentUserID: webhookPollerUserID,
+				Pending:       pending,
+			}))
+			c.ProjectHooks[key][0].URL = "https://elsewhere.example/hooks/fullsend"
+
+			diag := diagnoseWebhook(t, c)
+			assert.Equal(t, GitLabWebhookStateDrifted, diag.State)
+			assert.Contains(t, strings.Join(diag.Reasons, "\n"), "reconciliation pending: webhook fast-path blocked: the replacement GitLab Poller generation (user ID")
+			assert.Contains(t, strings.Join(diag.Reasons, "\n"), "is quarantined: its single pipeline trigger creation request has an unknown result")
+
+			res, err := ensureWebhookAsPollerOn(c, ro)
+			require.NoError(t, err)
+			assert.Equal(t, "deferred", res.Action)
+			assert.Contains(t, strings.Join(res.Details, "\n"), "is quarantined: its single pipeline trigger creation request has an unknown result")
+		})
+	}
 }
