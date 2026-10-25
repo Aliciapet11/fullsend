@@ -68,7 +68,8 @@ path dispatches, because the poll jobs also require a protected ref. The
 [ADR 0067](../ADRs/0067-gitlab-cron-polling-event-dispatch.md) cron poller stays
 in place as the reconciliation backstop. When a webhook delivery is missed or
 the fast path is not provisioned, review fires once the poller sees an MR whose
-`created_at` is newer than the watermark (up to one poll interval of delay). Native `merge_request_event` pipeline dispatch was removed.
+`created_at` is newer than the watermark (up to one poll interval of delay).
+Native `merge_request_event` pipeline dispatch was removed.
 Push-to-open-MR (GitHub `synchronize`) is not auto-detected: the poller does not
 detect it, and the webhook dispatcher rejects merge request updates. Comment
 `/fs-review` to re-review after new commits.
