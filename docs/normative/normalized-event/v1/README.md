@@ -458,6 +458,7 @@ mapped:
 | `merge_request` | `update` + `changes.labels` | `label_changed` (one per label diffed) | each named label present (add) / absent (remove) as claimed |
 | `merge_request` | `update` (other) | `synchronized`/`edited`/`marked_ready` | **uncheckable as a unit → MUST fail closed** |
 | `note` | create | `comment_added` | referenced note exists in the re-fetch |
+| `note` | update | — (ignored, non-routable) | none; an edited comment claims no new transition → MUST be ignored once the payload identifiers validate: no re-fetch, no dispatch, no state write, job succeeds |
 | `issue` | `open`/`reopen` | `opened`/`reopened` | issue exists and `state == "opened"` |
 | `issue` | `close` | `closed` | issue exists and `state == "closed"` |
 | `issue` | `update` + `changes.labels` | `label_changed` (one per label diffed) | each named label present (add) / absent (remove) as claimed |
@@ -469,6 +470,12 @@ An **ignored** event and a **rejected** event are different outcomes. The
 claims no transition, so there is nothing to validate and nothing to route.
 The adapter MUST record it as ignored and MUST NOT dispatch, write poll
 state, or fail the dispatcher job. It SHOULD log an explicit no-op message.
+The `note`/`update` row is the same outcome for an edited issue or merge
+request comment. GitLab fires note webhooks for edits as well as new
+comments. An edit is not a new `comment_added`, so the adapter MUST ignore
+it in the same way. The note ID, `noteable_type`, and issue or merge request
+IID are still validated first, and a malformed payload fails closed. Any
+other note action is rejected.
 A **rejected** event names a transition that the re-fetch contradicts or
 cannot check. This includes every `update` that carries `changes.labels`:
 a diff that does not resolve to discrete add/remove pairs, a label entry
@@ -496,11 +503,13 @@ unset. `fullsend poll --input-driver gitlab-webhook` requires an explicit
 normative: when a pin is unavailable the driver MUST fail closed, never fall
 back to an overridable variable. Shipping did not close snapshot-consistent
 replay, which remains a residual risk (see below). Current builder behavior,
-all of it fail-closed except the ignored bare issue update:
+all of it fail-closed except the ignored bare issue update and note edit:
 
 - A bare issue `update` (no `changes.labels`) is ignored. The builder
   returns no events and no error, and the dispatcher job logs a no-op and
   succeeds. A bare `merge_request` `update` still fails closed.
+- A note `update` (an edited comment) is ignored the same way once its
+  identifiers validate.
 - Rows whose actor has no event-time evidence in the re-fetch are rejected:
   `merge_request`/`reopen` and `issue`/`reopen`, which need resource state
   events.
@@ -514,8 +523,9 @@ all of it fail-closed except the ignored bare issue update:
 The `MUST fail closed` cells above have **no implementer-defined extension
 point**: an `update` action that is not resolved by a row in this table MUST
 fail closed. The `issue`/`update` (other) row resolves the bare issue update
-as ignored. That is the only ignored row, and an implementation MUST NOT
-extend it to other actions or object kinds. Any future named sub-check (e.g.
+as ignored, and the `note`/`update` row resolves a note edit as ignored.
+Those are the only ignored rows, and an implementation MUST NOT extend them
+to other actions or object kinds. Any future named sub-check (e.g.
 draft→ready for `marked_ready`) MUST be added as an **explicit row in this
 spec**, not invented at implementation time.
 The `merge_request`/`close` row requires the current

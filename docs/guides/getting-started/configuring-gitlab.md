@@ -1572,7 +1572,10 @@ Confirm:
   events that dispatch nothing. An issue edit that does not change labels
   (title, description, assignee) is ignored: the job logs
   `ignoring issue #N update without changes.labels` and succeeds without
-  starting an agent pipeline. A failed dispatcher job means the payload
+  starting an agent pipeline. An edited comment on an issue or merge
+  request is ignored the same way: the job logs
+  `webhook: ignoring note edit on ...` and succeeds without dispatching.
+  A failed dispatcher job means the payload
   was rejected, not ignored. Typical causes are a label change the API
   re-fetch contradicts or cannot tie to the acting user, a stale or
   replayed event, or an unsupported action such as a merge request edit
