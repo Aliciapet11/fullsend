@@ -89,8 +89,11 @@ When the review agent requests changes (without rejecting), no outcome label is
 applied. On GitHub, the native `pull_request_review` event triggers the
 [fix agent](fix.md) directly. On GitLab, which has no equivalent native review
 event, the review bot posts an MR note with the hidden
-`<!-- fullsend:changes-requested -->` marker; the scheduled poller retains that
-bot-authored note and the dispatch router routes it to fix. Fork merge requests
+`<!-- fullsend:changes-requested -->` marker; the webhook fast path, with the
+scheduled poller as reconciliation backstop, retains that bot-authored note and
+the dispatch router routes it to fix. Both paths retain the note only when its
+author is the Poller bot user, so with distinct Analyst and Poller identities
+it does not dispatch automatically and `/fs-fix` is needed. Fork merge requests
 are blocked from automatic fix runs, matching GitHub. Comment-only reviews do
 not carry the marker and do not dispatch fix.
 
