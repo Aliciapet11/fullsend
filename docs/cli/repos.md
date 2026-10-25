@@ -1269,6 +1269,18 @@ File deletions (workflow YAML, `.fullsend/config.yaml`, and GitLab `.gitlab-ci.y
 
 GitLab uninstall holds the `FULLSEND_GITLAB_INSTALL_LEASE` project lease for the whole teardown, from webhook removal through the final variable, secret, branch, and token deletions, so no concurrent installer can publish a replacement hook, trigger token, or role credential mid-teardown. It fails closed: if another installer holds the lease or the client cannot take it, uninstall stops before removing anything and the manifest entry is left in place for retry. See [Upgrade compatibility](#upgrade-compatibility) for stranded-lease recovery.
 
+The GitLab file removal, whether by pull request or `--direct`, also deletes
+the webhook dispatcher scaffold (`.gitlab/ci/fullsend-dispatcher.yml` and
+`.gitlab/ci/scripts/run-dispatcher-job.sh`). The `.gitlab-ci.yml` unmerge
+removes Fullsend's `trigger` and child-pipeline workflow rules along with its
+include, stages and other rules, and keeps the user's own entries. A repository
+whose fast path was never provisioned (installed before it shipped, or never
+converged) uninstalls cleanly: an absent webhook, trigger token, credential
+variable or dispatcher file is skipped. Uninstall leaves the project's
+`ci_pipeline_variables_minimum_override_role` setting unchanged. The restrictive
+`no_one_allowed` value is safe to keep; relax it yourself in the GitLab project
+settings if other pipelines need pipeline-variable overrides.
+
 For the service-account cleanup, see
 [GitLab project service-account lifecycle § Service-account uninstall](#service-account-uninstall).
 
