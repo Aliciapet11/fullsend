@@ -63,11 +63,12 @@ branch, which dispatches review without waiting for a poll. Provisioning is
 deferred until the dispatcher and its scripts are on the default branch, the
 default branch is protected, and `no_one_allowed` is verified. A repository
 whose scaffold merge request is still open therefore relies on the poller alone
-until then. The [ADR 0067](../ADRs/0067-gitlab-cron-polling-event-dispatch.md)
-cron poller stays in place as the reconciliation backstop. When a webhook
-delivery is missed or the fast path is not provisioned, review fires once the
-poller sees an MR whose `created_at` is newer than the watermark (up to one poll
-interval of delay). Native `merge_request_event` pipeline dispatch was removed.
+once the scaffold is merged to a protected default branch. Until then neither
+path dispatches, because the poll jobs also require a protected ref. The
+[ADR 0067](../ADRs/0067-gitlab-cron-polling-event-dispatch.md) cron poller stays
+in place as the reconciliation backstop. When a webhook delivery is missed or
+the fast path is not provisioned, review fires once the poller sees an MR whose
+`created_at` is newer than the watermark (up to one poll interval of delay). Native `merge_request_event` pipeline dispatch was removed.
 Push-to-open-MR (GitHub `synchronize`) is not auto-detected: the poller does not
 detect it, and the webhook dispatcher rejects merge request updates. Comment
 `/fs-review` to re-review after new commits.
