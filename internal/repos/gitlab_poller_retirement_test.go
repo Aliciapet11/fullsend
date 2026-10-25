@@ -764,6 +764,8 @@ func TestDiagnoseGitLabWebhook_VerifiedGenerationNotReportedWhenInstallRecovers(
 	}{
 		"unwired, never distributed":                         {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, false)}},
 		"unwired, distributed":                               {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}},
+		"unwired, distributed, two abandoned":                {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, AbandonedUserIDs: []int64{7001, 7002}, Pending: verified(cutoverNewUID, true)}, wantPending: true},
+		"unwired, never distributed, two abandoned":          {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, AbandonedUserIDs: []int64{7001, 7002}, Pending: verified(cutoverNewUID, false)}},
 		"managed Poller is another account":                  {state: PollerGenerationState{CurrentUserID: cutoverNewUID + 1, Pending: verified(cutoverNewUID, true)}, managedUser: webhookPollerUserID, wantPending: true},
 		"pending is the managed Poller, no previous current": {state: PollerGenerationState{Pending: verified(cutoverNewUID, true)}, managedUser: int(cutoverNewUID)},
 		"pending is the managed Poller":                      {state: PollerGenerationState{CurrentUserID: webhookPollerUserID, Pending: verified(cutoverNewUID, true)}, managedUser: int(cutoverNewUID), wantPending: true},
@@ -832,4 +834,33 @@ func TestDiagnoseGitLabWebhook_InterruptedCutoverMatchesInstallOutcome(t *testin
 	assert.Contains(t, strings.Join(res.Details, "\n"), "has not finished retiring")
 	assert.Equal(t, int64(webhookPollerUserID), generationState(t, c).RetiringUserID)
 	assert.Contains(t, strings.Join(diagnoseWebhook(t, c).Reasons, "\n"), "has not finished retiring")
+}
+
+// Recovering an unwired verified generation whose trigger may have been
+// distributed abandons its account. With two accounts already abandoned that
+// reaches the cap, so install defers on the replacement; status names the same
+// blocker instead of leaving the count at two (#8802).
+func TestDiagnoseGitLabWebhook_DistributedVerifiedGenerationAtAbandonedCapMatchesInstallOutcome(t *testing.T) {
+	key := webhookTestOwner + "/" + webhookTestRepo
+	c := newWebhookFake()
+	ensureWebhook(t, c, false, false)
+	ownedBy(c, webhookMaintainerUserID, forge.GitLabAccessLevelMaintainer)
+	seedDefaultBranchGrants(t, c)
+	ro := newRetiringTriggerOwner(c)
+
+	require.NoError(t, writePollerGenerations(context.Background(), c, webhookTestOwner, webhookTestRepo, PollerGenerationState{
+		CurrentUserID:    webhookPollerUserID,
+		AbandonedUserIDs: []int64{7001, 7002},
+		Pending:          &PendingPollerGeneration{UserID: cutoverNewUID, Phase: PollerPhaseVerified, TriggerAttempted: true, TriggerID: 9001, TriggerDistributed: true},
+	}))
+	c.ProjectHooks[key][0].URL = "https://elsewhere.example/hooks/fullsend"
+
+	diag := diagnoseWebhook(t, c)
+	assert.Equal(t, GitLabWebhookStateDrifted, diag.State)
+	assert.Contains(t, strings.Join(diag.Reasons, "\n"), "reconciliation pending: webhook fast-path blocked: 3 replacement GitLab Poller accounts were abandoned")
+
+	res, err := ensureWebhookAsPollerOn(c, ro)
+	require.NoError(t, err)
+	assert.Equal(t, "deferred", res.Action)
+	assert.Contains(t, strings.Join(res.Details, "\n"), "accounts were abandoned")
 }

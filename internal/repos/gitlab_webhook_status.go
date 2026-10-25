@@ -196,7 +196,12 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 				} else {
 					// Install recovers any other verified generation on its
 					// own: it resumes or abandons an unwired one. It is not a
-					// blocker.
+					// blocker. A generation whose trigger may have been
+					// distributed is abandoned, which counts against the
+					// abandoned-account cap that can refuse the replacement.
+					if p.TriggerDistributed {
+						gen.AbandonedUserIDs = append(slices.Clone(gen.AbandonedUserIDs), p.UserID)
+					}
 					gen.Pending = nil
 				}
 			}
