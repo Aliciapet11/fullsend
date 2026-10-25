@@ -64,7 +64,7 @@ func (p *Poller) toNormalizedEvent(ctx context.Context, event RoutableEvent) (di
 	case "issue_note", "mr_note":
 		authorID = event.NoteAuthorID
 		actorLogin = event.NoteAuthorLogin
-		isBot = event.IsBot || (p.botUserID != 0 && event.NoteAuthorID == p.botUserID) || isProjectAccessTokenBot(event.NoteAuthorLogin)
+		isBot = event.IsBot || (p.botUserID != 0 && event.NoteAuthorID == p.botUserID) || p.isAnalystAuthor(event.NoteAuthorID) || isProjectAccessTokenBot(event.NoteAuthorLogin)
 	case "issue_label":
 		if event.ChangedLabel != "" {
 			if event.NoteAuthorID != 0 && event.NoteAuthorLogin != "" {

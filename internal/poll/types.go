@@ -8,7 +8,13 @@ import (
 
 // Options configures the poller.
 type Options struct {
-	BotUserID      int
+	BotUserID int
+	// AnalystUserID is the GitLab user ID of the registered Analyst
+	// identity, which authors the review stage's changes-requested
+	// marker notes. Only a marker note from this identity reaches the
+	// fix stage; 0 (unknown) matches no author. In a single-identity
+	// installation it equals BotUserID.
+	AnalystUserID  int
 	GitLabURL      string
 	PipelineRef    string // git ref for API-triggered pipelines (required; resolved at CLI wiring time)
 	PollJobURL     string // back-link to the poller CI job (optional; from CI_JOB_URL)

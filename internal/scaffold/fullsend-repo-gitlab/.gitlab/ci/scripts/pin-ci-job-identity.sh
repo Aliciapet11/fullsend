@@ -536,4 +536,43 @@ fullsend_select_gitlab_dispatch_route() {
   echo "Agent dispatch route: ${FULLSEND_GITLAB_DISPATCH_ROUTE}"
 }
 
+# fullsend_resolve_gitlab_analyst_user_id exports
+# FULLSEND_GITLAB_ANALYST_USER_ID, the numeric GitLab user ID of the
+# registered Analyst identity, for `fullsend poll` in the poll and
+# dispatcher jobs (#8807). The review stage posts its changes-requested
+# marker as the Analyst, which in distinct-role installations is not the
+# Poller whose credential those jobs hold, so the poller needs the Analyst
+# ID to retain that marker for the fix stage. Only the numeric ID is
+# exported: the Analyst credential is selected inside a subshell for a
+# single GET /user call through fullsend_gate_curl and never replaces
+# FULLSEND_JOB_TOKEN. Call it after select-gitlab-role-token.sh (so
+# fullsend_select_gitlab_role_token is defined) and before the caller
+# blanks sibling role secrets. Any inherited value is discarded first, and
+# a failed lookup only warns: the poller then retains no marker, which is
+# the safe outcome, instead of stopping unrelated dispatch.
+fullsend_resolve_gitlab_analyst_user_id() {
+  local _fs_resp _fs_id
+  unset FULLSEND_GITLAB_ANALYST_USER_ID
+  if ! _fs_resp=$(
+    # shellcheck disable=SC2034  # consumed by fullsend_select_gitlab_role_token
+    FULLSEND_JOB_KIND=agent
+    # shellcheck disable=SC2034  # consumed by fullsend_select_gitlab_role_token
+    FULLSEND_JOB_AGENT=analyst
+    fullsend_select_gitlab_role_token || exit 1
+    fullsend_gate_curl "${FULLSEND_PINNED_GITLAB_URL}/api/v4/user" \
+      -H "PRIVATE-TOKEN: ${FULLSEND_JOB_TOKEN}"
+  ); then
+    echo "WARNING: could not resolve the Analyst identity; changes-requested markers will not trigger the fix stage in this job" >&2
+    return 0
+  fi
+  _fs_id=$(printf '%s' "${_fs_resp}" | jq -r '.id // empty' 2>/dev/null || true)
+  case "${_fs_id}" in
+    ''|0|*[!0-9]*)
+      echo "WARNING: GitLab returned no valid user ID for the Analyst identity; changes-requested markers will not trigger the fix stage in this job" >&2
+      return 0
+      ;;
+  esac
+  export FULLSEND_GITLAB_ANALYST_USER_ID="${_fs_id}"
+}
+
 fullsend_pin_ci_job_identity

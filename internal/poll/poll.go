@@ -21,6 +21,7 @@ type Poller struct {
 	owner             string
 	repo              string
 	botUserID         int
+	analystUserID     int
 	gitlabURL         string
 	opts              Options
 	dispatches        []Dispatch
@@ -41,14 +42,15 @@ func New(client GitLabClient, router dispatch.EventRouter, projectPath string, o
 		gitlabURL = "https://gitlab.com"
 	}
 	return &Poller{
-		client:      client,
-		router:      router,
-		projectPath: projectPath,
-		owner:       owner,
-		repo:        repo,
-		botUserID:   opts.BotUserID,
-		gitlabURL:   strings.TrimRight(gitlabURL, "/"),
-		opts:        opts,
+		client:        client,
+		router:        router,
+		projectPath:   projectPath,
+		owner:         owner,
+		repo:          repo,
+		botUserID:     opts.BotUserID,
+		analystUserID: opts.AnalystUserID,
+		gitlabURL:     strings.TrimRight(gitlabURL, "/"),
+		opts:          opts,
 	}
 }
 
