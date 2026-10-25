@@ -1485,6 +1485,20 @@ resolve `FULLSEND_GITLAB_POLLER_TOKEN` once, after the schedule-only pin.
 The Go CLI then overrides `GITLAB_TOKEN` / `PUSH_TOKEN` from the
 registered role credential; nothing restores `FULLSEND_FORGE_TOKEN`.
 
+The poll and dispatcher jobs also need the Analyst's numeric user ID
+(#8807). The review stage posts its `<!-- fullsend:changes-requested -->`
+marker as the Analyst. The poller retains a bot-authored marker note for
+the fix stage only when that note's author is the Analyst. Markers from
+the Poller or any other bot stay filtered. Before blanking sibling role
+secrets, `run-poll-job.sh` and `run-dispatcher-job.sh` call
+`fullsend_resolve_gitlab_analyst_user_id` (in `pin-ci-job-identity.sh`).
+That function selects the Analyst credential in a subshell for a single
+`GET /user` and exports only the job-local
+`FULLSEND_GITLAB_ANALYST_USER_ID`. The Analyst credential never replaces
+`FULLSEND_JOB_TOKEN` and is still blanked before `fullsend poll` runs. An
+inherited value is discarded first. A failed lookup only warns and leaves
+the variable unset, and the poller then retains no marker.
+
 The `STAGE=fix` review-body pre-fetch is a separate case: it looks up
 the prior review note, which is always authored by the Analyst identity
 (`STAGE=review` maps to the analyst role) regardless of which role is

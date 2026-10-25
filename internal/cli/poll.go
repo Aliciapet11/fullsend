@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -96,6 +97,10 @@ func newPollCmd() *cobra.Command {
 			if err != nil {
 				return wrapGitLabAuthFailure(sel, fmt.Errorf("resolve bot user ID: %w", err))
 			}
+			analystUserID, err := gitlabAnalystUserID(os.Getenv)
+			if err != nil {
+				return err
+			}
 
 			// Build the event router from config + agents-repo known agents.
 			router, err := buildRouter(fullsendDir)
@@ -118,6 +123,7 @@ func newPollCmd() *cobra.Command {
 
 			opts := poll.Options{
 				BotUserID:             botUserID,
+				AnalystUserID:         analystUserID,
 				GitLabURL:             gitlabURL,
 				PipelineRef:           pipelineRef,
 				PollJobURL:            os.Getenv("CI_JOB_URL"),
@@ -226,6 +232,10 @@ func runGitLabWebhook(cmd *cobra.Command, projectPath, gitlabURL, fullsendDir st
 	if err != nil {
 		return wrapGitLabAuthFailure(sel, fmt.Errorf("resolve bot user ID: %w", err))
 	}
+	analystUserID, err := gitlabAnalystUserID(os.Getenv)
+	if err != nil {
+		return err
+	}
 
 	router, err := buildRouter(fullsendDir)
 	if err != nil {
@@ -239,6 +249,7 @@ func runGitLabWebhook(cmd *cobra.Command, projectPath, gitlabURL, fullsendDir st
 
 	opts := poll.Options{
 		BotUserID:             botUserID,
+		AnalystUserID:         analystUserID,
 		GitLabURL:             gitlabURL,
 		PipelineRef:           pipelineRef,
 		PollJobURL:            os.Getenv("CI_JOB_URL"),
@@ -255,6 +266,26 @@ func runGitLabWebhook(cmd *cobra.Command, projectPath, gitlabURL, fullsendDir st
 var supportedGitLabDispatchRoutes = []string{
 	forge.GitLabDispatchRouteAPI,
 	forge.GitLabDispatchRouteChildPipeline,
+}
+
+// gitlabAnalystUserID reads the registered Analyst identity's numeric GitLab
+// user ID that the poll and dispatcher job scripts export (#8807). The poller
+// retains a changes-requested marker note only when the Analyst authored it,
+// because in distinct-role installations the Analyst is not the Poller whose
+// credential this command holds. Unset returns 0, which matches no author, so
+// an older job script that does not export the ID keeps the marker filtered.
+// A malformed value is an error rather than a silent 0, since the scripts
+// only export a validated positive integer.
+func gitlabAnalystUserID(getenv func(string) string) (int, error) {
+	raw := getenv(forge.VarGitLabAnalystUserID)
+	if raw == "" {
+		return 0, nil
+	}
+	id, err := strconv.Atoi(raw)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("%s=%q is not a positive GitLab user ID", forge.VarGitLabAnalystUserID, raw)
+	}
+	return id, nil
 }
 
 // gitlabChildDispatchJobToken resolves the agent dispatch route the GitLab

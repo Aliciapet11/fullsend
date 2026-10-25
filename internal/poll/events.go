@@ -516,8 +516,8 @@ func (p *Poller) enrichIssueOpenBots(ctx context.Context, events []RoutableEvent
 }
 
 // isBotEvent uses multiple signals for reliable bot detection: the API
-// Bot field (when available), the configured botUserID, and the
-// project access token username pattern.
+// Bot field (when available), the configured botUserID and
+// analystUserID, and the project access token username pattern.
 func (p *Poller) isBotEvent(event RoutableEvent) bool {
 	if event.IsBot {
 		return true
@@ -525,11 +525,20 @@ func (p *Poller) isBotEvent(event RoutableEvent) bool {
 	if p.botUserID != 0 && event.NoteAuthorID == p.botUserID {
 		return true
 	}
+	if p.isAnalystAuthor(event.NoteAuthorID) {
+		return true
+	}
 	return isProjectAccessTokenBot(event.NoteAuthorLogin)
 }
 
-// filterBotEvents removes bot-authored events, except for the enrolled
-// bot's changes-requested markers which trigger the fix stage.
+// isAnalystAuthor reports whether authorID is the registered Analyst
+// identity. An unknown Analyst ID (0) matches no author.
+func (p *Poller) isAnalystAuthor(authorID int) bool {
+	return p.analystUserID != 0 && authorID == p.analystUserID
+}
+
+// filterBotEvents removes bot-authored events, except for the registered
+// Analyst's changes-requested markers which trigger the fix stage.
 func (p *Poller) filterBotEvents(events []RoutableEvent) []RoutableEvent {
 	var filtered []RoutableEvent
 	for _, event := range events {
@@ -537,9 +546,13 @@ func (p *Poller) filterBotEvents(events []RoutableEvent) []RoutableEvent {
 			filtered = append(filtered, event)
 			continue
 		}
+		// The review stage posts the marker as the Analyst, which is a
+		// different identity from the Poller in distinct-role
+		// installations. Markers from the Poller itself or any other bot
+		// stay filtered.
 		if event.Type == "mr_note" &&
 			strings.Contains(event.NoteBody, forge.ChangesRequestedMarker) &&
-			event.NoteAuthorID == p.botUserID {
+			p.isAnalystAuthor(event.NoteAuthorID) {
 			filtered = append(filtered, event)
 			continue
 		}

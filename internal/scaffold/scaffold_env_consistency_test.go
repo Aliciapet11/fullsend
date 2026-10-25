@@ -54,6 +54,7 @@ func canonicalForgeEnvVars() map[string]struct{} {
 		forge.VarPollMode,
 		forge.VarGitLabBotToken,
 		forge.VarGitLabDispatchRoute,
+		forge.VarGitLabAnalystUserID,
 		forge.VarGitLabTriggerAccount,
 		forge.VarGitLabDispatchActivation,
 		forge.VarGitLabRoleRegistry,

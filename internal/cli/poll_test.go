@@ -32,6 +32,7 @@ func clearPollEnv(t *testing.T) {
 		forge.VarPollMode,
 		forge.VarGitLabRoleRegistry,
 		forge.VarGitLabDispatchRoute, "CI_JOB_TOKEN",
+		forge.VarGitLabAnalystUserID,
 		forge.SecretGitLabPollerToken, forge.SecretGitLabAnalystToken,
 		forge.SecretGitLabCoderToken,
 		"JIRA_BASE_URL", "GITHUB_REPOSITORY",
@@ -622,6 +623,64 @@ func TestGitLabChildDispatchJobToken(t *testing.T) {
 		}))
 		require.ErrorContains(t, err, "not a recognized dispatch route")
 		assert.NotContains(t, err.Error(), "job-token-value")
+	})
+}
+
+func TestGitLabAnalystUserID(t *testing.T) {
+	env := func(v string) func(string) string {
+		return func(key string) string {
+			if key == forge.VarGitLabAnalystUserID {
+				return v
+			}
+			return ""
+		}
+	}
+
+	id, err := gitlabAnalystUserID(env(""))
+	require.NoError(t, err)
+	assert.Zero(t, id, "unset must match no author")
+
+	id, err = gitlabAnalystUserID(env("55"))
+	require.NoError(t, err)
+	assert.Equal(t, 55, id)
+
+	for _, bad := range []string{"0", "-3", "abc", "5 "} {
+		_, err := gitlabAnalystUserID(env(bad))
+		require.ErrorContains(t, err, forge.VarGitLabAnalystUserID, "value %q", bad)
+	}
+}
+
+// TestPollCmd_GitLabMalformedAnalystUserID covers both GitLab entry paths
+// wiring the Analyst ID (#8807): a malformed value fails before any event
+// is routed instead of silently disabling the Analyst marker.
+func TestPollCmd_GitLabMalformedAnalystUserID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v4/user" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":100,"username":"fullsend-poller"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	t.Run("cron poll", func(t *testing.T) {
+		clearPollEnv(t)
+		t.Setenv(forge.SecretGitLabPollerToken, "poller-tok")
+		t.Setenv("CI_COMMIT_REF_NAME", "main")
+		t.Setenv(forge.VarGitLabAnalystUserID, "not-a-number")
+		cmd := newPollCmd()
+		cmd.SetArgs([]string{"--forge", "gitlab", "--project", "group/project", "--gitlab-url", srv.URL, "--fullsend-dir", t.TempDir()})
+		require.ErrorContains(t, cmd.Execute(), forge.VarGitLabAnalystUserID)
+	})
+
+	t.Run("webhook", func(t *testing.T) {
+		clearPollEnv(t)
+		t.Setenv(forge.SecretGitLabPollerToken, "poller-tok")
+		t.Setenv("CI_COMMIT_REF_NAME", "main")
+		t.Setenv(forge.VarGitLabAnalystUserID, "not-a-number")
+		webhookPayloadFile(t, `{}`)
+		require.ErrorContains(t, runWebhookCmd(t, "--project", "group/project", "--gitlab-url", srv.URL), forge.VarGitLabAnalystUserID)
 	})
 }
 
