@@ -742,7 +742,11 @@ or readiness contract), `deferred` (nothing provisioned and the pipeline
 wrapper does not include the dispatcher yet), and `unreadable`. Every state
 except `ready` and `deferred` is `gitlab-webhook` drift, so it makes the command
 exit non-zero. See [`repos status` output](../../cli/repos.md#output) for what
-each state means.
+each state means. Once the scaffold is merged to a protected default branch and
+the poller is deployed, the poller is the dispatch backstop, so a fast path that
+is not `ready` delays dispatch by up to one poll interval instead of stopping
+it. A fresh install whose scaffold merge request is still open, or whose default
+branch is unprotected, dispatches nothing on either path until then.
 
 Use `--json` for machine-readable output:
 

@@ -455,7 +455,44 @@ On an established installation, install reads the stale assets, reads the workfl
 
 For GitLab repos, `repos install` provisions the built-in Poller, Analyst, and Coder role credentials (`FULLSEND_GITLAB_*_TOKEN`) and any registered custom roles. Runtime and CI routing always select the registered role credential and fail closed if it is missing; the legacy `FULLSEND_FORGE_TOKEN` is never used, and there is no migration gate. Install does not remove a leftover legacy shared secret or revoke the `fullsend-bot` project token — a repository installed before the role-only rollout requires manual cleanup of those. Custom roles are registered with `--gitlab-role-registry`; a custom role may reuse another registered credential or enroll its own token via `--gitlab-role-token`. The same `repos install` run rotates any own-credential role whose project access token is expiring, expired, revoked, or unverified. `--rotate-gitlab-roles` force-rotates every own-credential role; `--rotate-gitlab-role=poller` limits the run to one role. A failed rotation leaves the previous secret in place. `repos install` exits non-zero when any role credential rotation fails (reporting `GitLab role rotation incomplete: N role credential(s) pending`), when the project-token inventory is unavailable for a forced or role-filtered rotation or when `--gitlab-role-token` replacements are supplied, and when reconciling the Poller's elevated access fails; rerun the install after resolving the reported cause. There is no public rollback to the shared token. See [gitlab-role-credentials.md](../contributing/gitlab-role-credentials.md) and [Configuring GitLab § Role identity model and credential lifecycle](../guides/getting-started/configuring-gitlab.md#role-identity-model-and-credential-lifecycle). Developer is sufficient because poller state lives on dedicated unprotected branches rather than Maintainer-only CI/CD variables. Creating project access tokens requires GitLab Premium or Ultimate on gitlab.com; self-managed instances, including Community Edition, can create them without a paid tier. The token expiry is computed in UTC so a local-timezone date cannot produce a token that GitLab already considers expired (`active: false`).
 
-For GitLab repos, `repos install` also provisions the [ADR 0125](../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md) webhook fast path: a pipeline trigger token (`FULLSEND_TRIGGER_TOKEN`) and webhook secret (`FULLSEND_WEBHOOK_SECRET`), both stored as protected, masked CI/CD variables, plus a project webhook for issue, merge request, and comment events that triggers a pipeline on the protected default branch. The step is deferred (and reported) until the dispatcher is on the default branch, that branch is protected, and `ci_pipeline_variables_minimum_override_role=no_one_allowed` is verified. It is also deferred when a project, group, or instance-level CI/CD variable redefines a predefined variable the trigger-pipeline checks rely on (such as `CI_PIPELINE_SOURCE` or `CI_COMMIT_REF_PROTECTED`). Listing instance-level variables needs administrator access and listing group variables needs group Owner access. Every scope the installing credential can read is checked. A scope that answers forbidden is unverified, not unsafe: it neither defers a new fast path nor revokes an existing one, so a project Maintainer can enable the fast path without administrator or group Owner access. Other listing errors still fail the step. Fullsend does not verify unreadable scopes, so it trusts instance administrators and group Owners not to override those variables, either at install time or later. See [Inherited CI/CD variable trust](../guides/getting-started/configuring-gitlab.md#inherited-cicd-variable-trust) for this assumption and its failure mode. Re-runs are no-ops when everything is in place and repair a missing or drifted webhook or token. `--rotate-gitlab-trigger-token` mints a new token, updates the webhook, and then revokes the old token. While the trigger account's dispatch activation is recorded (the account route), the webhook instead embeds `FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN`, `FULLSEND_TRIGGER_TOKEN` and the Poller-owned webhook trigger are retired, `--rotate-gitlab-trigger-token` rotates nothing, and `--rotate-gitlab-trigger-account` rotates the credential the webhook uses. Token, secret, and webhook URL values are never printed. The fast-path provisioning and safety-reconciliation steps run under the `FULLSEND_GITLAB_INSTALL_LEASE` project lease; when it cannot be taken they change nothing and report the step as deferred together with an error (see [Upgrade compatibility](#upgrade-compatibility)).
+For GitLab repos, `repos install` also provisions the
+[ADR 0125](../ADRs/0125-gitlab-hybrid-webhook-poller-dispatch.md) webhook fast
+path: a pipeline trigger token (`FULLSEND_TRIGGER_TOKEN`) and webhook secret
+(`FULLSEND_WEBHOOK_SECRET`), both stored as protected, masked CI/CD variables,
+plus a project webhook for issue, merge request, and comment events that
+triggers a pipeline on the protected default branch. The step is deferred (and
+reported) until the dispatcher is on the default branch, that branch is
+protected, and `ci_pipeline_variables_minimum_override_role=no_one_allowed` is
+verified. The polling schedules stay in place as the backstop: they keep
+dispatching while the fast path is deferred or disabled, and they recover events
+whose webhook delivery is missed. See
+[Least-privilege dispatch contract](../guides/getting-started/configuring-gitlab.md#least-privilege-dispatch-contract)
+for how both paths dispatch at Developer level with typed inputs. The step is
+also deferred when a project, group, or instance-level CI/CD variable redefines
+a predefined variable the trigger-pipeline checks rely on (such as
+`CI_PIPELINE_SOURCE` or `CI_COMMIT_REF_PROTECTED`). Listing instance-level
+variables needs administrator access and listing group variables needs group
+Owner access. Every scope the installing credential can read is checked. A scope
+that answers forbidden is unverified, not unsafe: it neither defers a new fast
+path nor revokes an existing one, so a project Maintainer can enable the fast
+path without administrator or group Owner access. Other listing errors still
+fail the step. Fullsend does not verify unreadable scopes, so it trusts instance
+administrators and group Owners not to override those variables, either at
+install time or later. See
+[Inherited CI/CD variable trust](../guides/getting-started/configuring-gitlab.md#inherited-cicd-variable-trust)
+for this assumption and its failure mode. Re-runs are no-ops when everything is
+in place and repair a missing or drifted webhook or token.
+`--rotate-gitlab-trigger-token` mints a new token, updates the webhook, and then
+revokes the old token. While the trigger account's dispatch activation is
+recorded (the account route), the webhook instead embeds
+`FULLSEND_GITLAB_TRIGGER_ACCOUNT_TOKEN`, `FULLSEND_TRIGGER_TOKEN` and the
+Poller-owned webhook trigger are retired, `--rotate-gitlab-trigger-token`
+rotates nothing, and `--rotate-gitlab-trigger-account` rotates the credential
+the webhook uses. Token, secret, and webhook URL values are never printed. The
+fast-path provisioning and safety-reconciliation steps run under the
+`FULLSEND_GITLAB_INSTALL_LEASE` project lease; when it cannot be taken they
+change nothing and report the step as deferred together with an error (see
+[Upgrade compatibility](#upgrade-compatibility)).
 
 Project-wide trigger safety failures remove the published account token and
 revoke its owned triggers through the ledger. This applies to any existing

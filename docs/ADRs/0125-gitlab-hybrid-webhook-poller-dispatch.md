@@ -46,6 +46,16 @@ Accepted
 > full activation gate passes) is present, and with the same dispatch HMAC as
 > `api`. Statements below that the agent job admits only `api` describe the
 > design before that change.
+>
+> **Update (#8799):** the webhook fast path has shipped, with the poller as
+> its backstop. Under ADR 0131, `STAGE` and the signed dispatch fields travel
+> as typed pipeline inputs, not pipeline variables. The Caveats finding that
+> `no_one_allowed` is not usable therefore no longer applies. GitLab's native
+> `TRIGGER_PAYLOAD` stays available to the dispatcher job under
+> `no_one_allowed`, which resolves the residual Caveats leaves open. How the
+> shipped adapter meets the other ship gates in Consequences, and the residual
+> risks that remain, are recorded in the
+> [normative event specification](../normative/normalized-event/v1/README.md#gitlab-adapter-notes).
 
 Supersedes the GitLab **dispatch topology** in
 [ADR 0067](0067-gitlab-cron-polling-event-dispatch.md) (native-CI two-path,
