@@ -701,7 +701,12 @@ who created a per-user grant. A step that fails leaves the record for the next i
 retry, and never stops install from repairing the webhook. A trigger whose owner
 GitLab omits is revoked only when it is a managed webhook trigger no webhook
 uses; otherwise install names it so an operator can revoke it. Until retirement completes, a forced trigger rotation defers and keeps
-the existing fast path, so at most one old/new Poller pair exists. The current Poller
+the existing fast path, so at most one old/new Poller pair exists. A drifted
+fast path that needs a replacement trigger (for example, a webhook whose URL no
+longer carries the stored token) cannot be repaired until then. Install removes
+it, because retirement cannot run while a managed webhook's trigger is
+unidentifiable. It reports reconciliation as pending and names the blocker.
+Once retirement completes, install recreates it. The current Poller
 keeps polling throughout, so polling and in-flight jobs that authenticate as it
 are not interrupted. If the trigger request, its verification, or the final
 checks fail, install publishes nothing and quarantines the generation, which
@@ -996,7 +1001,10 @@ trigger token, the webhook secret or the webhook URL. The states are:
 
 States other than `ready` and `deferred` add `gitlab-webhook` drift. The table
 output lists the reasons for every state except `ready`. `repos install`
-creates a missing webhook and repairs a misconfigured one.
+creates a missing webhook and repairs a misconfigured one. When the repair
+needs a replacement trigger token and the Poller generation state blocks it
+(for example, a superseded Poller generation has not finished retiring), the
+reasons include `reconciliation pending:` followed by the blocker.
 
 `repos uninstall` removes the published token, trigger token, push entry,
 deploy key, the managed polling schedules the account owns (deleted without an

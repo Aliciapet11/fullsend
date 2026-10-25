@@ -171,6 +171,18 @@ func DiagnoseGitLabWebhook(ctx context.Context, client forge.Client, owner, repo
 		}
 		status.Reasons = append(status.Reasons, gitlabWebhookHookReasons(st, baseURL, st.triggerToken, activeID, st.activeHookIndex(baseURL), false)...)
 		status.WebhookConfigured = st.provisioned(baseURL)
+		if activeID == 0 {
+			// Repairing the fast path needs a replacement trigger token, which
+			// repos install mints through a fresh Poller generation. Name what
+			// blocks that generation so the drift reads as pending (#8802).
+			gen, genErr := loadPollerGenerations(ctx, client, owner, repo)
+			if genErr != nil {
+				return unreadable("the GitLab Poller generation state", genErr)
+			}
+			if blocked := pollerHandoffBlocked(gen); blocked != "" {
+				status.Reasons = append(status.Reasons, "reconciliation pending: "+blocked)
+			}
+		}
 	}
 
 	switch {
