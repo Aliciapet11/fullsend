@@ -269,7 +269,7 @@ func TestResolveLocalPathsRelativeToHarnessFile_FallbackAndDeprecation(t *testin
 	assert.Contains(t, diagnostics[0].Message, "deprecated --fullsend-dir-relative fallback")
 }
 
-func TestResolveLocalPathsRelativeToHarnessFile_HarnessFileWinsOverFallback(t *testing.T) {
+func TestResolveLocalPathsRelativeToHarnessFile_HarnessFileWinsAndWarns(t *testing.T) {
 	root := t.TempDir()
 	harnessDir := filepath.Join(root, "agents", "custom")
 	require.NoError(t, os.MkdirAll(harnessDir, 0o755))
@@ -279,7 +279,10 @@ func TestResolveLocalPathsRelativeToHarnessFile_HarnessFileWinsOverFallback(t *t
 	harness := &Harness{Policy: "policy.yaml"}
 	require.NoError(t, harness.resolveLocalPathsRelativeTo(harnessDir, root))
 	assert.Equal(t, filepath.Join(harnessDir, "policy.yaml"), harness.Policy)
-	assert.Empty(t, harness.Lint())
+	diagnostics := harness.Lint()
+	require.Len(t, diagnostics, 1)
+	assert.Contains(t, diagnostics[0].Message, "harness-relative location")
+	assert.Contains(t, diagnostics[0].Message, "deprecated --fullsend-dir-relative location")
 }
 
 func TestResolveLocalPathsRelativeToHarnessFile_FallbackCannotEscapeContainment(t *testing.T) {

@@ -94,8 +94,9 @@ func (r *pathResolver) resolve(field, path string) (string, error) {
 	if r.fallback {
 		legacyResolved := filepath.Clean(filepath.Join(r.containmentRoot, path))
 		legacyWithinRoot := r.withinContainmentRoot(legacyResolved)
-		if legacyWithinRoot && legacyResolved != resolved &&
-			localPathExists(legacyResolved) && !localPathExists(resolved) {
+		legacyExists := legacyWithinRoot && localPathExists(legacyResolved)
+		resolvedExists := localPathExists(resolved)
+		if legacyExists && legacyResolved != resolved && !resolvedExists {
 			r.diagnostics = append(r.diagnostics, Diagnostic{
 				Severity: SeverityWarning,
 				Field:    field,
@@ -105,6 +106,16 @@ func (r *pathResolver) resolve(field, path string) (string, error) {
 				),
 			})
 			return legacyResolved, nil
+		}
+		if legacyExists && resolvedExists && legacyResolved != resolved {
+			r.diagnostics = append(r.diagnostics, Diagnostic{
+				Severity: SeverityWarning,
+				Field:    field,
+				Message: fmt.Sprintf(
+					"path %q resolves to the harness-relative location %q; the deprecated --fullsend-dir-relative location %q also exists, so verify that the harness-relative file is the intended one",
+					path, resolved, legacyResolved,
+				),
+			})
 		}
 	}
 

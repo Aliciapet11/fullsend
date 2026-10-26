@@ -37,6 +37,28 @@ func TestEscapeWorkflowCommandData(t *testing.T) {
 	assert.Equal(t, "100%25 complete%0D%0A::add-mask::secret", escapeWorkflowCommandData("100% complete\r\n::add-mask::secret"))
 }
 
+func TestListTriggeredHarnesses_EscapesLoadFailureAnnotation(t *testing.T) {
+	buf := captureAnnotations(t)
+	repo := t.TempDir()
+	configDir := writeHarnessConfigSubdir(t, repo, `agent: agents/triage.md
+role: triage
+slug: escaped-annotation
+skills:
+  - skills/custom:
+      "sub-agents/x.md\n::add-mask::secret": ../../../outside.md
+`)
+	cfg, err := config.LoadConfig(configDir, config.LoadOpts{MissingOK: false})
+	require.NoError(t, err)
+
+	_, err = ListTriggeredHarnesses(context.Background(), configDir, cfg, nil)
+	require.Error(t, err)
+
+	annotation := buf.String()
+	assert.Contains(t, annotation, "::error::harness dispatch: skipping agent issue-ping: load failed:")
+	assert.Contains(t, annotation, `sub-agents/x.md%0A::add-mask::secret`)
+	assert.NotContains(t, annotation, "\n::add-mask::secret")
+}
+
 func TestMergedConfigAgents_MissingFile(t *testing.T) {
 	agents, err := MergedConfigAgents(t.TempDir())
 	require.NoError(t, err)

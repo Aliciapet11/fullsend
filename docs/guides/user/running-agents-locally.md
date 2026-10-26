@@ -184,7 +184,8 @@ works in CI and on your machine.
 The agent's harness must declare the provider (`providers: [openai]`; both the definition and the
 `fullsend-openai` profile are built into fullsend, nothing needs to be on disk; the fleet's agents
 declare it) and a sandbox policy
-(`policy: policies/base.yaml` — the fleet's agents already have it). A custom harness needs
+(`policy: ../policies/base.yaml` for a harness in `.fullsend/harness/` — the fleet's agents already
+have it). A custom harness needs
 `policy:`: `fullsend run` fails at harness validation, before it creates the sandbox, if one is
 missing. The fleet base policy is also the one that does not leave an uninspected route to
 `api.openai.com`, which the gateway refuses to carry the credential over. The sandbox only ever
