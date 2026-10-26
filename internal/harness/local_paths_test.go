@@ -376,17 +376,27 @@ forge:
 	assert.Equal(t, filepath.Join(harnessDir, "policy.yaml"), harness.Policy)
 }
 
-func TestLoadWithBase_PathShapeValidationRunsBeforeResolution(t *testing.T) {
+func TestLoadWithBase_LocalParentSegmentsResolveFromNestedHarness(t *testing.T) {
 	root := t.TempDir()
-	harnessDir := filepath.Join(root, "agents", "custom")
+	harnessDir := filepath.Join(root, "harness")
+	writeSkill(t, filepath.Join(root, "skills", "custom"), "custom-skill")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "plugins", "custom"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "overrides"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "overrides", "custom.md"), []byte("Override.\n"), 0o644))
 	path := writeTestHarness(t, harnessDir, "harness.yaml", `
-agent: agent.md
+agent: ../agents/agent.md
 role: custom
+skills:
+  - ../skills/custom:
+      sub-agents/custom.md: ../overrides/custom.md
 plugins:
   - path: ../plugins/custom
 `)
 
-	_, _, err := LoadWithBase(context.Background(), path, ComposeOpts{WorkspaceRoot: root})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must not contain path traversal segments")
+	harness, _, err := LoadWithBase(context.Background(), path, ComposeOpts{WorkspaceRoot: root})
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(root, "plugins", "custom"), harness.Plugins[0].Path)
+	assert.Equal(t, filepath.Join(root, "skills", "custom"), harness.Skills[0].Source)
+	require.NotNil(t, harness.Skills[0].Overrides["sub-agents/custom.md"])
+	assert.Equal(t, filepath.Join(root, "overrides", "custom.md"), *harness.Skills[0].Overrides["sub-agents/custom.md"])
 }

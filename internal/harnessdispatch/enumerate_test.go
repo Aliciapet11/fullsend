@@ -33,6 +33,10 @@ func captureAnnotations(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
+func TestEscapeWorkflowCommandData(t *testing.T) {
+	assert.Equal(t, "100%25 complete%0D%0A::add-mask::secret", escapeWorkflowCommandData("100% complete\r\n::add-mask::secret"))
+}
+
 func TestMergedConfigAgents_MissingFile(t *testing.T) {
 	agents, err := MergedConfigAgents(t.TempDir())
 	require.NoError(t, err)

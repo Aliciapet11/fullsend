@@ -138,6 +138,10 @@ func SkillSources(entries []SkillEntry) []string {
 // they were validated pre-resolution by resolveBaseResources or will be
 // validated by ResolveHarness.
 func ValidateSkillOverrides(skills []SkillEntry) error {
+	return validateSkillOverrides(skills, false)
+}
+
+func validateSkillOverrides(skills []SkillEntry, allowParentSegments bool) error {
 	for i, entry := range skills {
 		for key, val := range entry.Overrides {
 			if err := validateOverrideKey(fmt.Sprintf("skills[%d]", i), key); err != nil {
@@ -148,7 +152,7 @@ func ValidateSkillOverrides(skills []SkillEntry) error {
 					return fmt.Errorf("skills[%d]: override source for %q must be non-empty (use null to remove)", i, key)
 				}
 				if !IsURL(*val) && !isResolvedPath(*val) {
-					if err := validateOverrideValue(fmt.Sprintf("skills[%d]", i), key, *val); err != nil {
+					if err := validateOverrideValue(fmt.Sprintf("skills[%d]", i), key, *val, allowParentSegments); err != nil {
 						return err
 					}
 				}
@@ -187,7 +191,7 @@ func validateOverrideKey(field, key string) error {
 
 // validateOverrideValue checks that an override source path does not contain
 // null bytes, query/fragment markers, or path traversal segments.
-func validateOverrideValue(field, key, val string) error {
+func validateOverrideValue(field, key, val string, allowParentSegments bool) error {
 	if strings.ContainsRune(val, 0) {
 		return fmt.Errorf("%s: override source for %q must not contain null bytes", field, key)
 	}
@@ -197,9 +201,11 @@ func validateOverrideValue(field, key, val string) error {
 	if filepath.IsAbs(val) || strings.HasPrefix(val, "/") {
 		return fmt.Errorf("%s: override source for %q must be relative (no leading /)", field, key)
 	}
-	for _, seg := range strings.Split(filepath.ToSlash(val), "/") {
-		if seg == ".." {
-			return fmt.Errorf("%s: override source for %q must not contain path traversal segments", field, key)
+	if !allowParentSegments {
+		for _, seg := range strings.Split(filepath.ToSlash(val), "/") {
+			if seg == ".." {
+				return fmt.Errorf("%s: override source for %q must not contain path traversal segments", field, key)
+			}
 		}
 	}
 	return nil

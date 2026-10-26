@@ -325,8 +325,8 @@ harness ships its own under the same `plugins:` key Claude Code plugins use
 ```yaml
 # harness/code.yaml
 plugins:
-  - extensions/go-diagnostics                 # directory in the harness repo
-  - path: extensions/pi-fff                   # object form only when env or a flag is needed
+  - ../extensions/go-diagnostics              # sibling of the harness directory
+  - path: ../extensions/pi-fff                # object form only when env or a flag is needed
     env:
       FFF_MULTIGREP: "1"
     pi:

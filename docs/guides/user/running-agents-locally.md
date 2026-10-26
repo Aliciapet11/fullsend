@@ -531,12 +531,12 @@ The steps edit the agents clone from [Clone repositories](#clone-repositories)
    providers:
      - vertex-ai
      - openai
-     - providers/gateway.yaml
+     - ../providers/gateway.yaml
    openshell:
      profiles:
-       - profiles/gateway-inference.yaml
+       - ../profiles/gateway-inference.yaml
    plugins:
-     - path: extensions/inference-gateway
+     - path: ../extensions/inference-gateway
        env:
          INFERENCE_GATEWAY_BASE_URL: "https://gateway.example.com"
          INFERENCE_GATEWAY_EXTRA_MODELS: "gpt-6-luna=openai-responses,example-org/open-model=openai-completions,claude-haiku-4-5=anthropic-messages"
@@ -764,7 +764,7 @@ to the server (gateway). It is likely that you need to bind the gateway to `0.0.
 
 **`API Error: Error code policy_denied` on the first model call (agent exits after ~2 s, 0 tokens)**
 - The gateway denied the agent's binary, not the model. Run `grep DENIED <run-dir>/logs/openshell-sandbox.log`; a line ending in `binary '…/claude.exe' not allowed in policy '_provider_vertex_ai'` means the Vertex profile lacks `**/claude.exe` (Claude Code 2.1.2xx runs as `claude.exe`, even on Linux)
-- For the built-in `fullsend-vertex-ai` profile, upgrade fullsend: the profile ships in the binary. To try a changed profile locally, copy it under your own id (for example `profiles/myorg-vertex-ai.yaml` with `id: myorg-vertex-ai`), list it in `openshell.profiles`, and point a provider of your own at it (`type: myorg-vertex-ai`). Files under `profiles/` are **not** imported unless the harness lists them
+- For the built-in `fullsend-vertex-ai` profile, upgrade fullsend: the profile ships in the binary. To try a changed profile locally, copy it under your own id (for example `../profiles/myorg-vertex-ai.yaml` with `id: myorg-vertex-ai`), list it in `openshell.profiles`, and point a provider of your own at it (`type: myorg-vertex-ai`). Files under `profiles/` are **not** imported unless the harness lists them
 
 **Agent fails with missing environment variable**
 - Check your env file contains all variables listed in the agent's harness YAML (`harness/{agent}.yaml` in the `.fullsend` config directory)

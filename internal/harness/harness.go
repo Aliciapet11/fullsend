@@ -964,6 +964,10 @@ func (h *Harness) ValidateAllowedRemoteResources(orgAllowlist []string) error {
 // and not URLs, and that declarative fields (agent, policy, skills[], plugins[])
 // that are URLs include an integrity hash (#sha256=...).
 func (h *Harness) ValidateResourceTypes() error {
+	return h.validateResourceTypes(false)
+}
+
+func (h *Harness) validateResourceTypes(allowParentSegments bool) error {
 	// Executable fields must be local paths, not URLs.
 	execFields := []struct {
 		name  string
@@ -1046,7 +1050,7 @@ func (h *Harness) ValidateResourceTypes() error {
 			}
 		}
 	}
-	if err := ValidateSkillOverrides(h.Skills); err != nil {
+	if err := validateSkillOverrides(h.Skills, allowParentSegments); err != nil {
 		return err
 	}
 	for i, e := range h.Plugins {
@@ -1071,7 +1075,7 @@ func (h *Harness) ValidateResourceTypes() error {
 			if base := filepath.Base(info.Path); !ValidPluginBasename(base) {
 				return fmt.Errorf("plugins[%d] URL path %q does not end in a valid plugin basename (allowed: a-z, A-Z, 0-9, _, -)", i, info.Path)
 			}
-		} else {
+		} else if !allowParentSegments {
 			for _, segment := range strings.Split(filepath.ToSlash(p), "/") {
 				if segment == ".." {
 					return fmt.Errorf("plugins[%d]: path %q must not contain path traversal segments", i, p)

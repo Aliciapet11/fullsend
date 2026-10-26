@@ -88,7 +88,8 @@ func ListTriggeredHarnesses(ctx context.Context, configDir string, cfg config.Co
 			continue
 		}
 		for _, diagnostic := range h.PathDiagnostics() {
-			fmt.Fprintf(annotationWriter, "::warning::harness dispatch: agent %s: %s\n", agent.Name, diagnostic.String())
+			fmt.Fprintf(annotationWriter, "::warning::harness dispatch: agent %s: %s\n",
+				escapeWorkflowCommandData(agent.Name), escapeWorkflowCommandData(diagnostic.String()))
 		}
 		loaded++
 		if strings.TrimSpace(h.Trigger) == "" {
@@ -107,6 +108,14 @@ func ListTriggeredHarnesses(ctx context.Context, configDir string, cfg config.Co
 		return nil, fmt.Errorf("no agents could be loaded: %w", errors.Join(loadErrs...))
 	}
 	return out, nil
+}
+
+func escapeWorkflowCommandData(value string) string {
+	return strings.NewReplacer(
+		"%", "%25",
+		"\r", "%0D",
+		"\n", "%0A",
+	).Replace(value)
 }
 
 // MatchHarnesses evaluates CEL triggers and returns matching harnesses.

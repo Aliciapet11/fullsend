@@ -138,11 +138,13 @@ func LoadWithBase(ctx context.Context, path string, opts ComposeOpts) (*Harness,
 		return nil, nil, err
 	}
 
-	// Validate path shapes while values are still relative. LoadWithBase
-	// rewrites them to absolute paths below; ValidateSkillOverrides,
-	// validatePlugins, and profile extension checks intentionally skip
-	// already-resolved values.
-	if err := child.ValidateResourceTypes(); err != nil {
+	// Validate path shapes while values are still relative. Local layers may
+	// use contained parent segments to reference sibling directories; the
+	// resolver enforces the workspace-root boundary immediately below. Remote
+	// and legacy resolution paths retain the strict no-parent-segment rule.
+	allowParentSegments := opts.SourceURL == "" && opts.WorkspaceRoot != "" &&
+		harnessDirWithinContainmentRoot(childDir, opts.WorkspaceRoot)
+	if err := child.validateResourceTypes(allowParentSegments); err != nil {
 		return nil, nil, fmt.Errorf("invalid harness: %w", err)
 	}
 
@@ -523,7 +525,7 @@ func loadBaseChain(
 		}
 		if opts.WorkspaceRoot != "" &&
 			harnessDirWithinContainmentRoot(filepath.Dir(resolvedBasePath), opts.WorkspaceRoot) {
-			if err := base.ValidateResourceTypes(); err != nil {
+			if err := base.validateResourceTypes(true); err != nil {
 				return nil, nil, fmt.Errorf("base harness %s: %w", resolvedBasePath, err)
 			}
 			if err := base.resolveSelectedLocalPathsRelativeTo(filepath.Dir(resolvedBasePath), opts.WorkspaceRoot, pathSelectionFromOpts(opts)); err != nil {

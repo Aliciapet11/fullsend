@@ -41,11 +41,15 @@ func warnOpenAISubagentWithoutProvider(cfg config.ConfigReader, absDir, agentNam
 	if source == "" || urlutil.IsURL(source) {
 		return
 	}
-	h, _, err := harness.LoadWithBase(context.Background(), underDir(absDir, source), harness.ComposeOpts{WorkspaceRoot: absDir})
-	if err != nil || len(h.Overlays) > 0 || len(h.Forge) > 0 {
-		// A base: harness does not load here; an overlay or a forge:
-		// block may add providers. Either way the effective list is not
-		// known.
+	harnessPath := underDir(absDir, source)
+	raw, err := harness.LoadRaw(harnessPath)
+	if err != nil || raw.Base != "" || len(raw.Overlays) > 0 || raw.Forge != nil {
+		// A base, overlay, or forge block may add providers. Either way
+		// the effective list is not known.
+		return
+	}
+	h, _, err := harness.LoadWithBase(context.Background(), harnessPath, harness.ComposeOpts{WorkspaceRoot: absDir})
+	if err != nil {
 		return
 	}
 	// Only the subagents entries, the ones the repo asked for: a persona's
