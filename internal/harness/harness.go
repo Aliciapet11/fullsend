@@ -398,7 +398,7 @@ type Harness struct {
 
 	// Runtime-only fields (not serialized to YAML)
 	hadForgeBeforeResolve bool         `yaml:"-"` // true if Forge was non-nil before ResolveForge; used by Lint()
-	pathDiagnostics       []Diagnostic `yaml:"-"`
+	pathDiagnostics       []Diagnostic `yaml:"-"` // path-resolution warnings (deprecated fallback); surfaced by Lint() and PathDiagnostics()
 }
 
 // Load reads a harness YAML file from path, unmarshals it, and validates it.
@@ -678,7 +678,7 @@ func (h *Harness) ResolveRelativeTo(baseDir string) error {
 		return err
 	}
 	defer resolver.Close()
-	return resolver.resolveHarness(h)
+	return resolver.resolveHarness(h, pathSelection{})
 }
 
 // ValidateRunnerEnvWith checks that all ${VAR} references in RunnerEnv,
@@ -1070,6 +1070,12 @@ func (h *Harness) ValidateResourceTypes() error {
 			}
 			if base := filepath.Base(info.Path); !ValidPluginBasename(base) {
 				return fmt.Errorf("plugins[%d] URL path %q does not end in a valid plugin basename (allowed: a-z, A-Z, 0-9, _, -)", i, info.Path)
+			}
+		} else {
+			for _, segment := range strings.Split(filepath.ToSlash(p), "/") {
+				if segment == ".." {
+					return fmt.Errorf("plugins[%d]: path %q must not contain path traversal segments", i, p)
+				}
 			}
 		}
 	}

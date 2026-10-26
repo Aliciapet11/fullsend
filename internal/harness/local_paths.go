@@ -9,6 +9,10 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/skill"
 )
 
+// pathResolver resolves local harness paths relative to the harness file while
+// keeping every resolved target inside the containment root. When fallback is
+// enabled, a missing harness-relative path may fall back to the deprecated
+// --fullsend-dir-relative spelling and record a warning.
 type pathResolver struct {
 	harnessRel      string
 	harnessDir      string
@@ -18,6 +22,9 @@ type pathResolver struct {
 	diagnostics     []Diagnostic
 }
 
+// newPathResolver returns a resolver for harnessDir bounded by containmentRoot.
+// An empty containmentRoot defaults to harnessDir, which is useful for standalone
+// harnesses that resolve resources only within their own directory.
 func newPathResolver(harnessDir, containmentRoot string, fallback bool) (*pathResolver, error) {
 	if harnessDir == "" {
 		return nil, fmt.Errorf("harness directory is required for path resolution")
@@ -59,6 +66,8 @@ func newPathResolver(harnessDir, containmentRoot string, fallback bool) (*pathRe
 	}
 	if root, err := os.OpenRoot(resolver.containmentRoot); err == nil {
 		resolver.root = root
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("opening containment directory: %w", err)
 	}
 	return resolver, nil
 }
@@ -69,6 +78,9 @@ func (r *pathResolver) Close() {
 	}
 }
 
+// resolve returns path unchanged when it is empty, absolute, or a URL. Relative
+// paths are resolved against the harness directory and validated through the
+// containment root so symlinked components cannot escape it.
 func (r *pathResolver) resolve(field, path string) (string, error) {
 	if path == "" || filepath.IsAbs(path) || IsURL(path) {
 		return path, nil
@@ -128,7 +140,31 @@ func (r *pathResolver) resolveSkill(field string, entry *SkillEntry) error {
 	return nil
 }
 
-func (r *pathResolver) resolveHarness(h *Harness) error {
+// pathSelection controls whether conditional forge and overlay blocks are
+// resolved eagerly or only when they match the active run. The zero value keeps
+// the historical behavior of resolving every block, which standalone callers
+// and tests rely on.
+type pathSelection struct {
+	forgePlatform       string
+	event               map[string]any
+	config              map[string]any
+	evaluateConditional bool
+}
+
+func pathSelectionFromOpts(opts ComposeOpts) pathSelection {
+	return pathSelection{
+		forgePlatform:       opts.ForgePlatform,
+		event:               opts.Event,
+		config:              opts.Config,
+		evaluateConditional: true,
+	}
+}
+
+// resolveHarness rewrites local path fields in place. When selection requests
+// conditional evaluation, only the active forge platform and matching overlays
+// are resolved; unused blocks are left untouched for their later owner to
+// discard or resolve.
+func (r *pathResolver) resolveHarness(h *Harness, selection pathSelection) error {
 	for _, field := range []struct {
 		name  string
 		value *string
@@ -207,11 +243,21 @@ func (r *pathResolver) resolveHarness(h *Harness) error {
 		if config == nil {
 			continue
 		}
+		if selection.evaluateConditional && selection.forgePlatform != "" &&
+			platform != selection.forgePlatform {
+			continue
+		}
 		if err := r.resolveForgeConfig(fmt.Sprintf("forge.%s", platform), config); err != nil {
 			return err
 		}
 	}
 	for i := range h.Overlays {
+		if selection.evaluateConditional {
+			matched, err := EvaluateOverlay(h.Overlays[i].When, selection.event, selection.forgePlatform, selection.config)
+			if err != nil || !matched {
+				continue
+			}
+		}
 		if err := r.resolveForgeConfig(fmt.Sprintf("overlays[%d]", i), &h.Overlays[i].ForgeConfig); err != nil {
 			return err
 		}
@@ -285,10 +331,22 @@ func (r *pathResolver) resolveForgeConfig(prefix string, config *ForgeConfig) er
 	return nil
 }
 
+// withinContainmentRoot reports whether path stays inside the resolver's root.
+// Lexical containment is checked first; when an os.Root is available, the
+// target is also stat'ed through it so symlinks that escape the root are
+// rejected even when the cleaned spelling appears to remain inside it.
 func (r *pathResolver) withinContainmentRoot(path string) bool {
 	relative, err := filepath.Rel(r.containmentRoot, path)
-	return err == nil && relative != "." && relative != ".." &&
-		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	if r.root != nil {
+		if _, err := r.root.Stat(relative); err != nil && !os.IsNotExist(err) {
+			return false
+		}
+	}
+	return true
 }
 
 func localPathExists(path string) bool {
@@ -296,6 +354,8 @@ func localPathExists(path string) bool {
 	return err == nil
 }
 
+// harnessDirWithinContainmentRoot reports whether harnessDir is equal to or
+// inside containmentRoot after resolving symlinks on both paths.
 func harnessDirWithinContainmentRoot(harnessDir, containmentRoot string) bool {
 	absHarnessDir, err := filepath.Abs(harnessDir)
 	if err != nil {
@@ -317,16 +377,34 @@ func harnessDirWithinContainmentRoot(harnessDir, containmentRoot string) bool {
 		(relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
 }
 
+// resolveLocalPathsRelativeTo resolves every local path relative to harnessDir.
+// It preserves the historical behavior of resolving all forge and overlay
+// blocks, which is useful for direct callers and tests without run context.
 func (h *Harness) resolveLocalPathsRelativeTo(harnessDir, containmentRoot string) error {
+	return h.resolveSelectedLocalPathsRelativeTo(harnessDir, containmentRoot, pathSelection{})
+}
+
+// resolveSelectedLocalPathsRelativeTo is the run-aware form of
+// resolveLocalPathsRelativeTo. Conditional blocks are resolved only when they
+// match selection, preventing an invalid path in an unused forge or overlay
+// block from blocking an otherwise valid run.
+func (h *Harness) resolveSelectedLocalPathsRelativeTo(harnessDir, containmentRoot string, selection pathSelection) error {
 	resolver, err := newPathResolver(harnessDir, containmentRoot, true)
 	if err != nil {
 		return err
 	}
 	defer resolver.Close()
 
-	if err := resolver.resolveHarness(h); err != nil {
+	if err := resolver.resolveHarness(h, selection); err != nil {
 		return err
 	}
 	h.pathDiagnostics = append(h.pathDiagnostics, resolver.diagnostics...)
 	return nil
+}
+
+// PathDiagnostics returns only the diagnostics produced while resolving local
+// harness paths. Dispatch paths use it to surface deprecated fallback warnings
+// without enabling the full Lint() surface.
+func (h *Harness) PathDiagnostics() []Diagnostic {
+	return h.pathDiagnostics
 }

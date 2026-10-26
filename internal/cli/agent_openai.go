@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -40,7 +41,7 @@ func warnOpenAISubagentWithoutProvider(cfg config.ConfigReader, absDir, agentNam
 	if source == "" || urlutil.IsURL(source) {
 		return
 	}
-	h, err := harness.Load(underDir(absDir, source))
+	h, _, err := harness.LoadWithBase(context.Background(), underDir(absDir, source), harness.ComposeOpts{WorkspaceRoot: absDir})
 	if err != nil || len(h.Overlays) > 0 || len(h.Forge) > 0 {
 		// A base: harness does not load here; an overlay or a forge:
 		// block may add providers. Either way the effective list is not

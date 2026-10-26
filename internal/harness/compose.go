@@ -138,13 +138,21 @@ func LoadWithBase(ctx context.Context, path string, opts ComposeOpts) (*Harness,
 		return nil, nil, err
 	}
 
+	// Validate path shapes while values are still relative. LoadWithBase
+	// rewrites them to absolute paths below; ValidateSkillOverrides,
+	// validatePlugins, and profile extension checks intentionally skip
+	// already-resolved values.
+	if err := child.ValidateResourceTypes(); err != nil {
+		return nil, nil, fmt.Errorf("invalid harness: %w", err)
+	}
+
 	// Resolve every path in a local layer before merging so each field keeps
 	// the directory of the harness that declared it. Containment still uses
 	// the workspace root supplied by the caller. A URL-sourced harness's
 	// resources are fetched instead, below.
 	if opts.SourceURL == "" && opts.WorkspaceRoot != "" &&
 		harnessDirWithinContainmentRoot(childDir, opts.WorkspaceRoot) {
-		if err := child.resolveLocalPathsRelativeTo(childDir, opts.WorkspaceRoot); err != nil {
+		if err := child.resolveSelectedLocalPathsRelativeTo(childDir, opts.WorkspaceRoot, pathSelectionFromOpts(opts)); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -257,7 +265,6 @@ func LoadWithBase(ctx context.Context, path string, opts ComposeOpts) (*Harness,
 
 	// Merge base into child (child overrides base)
 	mergeBaseIntoChild(base, child)
-	child.pathDiagnostics = append(child.pathDiagnostics, base.pathDiagnostics...)
 
 	// Clear the base field (consumed)
 	child.Base = ""
@@ -516,7 +523,10 @@ func loadBaseChain(
 		}
 		if opts.WorkspaceRoot != "" &&
 			harnessDirWithinContainmentRoot(filepath.Dir(resolvedBasePath), opts.WorkspaceRoot) {
-			if err := base.resolveLocalPathsRelativeTo(filepath.Dir(resolvedBasePath), opts.WorkspaceRoot); err != nil {
+			if err := base.ValidateResourceTypes(); err != nil {
+				return nil, nil, fmt.Errorf("base harness %s: %w", resolvedBasePath, err)
+			}
+			if err := base.resolveSelectedLocalPathsRelativeTo(filepath.Dir(resolvedBasePath), opts.WorkspaceRoot, pathSelectionFromOpts(opts)); err != nil {
 				return nil, nil, fmt.Errorf("base harness %s: %w", resolvedBasePath, err)
 			}
 		}
@@ -537,7 +547,6 @@ func loadBaseChain(
 		// forge or overlay blocks remain).
 		mergeBaseIntoChild(ancestorBase, base)
 		base.Base = ""
-		base.pathDiagnostics = append(base.pathDiagnostics, ancestorBase.pathDiagnostics...)
 	}
 
 	// Resolve this base layer's forge and overlays before returning to
@@ -747,6 +756,10 @@ func mergeBaseIntoChild(base, child *Harness) {
 	if base.hadForgeBeforeResolve {
 		child.hadForgeBeforeResolve = true
 	}
+
+	// Propagate path-resolution diagnostics from every base layer so callers
+	// that only inspect the final harness still see deprecated fallbacks.
+	child.pathDiagnostics = append(child.pathDiagnostics, base.pathDiagnostics...)
 
 	// Scalars: child overrides if non-zero
 	if child.Agent == "" {

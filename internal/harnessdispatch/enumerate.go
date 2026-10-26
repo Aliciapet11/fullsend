@@ -87,6 +87,9 @@ func ListTriggeredHarnesses(ctx context.Context, configDir string, cfg config.Co
 			loadErrs = append(loadErrs, fmt.Errorf("agent %s: load failed: %w", agent.Name, err))
 			continue
 		}
+		for _, diagnostic := range h.PathDiagnostics() {
+			fmt.Fprintf(annotationWriter, "::warning::harness dispatch: agent %s: %s\n", agent.Name, diagnostic.String())
+		}
 		loaded++
 		if strings.TrimSpace(h.Trigger) == "" {
 			continue

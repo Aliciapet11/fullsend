@@ -98,6 +98,26 @@ func TestResolveLocalPathsRelativeToHarnessFile(t *testing.T) {
 	assert.Equal(t, filepath.Join(harnessDir, "schemas", "overlay-validate.json"), overlay.ValidationLoop.Schema)
 }
 
+func TestNewPathResolverRejectsNonDirectoryContainmentRoot(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "containment-root")
+	require.NoError(t, os.WriteFile(file, nil, 0o644))
+
+	_, err := newPathResolver(file, file, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "opening containment directory")
+}
+
+func TestPathDiagnostics(t *testing.T) {
+	diagnostic := Diagnostic{Severity: SeverityWarning, Field: "policy", Message: "deprecated fallback"}
+	harness := &Harness{pathDiagnostics: []Diagnostic{diagnostic}}
+
+	diagnostics := harness.PathDiagnostics()
+
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, diagnostic, diagnostics[0])
+}
+
 func TestResolveLocalPathsRelativeToHarnessFile_TraversalRejected(t *testing.T) {
 	root := t.TempDir()
 	harnessDir := filepath.Join(root, "agents", "custom")
@@ -119,6 +139,22 @@ func TestResolveLocalPathsRelativeToHarnessFile_HarnessOutsideContainmentRejecte
 	err := harness.resolveLocalPathsRelativeTo(harnessDir, root)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is outside fullsend directory")
+}
+
+func TestResolveLocalPathsRelativeToHarnessFile_SymlinkEscapeRejected(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "fullsend")
+	harnessDir := filepath.Join(root, "harness")
+	require.NoError(t, os.MkdirAll(harnessDir, 0o755))
+	outside := filepath.Join(parent, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "policy.yaml"), []byte("version: 1\n"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(harnessDir, "linked")))
+
+	harness := &Harness{Policy: "linked/policy.yaml"}
+	err := harness.resolveLocalPathsRelativeTo(harnessDir, root)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `policy: path "linked/policy.yaml" resolves outside fullsend directory`)
 }
 
 func TestResolveLocalPathsRelativeToHarnessFile_TraversalFieldsRejected(t *testing.T) {
@@ -317,4 +353,40 @@ policy: policy.yaml
 	assert.Equal(t, filepath.Join(root, "policy.yaml"), harness.Policy)
 	require.Len(t, harness.Lint(), 1)
 	assert.True(t, strings.Contains(harness.Lint()[0].Message, "deprecated --fullsend-dir-relative fallback"))
+}
+
+func TestLoadWithBase_UnusedForgePathDoesNotBlockActiveRun(t *testing.T) {
+	root := t.TempDir()
+	harnessDir := filepath.Join(root, "agents", "custom")
+	path := writeTestHarness(t, harnessDir, "harness.yaml", `
+agent: agent.md
+role: custom
+forge:
+  github:
+    policy: policy.yaml
+  gitlab:
+    policy: ../../../outside.yaml
+`)
+
+	harness, _, err := LoadWithBase(context.Background(), path, ComposeOpts{
+		WorkspaceRoot: root,
+		ForgePlatform: "github",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(harnessDir, "policy.yaml"), harness.Policy)
+}
+
+func TestLoadWithBase_PathShapeValidationRunsBeforeResolution(t *testing.T) {
+	root := t.TempDir()
+	harnessDir := filepath.Join(root, "agents", "custom")
+	path := writeTestHarness(t, harnessDir, "harness.yaml", `
+agent: agent.md
+role: custom
+plugins:
+  - path: ../plugins/custom
+`)
+
+	_, _, err := LoadWithBase(context.Background(), path, ComposeOpts{WorkspaceRoot: root})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not contain path traversal segments")
 }
