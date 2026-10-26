@@ -136,8 +136,8 @@ agents:
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	writeLintAgentFixture(t, dir, "my-agent")
 	harnessYAML := `role: triage
-agent: agents/my-agent.md
-policy: policies/base.yaml
+agent: ../agents/my-agent.md
+policy: ../policies/base.yaml
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
 
@@ -432,11 +432,11 @@ agents:
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "scripts"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "scripts", "validate.sh"), []byte("#!/bin/sh\n"), 0o644))
 	harnessYAML := `role: triage
-agent: agents/my-agent.md
-policy: policies/base.yaml
+agent: ../agents/my-agent.md
+policy: ../policies/base.yaml
 validation_loop:
-  script: scripts/validate.sh
-  preflight_check: scripts/common-preflight.sh
+  script: ../scripts/validate.sh
+  preflight_check: ../scripts/common-preflight.sh
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
 
@@ -540,7 +540,7 @@ agents:
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
 	writePolicyFixture(t, dir)
 	harnessYAML := `role: triage
-agent: ../outside.md
+agent: ../../outside.md
 policy: policies/base.yaml
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness", "my-agent.yaml"), []byte(harnessYAML), 0o644))
@@ -548,7 +548,7 @@ policy: policies/base.yaml
 	cmd := newLintCmd()
 	_, err := executeCmd(cmd, []string{"--fullsend-dir", dir})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `resolving paths for agent "my-agent"`)
+	assert.Contains(t, err.Error(), `loading harness for agent "my-agent"`)
 	assert.Contains(t, err.Error(), "resolves outside fullsend directory")
 }
 

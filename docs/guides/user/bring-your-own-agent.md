@@ -368,11 +368,14 @@ You need a harness, an agent definition, and one supporting file. [`fullsend age
 
 Commit all three. `fullsend github setup` creates none of them.
 
+The harness lives in `harness/`, so its local paths use `../` to reach the
+sibling `agents/` and `policies/` directories.
+
 **`harness/my-agent.yaml`:**
 ```yaml
-agent: agents/my-agent.md
+agent: ../agents/my-agent.md
 image: ghcr.io/fullsend-ai/fullsend-sandbox:latest  # Pin to a digest before CI use
-policy: policies/base.yaml
+policy: ../policies/base.yaml
 providers:
   - vertex-ai
 role: triage                        # a role your mint SERVES — not the agent's name (see note below)
@@ -444,6 +447,9 @@ Network access (which APIs the agent can reach) is controlled by provider profil
 ### Real-world example: the triage agent
 
 The [fullsend-ai/agents](https://github.com/fullsend-ai/agents) triage agent is a full production agent. The harness below is adapted from the current [`harness/triage.yaml`](https://github.com/fullsend-ai/agents/blob/main/harness/triage.yaml) (field order adjusted for readability):
+
+The upstream harness sits at the repository root beside its resources. If you
+copy this example into `.fullsend/harness/`, prefix each local path with `../`.
 
 ```yaml
 agent: agents/triage.md
@@ -533,7 +539,11 @@ skills/issue-labels/
   references/         # Optional: reference data
 ```
 
-Reference in the agent frontmatter by name (`skills: [issue-labels]`) and in the harness by path (`skills: [skills/issue-labels]`). Skills can also be URLs with integrity hashes. See [Configuring with Skills](customizing-with-skills.md) for details on creating and managing skills.
+Reference in the agent frontmatter by name (`skills: [issue-labels]`) and in
+the harness by path (`skills: [../skills/issue-labels]` when the harness is in
+`.fullsend/harness/`). Skills can also be URLs with integrity hashes. See
+[Configuring with Skills](customizing-with-skills.md) for details on creating
+and managing skills.
 
 For details on skill authoring, precedence, and extension points, see
 [Configuring with Skills](customizing-with-skills.md).
@@ -559,7 +569,7 @@ base: https://raw.githubusercontent.com/fullsend-ai/agents/<sha>/harness/triage.
 model: sonnet
 slug: my-org-triage
 skills:
-  - skills/my-enhancement
+  - ../skills/my-enhancement
 timeout_minutes: 15
 ```
 

@@ -28,6 +28,11 @@ type SkillEntry struct {
 	// value (override source path) are validated during harness
 	// validation.
 	Overrides map[string]*string
+
+	// mergeName is the identity computed when a local source is resolved
+	// before base or forge merging. It preserves the no-read fallback for
+	// paths whose marker cannot be opened safely.
+	mergeName string `yaml:"-"`
 }
 
 // HasOverrides reports whether this entry has any file-level overrides.
